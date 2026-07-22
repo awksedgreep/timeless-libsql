@@ -308,6 +308,30 @@ The codec byte in `_blocks` already reserves slots, so this is not an
 architectural decision — blocks with different codecs coexist in one table.
 Nothing blocks on this choice.
 
+**DECIDED 2026-07-22 (post-Session 6):** `timeless-codec` becomes a real crate.
+- API guardrail: the public unit is the TYPED COLUMN ENCODER (i64/f64/
+  low-card-string/high-card-string/blob + validity bitmaps + adaptive
+  selection + block framing) — NOT LogEntry/SpanEntry. Logs = 4 fixed
+  columns, spans = 10, the v3 generic table = any STRICT schema. Scope name
+  is positioning, not a technical ceiling.
+- FSST demoted to bake-off checkbox (owner's prior tests were poor + our
+  access pattern decompresses whole blocks, so FSST's random-access edge is
+  never collected while its ratio deficit vs concatenated-column zstd is
+  always paid). Expected menu: pco (numerics/ts), dictionary+RLE (low-card),
+  zstd±trained-dict (messages/high-card).
+- Compose existing crates (pco, maybe vortex-alp) — originality lives in
+  selection policy + framing + form factor (tiny, no Arrow, no C++, WASM).
+  Prior art: Vortex is BtrBlocks-in-Rust for the Arrow world; its encodings
+  are consumable à la carte; its format/deps are not our form factor.
+- STRATEGIC ARC (opt-in, later, owner's call): publish timeless-core +
+  timeless-codec to crates.io → Elixir timeless_logs/traces can become thin
+  rustler NIFs over the same crates (the tms_engine shape), deleting the
+  ex_openzl C++ build from the Elixir distribution. Evidence needed first:
+  same-data bake-off vs OpenZL (we're at 12.2x zstd-columnar vs their 12.8x
+  OpenZL on DIFFERENT datasets — suggestive, not proven).
+- First task next session: extract crates/timeless-codec by deduping
+  blocks/codec.rs + spans/codec.rs (zstd helpers + header framing).
+
 ---
 
 ## Source-of-truth references (already verified — don't re-derive)
