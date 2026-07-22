@@ -1,12 +1,15 @@
 //! timeless-ext: loadable SQLite extension exposing the timeless-core
 //! time-series engine as virtual tables.
 //!
-//! Two modules are registered on every connection that loads the .so:
+//! Three modules are registered on every connection that loads the .so:
 //!   - "timeless_spike"   (spike.rs)        - the Session 1 proof-of-concept,
 //!     kept as a compiling reference for the vtab + re-entrancy patterns.
 //!   - "timeless_metrics" (metrics_vtab.rs) - the real thing: a writable
 //!     vtab whose chunks persist into shadow tables on the HOST database
 //!     through shadow_store::ShadowTableStore (timeless_core::ChunkStore).
+//!   - "timeless_logs"    (logs_vtab.rs)    - Phase 2: compressed log
+//!     blocks + inverted term index in `<name>_blocks`/`<name>_terms`
+//!     via shadow_block_store::ShadowBlockStore (BlockStore).
 //!
 //! Usage:
 //!   .load target/release/libtimeless_ext
@@ -16,7 +19,10 @@
 //!   INSERT INTO metrics(metrics) VALUES ('flush');   -- FTS5-style command
 //!   SELECT * FROM metrics WHERE name = 'cpu' AND ts >= 1700000000;
 
+mod flatjson;
+mod logs_vtab;
 mod metrics_vtab;
+mod shadow_block_store;
 mod shadow_store;
 mod spike;
 
@@ -76,6 +82,7 @@ pub unsafe extern "C" fn sqlite3_timeless_ext_init(
 fn extension_init(db: Connection) -> Result<bool> {
     spike::register(&db)?;
     metrics_vtab::register(&db)?;
+    logs_vtab::register(&db)?;
     // false = loaded per-connection (fine here; sqld preloads into every
     // connection anyway).
     Ok(false)

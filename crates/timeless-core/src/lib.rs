@@ -7,9 +7,14 @@
 //! The Elixir repo's crate is intentionally untouched; rewiring it to depend
 //! on this crate is a later, post-publication step.
 
+pub mod blocks;
 mod engine;
 pub mod store;
 
+pub use blocks::{
+    level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta,
+    BlockStore, EncodedBlock, LogEntry, LogQuery, MemBlockStore,
+};
 pub use engine::*;
 pub use store::{ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk};
 

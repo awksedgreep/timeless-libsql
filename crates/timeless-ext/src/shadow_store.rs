@@ -84,7 +84,10 @@ pub(crate) fn drop_ddl(table: &str) -> String {
 /// goes through the Mutex below AND the host SQLite library is built in
 /// serialized threading mode (the default), which allows one connection
 /// to be used from multiple threads.
-struct HostHandle(*mut ffi::sqlite3);
+///
+/// pub(crate): shadow_block_store.rs (the logs BlockStore backend) wraps
+/// the same host connection with the same Mutex discipline.
+pub(crate) struct HostHandle(pub(crate) *mut ffi::sqlite3);
 unsafe impl Send for HostHandle {}
 
 pub(crate) struct ShadowTableStore {

@@ -481,25 +481,46 @@ Nothing blocks on this choice.
       criterion with honest asterisk: 6.4x on deliberately-hostile TSBS
       variant, 200x friendly; see RESULTS.md)
 
-### Session 5 — Logs vtab (Phase 2, ≈1.5–2 days)
+### Session 5 — Logs vtab (Phase 2, ≈1.5–2 days) — ✅ CORE COMPLETE 2026-07-22
 Gated on: metrics POC green (vtab skeleton, command idiom, shadow-table store
 all proven — logs reuses every one of them).
 
-- [ ] `timeless-core`: generic block store module (blocks + terms + compaction
-      state machine), unit-agnostic timestamps
-- [ ] Columnar split codec: port the timeless_logs layout (ts/level/message/
-      metadata columns), zstd per-column; codec byte reserves OpenZL slot
-- [ ] `timeless_logs` vtab: xCreate with `index_keys=` arg, xUpdate row insert,
-      'ingest' blob batch, 'flush' + 'optimize' commands
-- [ ] xBestIndex: level/term equality + ts range → posting-list intersection;
-      in-module LIKE scan over candidate blocks
-- [ ] Compaction as single-transaction atomic swap; merge compaction with
-      HARD time-span cap on merged blocks (retention boundary rule — see
-      Pruning section)
-- [ ] 'prune' command + `retention=` vtab arg (age-based only for POC);
-      same-transaction terms cleanup; batched deletes
-- [ ] Oracle test vs plain table; compression ratio benchmark vs plain SQLite
-      table of log rows (target ≥10x) and vs timeless_logs itself
+- [x] `timeless-core`: generic block store module (`src/blocks/`: LogEntry,
+      BlockEngine, BlockStore trait mirroring ChunkStore, MemBlockStore for
+      tests), unit-agnostic timestamps (`merge_max_ts_span` is a config
+      param in ts units; the vtab passes 3_600_000 ms). 11 unit tests green
+      incl. read-count proof that term pruning skips blocks.
+- [x] Columnar split codec: ported the timeless_logs layout (ts delta+zstd /
+      level u8 / u32-len-prefixed messages / len-prefixed metadata pairs,
+      each column independently zstd-7); codec byte reserves OpenZL slot
+      (1=raw framing, 2=zstd-columnar, 3=reserved)
+- [x] `timeless_logs` vtab: xCreate with `index_keys=` arg (persisted in
+      _meta, read back at xConnect — never trusts replayed args), xUpdate
+      row insert, 'flush' + 'optimize' commands. DESIGN IMPROVEMENT: one
+      HIDDEN TEXT column per index key, so `WHERE service='api'` is plain
+      column equality (pushed to posting lists) and `SELECT service` works.
+- [ ] 'ingest' blob batch for logs (Tier 2) — DEFERRED; hidden column
+      dispatches by type already (BLOB reserved, clear error for now)
+- [x] xBestIndex: level/term equality + ts range → posting-list INTERSECT
+      in SQL. Deviation: `message LIKE` left ABOVE the vtab (SQLite filters
+      rows we materialize; candidate blocks still pruned by the other
+      constraints). In-module substring scan = later optimization.
+- [x] Compaction as single-transaction atomic swap (one replace_blocks call
+      rides the host txn; terms swapped in the same operation); merge
+      compaction with HARD time-span cap on merged blocks (retention
+      boundary rule — unit test proves the cap splits merges)
+- [x] 'prune:<ts>' command; same-transaction terms cleanup (cli.sh section
+      11 asserts _terms count drops with _blocks); batched deletes
+- [ ] `retention=` vtab arg (auto-prune during flush/optimize) — deferred
+      with Tier 2; 'prune:<ts>' covers the POC story
+- [x] Oracle test vs plain table (bench-logs cross-checks all query counts);
+      compression ratio benchmark vs plain SQLite log table: **11.2x
+      smaller (10.7 B/entry vs 120.3), target ≥10x MET** on 1M realistic
+      entries. NOTE: file shrink needs host-side `PRAGMA auto_vacuum =
+      INCREMENTAL` before growth + stepped `PRAGMA incremental_vacuum`
+      after 'optimize' (xCreate's pragma attempt is too late — the CREATE
+      statement already allocated pages). Not yet compared vs
+      timeless_logs itself.
 - [ ] **Codec bake-off** (see "Codec strategy"): same blocks compressed
       three ways — zstd columnar vs OpenZL vs best-effort pure-Rust pipeline
       (delta/pco ts column + dictionary zstd messages). Record ratios +

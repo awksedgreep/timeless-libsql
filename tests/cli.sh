@@ -14,6 +14,11 @@
 #   6. rollback caveat (documented POC behavior, WARNING not failure)
 #   7. Tier 2 batch blob ingest (format v0; blob in the hidden column)
 #   8. malformed batch blobs rejected atomically (truncation, bad index)
+#   9. timeless_logs round-trip (metadata + index-key columns, pre/post
+#      flush exactness, optimize codec transition, reopen recovery)
+#   10. logs pushdown proof (service+level constraints, _terms contents)
+#   11. logs prune removes blocks AND their term rows
+#   12. logs append-only enforcement + level/command validation
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
@@ -279,6 +284,155 @@ fi
 got=$(sqlite3 "$BADDB" ".load $EXT" \
   "INSERT INTO metrics(metrics) VALUES ('flush'); SELECT COUNT(*) FROM metrics;")
 check_eq "malformed batches stored nothing" "$got" "0"
+
+# ---------------------------------------------------------------------------
+echo "== section 9: timeless_logs round-trip =="
+# Fresh db. Covers: index_keys creation arg; metadata as flat JSON; the
+# index-key hidden columns as INSERT shorthand (service='web' merges
+# into metadata); canonical sorted-JSON metadata output; queryable
+# before AND after flush; 'optimize' transitions codec 1 (raw) -> 2
+# (zstd-columnar) with identical rows; SELECT of a hidden index-key
+# column surfaces the value from metadata.
+LOGDB="$TMP/logs_test.db"
+got=$(sqlite3 "$LOGDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,path,status');
+INSERT INTO logs(ts, level, message, metadata) VALUES (1000, 'info', 'req done', '{"service":"api","path":"/checkout","status":"200"}');
+INSERT INTO logs(ts, level, message, metadata, service) VALUES (2000, 'error', 'boom', '{"path":"/pay"}', 'web');
+INSERT INTO logs(ts, level, message) VALUES (1500, 'debug', 'noise');
+SELECT 'pre', ts, level, message, metadata FROM logs ORDER BY ts;
+INSERT INTO logs(logs) VALUES ('flush');
+SELECT 'post', ts, level, message, metadata FROM logs ORDER BY ts;
+SELECT 'raw_blocks', COUNT(*) FROM logs_blocks WHERE codec = 1;
+INSERT INTO logs(logs) VALUES ('optimize');
+SELECT 'codecs', COUNT(*) FILTER (WHERE codec = 1), COUNT(*) FILTER (WHERE codec = 2) FROM logs_blocks;
+SELECT 'opt', ts, level, message, metadata FROM logs ORDER BY ts;
+SELECT 'svc', ts, COALESCE(service, '-') FROM logs ORDER BY ts;
+SQL
+)
+expected='pre|1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
+pre|1500|debug|noise|{}
+pre|2000|error|boom|{"path":"/pay","service":"web"}
+post|1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
+post|1500|debug|noise|{}
+post|2000|error|boom|{"path":"/pay","service":"web"}
+raw_blocks|1
+codecs|0|1
+opt|1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
+opt|1500|debug|noise|{}
+opt|2000|error|boom|{"path":"/pay","service":"web"}
+svc|1000|api
+svc|1500|-
+svc|2000|web'
+check_eq "logs insert/flush/optimize round-trip" "$got" "$expected"
+
+# Reopen in a NEW process: xConnect must recover the block index via
+# scan() and index_keys from _meta (NOT from creation args).
+got=$(sqlite3 "$LOGDB" <<SQL
+.load $EXT
+SELECT ts, level, message, metadata FROM logs ORDER BY ts;
+SELECT 'svc2000', service FROM logs WHERE ts = 2000;
+SQL
+)
+expected='1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
+1500|debug|noise|{}
+2000|error|boom|{"path":"/pay","service":"web"}
+svc2000|web'
+check_eq "logs reopen recovery (scan + index_keys from _meta)" "$got" "$expected"
+
+# ---------------------------------------------------------------------------
+echo "== section 10: logs pushdown proof (terms + hidden-column equality) =="
+# The _terms posting list must contain level: terms plus terms for the
+# allowlisted keys ONLY (selective indexing), and WHERE service='api'
+# + level filters must return exactly the matching rows. message LIKE
+# stays a SQLite-side filter but must still be correct.
+got=$(sqlite3 "$LOGDB" <<SQL
+.load $EXT
+SELECT 'term_svc_api', COUNT(*) FROM logs_terms WHERE term = 'service:api';
+SELECT 'term_lvl_err', COUNT(*) FROM logs_terms WHERE term = 'level:error';
+SELECT 'term_status', COUNT(*) FROM logs_terms WHERE term = 'status:200';
+SELECT 'q_svc', ts, level, message FROM logs WHERE service = 'api';
+SELECT 'q_svc_lvl', ts, message FROM logs WHERE service = 'web' AND level = 'error';
+SELECT 'q_lvl_range', ts, message FROM logs WHERE level = 'error' AND ts >= 1500 AND ts <= 2500;
+SELECT 'q_none', COUNT(*) FROM logs WHERE service = 'nope';
+SELECT 'q_like', COUNT(*) FROM logs WHERE message LIKE '%boo%';
+SQL
+)
+expected='term_svc_api|1
+term_lvl_err|1
+term_status|1
+q_svc|1000|info|req done
+q_svc_lvl|2000|boom
+q_lvl_range|2000|boom
+q_none|0
+q_like|1'
+check_eq "service/level/ts pushdown + LIKE above the vtab" "$got" "$expected"
+
+# ---------------------------------------------------------------------------
+echo "== section 11: logs prune removes blocks AND their term rows =="
+# Fresh db, two flushes -> two blocks with disjoint ts ranges. Pruning
+# between them must delete the old block and its posting-list rows in
+# the same operation (posting lists never dangle — PLAN.md rule).
+PRUNEDB="$TMP/logs_prune.db"
+got=$(sqlite3 "$PRUNEDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');
+INSERT INTO logs(ts, level, message, service) VALUES (1000, 'info', 'old-1', 'api');
+INSERT INTO logs(ts, level, message, service) VALUES (2000, 'warning', 'old-2', 'web');
+INSERT INTO logs(logs) VALUES ('flush');
+INSERT INTO logs(ts, level, message, service) VALUES (9000000, 'info', 'new-1', 'api');
+INSERT INTO logs(logs) VALUES ('flush');
+SELECT 'before', (SELECT COUNT(*) FROM logs_blocks), (SELECT COUNT(*) FROM logs_terms);
+INSERT INTO logs(logs) VALUES ('prune:1000000');
+SELECT 'after', (SELECT COUNT(*) FROM logs_blocks), (SELECT COUNT(*) FROM logs_terms);
+SELECT 'rows', ts, message FROM logs ORDER BY ts;
+SQL
+)
+# before: block1 terms = level:info, level:warning, service:api,
+# service:web (4); block2 terms = level:info, service:api (2) -> 6.
+# after: only block2's 2 terms may remain.
+expected='before|2|6
+after|1|2
+rows|9000000|new-1'
+check_eq "prune drops expired blocks + their term rows" "$got" "$expected"
+
+# ---------------------------------------------------------------------------
+echo "== section 12: logs append-only + validation =="
+if err=$(sqlite3 "$LOGDB" ".load $EXT" "DELETE FROM logs WHERE ts = 1000;" 2>&1); then
+  fail "logs DELETE should be rejected (got success: $err)"
+elif [[ "$err" == *append-only* ]]; then
+  pass "logs DELETE rejected with append-only error"
+else
+  fail "logs DELETE rejected but with unexpected message: $err"
+fi
+
+if err=$(sqlite3 "$LOGDB" ".load $EXT" "UPDATE logs SET message = 'x' WHERE ts = 1000;" 2>&1); then
+  fail "logs UPDATE should be rejected (got success: $err)"
+elif [[ "$err" == *append-only* ]]; then
+  pass "logs UPDATE rejected with append-only error"
+else
+  fail "logs UPDATE rejected but with unexpected message: $err"
+fi
+
+# Unknown level names must be rejected loudly (0=debug..3=error only).
+if err=$(sqlite3 "$LOGDB" ".load $EXT" \
+    "INSERT INTO logs(ts, level, message) VALUES (1, 'fatal', 'x');" 2>&1); then
+  fail "level 'fatal' should be rejected (got success: $err)"
+elif [[ "$err" == *"unknown log level"* ]]; then
+  pass "unknown level rejected with a clear error"
+else
+  fail "unknown level rejected but with unexpected message: $err"
+fi
+
+# Unknown commands too.
+if err=$(sqlite3 "$LOGDB" ".load $EXT" \
+    "INSERT INTO logs(logs) VALUES ('defrag');" 2>&1); then
+  fail "unknown command should be rejected (got success: $err)"
+elif [[ "$err" == *"unknown command"* ]]; then
+  pass "unknown command rejected with a clear error"
+else
+  fail "unknown command rejected but with unexpected message: $err"
+fi
 
 # ---------------------------------------------------------------------------
 echo

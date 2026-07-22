@@ -10,6 +10,17 @@ name = "bench"
 version = "0.1.0"
 edition = "2021"
 
+# Two binaries, one crate: the Session 4 metrics bench (bench) and the
+# Session 5 logs bench (bench-logs) share the workspace-detachment +
+# bundled-sqlite rationale above.
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench-logs"
+path = "src/bench_logs.rs"
+
 [dependencies]
 # bundled         = compile SQLite in, ignore the system library
 # load_extension  = expose sqlite3_load_extension so we can .so-load
