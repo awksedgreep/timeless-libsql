@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/timeless-core", "crates/timeless-ext"]
+members = ["crates/timeless-codec", "crates/timeless-core", "crates/timeless-ext"]
 resolver = "2"
 
 [workspace.package]

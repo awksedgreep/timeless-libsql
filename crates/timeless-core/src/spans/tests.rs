@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::codec::{decode_span_block, encode_span_block, CODEC_RAW, CODEC_ZSTD};
+use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
 use super::engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery};
 use super::mem::MemSpanStore;
 use super::{
@@ -157,7 +157,7 @@ fn status_terms_of(terms: &[String]) -> Vec<&String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn span_codec_round_trips_both_codecs() {
+fn span_codec_round_trips_all_codecs() {
     // Deliberately hostile: NEGATIVE start_ts (pre-epoch ns — legal,
     // the engine never assumes an epoch), a root span with no parent,
     // unicode attribute values, empty strings, negative-delta ordering
@@ -203,7 +203,11 @@ fn span_codec_round_trips_both_codecs() {
             attributes: vec![("k".into(), "".into())],
         },
     ];
-    for codec in [CODEC_RAW, CODEC_ZSTD] {
+    // CODEC_ZSTD stays in this loop FOREVER even though optimize() no
+    // longer writes it: encode_span_block(.., CODEC_ZSTD, ..) is the
+    // retained legacy encoder path, and this round-trip is the proof
+    // that existing codec-2 span blocks remain decodable.
+    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR] {
         let (bytes, meta) = encode_span_block(&entries, codec, 7).unwrap();
         assert_eq!(meta.ts_min, -42);
         assert_eq!(meta.ts_max, 1_700_000_000_000_000_999);
@@ -237,6 +241,54 @@ fn span_codec_rejects_garbage() {
     .is_err());
     // Empty blocks are refused.
     assert!(encode_span_block(&[], CODEC_RAW, 7).is_err());
+}
+
+#[test]
+fn optimize_writes_codec_4_blocks_that_decode_exactly() {
+    // The traces twin of the logs test with the same name: after
+    // optimize, every persisted block must carry codec byte 4
+    // (CODEC_COLUMNAR) — in the store metadata AND in the payload
+    // itself — and decode back to exactly the pushed spans.
+    let shared = Arc::new(MemSpanStore::new());
+    let store = SpyStore {
+        inner: Arc::clone(&shared),
+        reads: Arc::new(AtomicUsize::new(0)),
+        put_terms: Arc::new(Mutex::new(Vec::new())),
+        replace_terms: Arc::new(Mutex::new(Vec::new())),
+    };
+    let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+
+    let mut expect = Vec::new();
+    for i in 0..200u8 {
+        let e = span(
+            i % 7,
+            i,
+            (i % 5 != 0).then_some(i / 2),
+            ["GET /x", "db.query", "cache.get"][i as usize % 3],
+            ["api", "db", "cache"][i as usize % 3],
+            (i % 5) as u8,
+            (i % 3) as u8,
+            10_000 + i as i64,
+            &[("http.method", "GET")],
+        );
+        expect.push(e.clone());
+        engine.push(e).unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+
+    let mut decoded = Vec::new();
+    let scanned = shared.scan().unwrap();
+    assert!(!scanned.is_empty());
+    for (meta, loc) in scanned {
+        assert_eq!(meta.codec, CODEC_COLUMNAR, "store meta codec byte");
+        let bytes = shared.read_block(&loc).unwrap();
+        assert_eq!(bytes[1], CODEC_COLUMNAR, "payload codec byte");
+        decoded.extend(decode_span_block(&bytes).unwrap());
+    }
+    decoded.sort_by_key(|e| (e.start_ts, e.span_id));
+    expect.sort_by_key(|e| (e.start_ts, e.span_id));
+    assert_eq!(decoded, expect, "codec-4 optimize output round-trips");
 }
 
 #[test]

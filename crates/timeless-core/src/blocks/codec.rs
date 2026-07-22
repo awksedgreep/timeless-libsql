@@ -6,28 +6,47 @@
 //! them into four columns and compress each independently, so the
 //! compressor sees long runs of similar data:
 //!
-//!   column 1  timestamps   i64 LE; delta-encoded before zstd (steady
-//!                          log traffic makes deltas tiny and repetitive)
+//!   column 1  timestamps   i64 per entry
 //!   column 2  levels       one u8 per entry (mostly "info" → ~free)
-//!   column 3  messages     u32-len-prefixed UTF-8, concatenated
+//!   column 3  messages     UTF-8 strings
 //!   column 4  metadata     per entry: u16 pair count, then per pair
 //!                          u16 key-len + key + u32 val-len + value
 //!
-//! Two codecs share one container:
-//!   CODEC_RAW  (1) — columns stored uncompressed, no delta. This is
-//!                    the low-latency flush format (write fast now,
-//!                    compress later — the two-tier design).
-//!   CODEC_ZSTD (2) — timestamps delta-encoded, then EVERY column
-//!                    independently zstd-compressed.
+//! Three codecs share one container:
+//!   CODEC_RAW      (1) — columns stored uncompressed, no delta. This
+//!                        is the low-latency flush format (write fast
+//!                        now, compress later — the two-tier design).
+//!   CODEC_ZSTD     (2) — timestamps delta-encoded, then EVERY column
+//!                        independently zstd-compressed. The Session 5
+//!                        format; still fully decodable (existing dbs
+//!                        keep working) but no longer written by
+//!                        optimize().
 //!   codec 3 is reserved for OpenZL (never assigned here; the codec
-//!   byte in the header + `_blocks.codec` column means both formats
-//!   coexist in one table and the bake-off needs no migration).
+//!   byte in the header + `_blocks.codec` column means all formats
+//!   coexist in one table and any bake-off needs no migration).
+//!   CODEC_COLUMNAR (4) — "adaptive columnar v1": each column goes
+//!                        through the timeless-codec TYPED ENCODERS,
+//!                        which pick a strategy per column by
+//!                        measurement (ts → delta+pco vs delta+zstd,
+//!                        levels → RLE vs zstd, messages → dictionary
+//!                        vs concat+zstd). The winning strategy id is
+//!                        framed inside the column, so decode never
+//!                        guesses. This is what optimize() writes since
+//!                        the Session 7 bake-off.
 //!
-//! Container layout (all integers little-endian):
+//! Codec-4 metadata note: the metadata column keeps TODAY'S pair
+//! serialization (below) compressed with plain zstd — same bytes as
+//! codec 2. Splitting metadata into PER-KEY typed columns (a "status"
+//! column would dictionary-encode beautifully) is future work: it
+//! needs a key manifest in the block and interacts with the term
+//! index, so it's a format revision of its own, not a tonight job.
+//!
+//! Container layout (all integers little-endian, IDENTICAL for all
+//! codecs — only the column payloads differ):
 //!
 //!   offset  size  field
 //!   0       1     format version (0x01)
-//!   1       1     codec (1 or 2)
+//!   1       1     codec (1, 2 or 4)
 //!   2       4     u32 entry_count
 //!   6       8     i64 ts_min
 //!   14      8     i64 ts_max
@@ -37,23 +56,38 @@
 //! decode_block() is the exact inverse and validates everything it
 //! reads — a truncated or corrupt block is an error naming the field,
 //! never a panic or garbage entries.
+//!
+//! The zstd helpers and the bounds-checked Reader used to live here
+//! (pub(crate), shared with spans/codec.rs); they moved to the
+//! timeless-codec crate — one copy, three consumers.
+
+use timeless_codec::{
+    decode_i64, decode_str, decode_u8, encode_i64, encode_str, encode_u8, zstd_compress,
+    zstd_decompress, Reader,
+};
 
 use super::{BlockMeta, LogEntry};
 
 pub const CODEC_RAW: u8 = 1;
 pub const CODEC_ZSTD: u8 = 2;
+/// Codec 3 stays reserved for OpenZL — see the module header.
+pub const CODEC_COLUMNAR: u8 = 4;
 
 const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = 38;
+
+fn known_codec(codec: u8) -> bool {
+    codec == CODEC_RAW || codec == CODEC_ZSTD || codec == CODEC_COLUMNAR
+}
 
 /// Encode `entries` into one block payload. Entries should already be
 /// sorted by ts (the engine sorts at flush); the codec doesn't REQUIRE
 /// it (deltas may be negative) but sorted input compresses better and
 /// keeps ts_min/ts_max cheap to trust.
 ///
-/// `zstd_level` is only consulted for CODEC_ZSTD. Level 7 is the
-/// engine's default: measurably better ratio than the zstd crate's
-/// default (3) at a throughput still far above ingest rates.
+/// `zstd_level` is consulted for CODEC_ZSTD and CODEC_COLUMNAR. Level 7
+/// is the engine's default: measurably better ratio than the zstd
+/// crate's default (3) at a throughput still far above ingest rates.
 pub fn encode_block(
     entries: &[LogEntry],
     codec: u8,
@@ -62,10 +96,11 @@ pub fn encode_block(
     if entries.is_empty() {
         return Err("encode_block: refusing to encode an empty block".into());
     }
-    if codec != CODEC_RAW && codec != CODEC_ZSTD {
+    if !known_codec(codec) {
         return Err(format!("encode_block: unknown codec {codec}"));
     }
 
+    let n = entries.len();
     let mut ts_min = i64::MAX;
     let mut ts_max = i64::MIN;
     for e in entries {
@@ -79,75 +114,71 @@ pub fn encode_block(
         ts_max = ts_max.max(e.ts);
     }
 
-    // ── Build the four columns, uncompressed ────────────────────────
-    // Column 1: timestamps. RAW stores absolutes; ZSTD stores deltas
-    // (first value absolute, then successive differences) because the
-    // deltas of steady traffic are small repeated numbers — much better
-    // zstd food than large monotonically-shifting absolutes.
-    let mut col_ts = Vec::with_capacity(entries.len() * 8);
-    if codec == CODEC_RAW {
-        for e in entries {
-            col_ts.extend_from_slice(&e.ts.to_le_bytes());
-        }
-    } else {
-        let mut prev = 0i64;
-        for e in entries {
-            col_ts.extend_from_slice(&e.ts.wrapping_sub(prev).to_le_bytes());
-            prev = e.ts;
-        }
-    }
+    // Column 2 raw form (one byte per entry) and column 4 raw form
+    // (the pair serialization) are shared by every codec.
+    let col_lvl_raw: Vec<u8> = entries.iter().map(|e| e.level).collect();
+    let col_meta_raw = serialize_metadata(entries)?;
 
-    // Column 2: levels, one byte each.
-    let mut col_lvl = Vec::with_capacity(entries.len());
-    for e in entries {
-        col_lvl.push(e.level);
-    }
-
-    // Column 3: messages, u32-len-prefixed UTF-8 concatenated.
-    let mut col_msg = Vec::new();
-    for e in entries {
-        let b = e.message.as_bytes();
-        if b.len() > u32::MAX as usize {
-            return Err("encode_block: message longer than u32::MAX bytes".into());
+    let columns: [Vec<u8>; 4] = match codec {
+        CODEC_COLUMNAR => {
+            // Codec 4: typed column encoders pick their own strategy
+            // (and record it in the column frame). The ts delta pass
+            // lives INSIDE encode_i64 now; we hand it absolutes.
+            let ts_values: Vec<i64> = entries.iter().map(|e| e.ts).collect();
+            [
+                encode_i64(&ts_values, zstd_level)?.to_bytes(),
+                encode_u8(&col_lvl_raw, zstd_level)?.to_bytes(),
+                encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?
+                    .to_bytes(),
+                // Metadata: today's serialization + zstd, UNFRAMED
+                // (byte-identical to the codec-2 column) — see the
+                // module header for why per-key columns are future
+                // work.
+                zstd_compress(&col_meta_raw, zstd_level)?,
+            ]
         }
-        col_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
-        col_msg.extend_from_slice(b);
-    }
-
-    // Column 4: metadata. u16 pair count, then per pair u16 key length
-    // (keys are short identifiers; >64KB keys are rejected as nonsense)
-    // and u32 value length (values can be long).
-    let mut col_meta = Vec::new();
-    for e in entries {
-        if e.metadata.len() > u16::MAX as usize {
-            return Err("encode_block: more than 65535 metadata pairs in one entry".into());
-        }
-        col_meta.extend_from_slice(&(e.metadata.len() as u16).to_le_bytes());
-        for (k, v) in &e.metadata {
-            let (kb, vb) = (k.as_bytes(), v.as_bytes());
-            if kb.len() > u16::MAX as usize {
-                return Err(format!("encode_block: metadata key {k:?} longer than 64KB"));
+        _ => {
+            // Codecs 1/2 — the Session 5 formats, byte-for-byte.
+            // Column 1: RAW stores absolutes; ZSTD stores deltas
+            // (first value absolute, then successive differences)
+            // because the deltas of steady traffic are small repeated
+            // numbers — much better zstd food than large monotonically-
+            // shifting absolutes.
+            let mut col_ts = Vec::with_capacity(n * 8);
+            if codec == CODEC_RAW {
+                for e in entries {
+                    col_ts.extend_from_slice(&e.ts.to_le_bytes());
+                }
+            } else {
+                let mut prev = 0i64;
+                for e in entries {
+                    col_ts.extend_from_slice(&e.ts.wrapping_sub(prev).to_le_bytes());
+                    prev = e.ts;
+                }
             }
-            if vb.len() > u32::MAX as usize {
-                return Err(format!("encode_block: metadata value for {k:?} too long"));
-            }
-            col_meta.extend_from_slice(&(kb.len() as u16).to_le_bytes());
-            col_meta.extend_from_slice(kb);
-            col_meta.extend_from_slice(&(vb.len() as u32).to_le_bytes());
-            col_meta.extend_from_slice(vb);
-        }
-    }
 
-    // ── Compress (codec 2) or store as-is (codec 1) ──────────────────
-    let columns: [Vec<u8>; 4] = if codec == CODEC_ZSTD {
-        [
-            zstd_compress(&col_ts, zstd_level)?,
-            zstd_compress(&col_lvl, zstd_level)?,
-            zstd_compress(&col_msg, zstd_level)?,
-            zstd_compress(&col_meta, zstd_level)?,
-        ]
-    } else {
-        [col_ts, col_lvl, col_msg, col_meta]
+            // Column 3: messages, u32-len-prefixed UTF-8 concatenated.
+            let mut col_msg = Vec::new();
+            for e in entries {
+                let b = e.message.as_bytes();
+                if b.len() > u32::MAX as usize {
+                    return Err("encode_block: message longer than u32::MAX bytes".into());
+                }
+                col_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                col_msg.extend_from_slice(b);
+            }
+
+            if codec == CODEC_ZSTD {
+                [
+                    zstd_compress(&col_ts, zstd_level)?,
+                    zstd_compress(&col_lvl_raw, zstd_level)?,
+                    zstd_compress(&col_msg, zstd_level)?,
+                    zstd_compress(&col_meta_raw, zstd_level)?,
+                ]
+            } else {
+                [col_ts, col_lvl_raw, col_msg, col_meta_raw]
+            }
+        }
     };
 
     // ── Assemble container ───────────────────────────────────────────
@@ -155,7 +186,7 @@ pub fn encode_block(
     let mut out = Vec::with_capacity(total);
     out.push(FORMAT_VERSION);
     out.push(codec);
-    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(n as u32).to_le_bytes());
     out.extend_from_slice(&ts_min.to_le_bytes());
     out.extend_from_slice(&ts_max.to_le_bytes());
     for c in &columns {
@@ -171,13 +202,15 @@ pub fn encode_block(
     let meta = BlockMeta {
         ts_min,
         ts_max,
-        entry_count: entries.len() as u32,
+        entry_count: n as u32,
         codec,
     };
     Ok((out, meta))
 }
 
-/// Decode a block payload back into entries, in stored order.
+/// Decode a block payload back into entries, in stored order. Speaks
+/// every codec ever written (1, 2 and 4) — existing databases must
+/// stay decodable forever, whatever optimize() currently emits.
 pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     let mut r = Reader::new(bytes);
     let version = r.u8("format version")?;
@@ -187,7 +220,7 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
         ));
     }
     let codec = r.u8("codec")?;
-    if codec != CODEC_RAW && codec != CODEC_ZSTD {
+    if !known_codec(codec) {
         return Err(format!("block: unknown codec {codec}"));
     }
     let n = r.u32("entry_count")? as usize;
@@ -211,6 +244,34 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
         ));
     }
 
+    // ── Codec 4: typed column decoders ───────────────────────────────
+    if codec == CODEC_COLUMNAR {
+        let timestamps = decode_i64(stored[0], n)?;
+        let levels = decode_u8(stored[1], n)?;
+        for (i, &lvl) in levels.iter().enumerate() {
+            if lvl > 3 {
+                return Err(format!("block: entry {i} has invalid level byte {lvl}"));
+            }
+        }
+        let messages = decode_str(stored[2], n)?;
+        let meta_raw = zstd_decompress(stored[3], "metadata column")?;
+        let metadatas = parse_metadata(&meta_raw, n)?;
+
+        let mut out = Vec::with_capacity(n);
+        let mut msg_it = messages.into_iter();
+        let mut md_it = metadatas.into_iter();
+        for i in 0..n {
+            out.push(LogEntry {
+                ts: timestamps[i],
+                level: levels[i],
+                message: msg_it.next().unwrap(),
+                metadata: md_it.next().unwrap(),
+            });
+        }
+        return Ok(out);
+    }
+
+    // ── Codecs 1/2 — the Session 5 decode path, byte-for-byte ────────
     // Decompress columns for codec 2. `Cow`-style: raw columns borrow,
     // zstd columns own — a Vec<u8> per column either way keeps it simple
     // (blocks are a few hundred KB at most).
@@ -273,8 +334,57 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     }
 
     // ── Column 4: metadata ───────────────────────────────────────────
+    let metadatas = parse_metadata(&cols[3], n)?;
+
+    // ── Zip the columns back into entries ────────────────────────────
+    let mut out = Vec::with_capacity(n);
+    let mut msg_it = messages.into_iter();
+    let mut md_it = metadatas.into_iter();
+    for i in 0..n {
+        out.push(LogEntry {
+            ts: timestamps[i],
+            level: cols[1][i],
+            message: msg_it.next().unwrap(),
+            metadata: md_it.next().unwrap(),
+        });
+    }
+    Ok(out)
+}
+
+const COLUMN_NAMES: [&str; 4] = ["ts column", "level column", "message column", "metadata column"];
+
+/// The metadata pair serialization — u16 pair count, then per pair u16
+/// key length (keys are short identifiers; >64KB keys are rejected as
+/// nonsense) and u32 value length (values can be long). Shared by every
+/// codec: 1 stores it raw, 2 and 4 zstd it.
+fn serialize_metadata(entries: &[LogEntry]) -> Result<Vec<u8>, String> {
+    let mut col_meta = Vec::new();
+    for e in entries {
+        if e.metadata.len() > u16::MAX as usize {
+            return Err("encode_block: more than 65535 metadata pairs in one entry".into());
+        }
+        col_meta.extend_from_slice(&(e.metadata.len() as u16).to_le_bytes());
+        for (k, v) in &e.metadata {
+            let (kb, vb) = (k.as_bytes(), v.as_bytes());
+            if kb.len() > u16::MAX as usize {
+                return Err(format!("encode_block: metadata key {k:?} longer than 64KB"));
+            }
+            if vb.len() > u32::MAX as usize {
+                return Err(format!("encode_block: metadata value for {k:?} too long"));
+            }
+            col_meta.extend_from_slice(&(kb.len() as u16).to_le_bytes());
+            col_meta.extend_from_slice(kb);
+            col_meta.extend_from_slice(&(vb.len() as u32).to_le_bytes());
+            col_meta.extend_from_slice(vb);
+        }
+    }
+    Ok(col_meta)
+}
+
+/// Exact inverse of [`serialize_metadata`], shared by every decode path.
+fn parse_metadata(raw: &[u8], n: usize) -> Result<Vec<Vec<(String, String)>>, String> {
     let mut metadatas = Vec::with_capacity(n);
-    let mut tr = Reader::new(&cols[3]);
+    let mut tr = Reader::new(raw);
     for i in 0..n {
         let pairs = tr.u16("metadata pair count")? as usize;
         let mut md = Vec::with_capacity(pairs);
@@ -294,88 +404,5 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     if tr.remaining() != 0 {
         return Err("block: trailing bytes in metadata column".into());
     }
-
-    // ── Zip the columns back into entries ────────────────────────────
-    let mut out = Vec::with_capacity(n);
-    let mut msg_it = messages.into_iter();
-    let mut md_it = metadatas.into_iter();
-    for i in 0..n {
-        out.push(LogEntry {
-            ts: timestamps[i],
-            level: cols[1][i],
-            message: msg_it.next().unwrap(),
-            metadata: md_it.next().unwrap(),
-        });
-    }
-    Ok(out)
-}
-
-const COLUMN_NAMES: [&str; 4] = ["ts column", "level column", "message column", "metadata column"];
-
-// pub(crate): the spans codec (spans/codec.rs, Session 6) reuses these
-// primitives — same zstd calls, same bounds-checked reader — instead of
-// growing a second copy. Nothing about THIS codec changed.
-pub(crate) fn zstd_compress(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
-    zstd::bulk::compress(data, level).map_err(|e| format!("zstd compress failed: {e}"))
-}
-
-pub(crate) fn zstd_decompress(data: &[u8], what: &str) -> Result<Vec<u8>, String> {
-    // decompress() needs a capacity hint; decode_all streams instead and
-    // handles any size without us trusting an attacker-controlled header
-    // field for the allocation.
-    zstd::stream::decode_all(data).map_err(|e| format!("zstd decompress of {what} failed: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// Bounds-checked byte reader (same pattern as the vtab's BatchReader:
-// every read names what it was reading, so corruption errors point at
-// the exact field). Shared with the spans codec (hence pub(crate)).
-// ---------------------------------------------------------------------------
-
-pub(crate) struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    pub(crate) fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, pos: 0 }
-    }
-
-    pub(crate) fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-
-    pub(crate) fn take(&mut self, n: usize, what: &str) -> Result<&'a [u8], String> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .ok_or_else(|| format!("block: length overflow reading {what}"))?;
-        if end > self.buf.len() {
-            return Err(format!(
-                "block truncated: need {n} byte(s) for {what} at offset {}, only {} remain",
-                self.pos,
-                self.remaining()
-            ));
-        }
-        let s = &self.buf[self.pos..end];
-        self.pos = end;
-        Ok(s)
-    }
-
-    pub(crate) fn u8(&mut self, what: &str) -> Result<u8, String> {
-        Ok(self.take(1, what)?[0])
-    }
-
-    pub(crate) fn u16(&mut self, what: &str) -> Result<u16, String> {
-        Ok(u16::from_le_bytes(self.take(2, what)?.try_into().unwrap()))
-    }
-
-    pub(crate) fn u32(&mut self, what: &str) -> Result<u32, String> {
-        Ok(u32::from_le_bytes(self.take(4, what)?.try_into().unwrap()))
-    }
-
-    pub(crate) fn i64(&mut self, what: &str) -> Result<i64, String> {
-        Ok(i64::from_le_bytes(self.take(8, what)?.try_into().unwrap()))
-    }
+    Ok(metadatas)
 }

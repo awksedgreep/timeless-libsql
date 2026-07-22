@@ -1,40 +1,68 @@
 //! Columnar span block codec — the traces sibling of blocks/codec.rs
-//! (read that header first; the container idea, the RAW/ZSTD two-tier
-//! split and the codec byte semantics are identical, and the zstd
-//! helpers + bounds-checked Reader are literally shared from there).
+//! (read that header first; the container idea, the RAW/ZSTD/COLUMNAR
+//! codec byte semantics are identical, and the zstd helpers + bounds-
+//! checked Reader come from the shared timeless-codec crate).
 //!
 //! Ten columns instead of four — spans are wider than log lines, and
 //! the columnar split is where the compression comes from: each column
 //! is long runs of SIMILAR data (all the 16-byte trace ids together,
-//! all the u8 kinds together...), which zstd rewards far more than
-//! interleaved span structs would:
+//! all the u8 kinds together...), which every codec rewards far more
+//! than interleaved span structs would:
 //!
 //!   col  1  trace_ids   16 bytes fixed per span, packed binary
 //!   col  2  span_ids    8 bytes fixed per span
 //!   col  3  parent_ids  1 presence byte (0|1), then 8 bytes IF present
 //!                       (root spans pay 1 byte, not 9 zeros)
-//!   col  4  names       u16-len-prefixed UTF-8, concatenated
-//!   col  5  services    u16-len-prefixed UTF-8, concatenated
+//!   col  4  names       UTF-8 strings (u16-len-prefixed in codecs 1/2)
+//!   col  5  services    UTF-8 strings (ditto)
 //!   col  6  kinds       one u8 per span (0..=4)
 //!   col  7  statuses    one u8 per span (0..=2)
-//!   col  8  start_ts    i64 LE; delta-encoded before zstd (spans in a
-//!                       block are start_ts-sorted → tiny deltas)
-//!   col  9  durations   i64 LE (no delta: durations don't trend, but
-//!                       similar magnitudes still zstd well)
+//!   col  8  start_ts    i64 per span
+//!   col  9  durations   i64 per span
 //!   col 10  attributes  per span: u16 pair count, then per pair
 //!                       u16 key-len + key + u32 val-len + value
 //!                       (byte-identical layout to the logs metadata
 //!                       column — flat sorted string pairs both places)
 //!
+//! Codec map (same ids as logs — the constants ARE the logs constants):
+//!   CODEC_RAW      (1) — everything uncompressed; the flush format.
+//!   CODEC_ZSTD     (2) — start_ts delta-encoded, every column zstd'd.
+//!                        The Session 6 format; still decodable, no
+//!                        longer written by optimize().
+//!   codec 3 reserved for OpenZL, untouched.
+//!   CODEC_COLUMNAR (4) — "adaptive columnar v1", per-column typed
+//!                        encoders from timeless-codec:
+//!             start_ts/durations → encode_i64 (delta+pco vs delta+zstd)
+//!             kinds/statuses     → encode_u8  (RLE vs zstd; status-pure
+//!                                  blocks collapse to one RLE pair)
+//!             names/services     → encode_str (services are ~10
+//!                                  distinct values → the dictionary
+//!                                  strategy fires; names are a bounded
+//!                                  set too)
+//!             trace/span ids     → encode_fixed_bytes (zstd only —
+//!                                  random ids are irreducible; see
+//!                                  that encoder's doc for why there's
+//!                                  no byte-plane transpose tonight)
+//!             parent_ids         → presence-byte serialization + zstd
+//!                                  (NOT encode_fixed_bytes: the column
+//!                                  is variable-width by construction —
+//!                                  splitting it into a presence u8
+//!                                  column + packed ids is a format
+//!                                  revision for another night)
+//!             attributes         → today's serialization + zstd, same
+//!                                  bytes as codec 2 (per-key columns
+//!                                  are future work, like logs metadata)
+//!
 //! Name/service lengths are u16 (a >64KB operation name is nonsense and
 //! rejected, same policy as metadata keys in logs); attribute values
 //! get u32 like log metadata values (they can legitimately be long).
 //!
-//! Container layout (all integers little-endian):
+//! Container layout (all integers little-endian, identical for all
+//! codecs — only the column payloads differ):
 //!
 //!   offset  size   field
 //!   0       1      format version (0x01)
-//!   1       1      codec (1=raw 2=zstd; 3 reserved for OpenZL)
+//!   1       1      codec (1, 2 or 4; 3 reserved for OpenZL)
 //!   2       4      u32 entry_count
 //!   6       8      i64 ts_min   (min start_ts)
 //!   14      8      i64 ts_max   (max start_ts)
@@ -45,8 +73,12 @@
 //! a truncated or corrupt block is an error naming the field, never a
 //! panic or garbage spans.
 
-use crate::blocks::codec::{zstd_compress, zstd_decompress, Reader};
-pub use crate::blocks::codec::{CODEC_RAW, CODEC_ZSTD};
+use timeless_codec::{
+    decode_fixed_bytes, decode_i64, decode_str, decode_u8, encode_fixed_bytes, encode_i64,
+    encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
+};
+
+pub use crate::blocks::codec::{CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
 
 use super::{BlockMeta, SpanEntry};
 
@@ -67,6 +99,10 @@ const COLUMN_NAMES: [&str; N_COLUMNS] = [
     "attributes column",
 ];
 
+fn known_codec(codec: u8) -> bool {
+    codec == CODEC_RAW || codec == CODEC_ZSTD || codec == CODEC_COLUMNAR
+}
+
 /// Encode `entries` into one span block payload. Entries should already
 /// be sorted by start_ts (the engine sorts at flush); the codec doesn't
 /// REQUIRE it (deltas may be negative — see the negative-ts round-trip
@@ -79,7 +115,7 @@ pub fn encode_span_block(
     if entries.is_empty() {
         return Err("encode_span_block: refusing to encode an empty block".into());
     }
-    if codec != CODEC_RAW && codec != CODEC_ZSTD {
+    if !known_codec(codec) {
         return Err(format!("encode_span_block: unknown codec {codec}"));
     }
 
@@ -104,19 +140,13 @@ pub fn encode_span_block(
 
     let n = entries.len();
 
-    // ── Build the ten columns, uncompressed ─────────────────────────
+    // ── Raw column material shared by every codec ────────────────────
     let mut col_trace = Vec::with_capacity(n * 16);
     let mut col_span = Vec::with_capacity(n * 8);
     let mut col_parent = Vec::with_capacity(n); // + 8/present
-    let mut col_name = Vec::new();
-    let mut col_svc = Vec::new();
     let mut col_kind = Vec::with_capacity(n);
     let mut col_status = Vec::with_capacity(n);
-    let mut col_ts = Vec::with_capacity(n * 8);
-    let mut col_dur = Vec::with_capacity(n * 8);
     let mut col_attr = Vec::new();
-
-    let mut prev_ts = 0i64;
     for e in entries {
         col_trace.extend_from_slice(&e.trace_id);
         col_span.extend_from_slice(&e.span_id);
@@ -127,27 +157,8 @@ pub fn encode_span_block(
             }
             None => col_parent.push(0),
         }
-        for (label, s, col) in [("name", &e.name, &mut col_name), ("service", &e.service, &mut col_svc)] {
-            let b = s.as_bytes();
-            if b.len() > u16::MAX as usize {
-                return Err(format!("encode_span_block: {label} longer than 64KB"));
-            }
-            col.extend_from_slice(&(b.len() as u16).to_le_bytes());
-            col.extend_from_slice(b);
-        }
         col_kind.push(e.kind);
         col_status.push(e.status);
-        // start_ts: RAW stores absolutes, ZSTD stores deltas (first
-        // absolute, then differences) — same scheme as the logs ts
-        // column and for the same reason: steady traffic makes deltas
-        // small repeated numbers, much better zstd food.
-        if codec == CODEC_RAW {
-            col_ts.extend_from_slice(&e.start_ts.to_le_bytes());
-        } else {
-            col_ts.extend_from_slice(&e.start_ts.wrapping_sub(prev_ts).to_le_bytes());
-            prev_ts = e.start_ts;
-        }
-        col_dur.extend_from_slice(&e.duration_ns.to_le_bytes());
 
         if e.attributes.len() > u16::MAX as usize {
             return Err("encode_span_block: more than 65535 attributes in one span".into());
@@ -166,20 +177,76 @@ pub fn encode_span_block(
             col_attr.extend_from_slice(&(vb.len() as u32).to_le_bytes());
             col_attr.extend_from_slice(vb);
         }
+        // Name/service length policy is enforced in both branches below
+        // (codec 4 hands strs to encode_str, which has its own u32
+        // guard; the u16 rejection here documents OUR policy).
+        for (label, s) in [("name", &e.name), ("service", &e.service)] {
+            if s.len() > u16::MAX as usize {
+                return Err(format!("encode_span_block: {label} longer than 64KB"));
+            }
+        }
     }
 
-    // ── Compress (codec 2) or store as-is (codec 1) ──────────────────
-    let raw_cols: [Vec<u8>; N_COLUMNS] = [
-        col_trace, col_span, col_parent, col_name, col_svc, col_kind, col_status, col_ts,
-        col_dur, col_attr,
-    ];
-    let columns: Vec<Vec<u8>> = if codec == CODEC_ZSTD {
-        raw_cols
-            .iter()
-            .map(|c| zstd_compress(c, zstd_level))
-            .collect::<Result<_, _>>()?
+    let columns: Vec<Vec<u8>> = if codec == CODEC_COLUMNAR {
+        // ── Codec 4: typed encoders per column ──────────────────────
+        let starts: Vec<i64> = entries.iter().map(|e| e.start_ts).collect();
+        let durs: Vec<i64> = entries.iter().map(|e| e.duration_ns).collect();
+        vec![
+            encode_fixed_bytes(&col_trace, 16, zstd_level)?.to_bytes(),
+            encode_fixed_bytes(&col_span, 8, zstd_level)?.to_bytes(),
+            // Parent ids: variable-width presence serialization, plain
+            // zstd (unframed, byte-identical to the codec-2 column).
+            zstd_compress(&col_parent, zstd_level)?,
+            encode_str(entries.iter().map(|e| e.name.as_str()), n, zstd_level)?.to_bytes(),
+            encode_str(entries.iter().map(|e| e.service.as_str()), n, zstd_level)?.to_bytes(),
+            encode_u8(&col_kind, zstd_level)?.to_bytes(),
+            encode_u8(&col_status, zstd_level)?.to_bytes(),
+            // Both i64 columns delta inside encode_i64; durations don't
+            // trend but the adaptive pick just falls back to whichever
+            // strategy handles their magnitude-similarity best.
+            encode_i64(&starts, zstd_level)?.to_bytes(),
+            encode_i64(&durs, zstd_level)?.to_bytes(),
+            // Attributes: today's serialization + zstd (unframed).
+            zstd_compress(&col_attr, zstd_level)?,
+        ]
     } else {
-        raw_cols.into_iter().collect()
+        // ── Codecs 1/2 — the Session 6 formats, byte-for-byte ────────
+        let mut col_name = Vec::new();
+        let mut col_svc = Vec::new();
+        let mut col_ts = Vec::with_capacity(n * 8);
+        let mut col_dur = Vec::with_capacity(n * 8);
+        let mut prev_ts = 0i64;
+        for e in entries {
+            for (s, col) in [(&e.name, &mut col_name), (&e.service, &mut col_svc)] {
+                let b = s.as_bytes();
+                col.extend_from_slice(&(b.len() as u16).to_le_bytes());
+                col.extend_from_slice(b);
+            }
+            // start_ts: RAW stores absolutes, ZSTD stores deltas (first
+            // absolute, then differences) — same scheme as the logs ts
+            // column and for the same reason: steady traffic makes
+            // deltas small repeated numbers, much better zstd food.
+            if codec == CODEC_RAW {
+                col_ts.extend_from_slice(&e.start_ts.to_le_bytes());
+            } else {
+                col_ts.extend_from_slice(&e.start_ts.wrapping_sub(prev_ts).to_le_bytes());
+                prev_ts = e.start_ts;
+            }
+            col_dur.extend_from_slice(&e.duration_ns.to_le_bytes());
+        }
+
+        let raw_cols: [Vec<u8>; N_COLUMNS] = [
+            col_trace, col_span, col_parent, col_name, col_svc, col_kind, col_status, col_ts,
+            col_dur, col_attr,
+        ];
+        if codec == CODEC_ZSTD {
+            raw_cols
+                .iter()
+                .map(|c| zstd_compress(c, zstd_level))
+                .collect::<Result<_, _>>()?
+        } else {
+            raw_cols.into_iter().collect()
+        }
     };
 
     // ── Assemble container ───────────────────────────────────────────
@@ -210,6 +277,7 @@ pub fn encode_span_block(
 }
 
 /// Decode a span block payload back into spans, in stored order.
+/// Speaks every codec ever written (1, 2 and 4).
 pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
     let mut r = Reader::new(bytes);
     let version = r.u8("format version")?;
@@ -219,7 +287,7 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         ));
     }
     let codec = r.u8("codec")?;
-    if codec != CODEC_RAW && codec != CODEC_ZSTD {
+    if !known_codec(codec) {
         return Err(format!("span block: unknown codec {codec}"));
     }
     let n = r.u32("entry_count")? as usize;
@@ -241,6 +309,53 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         ));
     }
 
+    // ── Codec 4: typed column decoders ───────────────────────────────
+    if codec == CODEC_COLUMNAR {
+        let trace_flat = decode_fixed_bytes(stored[0], n, 16)?;
+        let span_flat = decode_fixed_bytes(stored[1], n, 8)?;
+        let parent_raw = zstd_decompress(stored[2], COLUMN_NAMES[2])?;
+        let parents = parse_parents(&parent_raw, n)?;
+        let names = decode_str(stored[3], n)?;
+        let services = decode_str(stored[4], n)?;
+        let kinds = decode_u8(stored[5], n)?;
+        let statuses = decode_u8(stored[6], n)?;
+        for (i, &k) in kinds.iter().enumerate() {
+            if k > 4 {
+                return Err(format!("span block: span {i} has invalid kind byte {k}"));
+            }
+        }
+        for (i, &s) in statuses.iter().enumerate() {
+            if s > 2 {
+                return Err(format!("span block: span {i} has invalid status byte {s}"));
+            }
+        }
+        let timestamps = decode_i64(stored[7], n)?;
+        let durations = decode_i64(stored[8], n)?;
+        let attr_raw = zstd_decompress(stored[9], COLUMN_NAMES[9])?;
+        let attrs = parse_attributes(&attr_raw, n)?;
+
+        let mut out = Vec::with_capacity(n);
+        let mut name_it = names.into_iter();
+        let mut svc_it = services.into_iter();
+        let mut attr_it = attrs.into_iter();
+        for i in 0..n {
+            out.push(SpanEntry {
+                trace_id: <[u8; 16]>::try_from(&trace_flat[i * 16..(i + 1) * 16]).unwrap(),
+                span_id: <[u8; 8]>::try_from(&span_flat[i * 8..(i + 1) * 8]).unwrap(),
+                parent_span_id: parents[i],
+                name: name_it.next().unwrap(),
+                service: svc_it.next().unwrap(),
+                kind: kinds[i],
+                status: statuses[i],
+                start_ts: timestamps[i],
+                duration_ns: durations[i],
+                attributes: attr_it.next().unwrap(),
+            });
+        }
+        return Ok(out);
+    }
+
+    // ── Codecs 1/2 — the Session 6 decode path, byte-for-byte ────────
     let cols: Vec<Vec<u8>> = if codec == CODEC_ZSTD {
         stored
             .iter()
@@ -290,25 +405,7 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         .collect();
 
     // ── Variable columns: parents, names, services, attributes ───────
-    let mut parents = Vec::with_capacity(n);
-    let mut pr = Reader::new(&cols[2]);
-    for i in 0..n {
-        match pr.u8("parent presence byte")? {
-            0 => parents.push(None),
-            1 => {
-                let b = pr.take(8, "parent span id")?;
-                parents.push(Some(<[u8; 8]>::try_from(b).unwrap()));
-            }
-            other => {
-                return Err(format!(
-                    "span block: span {i} has invalid parent presence byte {other}"
-                ))
-            }
-        }
-    }
-    if pr.remaining() != 0 {
-        return Err("span block: trailing bytes in parent_id column".into());
-    }
+    let parents = parse_parents(&cols[2], n)?;
 
     let read_strings = |col: usize| -> Result<Vec<String>, String> {
         let mut out = Vec::with_capacity(n);
@@ -329,27 +426,7 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
     let names = read_strings(3)?;
     let services = read_strings(4)?;
 
-    let mut attrs = Vec::with_capacity(n);
-    let mut ar = Reader::new(&cols[9]);
-    for i in 0..n {
-        let pairs = ar.u16("attribute pair count")? as usize;
-        let mut a = Vec::with_capacity(pairs);
-        for _ in 0..pairs {
-            let klen = ar.u16("attribute key length")? as usize;
-            let kb = ar.take(klen, "attribute key")?;
-            let k = std::str::from_utf8(kb)
-                .map_err(|_| format!("span block: span {i}: attribute key is not valid UTF-8"))?;
-            let vlen = ar.u32("attribute value length")? as usize;
-            let vb = ar.take(vlen, "attribute value")?;
-            let v = std::str::from_utf8(vb)
-                .map_err(|_| format!("span block: span {i}: attribute value is not valid UTF-8"))?;
-            a.push((k.to_owned(), v.to_owned()));
-        }
-        attrs.push(a);
-    }
-    if ar.remaining() != 0 {
-        return Err("span block: trailing bytes in attributes column".into());
-    }
+    let attrs = parse_attributes(&cols[9], n)?;
 
     // ── Zip the columns back into spans ──────────────────────────────
     let mut out = Vec::with_capacity(n);
@@ -371,4 +448,56 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         });
     }
     Ok(out)
+}
+
+/// Parse the parent-id presence serialization (1 presence byte, then 8
+/// id bytes if present) — shared by every decode path.
+fn parse_parents(raw: &[u8], n: usize) -> Result<Vec<Option<[u8; 8]>>, String> {
+    let mut parents = Vec::with_capacity(n);
+    let mut pr = Reader::new(raw);
+    for i in 0..n {
+        match pr.u8("parent presence byte")? {
+            0 => parents.push(None),
+            1 => {
+                let b = pr.take(8, "parent span id")?;
+                parents.push(Some(<[u8; 8]>::try_from(b).unwrap()));
+            }
+            other => {
+                return Err(format!(
+                    "span block: span {i} has invalid parent presence byte {other}"
+                ))
+            }
+        }
+    }
+    if pr.remaining() != 0 {
+        return Err("span block: trailing bytes in parent_id column".into());
+    }
+    Ok(parents)
+}
+
+/// Parse the attribute pair serialization — shared by every decode path
+/// (byte-identical layout to logs metadata).
+fn parse_attributes(raw: &[u8], n: usize) -> Result<Vec<Vec<(String, String)>>, String> {
+    let mut attrs = Vec::with_capacity(n);
+    let mut ar = Reader::new(raw);
+    for i in 0..n {
+        let pairs = ar.u16("attribute pair count")? as usize;
+        let mut a = Vec::with_capacity(pairs);
+        for _ in 0..pairs {
+            let klen = ar.u16("attribute key length")? as usize;
+            let kb = ar.take(klen, "attribute key")?;
+            let k = std::str::from_utf8(kb)
+                .map_err(|_| format!("span block: span {i}: attribute key is not valid UTF-8"))?;
+            let vlen = ar.u32("attribute value length")? as usize;
+            let vb = ar.take(vlen, "attribute value")?;
+            let v = std::str::from_utf8(vb)
+                .map_err(|_| format!("span block: span {i}: attribute value is not valid UTF-8"))?;
+            a.push((k.to_owned(), v.to_owned()));
+        }
+        attrs.push(a);
+    }
+    if ar.remaining() != 0 {
+        return Err("span block: trailing bytes in attributes column".into());
+    }
+    Ok(attrs)
 }

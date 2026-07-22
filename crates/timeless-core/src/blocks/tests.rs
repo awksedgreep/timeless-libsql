@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::codec::{decode_block, encode_block, CODEC_RAW, CODEC_ZSTD};
+use super::codec::{decode_block, encode_block, CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
 use super::engine::{BlockEngine, BlockEngineConfig, LogQuery};
 use super::mem::MemBlockStore;
 use super::{level_from_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry};
@@ -50,13 +50,17 @@ fn config(index_keys: &[&str]) -> BlockEngineConfig {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn codec_round_trips_both_codecs() {
+fn codec_round_trips_all_codecs() {
+    // CODEC_ZSTD stays in this loop FOREVER even though optimize() no
+    // longer writes it: encode_block(.., CODEC_ZSTD, ..) is the
+    // retained legacy encoder path, and this round-trip is the proof
+    // that existing codec-2 databases remain decodable.
     let entries = vec![
         entry(1000, 1, "hello world", &[("service", "api"), ("path", "/x")]),
         entry(1001, 3, "boom 💥 unicode", &[]),
         entry(1005, 0, "", &[("k", "")]), // empty message + empty value
     ];
-    for codec in [CODEC_RAW, CODEC_ZSTD] {
+    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR] {
         let (bytes, meta) = encode_block(&entries, codec, 7).unwrap();
         assert_eq!(meta.ts_min, 1000);
         assert_eq!(meta.ts_max, 1005);
@@ -150,6 +154,88 @@ fn raw_optimize_query_round_trip_is_exact() {
         ..full_range_query()
     };
     assert_eq!(engine.query(&q).unwrap(), vec![expect[42].clone()]);
+}
+
+// ---------------------------------------------------------------------------
+// optimize() output codec: prove the compacted blocks carry codec
+// byte 4 (CODEC_COLUMNAR) on disk AND decode back to the exact
+// entries. A delegating wrapper over a shared MemBlockStore lets the
+// test inspect the store after the engine is done with it.
+// ---------------------------------------------------------------------------
+
+struct SharedStore(Arc<MemBlockStore>);
+
+impl BlockStore for SharedStore {
+    fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
+        self.0.put_block(block)
+    }
+    fn replace_blocks(
+        &self,
+        add: &[EncodedBlock],
+        remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        self.0.replace_blocks(add, remove, on_committed)
+    }
+    fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
+        self.0.read_block(loc)
+    }
+    fn delete_blocks(&self, locs: &[BlockLoc]) -> Vec<String> {
+        self.0.delete_blocks(locs)
+    }
+    fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+        self.0.scan()
+    }
+    fn query_terms(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.0.query_terms(terms, ts_min, ts_max)
+    }
+    fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
+        self.0.save_meta(key, value)
+    }
+    fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.0.load_meta(key)
+    }
+}
+
+#[test]
+fn optimize_writes_codec_4_blocks_that_decode_exactly() {
+    let shared = Arc::new(MemBlockStore::new());
+    let engine =
+        BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&["service"])).unwrap();
+
+    let mut expect = Vec::new();
+    for i in 0..200i64 {
+        let e = entry(
+            5_000 + i,
+            (i % 4) as u8,
+            &format!("payload {i} with some repetitive structure"),
+            &[("service", if i % 2 == 0 { "api" } else { "web" })],
+        );
+        expect.push(e.clone());
+        engine.push(e).unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+
+    // Every persisted block is codec 4 now — in the store metadata AND
+    // in the payload's own codec byte (offset 1) — and the payloads
+    // decode to exactly what was pushed.
+    let mut decoded = Vec::new();
+    let scanned = shared.scan().unwrap();
+    assert!(!scanned.is_empty());
+    for (meta, loc) in scanned {
+        assert_eq!(meta.codec, CODEC_COLUMNAR, "store meta codec byte");
+        let bytes = shared.read_block(&loc).unwrap();
+        assert_eq!(bytes[1], CODEC_COLUMNAR, "payload codec byte");
+        decoded.extend(decode_block(&bytes).unwrap());
+    }
+    decoded.sort_by_key(|e| e.ts);
+    assert_eq!(decoded, expect, "codec-4 optimize output round-trips");
 }
 
 // ---------------------------------------------------------------------------

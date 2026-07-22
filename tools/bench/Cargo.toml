@@ -10,10 +10,10 @@ name = "bench"
 version = "0.1.0"
 edition = "2021"
 
-# Three binaries, one crate: the Session 4 metrics bench (bench), the
-# Session 5 logs bench (bench-logs) and the Session 6 traces bench
-# (bench-traces) share the workspace-detachment + bundled-sqlite
-# rationale above.
+# Four binaries, one crate: the Session 4 metrics bench (bench), the
+# Session 5 logs bench (bench-logs), the Session 6 traces bench
+# (bench-traces) and the Session 7 codec bake-off (bench-codec) share
+# the workspace-detachment + bundled-sqlite rationale above.
 [[bin]]
 name = "bench"
 path = "src/main.rs"
@@ -26,12 +26,21 @@ path = "src/bench_logs.rs"
 name = "bench-traces"
 path = "src/bench_traces.rs"
 
+[[bin]]
+name = "bench-codec"
+path = "src/bench_codec.rs"
+
 [dependencies]
 # bundled         = compile SQLite in, ignore the system library
 # load_extension  = expose sqlite3_load_extension so we can .so-load
 #                   the timeless extension under test
 # blob            = blob API (and Tier 2 batches are blob parameters)
 rusqlite = { version = "0.40", features = ["bundled", "load_extension", "blob"] }
+
+# bench-codec calls the block codecs DIRECTLY (no SQLite in the loop):
+# it needs timeless-core's encode/decode entry points to compare codec
+# 2 vs codec 4 on identical entry groups.
+timeless-core = { path = "../../crates/timeless-core" }
 
 # The numbers should reflect the extension's release profile.
 [profile.release]

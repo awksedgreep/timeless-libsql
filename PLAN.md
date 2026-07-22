@@ -332,6 +332,29 @@ Nothing blocks on this choice.
 - First task next session: extract crates/timeless-codec by deduping
   blocks/codec.rs + spans/codec.rs (zstd helpers + header framing).
 
+**DONE 2026-07-22 (Session 7):** `crates/timeless-codec` exists and shipped.
+- API guardrail held: public unit = typed column encoders (encode_i64 /
+  encode_f64 / encode_str / encode_u8 / encode_fixed_bytes + framed
+  ColumnEnc, adaptive strategy selection by sampled trial encode), no
+  LogEntry/SpanEntry anywhere in the crate. Shared zstd helpers +
+  bounds-checked Reader moved there; the blocks/spans copies deleted.
+- Codec 4 ("adaptive columnar v1") added to blocks/ and spans/:
+  optimize() writes it, decode speaks 1/2/4, raw flush stays 1, codec 3
+  still reserved for OpenZL. Codec 2 is legacy-decodable forever (unit
+  tests keep encoding it via the retained encoder path).
+- Bake-off numbers + verdict: see the Session 5 checklist entry. Verdict
+  short form: codec 4 default (traces -5.3% ≥ 5% gate; logs -3.4%;
+  decode FASTER both datasets; no query regression >20% — level=error
+  24.2ms vs 22.9 recorded = noise-level, trace lookup 3.36ms vs 3.9).
+- Strategy menu behaved as predicted: dictionary fired on services AND
+  names (every group), delta+pco beat delta+zstd on ms-jitter log ts and
+  on ns start_ts/durations (every group), RLE collapsed the partition-
+  pure level/status columns to 5 bytes; messages stayed concat+zstd
+  (unique ids → distinct ratio ~1), kind stayed zstd (shuffled u8s, RLE
+  loses), ids stayed plain zstd (random = irreducible). FSST never
+  entered (owner decision); metadata/attributes stay serialized+zstd
+  (per-key columns = future format revision).
+
 ---
 
 ## Source-of-truth references (already verified — don't re-derive)
@@ -571,10 +594,26 @@ all proven — logs reuses every one of them).
       B/entry — level-homogeneous blocks compress BETTER, e.g. the
       messages column groups per-level templates). Metrics bench
       unaffected (tier2 18.4M pts/s, bit-exact checks OK).
-- [ ] **Codec bake-off** (see "Codec strategy"): same blocks compressed
-      three ways — zstd columnar vs OpenZL vs best-effort pure-Rust pipeline
-      (delta/pco ts column + dictionary zstd messages). Record ratios +
-      throughput in RESULTS.md; apply the decision rule
+- [x] **Codec bake-off — DONE 2026-07-22 (Session 7)**, two ways not
+      three (OpenZL untouched per the DECIDED block; codec 3 stays
+      reserved): codec 2 (zstd columnar) vs codec 4 (adaptive columnar
+      v1 = timeless-codec typed column encoders) over the SAME
+      1M-entry logs + 960,570-span traces workloads, cut into
+      8192-entry level/status-pure groups (bench-codec, shared
+      `datasets` module with bench-logs/bench-traces). Result: logs
+      -3.4% total (ts column -38.7% via delta+pco, level -44% via RLE;
+      messages/metadata unchanged — they dominate), traces **-5.3%**
+      total (names -37.8% + services -12.3% via dictionary, start_ts
+      -10.3% + durations -9.9% via delta+pco, status -44% via RLE).
+      Decision rule (≥5% on either dataset, no >20% query regression):
+      **PASS on traces → codec 4 is the optimize() default.**
+      End-to-end after the switch: logs file 9.9→9.65 MB (12.2→12.5x),
+      traces 37.3→35.8 MB (4.2→4.3x); queries level=error 24.2ms,
+      svc+level+range 7.4ms, trace lookup 3.36ms, status=error 4.1ms —
+      all within noise of or better than the recorded numbers. Decode
+      throughput IMPROVED (logs 587→630 MB/s, traces 605→767 MB/s);
+      encode is the only cost (traces 174→125 MB/s, paid at optimize
+      time only, and raw flush stays codec 1).
 - [ ] Stretch: OpenZL static-link spike (R7) via `openzl-sys` wrapper crate —
       if clean, add codec 3 and include in bake-off
 

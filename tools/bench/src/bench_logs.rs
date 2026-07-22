@@ -27,6 +27,8 @@
 //!   - timestamps in unix millis, ~3ms cadence with jitter (≈50 min of
 //!     traffic, so the vtab's 1h merge-span cap never fragments it)
 
+mod datasets;
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -34,118 +36,15 @@ use std::time::Instant;
 
 use rusqlite::{params, Connection};
 
-const N_ENTRIES: usize = 1_000_000;
-const BASE_TS: i64 = 1_700_000_000_000; // unix millis
-const STEP_MS: i64 = 3;
-
-const SERVICES: [&str; 10] = [
-    "api", "web", "auth", "billing", "search", "ingest", "worker", "gateway", "cache", "notify",
-];
-const PATHS: [&str; 20] = [
-    "/", "/login", "/logout", "/signup", "/checkout", "/cart", "/products", "/products/detail",
-    "/search", "/api/v1/users", "/api/v1/orders", "/api/v1/items", "/health", "/metrics",
-    "/admin", "/settings", "/profile", "/invoices", "/reports", "/webhooks",
-];
-const STATUSES: [&str; 6] = ["200", "201", "204", "404", "500", "503"];
-
-// ---------------------------------------------------------------------------
-// PRNG: xorshift64* (same as main.rs — deterministic, zero deps)
-// ---------------------------------------------------------------------------
-
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        Rng((z ^ (z >> 31)) | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next_u64() % n
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Dataset
-// ---------------------------------------------------------------------------
-
-struct Entry {
-    ts: i64,
-    level: &'static str,
-    message: String,
-    /// Canonical sorted flat JSON (path < service < status), matching
-    /// what the vtab emits, so plain-vs-vtab rows are byte-comparable.
-    metadata: String,
-}
-
-fn generate() -> Vec<Entry> {
-    let mut rng = Rng::new(0x1065); // "LOGS", squint harder
-    let mut out = Vec::with_capacity(N_ENTRIES);
-    let mut ts = BASE_TS;
-    for i in 0..N_ENTRIES {
-        ts += STEP_MS + rng.below(3) as i64 - 1; // 2-4ms cadence jitter
-        let service = SERVICES[rng.below(SERVICES.len() as u64) as usize];
-        let path = PATHS[rng.below(PATHS.len() as u64) as usize];
-
-        // Level mix: 70/15/10/5 info/debug/warning/error.
-        let roll = rng.below(100);
-        let level = if roll < 70 {
-            "info"
-        } else if roll < 85 {
-            "debug"
-        } else if roll < 95 {
-            "warning"
-        } else {
-            "error"
-        };
-        // Server-ish status distribution, correlated with level.
-        let status = match level {
-            "error" => STATUSES[3 + rng.below(3) as usize], // 404/500/503
-            _ => STATUSES[rng.below(3) as usize],           // 2xx
-        };
-
-        let dur = 1 + rng.below(2000);
-        let id = rng.below(1_000_000);
-        let message = match level {
-            "info" => format!("GET {path} completed in {dur}ms status={status}"),
-            "debug" => format!("cache lookup key=user:{id} shard={} hit=true", id % 16),
-            "warning" => {
-                if i % 3 == 0 {
-                    format!("upstream timeout after {dur}ms retrying request {id}")
-                } else {
-                    format!("slow query took {dur}ms on shard {}", id % 16)
-                }
-            }
-            _ => {
-                if i % 2 == 0 {
-                    format!("request {id} failed: connect timeout to {service}-backend")
-                } else {
-                    format!("request {id} failed: internal error (status {status})")
-                }
-            }
-        };
-        out.push(Entry {
-            ts,
-            level,
-            message,
-            metadata: format!(
-                "{{\"path\":\"{path}\",\"service\":\"{service}\",\"status\":\"{status}\"}}"
-            ),
-        });
-    }
-    out
-}
+// The workload lives in the shared datasets module (Session 7 codec
+// bake-off refactor) so bench-codec measures the exact bytes this
+// benchmark ingests. Aliased to the original local names to keep the
+// benchmark body diff-minimal against the recorded Session 5 runs.
+use datasets::{
+    generate_logs as generate, LogRecord as Entry, LOG_BASE_TS as BASE_TS,
+    LOG_ENTRIES as N_ENTRIES, LOG_PATHS as PATHS, LOG_STATUSES as STATUSES,
+    LOG_STEP_MS as STEP_MS, SERVICES,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers (same shapes as main.rs)

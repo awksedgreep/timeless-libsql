@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
-use super::codec::{decode_block, encode_block, CODEC_RAW, CODEC_ZSTD};
+use super::codec::{decode_block, encode_block, CODEC_COLUMNAR, CODEC_RAW};
 use super::{level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry};
 
 /// Tuning knobs. All ts_* values are in the SAME opaque unit as
@@ -21,7 +21,8 @@ use super::{level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry}
 pub struct BlockEngineConfig {
     /// Buffered entries that trigger an automatic flush inside push().
     pub flush_threshold: usize,
-    /// zstd level for CODEC_ZSTD blocks (7 = the measured sweet spot).
+    /// zstd level for compressed blocks (7 = the measured sweet spot;
+    /// codec 4's per-column zstd strategies use it too).
     pub zstd_level: i32,
     /// optimize() aims for merged blocks of ~this many entries (the
     /// donor's merge_compaction_target_size; larger = better dictionary
@@ -293,7 +294,10 @@ impl BlockEngine {
     }
 
     /// The two-tier compaction pass ('optimize' command):
-    ///   1. every RAW block gets recompressed to CODEC_ZSTD, and
+    ///   1. every RAW block gets recompressed to CODEC_COLUMNAR (codec
+    ///      4, adaptive per-column strategies — the Session 7 bake-off
+    ///      winner; legacy codec-2 blocks remain decodable and are
+    ///      upgraded whenever a merge rewrites them anyway), and
     ///   2. small compressed blocks get MERGED into ~merge_target_entries
     ///      blocks (bigger dictionary window → better ratio), subject to
     ///      the merge_max_ts_span hard cap (see config — the retention
@@ -417,7 +421,7 @@ impl BlockEngine {
             }
             entries.sort_by_key(|e| e.ts);
             let terms = self.extract_terms(&entries);
-            let (data, meta) = encode_block(&entries, CODEC_ZSTD, self.config.zstd_level)?;
+            let (data, meta) = encode_block(&entries, CODEC_COLUMNAR, self.config.zstd_level)?;
             adds.push(EncodedBlock { meta, data, terms });
             add_partitions.push(*partition);
             removes.extend(group.iter().map(|e| e.loc));

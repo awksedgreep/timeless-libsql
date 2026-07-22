@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+timeless-codec = { path = "../timeless-codec" }
 dashmap = "6.2.1"
 pco = "1.0.2"
 rayon = "1.12.0"

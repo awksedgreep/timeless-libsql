@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use super::codec::{decode_span_block, encode_span_block, CODEC_RAW, CODEC_ZSTD};
+use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_RAW};
 use super::{status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanEntry};
 
 /// Tuning knobs. All ts_* values are in the SAME opaque unit as
@@ -31,7 +31,8 @@ use super::{status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, 
 pub struct SpanEngineConfig {
     /// Buffered spans that trigger an automatic flush inside push().
     pub flush_threshold: usize,
-    /// zstd level for CODEC_ZSTD blocks (7 = the measured sweet spot).
+    /// zstd level for compressed blocks (7 = the measured sweet spot;
+    /// codec 4's per-column zstd strategies use it too).
     pub zstd_level: i32,
     /// optimize() aims for merged blocks of ~this many spans.
     pub merge_target_entries: usize,
@@ -245,7 +246,10 @@ impl SpanBlockEngine {
 
     /// Two-tier compaction ('optimize' command) — the same pass as
     /// blocks/engine.rs::optimize, with STATUS partitions: raw blocks
-    /// are recompressed to zstd, small blocks merge toward
+    /// are recompressed to CODEC_COLUMNAR (codec 4, adaptive
+    /// per-column strategies — legacy codec-2 blocks stay decodable
+    /// and upgrade whenever a merge rewrites them), small blocks merge
+    /// toward
     /// merge_target_entries WITHIN their status partition only (merging
     /// an error-pure block into an ok-pure one would re-create exactly
     /// the mixed blocks the partitioned flush prevents), subject to the
@@ -347,7 +351,8 @@ impl SpanBlockEngine {
             entries.sort_by_key(|e| e.start_ts);
             let terms = extract_terms(&entries);
             let trace_ids = extract_trace_ids(&entries);
-            let (data, meta) = encode_span_block(&entries, CODEC_ZSTD, self.config.zstd_level)?;
+            let (data, meta) =
+                encode_span_block(&entries, CODEC_COLUMNAR, self.config.zstd_level)?;
             adds.push(EncodedSpanBlock {
                 meta,
                 data,

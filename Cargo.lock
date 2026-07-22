@@ -441,12 +441,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "timeless-codec"
+version = "0.1.0"
+dependencies = [
+ "pco",
+ "zstd",
+]
+
+[[package]]
 name = "timeless-core"
 version = "0.1.0"
 dependencies = [
  "dashmap",
  "pco",
  "rayon",
+ "timeless-codec",
  "zstd",
 ]
 

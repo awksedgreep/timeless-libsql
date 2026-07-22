@@ -40,6 +40,8 @@
 //! vtab (every column compared against the generated truth, blob ids
 //! included); one full trace's span SET is equal in both stores.
 
+mod datasets;
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -47,188 +49,14 @@ use std::time::Instant;
 
 use rusqlite::{params, Connection};
 
-const N_TRACES: usize = 100_000;
-const BASE_TS: i64 = 1_700_000_000_000_000_000; // unix ns
-const TRACE_STEP_NS: i64 = 30_000_000; // one trace every ~30ms
-
-const SERVICES: [&str; 10] = [
-    "api", "web", "auth", "billing", "search", "ingest", "worker", "gateway", "cache", "notify",
-];
-const NAMES: [&str; 30] = [
-    "GET /",
-    "GET /products",
-    "GET /products/detail",
-    "GET /cart",
-    "POST /checkout",
-    "POST /login",
-    "POST /signup",
-    "GET /api/v1/users",
-    "GET /api/v1/orders",
-    "POST /api/v1/orders",
-    "db.query users",
-    "db.query orders",
-    "db.query products",
-    "db.insert orders",
-    "db.update inventory",
-    "cache.get",
-    "cache.set",
-    "cache.del",
-    "auth.verify_token",
-    "auth.refresh",
-    "billing.charge",
-    "billing.invoice",
-    "search.query",
-    "search.index",
-    "queue.publish",
-    "queue.consume",
-    "notify.email",
-    "notify.push",
-    "http.call inventory",
-    "http.call shipping",
-];
-const METHODS: [&str; 4] = ["GET", "POST", "PUT", "DELETE"];
-
-// ---------------------------------------------------------------------------
-// PRNG: xorshift64* (same as main.rs — deterministic, zero deps)
-// ---------------------------------------------------------------------------
-
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        Rng((z ^ (z >> 31)) | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next_u64() % n
-    }
-
-    fn unit(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    fn bytes<const N: usize>(&mut self) -> [u8; N] {
-        let mut out = [0u8; N];
-        for chunk in out.chunks_mut(8) {
-            let v = self.next_u64().to_le_bytes();
-            chunk.copy_from_slice(&v[..chunk.len()]);
-        }
-        out
-    }
-
-    /// Log-normal-ish duration: scale × exp(N(0, ~0.7)). Sum of three
-    /// uniforms approximates a normal well enough for a benchmark
-    /// (Irwin–Hall); the exp gives the heavy right tail real latency
-    /// distributions have.
-    fn duration(&mut self, scale_ns: f64) -> i64 {
-        let z = (self.unit() + self.unit() + self.unit()) - 1.5; // ~N(0, 0.5)
-        (scale_ns * (z * 1.4).exp()) as i64
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Dataset
-// ---------------------------------------------------------------------------
-
-struct Span {
-    trace_id: [u8; 16],
-    span_id: [u8; 8],
-    parent_span_id: Option<[u8; 8]>,
-    name: &'static str,
-    service: &'static str,
-    kind: &'static str,
-    status: &'static str,
-    start_ts: i64,
-    duration_ns: i64,
-    /// Canonical sorted flat JSON (http.method < http.status), matching
-    /// what the vtab emits, so plain-vs-vtab rows are byte-comparable.
-    attributes: String,
-}
-
-fn attrs(method: &str, status: &str) -> String {
-    format!("{{\"http.method\":\"{method}\",\"http.status\":\"{status}\"}}")
-}
-
-fn generate() -> Vec<Span> {
-    let mut rng = Rng::new(0x7247_CE5); // "TRACES", squint
-    let mut out = Vec::with_capacity(N_TRACES * 10);
-    for t in 0..N_TRACES {
-        let trace_id: [u8; 16] = rng.bytes();
-        let is_error = rng.below(20) == 0; // 5% error traces
-        // Span count 5..=20, skewed low: 80% short chains (5..=11),
-        // 20% fan-outs (12..=20) → mean ≈ 10.
-        let n_spans = if rng.below(10) < 8 {
-            5 + rng.below(7)
-        } else {
-            12 + rng.below(9)
-        } as usize;
-
-        let trace_start = BASE_TS + t as i64 * TRACE_STEP_NS + rng.below(10_000_000) as i64;
-        let root_dur = rng.duration(50_000_000.0).max(1_000_000); // ~50ms
-        let error_child = 1 + rng.below((n_spans - 1) as u64) as usize;
-
-        let mut span_ids: Vec<[u8; 8]> = Vec::with_capacity(n_spans);
-        for i in 0..n_spans {
-            let span_id: [u8; 8] = rng.bytes();
-            let root = i == 0;
-            let this_error = is_error && (root || i == error_child);
-            let kind = if root {
-                "server"
-            } else {
-                ["internal", "client", "producer", "consumer"][rng.below(4) as usize]
-            };
-            let status = if this_error {
-                "error"
-            } else if rng.below(5) == 0 {
-                "unset"
-            } else {
-                "ok"
-            };
-            let http_status = if this_error {
-                if rng.below(2) == 0 { "500" } else { "503" }
-            } else {
-                "200"
-            };
-            let method = METHODS[rng.below(METHODS.len() as u64) as usize];
-            let scale = match kind {
-                "server" => 50_000_000.0,
-                "client" => 10_000_000.0,
-                _ => 1_000_000.0,
-            };
-            out.push(Span {
-                trace_id,
-                span_id,
-                // Call-chain: parent is a random earlier span.
-                parent_span_id: (!root).then(|| span_ids[rng.below(i as u64) as usize]),
-                name: NAMES[rng.below(NAMES.len() as u64) as usize],
-                service: SERVICES[rng.below(SERVICES.len() as u64) as usize],
-                kind,
-                status,
-                start_ts: if root {
-                    trace_start
-                } else {
-                    trace_start + rng.below(root_dur as u64) as i64
-                },
-                duration_ns: if root { root_dur } else { rng.duration(scale).max(1_000) },
-                attributes: attrs(method, http_status),
-            });
-            span_ids.push(span_id);
-        }
-    }
-    out
-}
+// The workload lives in the shared datasets module (Session 7 codec
+// bake-off refactor) so bench-codec measures the exact bytes this
+// benchmark ingests. Aliased to keep the body diff-minimal against the
+// recorded Session 6 runs.
+use datasets::{
+    generate_traces as generate, SpanRecord as Span, N_TRACES, SERVICES,
+    TRACE_BASE_TS as BASE_TS, TRACE_NAMES as NAMES, TRACE_STEP_NS,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers (same shapes as bench_logs.rs)

@@ -1,0 +1,15 @@
+[package]
+name = "timeless-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed column encoders with adaptive strategy selection — the pure-Rust block codec for timeless (pco + zstd + dictionary/RLE, no serde, no Arrow, no C++)."
+
+[dependencies]
+# pco ("pcodec"): state-of-the-art numerical compression. Used for the
+# delta+pco i64 strategy and the f64 strategy. Already a workspace
+# citizen (timeless-core's metrics chunks use it).
+pco = "1.0.2"
+# zstd: the general-purpose fallback every strategy competes against,
+# and the only compressor for irreducible bytes (ids, blobs).
+zstd = "0.13"
