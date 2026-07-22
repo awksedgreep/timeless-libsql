@@ -1,7 +1,7 @@
 //! timeless-ext: loadable SQLite extension exposing the timeless-core
 //! time-series engine as virtual tables.
 //!
-//! Three modules are registered on every connection that loads the .so:
+//! Four modules are registered on every connection that loads the .so:
 //!   - "timeless_spike"   (spike.rs)        - the Session 1 proof-of-concept,
 //!     kept as a compiling reference for the vtab + re-entrancy patterns.
 //!   - "timeless_metrics" (metrics_vtab.rs) - the real thing: a writable
@@ -10,6 +10,11 @@
 //!   - "timeless_logs"    (logs_vtab.rs)    - Phase 2: compressed log
 //!     blocks + inverted term index in `<name>_blocks`/`<name>_terms`
 //!     via shadow_block_store::ShadowBlockStore (BlockStore).
+//!   - "timeless_traces"  (traces_vtab.rs)  - Phase 2, Session 6: span
+//!     blocks + term index + packed-trace-id index in `<name>_blocks`/
+//!     `<name>_terms`/`<name>_trace_blocks` via
+//!     shadow_span_store::ShadowSpanStore (SpanBlockStore). Three
+//!     signals, one .so (PLAN.md R8).
 //!
 //! Usage:
 //!   .load target/release/libtimeless_ext
@@ -23,8 +28,10 @@ mod flatjson;
 mod logs_vtab;
 mod metrics_vtab;
 mod shadow_block_store;
+mod shadow_span_store;
 mod shadow_store;
 mod spike;
+mod traces_vtab;
 
 use std::ffi::{c_char, c_int};
 
@@ -83,6 +90,7 @@ fn extension_init(db: Connection) -> Result<bool> {
     spike::register(&db)?;
     metrics_vtab::register(&db)?;
     logs_vtab::register(&db)?;
+    traces_vtab::register(&db)?;
     // false = loaded per-connection (fine here; sqld preloads into every
     // connection anyway).
     Ok(false)

@@ -312,11 +312,14 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
 
 const COLUMN_NAMES: [&str; 4] = ["ts column", "level column", "message column", "metadata column"];
 
-fn zstd_compress(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
+// pub(crate): the spans codec (spans/codec.rs, Session 6) reuses these
+// primitives — same zstd calls, same bounds-checked reader — instead of
+// growing a second copy. Nothing about THIS codec changed.
+pub(crate) fn zstd_compress(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     zstd::bulk::compress(data, level).map_err(|e| format!("zstd compress failed: {e}"))
 }
 
-fn zstd_decompress(data: &[u8], what: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn zstd_decompress(data: &[u8], what: &str) -> Result<Vec<u8>, String> {
     // decompress() needs a capacity hint; decode_all streams instead and
     // handles any size without us trusting an attacker-controlled header
     // field for the allocation.
@@ -326,24 +329,24 @@ fn zstd_decompress(data: &[u8], what: &str) -> Result<Vec<u8>, String> {
 // ---------------------------------------------------------------------------
 // Bounds-checked byte reader (same pattern as the vtab's BatchReader:
 // every read names what it was reading, so corruption errors point at
-// the exact field).
+// the exact field). Shared with the spans codec (hence pub(crate)).
 // ---------------------------------------------------------------------------
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
         Reader { buf, pos: 0 }
     }
 
-    fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }
 
-    fn take(&mut self, n: usize, what: &str) -> Result<&'a [u8], String> {
+    pub(crate) fn take(&mut self, n: usize, what: &str) -> Result<&'a [u8], String> {
         let end = self
             .pos
             .checked_add(n)
@@ -360,19 +363,19 @@ impl<'a> Reader<'a> {
         Ok(s)
     }
 
-    fn u8(&mut self, what: &str) -> Result<u8, String> {
+    pub(crate) fn u8(&mut self, what: &str) -> Result<u8, String> {
         Ok(self.take(1, what)?[0])
     }
 
-    fn u16(&mut self, what: &str) -> Result<u16, String> {
+    pub(crate) fn u16(&mut self, what: &str) -> Result<u16, String> {
         Ok(u16::from_le_bytes(self.take(2, what)?.try_into().unwrap()))
     }
 
-    fn u32(&mut self, what: &str) -> Result<u32, String> {
+    pub(crate) fn u32(&mut self, what: &str) -> Result<u32, String> {
         Ok(u32::from_le_bytes(self.take(4, what)?.try_into().unwrap()))
     }
 
-    fn i64(&mut self, what: &str) -> Result<i64, String> {
+    pub(crate) fn i64(&mut self, what: &str) -> Result<i64, String> {
         Ok(i64::from_le_bytes(self.take(8, what)?.try_into().unwrap()))
     }
 }

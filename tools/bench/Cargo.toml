@@ -10,9 +10,10 @@ name = "bench"
 version = "0.1.0"
 edition = "2021"
 
-# Two binaries, one crate: the Session 4 metrics bench (bench) and the
-# Session 5 logs bench (bench-logs) share the workspace-detachment +
-# bundled-sqlite rationale above.
+# Three binaries, one crate: the Session 4 metrics bench (bench), the
+# Session 5 logs bench (bench-logs) and the Session 6 traces bench
+# (bench-traces) share the workspace-detachment + bundled-sqlite
+# rationale above.
 [[bin]]
 name = "bench"
 path = "src/main.rs"
@@ -20,6 +21,10 @@ path = "src/main.rs"
 [[bin]]
 name = "bench-logs"
 path = "src/bench_logs.rs"
+
+[[bin]]
+name = "bench-traces"
+path = "src/bench_traces.rs"
 
 [dependencies]
 # bundled         = compile SQLite in, ignore the system library

@@ -9,11 +9,16 @@
 
 pub mod blocks;
 mod engine;
+pub mod spans;
 pub mod store;
 
 pub use blocks::{
     level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta,
     BlockStore, EncodedBlock, LogEntry, LogQuery, MemBlockStore,
+};
+pub use spans::{
+    kind_from_name, kind_name, status_from_name, status_name, EncodedSpanBlock, MemSpanStore,
+    SpanBlockEngine, SpanBlockStore, SpanEngineConfig, SpanEntry, SpanQuery,
 };
 pub use engine::*;
 pub use store::{ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk};

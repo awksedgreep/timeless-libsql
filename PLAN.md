@@ -554,15 +554,65 @@ all proven — logs reuses every one of them).
 - [ ] Stretch: OpenZL static-link spike (R7) via `openzl-sys` wrapper crate —
       if clean, add codec 3 and include in bake-off
 
-### Session 6 — Traces vtab (Phase 2, ≈1 day)
+### Session 6 — Traces vtab (Phase 2, ≈1 day) — ✅ CORE COMPLETE 2026-07-22
 Gated on: Session 5 (shares the entire block-store skeleton).
 
-- [ ] `_trace_blocks` packed-ID index; trace_id equality as the top-priority
-      xBestIndex plan
-- [ ] Span columnar layout (ns timestamps), terms: service/kind/status/name
-- [ ] 'ingest' batch format v0-traces; oracle + ratio benchmarks (target ~10x)
-- [ ] Demo: OTel data in, `SELECT * FROM traces WHERE trace_id = x'...'` out,
-      over sqld HTTP — three signals, one database file, one extension
+- [x] DESIGN DECISION — parallel `spans/` module in timeless-core, NOT a
+      genericized BlockEngine: the trace index changes the STORE CONTRACT
+      itself (blocks carry trace-id row sets; the store answers
+      query_trace), so a generic BlockStore<Aux> would have rippled through
+      every existing store impl and the four hand-written test wrapper
+      stores — violating the "logs behavior must not change" gate for zero
+      logs benefit. spans/ mirrors blocks/ line-for-line where logic is
+      identical (deliberately diff-able) and SHARES the real primitives:
+      BlockLoc/BlockMeta, codec constants, zstd helpers + bounds-checked
+      Reader (blocks/codec.rs, now pub(crate)). Logs untouched: all
+      Session 5 tests pass byte-identical, bench-logs regression unchanged
+      (12.2x, level=error 22.9ms).
+- [x] `_trace_blocks` packed-ID index (16-byte BLOBs, (trace_id, block_id)
+      WITHOUT ROWID PK, deduped per block); trace_id equality is the
+      top-priority xBestIndex plan (cost 10 vs 1e3 terms / 1e6 scan;
+      cli.sh proves the planner picks "VIRTUAL TABLE INDEX 1"). Rows are
+      created/deleted in the SAME operation as their blocks everywhere
+      (flush/optimize/prune) — never-dangle extended to the trace index,
+      cli.sh section 16 asserts it. NOTE: the trace_id constraint sets
+      omit=1 (unique among all our vtabs) so `WHERE trace_id = '<hex>'`
+      TEXT works — SQLite's own re-check would reject BLOB=TEXT; our
+      filter applies exact per-span equality after parsing both forms.
+- [x] Span columnar layout: 10 columns (trace 16B / span 8B / parent
+      presence+8B / name u16-len / service u16-len / kind u8 / status u8 /
+      start_ts i64 delta / duration i64 / attributes like logs metadata),
+      ns timestamps ('ts_unit'='ns' recorded in _meta), same RAW→ZSTD
+      two-tier + codec byte. Terms: service:/kind:/status:/name: ALWAYS —
+      no index_keys arg (span dimensions are OTel-conventional
+      low-cardinality enums/bounded sets; the open-ended stuff lives in
+      scan-only attributes). Partition dimension = STATUS (unset/ok/error)
+      — the Session 5 level fix applied from day one: status-pure blocks,
+      merge only within partition, recovery re-derives the tag from
+      status: posting lists. 11 new core unit tests incl. read-count proof
+      that a trace query reads ONLY blocks containing the trace.
+- [ ] 'ingest' batch format v0-traces (Tier 2) — DEFERRED, same status as
+      logs Tier 2 (hidden column dispatches by type; BLOB reserved with a
+      clear error)
+- [x] Oracle + ratio benchmark (bench-traces, 960,570 spans = 100k traces
+      × 5–20 spans, indexed-plain baseline — the fair fight): vtab
+      37.3MB vs plain+idx 155.2MB = **4.2x smaller** (38.8 B/span vs
+      161.6). Target was ~10x — honest miss with a clear reason: this
+      workload is ~24 B/span of irreducible entropy (random 8B span_id +
+      8B parent_id + log-normal ns durations ≈ incompressible); block
+      payloads are already at 28.3 B/span. Text-heavier spans (more
+      attributes) would widen the ratio. Queries (cold): trace_id point
+      lookup 3.9ms avg vs 0.005ms plain-indexed (expected: 1–2 block
+      decompressions vs a b-tree probe; interactive either way);
+      status='error' count 4.6ms vs 49.7ms plain (10.8x — the status
+      partition earning its keep); service+range 118ms vs 51ms (term
+      candidates decompress; acceptable, optimize later). Correctness: all
+      counts match the plain oracle, 3 random spans bit-exact through the
+      vtab (all 10 columns), one full-trace span set identical in both
+      stores. cli.sh sections 13–17 (14 new checks) all pass.
+- [x] Demo 2026-07-22: three signals in ONE sqld database over HTTP —
+      metric by name, log by service pushdown, trace by trace_id (hex
+      round-trip). The original pitch, running.
 
 ---
 

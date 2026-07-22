@@ -19,6 +19,13 @@
 #   10. logs pushdown proof (service+level constraints, _terms contents)
 #   11. logs prune removes blocks AND their term rows
 #   12. logs append-only enforcement + level/command validation
+#   13. timeless_traces round-trip (hex + blob ids in, BLOBs out,
+#       status-partitioned flush, optimize, reopen recovery)
+#   14. trace_id pushdown proof (_trace_blocks contents + the planner
+#       choosing the trace-index plan, visible as VIRTUAL TABLE INDEX 1)
+#   15. traces status/service pushdown
+#   16. traces prune removes blocks AND _terms AND _trace_blocks rows
+#   17. traces append-only + kind/status/id-length validation
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
@@ -436,6 +443,246 @@ fi
 # Unknown commands too.
 if err=$(sqlite3 "$LOGDB" ".load $EXT" \
     "INSERT INTO logs(logs) VALUES ('defrag');" 2>&1); then
+  fail "unknown command should be rejected (got success: $err)"
+elif [[ "$err" == *"unknown command"* ]]; then
+  pass "unknown command rejected with a clear error"
+else
+  fail "unknown command rejected but with unexpected message: $err"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== section 13: timeless_traces round-trip =="
+# Fresh db. Covers: hex-TEXT ids and BLOB ids both accepted on INSERT
+# (ids are ALWAYS returned as BLOBs — hex() for display); kind/status
+# TEXT vocabularies; NULL parent (root span); NULL kind/status take the
+# OTel defaults (internal/unset); canonical sorted-JSON attributes;
+# queryable before AND after flush; STATUS-partitioned flush (3
+# statuses buffered -> 3 status-pure raw blocks); 'optimize'
+# transitions codec 1 -> 2 per partition with identical rows.
+TRACEDB="$TMP/traces_test.db"
+got=$(sqlite3 "$TRACEDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE traces USING timeless_traces;
+INSERT INTO traces(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes)
+  VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '1111111111111111', NULL, 'GET /checkout', 'api', 'server', 'ok', 1000, 5000, '{"http.status":"200","http.method":"GET"}');
+INSERT INTO traces(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES (x'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', x'2222222222222222', x'1111111111111111', 'db.query', 'db', 'client', 'error', 2000, 700);
+INSERT INTO traces(trace_id, span_id, name, service, start_ts)
+  VALUES (x'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', x'3333333333333333', 'cache.get', 'cache', 1500);
+SELECT 'pre', hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THEN '-' ELSE hex(parent_span_id) END, name, service, kind, status, start_ts, duration_ns, attributes FROM traces ORDER BY start_ts;
+INSERT INTO traces(traces) VALUES ('flush');
+SELECT 'post', hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THEN '-' ELSE hex(parent_span_id) END, name, service, kind, status, start_ts, duration_ns, attributes FROM traces ORDER BY start_ts;
+SELECT 'raw_blocks', COUNT(*) FROM traces_blocks WHERE codec = 1;
+SELECT 'ts_unit', v FROM traces_meta WHERE k = 'ts_unit';
+INSERT INTO traces(traces) VALUES ('optimize');
+SELECT 'codecs', COUNT(*) FILTER (WHERE codec = 1), COUNT(*) FILTER (WHERE codec = 2) FROM traces_blocks;
+SELECT 'opt', hex(trace_id), name, kind, status FROM traces ORDER BY start_ts;
+SQL
+)
+# Block counts: the 3 buffered spans span 3 statuses (ok/unset/error),
+# so the status-partitioned flush writes 3 status-pure raw blocks and
+# optimize compacts each partition separately: 3 raw -> 3 zstd.
+expected='pre|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|1111111111111111|-|GET /checkout|api|server|ok|1000|5000|{"http.method":"GET","http.status":"200"}
+pre|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|3333333333333333|-|cache.get|cache|internal|unset|1500|0|{}
+pre|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|2222222222222222|1111111111111111|db.query|db|client|error|2000|700|{}
+post|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|1111111111111111|-|GET /checkout|api|server|ok|1000|5000|{"http.method":"GET","http.status":"200"}
+post|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|3333333333333333|-|cache.get|cache|internal|unset|1500|0|{}
+post|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|2222222222222222|1111111111111111|db.query|db|client|error|2000|700|{}
+raw_blocks|3
+ts_unit|ns
+codecs|0|3
+opt|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|GET /checkout|server|ok
+opt|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|cache.get|internal|unset
+opt|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|db.query|client|error'
+check_eq "traces insert/flush/optimize round-trip (hex + blob ids)" "$got" "$expected"
+
+# Reopen in a NEW process: xConnect recovers the block index via scan()
+# and status partitions via the status: posting lists.
+got=$(sqlite3 "$TRACEDB" <<SQL
+.load $EXT
+SELECT hex(trace_id), name, status, start_ts FROM traces ORDER BY start_ts;
+SELECT 'by_trace', name FROM traces WHERE trace_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ORDER BY start_ts;
+SQL
+)
+expected='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|GET /checkout|ok|1000
+BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|cache.get|unset|1500
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|db.query|error|2000
+by_trace|GET /checkout
+by_trace|db.query'
+check_eq "traces reopen recovery (scan + partition re-derivation)" "$got" "$expected"
+
+# ---------------------------------------------------------------------------
+echo "== section 14: trace_id pushdown proof =="
+# Two proofs:
+#  a) the _trace_blocks index holds PACKED 16-byte rows (dedup per
+#     block: trace A has spans in 2 blocks -> 2 rows, trace B in 1);
+#  b) the PLANNER picks the trace plan: best_index claims trace_id
+#     equality as idx_num bit 1 with cost ~10, which EXPLAIN QUERY PLAN
+#     prints as "VIRTUAL TABLE INDEX 1:". A hex-TEXT trace_id works in
+#     WHERE too (the filter parses both forms).
+got=$(sqlite3 "$TRACEDB" <<SQL
+.load $EXT
+SELECT 'rows', COUNT(*), SUM(LENGTH(trace_id)) FROM traces_trace_blocks;
+SELECT 'trace_a', COUNT(*) FROM traces_trace_blocks WHERE trace_id = x'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+SELECT 'q_blob', name FROM traces WHERE trace_id = x'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' ORDER BY start_ts;
+SELECT 'q_hex', COUNT(*) FROM traces WHERE trace_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+SELECT 'q_miss', COUNT(*) FROM traces WHERE trace_id = x'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+SQL
+)
+# 3 status-pure blocks: trace A is in the ok block AND the error block
+# (2 rows), trace B in the unset block (1 row) -> 3 rows, 16 bytes each.
+expected='rows|3|48
+trace_a|2
+q_blob|GET /checkout
+q_blob|db.query
+q_hex|2
+q_miss|0'
+check_eq "_trace_blocks packed rows + trace_id lookups (blob + hex)" "$got" "$expected"
+
+plan=$(sqlite3 "$TRACEDB" ".load $EXT" \
+  "EXPLAIN QUERY PLAN SELECT * FROM traces WHERE trace_id = x'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';")
+if [[ "$plan" == *"VIRTUAL TABLE INDEX 1:"* ]]; then
+  pass "planner chose the trace-index plan (idx_num 1)"
+else
+  fail "unexpected query plan for trace_id equality: $plan"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== section 15: traces status/service pushdown =="
+# The _terms posting list must carry all four term families, and
+# status/service/kind/name equality + ts range must return exactly the
+# matching spans (posting-list intersection happens in SQL; SQLite
+# re-checks above us).
+got=$(sqlite3 "$TRACEDB" <<SQL
+.load $EXT
+SELECT 'term_status_err', COUNT(*) FROM traces_terms WHERE term = 'status:error';
+SELECT 'term_svc_api', COUNT(*) FROM traces_terms WHERE term = 'service:api';
+SELECT 'term_kind_server', COUNT(*) FROM traces_terms WHERE term = 'kind:server';
+SELECT 'term_name', COUNT(*) FROM traces_terms WHERE term = 'name:db.query';
+SELECT 'q_status', name FROM traces WHERE status = 'error';
+SELECT 'q_svc', name FROM traces WHERE service = 'api';
+SELECT 'q_kind', name FROM traces WHERE kind = 'client';
+SELECT 'q_name', service FROM traces WHERE name = 'cache.get';
+SELECT 'q_combo', COUNT(*) FROM traces WHERE service = 'db' AND status = 'error' AND start_ts >= 1500 AND start_ts <= 2500;
+SELECT 'q_none', COUNT(*) FROM traces WHERE service = 'nope';
+SQL
+)
+expected='term_status_err|1
+term_svc_api|1
+term_kind_server|1
+term_name|1
+q_status|db.query
+q_svc|GET /checkout
+q_kind|db.query
+q_name|cache
+q_combo|1
+q_none|0'
+check_eq "traces status/service/kind/name pushdown" "$got" "$expected"
+
+# ---------------------------------------------------------------------------
+echo "== section 16: traces prune removes blocks + terms + trace rows =="
+# Fresh db, two flushes -> blocks with disjoint ts ranges. Pruning
+# between them must delete the old blocks and BOTH kinds of index rows
+# in the same operation (posting lists AND the trace index never
+# dangle — the PLAN.md rule extended to _trace_blocks).
+TPRUNEDB="$TMP/traces_prune.db"
+got=$(sqlite3 "$TPRUNEDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE traces USING timeless_traces;
+INSERT INTO traces(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES (x'11111111111111111111111111111111', x'0000000000000001', 'old-op', 'api', 'server', 'ok', 1000, 10);
+INSERT INTO traces(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES (x'22222222222222222222222222222222', x'0000000000000002', 'old-op', 'web', 'server', 'error', 2000, 10);
+INSERT INTO traces(traces) VALUES ('flush');
+INSERT INTO traces(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES (x'33333333333333333333333333333333', x'0000000000000003', 'new-op', 'api', 'server', 'ok', 9000000, 10);
+INSERT INTO traces(traces) VALUES ('flush');
+SELECT 'before', (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks);
+INSERT INTO traces(traces) VALUES ('prune:1000000');
+SELECT 'after', (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks);
+SELECT 'rows', hex(trace_id), name FROM traces ORDER BY start_ts;
+SELECT 'gone', COUNT(*) FROM traces WHERE trace_id = x'11111111111111111111111111111111';
+SQL
+)
+# before: flush 1 spans two statuses -> 2 pure blocks (ok: 4 terms
+# kind/name/service/status, error: 4 terms) + flush 2 -> 1 block
+# (4 terms) = 3 blocks / 12 term rows / 3 trace rows.
+# after: both old blocks pruned with ALL their index rows; the new
+# block keeps 4 terms + 1 trace row.
+expected='before|3|12|3
+after|1|4|1
+rows|33333333333333333333333333333333|new-op
+gone|0'
+check_eq "traces prune drops blocks + terms + trace-index rows" "$got" "$expected"
+
+# ---------------------------------------------------------------------------
+echo "== section 17: traces append-only + validation =="
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" "DELETE FROM traces WHERE service = 'api';" 2>&1); then
+  fail "traces DELETE should be rejected (got success: $err)"
+elif [[ "$err" == *append-only* ]]; then
+  pass "traces DELETE rejected with append-only error"
+else
+  fail "traces DELETE rejected but with unexpected message: $err"
+fi
+
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" "UPDATE traces SET name = 'x' WHERE start_ts = 1000;" 2>&1); then
+  fail "traces UPDATE should be rejected (got success: $err)"
+elif [[ "$err" == *append-only* ]]; then
+  pass "traces UPDATE rejected with append-only error"
+else
+  fail "traces UPDATE rejected but with unexpected message: $err"
+fi
+
+# Unknown kind/status vocabularies rejected loudly.
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" \
+    "INSERT INTO traces(trace_id, span_id, name, service, kind, start_ts) VALUES (x'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD', x'0000000000000004', 'op', 's', 'span', 1);" 2>&1); then
+  fail "kind 'span' should be rejected (got success: $err)"
+elif [[ "$err" == *"unknown span kind"* ]]; then
+  pass "unknown kind rejected with a clear error"
+else
+  fail "unknown kind rejected but with unexpected message: $err"
+fi
+
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" \
+    "INSERT INTO traces(trace_id, span_id, name, service, status, start_ts) VALUES (x'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD', x'0000000000000004', 'op', 's', 'failed', 1);" 2>&1); then
+  fail "status 'failed' should be rejected (got success: $err)"
+elif [[ "$err" == *"unknown span status"* ]]; then
+  pass "unknown status rejected with a clear error"
+else
+  fail "unknown status rejected but with unexpected message: $err"
+fi
+
+# Wrong id lengths: 15-byte blob and odd-length hex both rejected.
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" \
+    "INSERT INTO traces(trace_id, span_id, name, service, start_ts) VALUES (x'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDD', x'0000000000000004', 'op', 's', 1);" 2>&1); then
+  fail "15-byte trace_id should be rejected (got success: $err)"
+elif [[ "$err" == *"expected exactly 16"* ]]; then
+  pass "15-byte trace_id BLOB rejected"
+else
+  fail "short trace_id rejected but with unexpected message: $err"
+fi
+
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" \
+    "INSERT INTO traces(trace_id, span_id, name, service, start_ts) VALUES ('abc', x'0000000000000004', 'op', 's', 1);" 2>&1); then
+  fail "3-char hex trace_id should be rejected (got success: $err)"
+elif [[ "$err" == *"not a 32-char hex string"* ]]; then
+  pass "short hex trace_id TEXT rejected"
+else
+  fail "short hex trace_id rejected but with unexpected message: $err"
+fi
+
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" \
+    "INSERT INTO traces(trace_id, span_id, name, service, start_ts) VALUES (x'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD', x'00000000000000', 'op', 's', 1);" 2>&1); then
+  fail "7-byte span_id should be rejected (got success: $err)"
+elif [[ "$err" == *"expected exactly 8"* ]]; then
+  pass "7-byte span_id BLOB rejected"
+else
+  fail "short span_id rejected but with unexpected message: $err"
+fi
+
+# Unknown commands too.
+if err=$(sqlite3 "$TRACEDB" ".load $EXT" \
+    "INSERT INTO traces(traces) VALUES ('defrag');" 2>&1); then
   fail "unknown command should be rejected (got success: $err)"
 elif [[ "$err" == *"unknown command"* ]]; then
   pass "unknown command rejected with a clear error"
