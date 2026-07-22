@@ -1,12 +1,15 @@
 //! BlockEngine unit tests (Session 5 acceptance list):
 //!   - raw → optimize → query round-trip exactness
 //!   - term pruning actually SKIPS blocks (counted via a wrapper store)
+//!   - LEVEL-PARTITIONED flush: level-pure blocks, one level: term each,
+//!     optimize never merges across partitions, level queries read only
+//!     their partition's blocks (the "level-term weakness" fix)
 //!   - merge span cap respected
 //!   - buffered + flushed merge correctness
 //! plus codec round-trips and validation edges.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::codec::{decode_block, encode_block, CODEC_RAW, CODEC_ZSTD};
 use super::engine::{BlockEngine, BlockEngineConfig, LogQuery};
@@ -112,15 +115,19 @@ fn raw_optimize_query_round_trip_is_exact() {
 
     // Queryable BEFORE flush (buffer path)...
     assert_eq!(engine.query(&full_range_query()).unwrap(), expect);
-    // ...identical after flush (raw block path)...
+    // ...identical after flush. The buffer holds all four levels, so
+    // the level-partitioned flush writes FOUR level-pure raw blocks.
     assert_eq!(engine.flush().unwrap(), 100);
+    assert_eq!(engine.stats().0, 4, "one raw block per level present");
     assert_eq!(engine.query(&full_range_query()).unwrap(), expect);
-    // ...and identical after optimize (zstd block path).
+    // ...and identical after optimize (zstd block path). Each level
+    // partition compacts separately: 4 raw → 4 zstd, never merged
+    // across levels.
     let (removed, written) = engine.optimize().unwrap();
-    assert_eq!((removed, written), (1, 1)); // one raw block → one zstd block
+    assert_eq!((removed, written), (4, 4));
     assert_eq!(engine.query(&full_range_query()).unwrap(), expect);
     let (blocks, raw, buffered) = engine.stats();
-    assert_eq!((blocks, raw, buffered), (1, 0, 0));
+    assert_eq!((blocks, raw, buffered), (4, 0, 0));
 
     // Filtered queries are exact too.
     let q = LogQuery {
@@ -182,7 +189,7 @@ impl BlockStore for CountingStore {
         terms: &[String],
         ts_min: i64,
         ts_max: i64,
-    ) -> Result<Vec<BlockLoc>, String> {
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
         self.inner.query_terms(terms, ts_min, ts_max)
     }
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
@@ -248,6 +255,329 @@ fn term_index_skips_blocks() {
         ..full_range_query()
     };
     assert_eq!(engine.query(&q).unwrap().len(), 10);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Level partitioning (the "level-term weakness" fix): flush writes
+// level-pure blocks, optimize never merges across levels, and level
+// queries therefore read ONLY their level's blocks.
+// ---------------------------------------------------------------------------
+
+/// Wrapper that records the term set of every block persisted, whether
+/// via put_block/put_blocks (flush) or replace_blocks (optimize) — the
+/// direct way to assert level purity of what actually hit the store.
+struct TermCapturingStore {
+    inner: MemBlockStore,
+    put_terms: Arc<Mutex<Vec<Vec<String>>>>,
+    replace_terms: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl BlockStore for TermCapturingStore {
+    fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
+        // The default put_blocks loops put_block, so recording here
+        // captures batched flushes too.
+        self.put_terms.lock().unwrap().push(block.terms.clone());
+        self.inner.put_block(block)
+    }
+    fn replace_blocks(
+        &self,
+        add: &[EncodedBlock],
+        remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        let mut rec = self.replace_terms.lock().unwrap();
+        for b in add {
+            rec.push(b.terms.clone());
+        }
+        drop(rec);
+        self.inner.replace_blocks(add, remove, on_committed)
+    }
+    fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
+        self.inner.read_block(loc)
+    }
+    fn delete_blocks(&self, locs: &[BlockLoc]) -> Vec<String> {
+        self.inner.delete_blocks(locs)
+    }
+    fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+        self.inner.scan()
+    }
+    fn query_terms(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.inner.query_terms(terms, ts_min, ts_max)
+    }
+    fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
+        self.inner.save_meta(key, value)
+    }
+    fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner.load_meta(key)
+    }
+}
+
+fn level_terms_of(terms: &[String]) -> Vec<&String> {
+    terms.iter().filter(|t| t.starts_with("level:")).collect()
+}
+
+#[test]
+fn flush_writes_level_pure_blocks_with_single_level_term() {
+    let put_terms = Arc::new(Mutex::new(Vec::new()));
+    let store = TermCapturingStore {
+        inner: MemBlockStore::new(),
+        put_terms: Arc::clone(&put_terms),
+        replace_terms: Arc::new(Mutex::new(Vec::new())),
+    };
+    let engine = BlockEngine::new(Box::new(store), config(&["service"])).unwrap();
+
+    // Interleave all four levels in one buffer — the pre-fix flush
+    // would have written ONE block carrying all four level: terms.
+    let mut expect = Vec::new();
+    for i in 0..40i64 {
+        let e = entry(1_000 + i, (i % 4) as u8, &format!("m{i}"), &[("service", "api")]);
+        expect.push(e.clone());
+        engine.push(e).unwrap();
+    }
+    engine.flush().unwrap();
+
+    // One block per level present, each with EXACTLY one level: term.
+    let recorded = put_terms.lock().unwrap();
+    assert_eq!(recorded.len(), 4, "one block per level present");
+    for terms in recorded.iter() {
+        let lt = level_terms_of(terms);
+        assert_eq!(lt.len(), 1, "level-pure block must emit one level: term, got {terms:?}");
+        // Non-level terms still present (metadata indexing unchanged).
+        assert!(terms.iter().any(|t| t == "service:api"));
+    }
+    drop(recorded);
+
+    // The partitioned layout is invisible to queries: exact round-trip.
+    assert_eq!(engine.query(&full_range_query()).unwrap(), expect);
+}
+
+#[test]
+fn optimize_never_merges_across_levels() {
+    let replace_terms = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(MemBlockStore::new());
+
+    // Three flushes, each containing info AND error entries → six pure
+    // raw blocks (3 info + 3 error), interleaved in time.
+    struct Shared(Arc<MemBlockStore>, Arc<Mutex<Vec<Vec<String>>>>);
+    impl BlockStore for Shared {
+        fn put_block(&self, b: &EncodedBlock) -> Result<BlockLoc, String> {
+            self.0.put_block(b)
+        }
+        fn replace_blocks(
+            &self,
+            a: &[EncodedBlock],
+            r: &[BlockLoc],
+            c: &mut dyn FnMut(&[BlockLoc]),
+        ) -> Result<Vec<BlockLoc>, String> {
+            let mut rec = self.1.lock().unwrap();
+            for b in a {
+                rec.push(b.terms.clone());
+            }
+            drop(rec);
+            self.0.replace_blocks(a, r, c)
+        }
+        fn read_block(&self, l: &BlockLoc) -> Result<Vec<u8>, String> {
+            self.0.read_block(l)
+        }
+        fn delete_blocks(&self, l: &[BlockLoc]) -> Vec<String> {
+            self.0.delete_blocks(l)
+        }
+        fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+            self.0.scan()
+        }
+        fn query_terms(
+            &self,
+            t: &[String],
+            lo: i64,
+            hi: i64,
+        ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+            self.0.query_terms(t, lo, hi)
+        }
+        fn save_meta(&self, k: &str, v: &[u8]) -> Result<(), String> {
+            self.0.save_meta(k, v)
+        }
+        fn load_meta(&self, k: &str) -> Result<Option<Vec<u8>>, String> {
+            self.0.load_meta(k)
+        }
+    }
+
+    let engine = BlockEngine::new(
+        Box::new(Shared(Arc::clone(&store), Arc::clone(&replace_terms))),
+        config(&[]),
+    )
+    .unwrap();
+    for base in [1_000i64, 2_000, 3_000] {
+        for i in 0..10 {
+            engine.push(entry(base + i, 1, "info msg", &[])).unwrap();
+            engine.push(entry(base + i, 3, "error msg", &[])).unwrap();
+        }
+        engine.flush().unwrap();
+    }
+    assert_eq!(engine.stats().0, 6, "3 flushes x 2 levels = 6 pure blocks");
+
+    // The time ranges of info and error blocks OVERLAP EXACTLY — the
+    // old level-blind grouping would happily merge them. Partitioned
+    // optimize must merge 3 info → 1 and 3 error → 1, never across.
+    let (removed, written) = engine.optimize().unwrap();
+    assert_eq!((removed, written), (6, 2));
+    for terms in replace_terms.lock().unwrap().iter() {
+        assert_eq!(
+            level_terms_of(terms).len(),
+            1,
+            "merged block crossed level partitions: {terms:?}"
+        );
+    }
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 60);
+    drop(engine);
+
+    // Recovery proof: a fresh engine derives partitions from the
+    // level: posting lists. If it misclassified the two pure blocks as
+    // mixed they would share a bucket and a second optimize would merge
+    // them (2 removed, 1 written); correct derivation leaves two lone
+    // small zstd blocks alone.
+    let engine2 = BlockEngine::new(
+        Box::new(Shared(store, Arc::new(Mutex::new(Vec::new())))),
+        config(&[]),
+    )
+    .unwrap();
+    assert_eq!(
+        engine2.optimize().unwrap(),
+        (0, 0),
+        "recovered partitions must keep info/error blocks apart"
+    );
+}
+
+#[test]
+fn legacy_mixed_blocks_never_merge_with_pure_ones() {
+    // Simulate a block written BEFORE partitioning: encode a level-
+    // mixed batch and put it directly, with both level: terms — exactly
+    // what the old flush persisted. Codec version is unchanged, so this
+    // is byte-for-byte what an existing db contains.
+    let store = Arc::new(MemBlockStore::new());
+    let mixed_entries = vec![
+        entry(1_000, 1, "old info", &[]),
+        entry(1_001, 3, "old error", &[]),
+    ];
+    let (data, meta) = encode_block(&mixed_entries, CODEC_RAW, 7).unwrap();
+    store
+        .put_block(&EncodedBlock {
+            meta,
+            data,
+            terms: vec!["level:error".into(), "level:info".into()],
+        })
+        .unwrap();
+
+    struct Shared(Arc<MemBlockStore>);
+    impl BlockStore for Shared {
+        fn put_block(&self, b: &EncodedBlock) -> Result<BlockLoc, String> {
+            self.0.put_block(b)
+        }
+        fn replace_blocks(
+            &self,
+            a: &[EncodedBlock],
+            r: &[BlockLoc],
+            c: &mut dyn FnMut(&[BlockLoc]),
+        ) -> Result<Vec<BlockLoc>, String> {
+            self.0.replace_blocks(a, r, c)
+        }
+        fn read_block(&self, l: &BlockLoc) -> Result<Vec<u8>, String> {
+            self.0.read_block(l)
+        }
+        fn delete_blocks(&self, l: &[BlockLoc]) -> Vec<String> {
+            self.0.delete_blocks(l)
+        }
+        fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+            self.0.scan()
+        }
+        fn query_terms(
+            &self,
+            t: &[String],
+            lo: i64,
+            hi: i64,
+        ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+            self.0.query_terms(t, lo, hi)
+        }
+        fn save_meta(&self, k: &str, v: &[u8]) -> Result<(), String> {
+            self.0.save_meta(k, v)
+        }
+        fn load_meta(&self, k: &str) -> Result<Option<Vec<u8>>, String> {
+            self.0.load_meta(k)
+        }
+    }
+
+    // Recovery classifies the legacy block as mixed (two level: terms).
+    let engine = BlockEngine::new(Box::new(Shared(store)), config(&[])).unwrap();
+    // Add an overlapping-in-time PURE info block.
+    for i in 0..5 {
+        engine.push(entry(1_000 + i, 1, "new info", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+    assert_eq!(engine.stats().0, 2);
+
+    // Both blocks are RAW and time-adjacent, but live in different
+    // partitions (mixed vs info-pure): optimize must rewrite each to
+    // zstd SEPARATELY, never combining them.
+    let (removed, written) = engine.optimize().unwrap();
+    assert_eq!(
+        (removed, written),
+        (2, 2),
+        "mixed legacy block must not merge with a pure block"
+    );
+    // All seven entries still there.
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 7);
+}
+
+#[test]
+fn level_query_reads_only_that_levels_blocks() {
+    // THE regression test for the measured problem: with level-mixed
+    // flushes every block carried level:error and a level=error query
+    // decompressed all of them (356ms/1M in bench-logs — slower than a
+    // table scan). With partitioned flushes it must read ONLY the
+    // error-pure blocks.
+    let reads = Arc::new(AtomicUsize::new(0));
+    let store = CountingStore {
+        inner: MemBlockStore::new(),
+        reads: Arc::clone(&reads),
+    };
+    let engine = BlockEngine::new(Box::new(store), config(&[])).unwrap();
+
+    // Four flushes of realistic mixed traffic: mostly info + debug,
+    // errors in only some entries. Pre-fix layout: 4 blocks, all
+    // carrying level:error. Post-fix: 12 pure blocks, 4 of them error.
+    for base in [1_000i64, 2_000, 3_000, 4_000] {
+        for i in 0..20 {
+            engine.push(entry(base + i, 1, "info", &[])).unwrap();
+            engine.push(entry(base + i, 0, "debug", &[])).unwrap();
+            if i % 5 == 0 {
+                engine.push(entry(base + i, 3, "error", &[])).unwrap();
+            }
+        }
+        engine.flush().unwrap();
+    }
+    assert_eq!(engine.stats().0, 12, "4 flushes x 3 levels present");
+
+    reads.store(0, Ordering::SeqCst);
+    let q = LogQuery {
+        level: Some(3),
+        ..full_range_query()
+    };
+    assert_eq!(engine.query(&q).unwrap().len(), 16);
+    // THE assertion: only the 4 error-pure blocks were read; the 8
+    // info/debug blocks were pruned by the posting-list intersection
+    // without a single byte of their payloads being touched.
+    assert_eq!(reads.load(Ordering::SeqCst), 4);
+
+    // Same after optimize (merges happen within partitions only, so
+    // the error partition compacts to 1 block → 1 read).
+    engine.optimize().unwrap();
+    reads.store(0, Ordering::SeqCst);
+    assert_eq!(engine.query(&q).unwrap().len(), 16);
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
@@ -393,7 +723,7 @@ fn recovery_rebuilds_index_from_scan() {
             t: &[String],
             lo: i64,
             hi: i64,
-        ) -> Result<Vec<BlockLoc>, String> {
+        ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
             self.0.query_terms(t, lo, hi)
         }
         fn save_meta(&self, k: &str, v: &[u8]) -> Result<(), String> {

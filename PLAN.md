@@ -521,6 +521,32 @@ all proven — logs reuses every one of them).
       after 'optimize' (xCreate's pragma attempt is too late — the CREATE
       statement already allocated pages). Not yet compared vs
       timeless_logs itself.
+- [x] **Level-term weakness — FIXED 2026-07-22.** The original bench
+      measured `level=error` at 356.3ms/1M entries, SLOWER than a plain
+      table scan (45ms): 8192-entry flush blocks were level-MIXED, so
+      with a 70%-info workload every block carried every `level:` term
+      and the posting-list intersection pruned nothing. Fix:
+      LEVEL-PARTITIONED flush — the buffer is grouped by level and one
+      level-PURE raw block per level present is written (≤4 per flush),
+      so each block emits exactly ONE `level:` term and the existing
+      query_terms intersection prunes perfectly; optimize() merges only
+      WITHIN a level partition (merge_max_ts_span cap unchanged, applied
+      per partition), and pre-existing mixed blocks form their own
+      partition that never merges with pure ones. The partition tag is
+      IN-MEMORY ONLY (no shadow-schema change, codec unchanged):
+      recovery re-derives it from the `level:` posting lists — a block
+      listed under exactly one `level:` term is pure, ≥2 is mixed (four
+      metadata-only query_terms calls at xConnect). Friction fixes rode
+      along: BlockStore::put_blocks (batch insert; ShadowBlockStore does
+      one lock/prepared loop per flush) and query_terms now returns
+      (BlockLoc, BlockMeta). New bench-logs numbers (same 1M workload):
+      level=error 356.3 → 22.9 ms (15.6x, now ~2x faster than plain);
+      service+level+range 102.8 → 7.9 ms (13x); LIKE '%timeout%'
+      554.5 → 572.6 ms (~unchanged, expected — no indexed constraint to
+      prune with); file 10.7MB/11.2x → 9.9MB/12.2x smaller (9.86
+      B/entry — level-homogeneous blocks compress BETTER, e.g. the
+      messages column groups per-level templates). Metrics bench
+      unaffected (tier2 18.4M pts/s, bit-exact checks OK).
 - [ ] **Codec bake-off** (see "Codec strategy"): same blocks compressed
       three ways — zstd columnar vs OpenZL vs best-effort pure-Rust pipeline
       (delta/pco ts column + dictionary zstd messages). Record ratios +

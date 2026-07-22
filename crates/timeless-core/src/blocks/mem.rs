@@ -129,7 +129,7 @@ impl BlockStore for MemBlockStore {
         terms: &[String],
         ts_min: i64,
         ts_max: i64,
-    ) -> Result<Vec<BlockLoc>, String> {
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
         let inner = self.lock();
         // Intersect posting lists (empty terms = no term constraint).
         let mut ids: Option<BTreeSet<i64>> = None;
@@ -140,26 +140,28 @@ impl BlockStore for MemBlockStore {
                 Some(prev) => prev.intersection(&set).copied().collect(),
             });
         }
+        // The meta rides along for free — we look at it here anyway to
+        // do the ts-overlap test (see the trait comment).
         let mut out = Vec::new();
         match ids {
             Some(ids) => {
                 for id in ids {
                     if let Some((meta, _)) = inner.blocks.get(&id) {
                         if meta.ts_min <= ts_max && meta.ts_max >= ts_min {
-                            out.push(BlockLoc { id });
+                            out.push((BlockLoc { id }, *meta));
                         }
                     }
                 }
             }
             None => {
-                let mut all: Vec<i64> = inner
+                let mut all: Vec<(i64, BlockMeta)> = inner
                     .blocks
                     .iter()
                     .filter(|(_, (m, _))| m.ts_min <= ts_max && m.ts_max >= ts_min)
-                    .map(|(id, _)| *id)
+                    .map(|(id, (m, _))| (*id, *m))
                     .collect();
-                all.sort_unstable();
-                out.extend(all.into_iter().map(|id| BlockLoc { id }));
+                all.sort_unstable_by_key(|(id, _)| *id);
+                out.extend(all.into_iter().map(|(id, m)| (BlockLoc { id }, m)));
             }
         }
         Ok(out)

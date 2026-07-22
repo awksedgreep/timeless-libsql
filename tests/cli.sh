@@ -310,14 +310,18 @@ SELECT 'opt', ts, level, message, metadata FROM logs ORDER BY ts;
 SELECT 'svc', ts, COALESCE(service, '-') FROM logs ORDER BY ts;
 SQL
 )
+# Block counts: flush is LEVEL-PARTITIONED (level-term weakness fix) —
+# the 3 buffered entries span 3 levels (info/debug/error), so flush
+# writes 3 level-pure raw blocks, and optimize compacts each level
+# partition separately (never merging across levels): 3 raw -> 3 zstd.
 expected='pre|1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
 pre|1500|debug|noise|{}
 pre|2000|error|boom|{"path":"/pay","service":"web"}
 post|1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
 post|1500|debug|noise|{}
 post|2000|error|boom|{"path":"/pay","service":"web"}
-raw_blocks|1
-codecs|0|1
+raw_blocks|3
+codecs|0|3
 opt|1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
 opt|1500|debug|noise|{}
 opt|2000|error|boom|{"path":"/pay","service":"web"}
@@ -388,10 +392,15 @@ SELECT 'after', (SELECT COUNT(*) FROM logs_blocks), (SELECT COUNT(*) FROM logs_t
 SELECT 'rows', ts, message FROM logs ORDER BY ts;
 SQL
 )
-# before: block1 terms = level:info, level:warning, service:api,
-# service:web (4); block2 terms = level:info, service:api (2) -> 6.
-# after: only block2's 2 terms may remain.
-expected='before|2|6
+# before (level-partitioned flush): the first flush spans two levels so
+# it writes TWO pure blocks — info block terms = level:info, service:api
+# (2) + warning block terms = level:warning, service:web (2); the second
+# flush is info-only -> one block, terms = level:info, service:api (2).
+# 3 blocks / 6 term rows total (same 6 terms as the pre-partition layout,
+# distributed over more, purer blocks).
+# after: both old blocks (ts < 1000000) pruned with their term rows;
+# only the new block's 2 terms may remain.
+expected='before|3|6
 after|1|2
 rows|9000000|new-1'
 check_eq "prune drops expired blocks + their term rows" "$got" "$expected"

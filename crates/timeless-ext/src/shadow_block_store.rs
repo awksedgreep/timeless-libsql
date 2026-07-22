@@ -113,8 +113,12 @@ impl ShadowBlockStore {
             load_meta_sql: format!("SELECT v FROM {meta} WHERE k = ?1"),
             delete_blocks_prefix: format!("DELETE FROM {blocks} WHERE id IN ("),
             delete_terms_prefix: format!("DELETE FROM {terms} WHERE block_id IN ("),
+            // Selects the meta columns alongside the id: query_terms
+            // returns (loc, meta) pairs so callers never re-read rows
+            // this query already visited (Session 5 friction fix).
             query_base: format!(
-                "SELECT b.id FROM {blocks} b WHERE b.ts_min <= ?1 AND b.ts_max >= ?2"
+                "SELECT b.id, b.ts_min, b.ts_max, b.entry_count, b.codec \
+                 FROM {blocks} b WHERE b.ts_min <= ?1 AND b.ts_max >= ?2"
             ),
             term_select: format!("SELECT block_id FROM {terms} WHERE term = ?"),
         }
@@ -185,6 +189,22 @@ impl BlockStore for ShadowBlockStore {
         let guard = self.lock();
         let conn = Self::conn(&guard)?;
         self.insert_block(&conn, block)
+    }
+
+    /// Batch insert for the level-partitioned flush (up to four blocks
+    /// per flush — one per level present). Overrides the default
+    /// loop-of-put_block so the whole batch shares ONE lock acquisition
+    /// and one from_handle, and insert_block's prepare_cached statements
+    /// are reused across the loop. Still no transaction opened here
+    /// (store contract): the caller's enclosing host transaction makes
+    /// the batch atomic, exactly as for a single put_block.
+    fn put_blocks(&self, blocks: &[EncodedBlock]) -> Result<Vec<BlockLoc>, String> {
+        let guard = self.lock();
+        let conn = Self::conn(&guard)?;
+        blocks
+            .iter()
+            .map(|block| self.insert_block(&conn, block))
+            .collect()
     }
 
     /// Compaction swap: inserts, index-swap callback, deletes — all
@@ -269,7 +289,7 @@ impl BlockStore for ShadowBlockStore {
         terms: &[String],
         ts_min: i64,
         ts_max: i64,
-    ) -> Result<Vec<BlockLoc>, String> {
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
         let mut sql = self.query_base.clone();
         if !terms.is_empty() {
             sql.push_str(" AND b.id IN (");
@@ -300,7 +320,15 @@ impl BlockStore for ShadowBlockStore {
             .map_err(|e| format!("prepare term query failed: {e}"))?;
         let rows = stmt
             .query_map(params_from_iter(binds), |r| {
-                Ok(BlockLoc { id: r.get(0)? })
+                Ok((
+                    BlockLoc { id: r.get(0)? },
+                    BlockMeta {
+                        ts_min: r.get(1)?,
+                        ts_max: r.get(2)?,
+                        entry_count: r.get::<_, i64>(3)? as u32,
+                        codec: r.get::<_, i64>(4)? as u8,
+                    },
+                ))
             })
             .map_err(|e| format!("term query failed: {e}"))?
             .collect::<Result<Vec<_>, _>>()

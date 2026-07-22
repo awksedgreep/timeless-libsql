@@ -5,7 +5,11 @@
 //! them into zstd-compressed columnar blocks and merges small blocks
 //! (bigger dictionary window = better ratio). An inverted TERM index —
 //! `level:<name>` plus a selective allowlist of metadata keys — lets
-//! queries skip blocks without decompressing them.
+//! queries skip blocks without decompressing them. Blocks are
+//! LEVEL-PARTITIONED: flush writes one level-pure block per level
+//! present and optimize never merges across levels, so a single
+//! `level:` term identifies exactly the blocks worth reading (see
+//! engine::IndexEntry for the full story and the bench numbers).
 //!
 //! Deliberate differences from the Elixir donor:
 //!   - No GenServers / background processes: flush, optimize and prune
@@ -132,6 +136,18 @@ pub trait BlockStore: Send + Sync {
     /// a block is never visible without its posting-list rows.
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String>;
 
+    /// Persist a BATCH of blocks in one store call. Added for the
+    /// level-partitioned flush (see BlockEngine::flush): a flush now
+    /// emits up to four blocks (one per level present), and calling
+    /// put_block four times from the engine would mean four lock/
+    /// connection round-trips in the SQLite backend. The default just
+    /// loops put_block — correct for any store; ShadowBlockStore
+    /// overrides it to reuse one connection + prepared statement for
+    /// the whole batch. Locs come back in input order.
+    fn put_blocks(&self, blocks: &[EncodedBlock]) -> Result<Vec<BlockLoc>, String> {
+        blocks.iter().map(|b| self.put_block(b)).collect()
+    }
+
     /// Atomic swap for compaction: persist `add`, remove `remove` (and
     /// the removed blocks' term rows — posting lists never dangle, the
     /// PLAN.md pruning rule). `on_committed` fires after the adds are
@@ -155,15 +171,23 @@ pub trait BlockStore: Send + Sync {
     /// payloads) so the engine can rebuild its index on connect.
     fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String>;
 
-    /// Posting-list intersection + time-range overlap: return locs of
-    /// blocks that carry ALL of `terms` and overlap [ts_min, ts_max].
+    /// Posting-list intersection + time-range overlap: return every
+    /// block that carries ALL of `terms` and overlaps [ts_min, ts_max].
     /// Empty `terms` = every block in range (a pure time scan).
+    ///
+    /// Returns (loc, meta) pairs — the store already has the metadata
+    /// columns in hand when it answers this (both backends read the
+    /// blocks row/entry to do the ts-overlap test), so shipping the
+    /// meta costs nothing and saves the caller a second lookup. The
+    /// engine uses this at recovery to classify blocks by their
+    /// `level:` terms without re-reading anything it already indexed
+    /// (Session 5 friction fix).
     fn query_terms(
         &self,
         terms: &[String],
         ts_min: i64,
         ts_max: i64,
-    ) -> Result<Vec<BlockLoc>, String>;
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String>;
 
     /// Small key/value config persistence (index_keys, schema version).
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String>;
