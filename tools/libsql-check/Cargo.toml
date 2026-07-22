@@ -1,0 +1,13 @@
+# Standalone tool (detached from the parent workspace on purpose - libsql
+# compiles a bundled C library and we don't want that in every `cargo build`).
+# Session 1 gate: prove our .so loads in a libsql crate connection.
+[workspace]
+
+[package]
+name = "libsql-check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libsql = { version = "0.9", default-features = false, features = ["core"] }
+tokio = { version = "1", features = ["rt", "macros"] }

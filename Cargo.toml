@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/timeless-core", "crates/timeless-ext"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# One shared profile: extensions should be small and fast when we ship,
+# but debug builds are what we develop against.
+[profile.release]
+lto = true
+codegen-units = 1

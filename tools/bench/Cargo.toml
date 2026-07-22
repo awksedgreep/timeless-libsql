@@ -1,0 +1,23 @@
+# Standalone tool (detached from the parent workspace on purpose, same as
+# tools/libsql-check): rusqlite's "bundled" feature compiles its own copy
+# of the SQLite C library, which we absolutely want here — the benchmark
+# must not depend on whatever sqlite happens to be installed on the host —
+# but we don't want that C build inside every workspace `cargo build`.
+[workspace]
+
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# bundled         = compile SQLite in, ignore the system library
+# load_extension  = expose sqlite3_load_extension so we can .so-load
+#                   the timeless extension under test
+# blob            = blob API (and Tier 2 batches are blob parameters)
+rusqlite = { version = "0.40", features = ["bundled", "load_extension", "blob"] }
+
+# The numbers should reflect the extension's release profile.
+[profile.release]
+lto = true
+codegen-units = 1

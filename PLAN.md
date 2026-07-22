@@ -1,0 +1,601 @@
+# timeless-libsql — Hero POC Project Plan
+
+**Pitch:** VictoriaMetrics-class compression with a SQL interface, inside any
+SQLite/libSQL database, one `.load` away. "FTS5 for telemetry," starting with
+metrics. Port the *techniques* proven in timeless_metrics (pco columnar chunk
+compression, batch-first write path, series registry, block pruning) into a
+loadable extension — not a port of the timeless architecture.
+
+**Prior art check (2026-07-21):** nobody has done domain-aware compressed
+telemetry storage as a SQLite or libSQL extension. Nearest neighbors:
+sqlite-zstd (generic row compression), sqlite3-partitioner (partitioning only),
+ProxySQL embedded TSDB (plain rows). TimescaleDB compressed hypertables are the
+only proven instance of this pattern, on Postgres. The lane is empty.
+
+---
+
+## Hero POC success criteria
+
+The demo that makes people go "whoa":
+
+1. `sqlite3` CLI: `.load ./libtimeless_metrics` →
+   `CREATE VIRTUAL TABLE metrics USING timeless_metrics;` → insert → query. It
+   is Just A Table.
+2. TSBS-style dataset (~100M points): vtab database file is **20–40x smaller**
+   than the same data in a plain SQLite table, with equal-or-better range-query
+   latency.
+3. Blob-batch ingestion sustains **≥8M pts/sec** (Tier 2 interface, below).
+4. Flourish: same `.so` loaded into self-hosted `sqld` via
+   `--extensions-path`, queried over HTTP. libSQL replication of a telemetry
+   db demonstrated (embedded replica pulls the metrics db).
+
+## Non-goals (POC)
+
+- PromQL, rollups, retention, alerting, scraping (stays in timeless_metrics /
+  future work)
+- Label-based pushdown beyond metric name + time range (labels stored + returned,
+  filterable by SQLite above the vtab; label posting-list pushdown is v2)
+- Multi-connection concurrent writers (single writer assumed; see Risk R4)
+- Durability stronger than timeless_metrics today (in-memory buffer until chunk
+  flush; raw staging shadow table is a v2 decision with write-amp tradeoff)
+
+Logs and traces are NOT non-goals — they are Phase 2 (Sessions 5–6), gated on
+the metrics POC proving the vtab skeleton. Their designs are specified below so
+weekend sessions can flow straight into them.
+
+---
+
+## Architecture
+
+```
+                     ┌─────────────────────────────────────────┐
+ SQL (any client)    │  timeless-ext (cdylib, loadable ext)    │
+ INSERT / SELECT ───▶│  vtab module: xCreate/xConnect,         │
+ 'ingest' blob cmd   │  xUpdate, xBestIndex/xFilter, commands  │
+                     ├─────────────────────────────────────────┤
+                     │  timeless-core (pure Rust, no SQLite,   │
+                     │  no rustler): Engine, SeriesRegistry,   │
+                     │  PartitionBuffer, pco chunk codec       │
+                     ├─────────────────────────────────────────┤
+                     │  ChunkStore trait (metrics) /            │
+                     │  BlockStore (logs+traces, Phase 2)       │
+                     │   ├─ FsStore  (timeless_metrics keeps)  │
+                     │   └─ ShadowTableStore (blobs via host   │
+                     │      connection, prepared stmts)        │
+                     └─────────────────────────────────────────┘
+                                SQLite / libSQL / sqld
+```
+
+Key properties carried over from timeless_metrics:
+- points queryable before AND after flush (merged buffer + chunk reads)
+- batch-first write path
+- chunk metadata prunes reads (series_id + ts_min/ts_max)
+- WAL is NOT the bottleneck: at 16M pts/sec the engine emits only ~10–30MB/s
+  of pco-compressed chunk blobs. The entire perf problem is the row-at-a-time
+  SQL call path — solved by interface tiers, not storage heroics.
+
+## Ingestion interface tiers
+
+| Tier | Interface | Expected rate | Scope |
+|------|-----------|---------------|-------|
+| 1 | `INSERT INTO metrics(name, ts, value, labels) VALUES ...` (prepared, big txns) | ~0.5–2M pts/s (measure in spike!) | POC — compatibility floor |
+| 2 | `INSERT INTO metrics(metrics, batch) VALUES ('ingest', :blob)` — packed columnar blob, FTS5 command idiom | target ≥8M pts/s | POC — hero benchmark runs on this |
+| 3 | `sqlite3_bind_pointer` / carray-style zero-copy (in-process only) | ~native 16M pts/s | Deferred unless Tier 2 disappoints |
+
+Durability semantics MUST be identical across tiers (same engine buffers, same
+flush contract).
+
+### Batch blob format v0 (public contract — version it from day one)
+
+```
+offset  size  field
+0       1     format version (0x01)
+1       1     flags (reserved, 0)
+2       2     reserved
+4       4     u32 LE  n_series_entries
+8       4     u32 LE  n_points
+12      —     series table: n_series_entries × { u32 LE name_len, name utf8,
+              u32 LE labels_len, labels utf8 (JSON) }
+—       —     per-point series index: n_points × u32 LE (into series table)
+—       —     timestamps: n_points × i64 LE (unix seconds — match timeless)
+—       —     values: n_points × f64 LE
+```
+
+Columnar (all series refs, then all ts, then all values) so the engine ingests
+near-memcpy. Alignment: don't assume — read LE explicitly. Keep it dumb; this
+is not protobuf territory.
+
+### Command surface (FTS5 idiom)
+
+- `INSERT INTO metrics(metrics) VALUES ('flush')` — force chunk flush
+- `INSERT INTO metrics(metrics, batch) VALUES ('ingest', ?)` — Tier 2
+- (later: 'optimize' for merge compaction, 'stats')
+
+## Shadow tables (created by xCreate)
+
+```sql
+CREATE TABLE IF NOT EXISTS "<name>_series" (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL,
+  labels      TEXT NOT NULL DEFAULT '{}',   -- JSON
+  labels_hash BLOB NOT NULL,
+  UNIQUE(name, labels_hash)
+);
+CREATE TABLE IF NOT EXISTS "<name>_chunks" (
+  id          INTEGER PRIMARY KEY,
+  series_id   INTEGER NOT NULL,
+  ts_min      INTEGER NOT NULL,
+  ts_max      INTEGER NOT NULL,
+  point_count INTEGER NOT NULL,
+  codec       INTEGER NOT NULL,             -- 1 = pco-v<x>
+  resolution  INTEGER NOT NULL DEFAULT 0,   -- 0=raw; rollup ladder is v2
+  data        BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS "<name>_chunks_series_ts"
+  ON "<name>_chunks"(series_id, ts_min);
+CREATE TABLE IF NOT EXISTS "<name>_meta" (k TEXT PRIMARY KEY, v);
+  -- schema_version, engine config
+```
+
+xConnect: rebuild in-memory series registry + chunk metadata index by scanning
+`_series` and `_chunks` metadata columns (NOT the blobs). Adapt the engine's
+existing restart-recovery logic.
+
+## Declared vtab schema
+
+```sql
+CREATE TABLE x(name TEXT, ts INTEGER, value REAL, labels TEXT HIDDEN, ...);
+```
+
+xBestIndex pushdown for POC: `name = ?` (equality) and `ts >= / <= / BETWEEN`.
+Everything else filtered by SQLite above us (correct, just not pruned).
+
+---
+
+## Phase 2 — logs store (`timeless_logs` vtab)
+
+Donor design: timeless_logs (Elixir) — blocks + inverted term index +
+two-tier raw→compressed compaction, ~12.8x with OpenZL columnar split. Unlike
+metrics there is no Rust donor code: this is a fresh Rust implementation of a
+proven design. Reference: `~/Documents/elixir/timeless/timeless_logs/docs/
+architecture.md` (write path, columnar format, selective term indexing,
+compaction + merge compaction).
+
+```sql
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,path,status');
+-- declared schema: x(ts INTEGER, level TEXT, message TEXT, metadata TEXT)
+```
+
+Shadow tables:
+```sql
+"<name>_blocks"  (id INTEGER PK, ts_min, ts_max, entry_count, byte_size,
+                  codec INTEGER,  -- 1=raw 2=zstd-columnar 3=openzl-columnar
+                  data BLOB)
+"<name>_terms"   (term TEXT, block_id INTEGER,
+                  PRIMARY KEY(term, block_id)) WITHOUT ROWID
+"<name>_meta"    (k TEXT PRIMARY KEY, v)
+```
+
+Design decisions (ported from timeless_logs):
+- **Columnar split before compression**: timestamps (i64 LE), levels (u8),
+  length-prefixed messages, batched metadata — each column compressed
+  independently. Port the exact layout from timeless_logs storage.md.
+- **Two-tier blocks**: inserts accumulate in engine buffer → flush writes a
+  raw block row → 'optimize' command compacts raw→compressed and merges small
+  blocks (bigger dictionary window). Compaction = one transaction (insert new
+  block + terms, delete old rows) — atomic swap free of charge.
+- **Selective term indexing**: only `level:` terms plus keys named in
+  `index_keys=` vtab arg join the posting list. Identifier-like metadata stays
+  scan-only. This is the lesson that keeps the index small — encode it as a
+  schema-level contract.
+- **Compression codec**: v1 = zstd columnar split (pure-ish Rust via `zstd`
+  crate, links everywhere). OpenZL (C++) is a stretch goal AFTER confirming it
+  static-links cleanly into a loadable .so (Risk R7). Codec column means both
+  coexist; ratio target ≥10x either way. Third option on the table: a
+  purpose-built pure-Rust block codec — see "Codec strategy" below; the
+  Session 5 benchmark is the decision point.
+- Pushdown (xBestIndex): `level = ?`, indexed `metadata` key equality
+  (term posting-list intersection in SQL), `ts` range. `message LIKE` is NOT
+  pruned but IS executed inside the module (decompress candidate block →
+  substring scan) — never materialize non-matching rows.
+- Tier 2 ingest: `INSERT INTO logs(logs, batch) VALUES ('ingest', ?)` —
+  batch format v0-logs: header + columnar {ts[], level[], msgs, metadata}.
+
+## Phase 2 — trace store (`timeless_traces` vtab)
+
+Donor design: timeless_traces (Elixir) — same block skeleton as logs plus a
+trace index with packed 16-byte trace IDs, ~10x compression. Reference:
+`~/Documents/elixir/timeless/timeless_traces/docs/architecture.md`.
+
+```sql
+CREATE VIRTUAL TABLE traces USING timeless_traces;
+-- declared schema: x(trace_id BLOB, span_id BLOB, parent_span_id BLOB,
+--                    name TEXT, service TEXT, kind TEXT, status TEXT,
+--                    start_ts INTEGER, duration_ns INTEGER, attributes TEXT)
+```
+
+Shadow tables: `_blocks`, `_terms`, `_meta` identical to logs, plus:
+```sql
+"<name>_trace_blocks" (trace_id BLOB, block_id INTEGER,
+                       PRIMARY KEY(trace_id, block_id)) WITHOUT ROWID
+```
+
+Design decisions:
+- **Packed binary trace IDs** (16-byte BLOBs) in the trace index — the
+  timeless_traces lesson; no hex text anywhere in storage.
+- The hero query: `SELECT * FROM traces WHERE trace_id = x'...'` →
+  `_trace_blocks` lookup → decompress only blocks containing that trace.
+  This pushdown is the whole point of the trace vtab; get it into xBestIndex
+  with a high-priority index plan.
+- Terms: `service:`, `kind:`, `status:`, `name:` — same posting-list table
+  and intersection pushdown as logs.
+- Timestamps are **nanoseconds** here (OTel convention; logs are µs, metrics
+  s) — the shared block-store code must not assume a unit. Store unit in
+  `_meta`.
+- Tier 2 ingest: same command idiom, batch format v0-traces (columnar spans).
+- Reuse: logs and traces share the block store, term index, compaction, and
+  command plumbing in `timeless-core` — the traces vtab should be mostly
+  configuration + the trace_blocks index over the logs skeleton. timeless
+  proved this: the two Elixir libraries are near-clones.
+
+---
+
+## Pruning & retention (design now, implement v2 — one schema cost today)
+
+Block-granular deletes are a structural advantage: one DELETE row = one whole
+compressed block (~2000 entries) or chunk, found via the ts_max metadata that
+already exists for query pruning. ~1000x fewer row touches than row-store
+retention (cf. Home Assistant recorder-purge pain). Worth a demo line.
+
+Decisions:
+- **Single db file, freelist reuse — NOT partitioned ATTACH dbs.** SQLite
+  DELETE frees pages but never shrinks the file; at steady-state ingest that's
+  fine (file plateaus ≈ retention window + slack; freed pages recycle).
+  Set `PRAGMA auto_vacuum = INCREMENTAL` at xCreate (must precede growth);
+  trim slack with small `incremental_vacuum(N)` during maintenance. NEVER
+  full VACUUM (whole-file rewrite, ingest stall). ATTACH partitioning would
+  recover drop-the-file semantics but breaks the vtab model + sqld story —
+  rejected.
+- **No daemon → prune on command + opportunistically.** `INSERT INTO
+  t(t) VALUES('prune')` command; auto-enforce during 'flush'/'optimize' when
+  `retention='30d'` vtab arg is set. Batch deletes to bound the WAL.
+- **Same-transaction index cleanup**: deleting a block removes its `_terms` /
+  `_trace_blocks` rows atomically. Posting lists never dangle.
+- **HARD RULE — cap merged-block time span** (e.g. 1h): merge compaction must
+  never produce blocks straddling retention boundaries, or old data becomes
+  unprunable until the whole block expires. Make it a rule, not an emergent
+  property of ts_min grouping. Expensive to retrofit — adopt in Session 5.
+- **Metrics resolution ladder is v2, but costs one column NOW**:
+  `resolution INTEGER DEFAULT 0` on `_chunks` (0=raw) so rollup chunks (1m/1h
+  aggregates) land in the same table later with per-resolution retention, no
+  schema migration.
+- **Replication bonus**: retention deletes replicate — embedded replicas prune
+  in lockstep with the primary, zero read-side config.
+
+---
+
+## Codec strategy — the OpenZL question (decided by data, not taste)
+
+Three candidate codecs for logs/traces blocks. NOT porting OpenZL to Rust —
+it's a 100k-line actively-evolving framework with a versioned frame format;
+a faithful port is months of work plus a permanent upstream-tracking
+treadmill. The realistic options:
+
+1. **zstd columnar** (v1, always ships): per-column zstd over our split.
+   Pure-Rust-friendly, links everywhere, respectable ratio.
+2. **OpenZL via `openzl-sys` FFI crate** (stretch): thin -sys + safe wrapper,
+   days not months; ex_openzl build knowledge transfers directly. One call per
+   block → FFI overhead irrelevant. C++ contained in one reusable crate.
+3. **`timeless-codec` — purpose-built pure-Rust block codec** (the
+   "openzl-lite" option): our columnar split + per-column transforms —
+   delta/pco for timestamp columns, dictionary-assisted zstd for messages,
+   plain zstd for metadata/attributes. Key insight: the columnar split (the
+   biggest win) is OUR code, applied before OpenZL ever sees data — OpenZL's
+   *marginal* gain over a good per-column pipeline is unmeasured. Standalone
+   value: publishable crate, no C++ anywhere, WASM-capable, and the only
+   codec shape that could survive an upstream PR into libSQL core (C
+   codebase — a C++ framework dep is ~disqualifying there).
+
+**Decision rule (Session 5 benchmark, same blocks, three ways):**
+- OpenZL margin over best pure-Rust pipeline < ~1.5x → drop OpenZL in Rust
+  contexts; invest the difference in timeless-codec transforms.
+- Margin ≥ ~2x → keep OpenZL via -sys crate as the premium codec; revisit
+  only if WASM/upstreaming ambitions materialize.
+- In between → ship both behind the codec byte and let deployments choose
+  (size-sensitive vs dependency-sensitive).
+
+The codec byte in `_blocks` already reserves slots, so this is not an
+architectural decision — blocks with different codecs coexist in one table.
+Nothing blocks on this choice.
+
+---
+
+## Source-of-truth references (already verified — don't re-derive)
+
+### timeless_metrics engine — the donor code
+`~/Documents/elixir/timeless/timeless_metrics/native/tms_engine/src/lib.rs`
+(~3,500 lines, single file)
+- Lines ~1–2445: pure engine — extraction target. Structs: `PartitionKey`(42),
+  `SeriesInfo`(48), `PartitionBuffer`(53), `ChunkMeta`(81), `SeriesRegistry`(99),
+  `Engine`(442, impl at 501–2288), `CompressedPartition`(477)
+- Line ~2448 onward: 22 `#[rustler::nif]` wrappers + `EngineResource`
+  (ResourceArc shim, line 467–475) — NOT extracted; these define the API the
+  vtab needs (~8 of them)
+- Deps: `pco = "1"`, `dashmap = "6"`, `rayon = "1"` (all pure Rust — keep);
+  `rustler = "0.37"` (stays behind in tms_engine)
+- Watch for stray `rustler::Binary`/`Term`/`atoms!` usage inside engine
+  internals during extraction — expect a few hours of type substitution
+
+### timeless_logs / timeless_traces — the donor designs (Elixir, no Rust donor)
+- `~/Documents/elixir/timeless/timeless_logs/docs/architecture.md` — write
+  path, ETS term index (maps to `_terms` table), columnar OpenZL format,
+  selective metadata indexing policy, compaction + merge compaction triggers
+- `~/Documents/elixir/timeless/timeless_logs/docs/storage.md` — exact columnar
+  layout to port (ts i64 LE / level u8 / length-prefixed messages / batched
+  metadata), measured ~12.8x
+- `~/Documents/elixir/timeless/timeless_traces/docs/architecture.md` — trace
+  index w/ packed 16-byte IDs, span terms, ns timestamps, ~10x
+- Their snapshot+disk_log durability machinery does NOT port — SQLite
+  transactions replace it entirely (that's half the pitch)
+
+### libSQL source (cloned at `~/Documents/rust/libsql`)
+- sqld extension loading: `libsql-server/src/config.rs:131`
+  (`validate_extensions`) — `--extensions-path <dir>`, dir contains
+  `trusted.lst`, lines are `<sha256> <filename>`, verified at startup
+- Per-connection load: `libsql-server/src/connection/connection_core.rs:119`
+  (rusqlite `LoadExtensionGuard` + `load_extension`) — loaded into EVERY
+  connection (see Risk R4)
+- Embedded API: `libsql/src/local/connection.rs:428`
+  (`enable_load_extension` / `load_extension`)
+- Native-vtab precedent/template: `libsql-sqlite3/src/vectorvtab.c` (+ 11 more
+  vector*.c files) — the upstream-path model
+- sqld hosts connections via rusqlite → testing against rusqlite ≈ testing
+  against sqld's host stack
+
+### Rust vtab plumbing candidates (spike decides)
+- `rusqlite` with `loadable_extension` + `vtab` features (has `UpdateVTab`
+  trait for writes)
+- `sqlite-loadable-rs` (Alex Garcia — sqlite-vec lineage)
+- Fallback if both disappoint: thin C shim for module registration, Rust does
+  the work
+
+---
+
+## Weekend session plan
+
+### Session 1 — Day-0 spike + scaffold — ✅ COMPLETE 2026-07-22, ALL GATES GREEN
+
+- [x] `git init`, workspace scaffold: `crates/timeless-core`,
+      `crates/timeless-ext` (cdylib), `tools/libsql-check` (detached)
+- [x] Spike A — writable vtab via rusqlite 0.40.1 (`vtab` +
+      `loadable_extension` features). `Module::update_module_with_tx()`,
+      `UpdateVTab` + `TransactionVTab` (xBegin/xCommit/xRollback exist in
+      rusqlite natively → risk R5 has library support!). No C shim needed.
+- [x] Spike B — re-entrancy works exactly as hoped:
+      `Connection::from_handle(raw_db)` inside callbacks; xCreate makes the
+      shadow table, xUpdate inserts, cursor reads back. BEGIN/ROLLBACK
+      correctly discards vtab writes (shadow writes ride the host txn — the
+      atomicity claim, proven). Reopen (xConnect) + DROP (xDestroy cleanup)
+      verified.
+- [x] Spike C — measured on 1M rows via generate_series, release build:
+      plain table ~16M rows/s; vtab naive (re-prepare per row) ~1.0M/s;
+      vtab with held host Connection + prepare_cached ~3.4M/s.
+      **Tier 1 ceiling = ~3.4M pts/s** (better than the 0.5–2M estimate).
+      Lesson recorded: hold the host Connection in the vtab struct, use
+      prepare_cached, pre-format SQL strings.
+- [x] libsql parity — same .so loads via `libsql` crate 0.9
+      (`load_extension_enable` + `load_extension`, core features only);
+      full vtab lifecycle passed. `tools/libsql-check` is the harness.
+- [x] **Gate: PASSED.** API facts: Inserts/Updates args include the two rowid
+      slots — columns start at index 2. Entry points exported:
+      sqlite3_extension_init + sqlite3_timelessext_init +
+      sqlite3_timeless_ext_init (filename-derived name ambiguity covered).
+
+### Session 2 — Core extraction + storage seam (≈1–1.5 days) — IN PROGRESS
+- [x] Carved lines 1–2443 of tms_engine `lib.rs` into `timeless-core`
+      (2026-07-22). Rustler coupling was ONLY the imports + atoms mod +
+      EngineResource block (grep-verified, deleted). Two helpers lived below
+      the boundary and were copied in: `read_exact_at`, `partition_vec_memory`.
+      Engine half includes the pure Prometheus text parser (future scrape
+      compat). Public API pub-ified per the 22 NIF call sites.
+- [x] DECISION: Elixir repo's tms_engine left untouched (no path dep into an
+      experimental repo from a published hex package). Rewiring it onto a
+      published timeless-core crate is post-POC.
+- [x] Round-trip acceptance tests green: write → pre-flush query → flush →
+      post-flush query → aggregate → shutdown → restart-recovery from disk.
+      Compression measured: 1M-point drifty gauge = 0.133 bytes/point
+      (~120x vs 16B raw; pco best case, TSBS will be honest).
+- [x] `ChunkStore` trait threaded through the engine (subagent refactor,
+      2026-07-22): `store/mod.rs` (trait, ChunkLoc enum File|Row, EncodedChunk,
+      StoredChunk, ChunkBytes) + `store/fs.rs` (FsStore — ALL fs machinery
+      moved: PCO1/PCB1 formats, pending/manifest compaction recovery, TTL file
+      cache, dir scan). Engine holds Box<dyn ChunkStore>; zero fs:: in
+      engine.rs. `replace_chunks` gained an on_committed callback to preserve
+      pre-refactor ordering (manifest → rename → index swap → delete).
+      SQLite-backend risk notes recorded by the refactor: `_chunks` MUST use
+      INTEGER PRIMARY KEY (vacuum moves bare rowids under ChunkLoc::Row!);
+      keep storage_stats O(1); registry blob rewrite = write amplification;
+      read_chunk wants one contiguous buffer per chunk.
+- [x] Compression honesty tests (user challenged the 120x number — verdict:
+      REAL but best-case). Every point verified bit-exact after cold recovery,
+      bytes measured from actual files: periodic sawtooth 0.133 B/pt (120x);
+      hostile random walk (ms-jitter timestamps, 4-decimal noise) 3.9 B/pt
+      (4x lossless). Real telemetry lands between; TSBS in Session 4 is the
+      quotable number.
+- [ ] Implement `ShadowTableStore` in timeless-ext: prepared statements against
+      `_chunks`/`_series` on the host connection (→ rolls into Session 3)
+- [ ] Unit tests for round-trip: write chunks through ShadowTableStore, recover
+      registry + metadata from tables (→ rolls into Session 3)
+
+### Session 3 — The vtab, end to end — ✅ CORE COMPLETE 2026-07-22
+- [x] ShadowTableStore (timeless-ext/src/shadow_store.rs): ChunkStore over the
+      host connection. Mutex<HostHandle> for rayon-thread safety; two blob
+      columns (ts_data/val_data); id INTEGER PRIMARY KEY (vacuum-safe);
+      replace_chunks rides the host transaction (NO manifest — SQLite provides
+      the atomicity). resolution column reserved.
+- [x] timeless_metrics vtab (metrics_vtab.rs): runtime schema with hidden
+      command column; commands flush/compact/prune:<ts>; append-only (DELETE/
+      UPDATE rejected with clear errors); hand-rolled flat-JSON labels parser
+      (no serde); best_index bitmask name-eq + ts-range pushdown.
+- [x] tests/cli.sh: 8 sections all PASS (round-trip, append-only, spike
+      regression, pushdown, reopen recovery, prune, compact, rollback caveat).
+- [x] Hero smoke (1M pts, synthetic-friendly): plain SQLite table db 46.7MB
+      vs vtab db 233KB = ~200x smaller file; Tier 1 SQL ingest 2.8M pts/s;
+      flush 26ms → 1 chunk; count(*) through vtab = 1M. (TSBS honesty run
+      still owed in Session 4.)
+- [!] **LESSON (recorded): rayon deadlock trap.** Engine methods using
+      par_iter (query_range_labeled, query_aggregate_labeled) MUST NOT be
+      called from vtab callbacks: rayon workers re-enter SQLite on the host
+      connection whose mutex the host thread holds inside xFilter → deadlock.
+      Cursor uses sequential query_range_by_id per series. Fix candidates for
+      later: sequential variants in timeless-core, or rayon-off engine mode.
+- [ ] Deferred: property test vs plain-table oracle; kill -9 crash test;
+      R4 global engine registry (per-connection engines accepted for POC);
+      R5 rollback of buffered points (documented no-op)
+
+### Session 4 — Tier 2 + hero benchmark + sqld flourish (≈1–1.5 days)
+- [x] Batch blob format v0 encoder (bench-side) + decoder (ext-side);
+      'ingest' wired to resolve_series_batch + write_batch_raw. DEVIATION
+      from the "('ingest', :blob)" sketch above: the hidden command column
+      is overloaded by TYPE instead — TEXT = command, BLOB = v0 batch
+      (`INSERT INTO metrics(metrics) VALUES (:blob)`). Unambiguous, zero
+      schema change, one less string compare on the hot path. Decoder
+      validates the WHOLE blob (incl. every series index) before writing
+      anything; malformed batch = hard error, nothing stored. cli.sh
+      sections 7 + 8 cover exact round-trip, truncation, bad index.
+- [x] Bench harness: tools/bench (standalone crate, bundled rusqlite),
+      TSBS-style deterministic workload (100 hosts × 10 metrics × 1000
+      pts = 1M, 10s cadence + ms jitter, per-kind value shapes), three-way
+      plain vs Tier 1 vs Tier 2, query timings + bit-exact spot check
+- [x] Tier 2 ≥8M pts/s: MET — ~17–18M pts/s ingest (1M pts in ~56ms via
+      10×100k blobs, single txn); Tier 1 ~1.7–2M pts/s; plain baseline
+      ~3.6–4M rows/s. File 8.28MB vs plain 52.6MB (6.4x smaller,
+      8.3 B/pt) on honest jittered TSBS data; flush 177ms; count/range
+      queries verified after reopen (numbers from 2026-07-22 run)
+- [x] sqld demo 2026-07-22: sqld built from cloned source; trusted.lst
+      sha256 verified; vtab created + ingested + flushed via HTTP request 1;
+      SEPARATE request (fresh pooled connection → xConnect recovery) returned
+      rows with pushdown in 0.19ms. Legacy JSON endpoint (POST /).
+- [ ] Stretch: embedded replica of the metrics db syncing to a second node
+- [x] RESULTS.md written — all four success criteria met (compression
+      criterion with honest asterisk: 6.4x on deliberately-hostile TSBS
+      variant, 200x friendly; see RESULTS.md)
+
+### Session 5 — Logs vtab (Phase 2, ≈1.5–2 days)
+Gated on: metrics POC green (vtab skeleton, command idiom, shadow-table store
+all proven — logs reuses every one of them).
+
+- [ ] `timeless-core`: generic block store module (blocks + terms + compaction
+      state machine), unit-agnostic timestamps
+- [ ] Columnar split codec: port the timeless_logs layout (ts/level/message/
+      metadata columns), zstd per-column; codec byte reserves OpenZL slot
+- [ ] `timeless_logs` vtab: xCreate with `index_keys=` arg, xUpdate row insert,
+      'ingest' blob batch, 'flush' + 'optimize' commands
+- [ ] xBestIndex: level/term equality + ts range → posting-list intersection;
+      in-module LIKE scan over candidate blocks
+- [ ] Compaction as single-transaction atomic swap; merge compaction with
+      HARD time-span cap on merged blocks (retention boundary rule — see
+      Pruning section)
+- [ ] 'prune' command + `retention=` vtab arg (age-based only for POC);
+      same-transaction terms cleanup; batched deletes
+- [ ] Oracle test vs plain table; compression ratio benchmark vs plain SQLite
+      table of log rows (target ≥10x) and vs timeless_logs itself
+- [ ] **Codec bake-off** (see "Codec strategy"): same blocks compressed
+      three ways — zstd columnar vs OpenZL vs best-effort pure-Rust pipeline
+      (delta/pco ts column + dictionary zstd messages). Record ratios +
+      throughput in RESULTS.md; apply the decision rule
+- [ ] Stretch: OpenZL static-link spike (R7) via `openzl-sys` wrapper crate —
+      if clean, add codec 3 and include in bake-off
+
+### Session 6 — Traces vtab (Phase 2, ≈1 day)
+Gated on: Session 5 (shares the entire block-store skeleton).
+
+- [ ] `_trace_blocks` packed-ID index; trace_id equality as the top-priority
+      xBestIndex plan
+- [ ] Span columnar layout (ns timestamps), terms: service/kind/status/name
+- [ ] 'ingest' batch format v0-traces; oracle + ratio benchmarks (target ~10x)
+- [ ] Demo: OTel data in, `SELECT * FROM traces WHERE trace_id = x'...'` out,
+      over sqld HTTP — three signals, one database file, one extension
+
+---
+
+## Risk register
+
+- **R1 — writable-vtab support in Rust wrappers is under-traveled.**
+  Mitigation: Session 1 gate; C-shim fallback (+~2 days).
+- **R2 — re-entrant shadow-table SQL from vtab callbacks.** Supported (FTS5
+  does exactly this) but subtle. Mitigation: Spike B before any real code.
+- **R3 — rustler types entangled in engine internals.** Looked clean in
+  inventory (rustler confined to lines 2448+ and EngineResource). Budget a few
+  hours of type substitution.
+- **R4 — sqld loads the ext into EVERY connection** → one vtab instance per
+  connection over shared shadow tables. Per-connection engine buffers = split
+  state. POC: single-writer assumption + process-global engine registry keyed
+  by (db path, table). Extensions are one shared lib per process, so a global
+  works. Decide now, cheap; retrofit, expensive.
+- **R5 — transaction semantics of in-memory buffers.** Rollback after buffered
+  (unflushed) inserts should discard those points → implement
+  xBegin/xCommit/xRollback minimally, or document POC limitation explicitly.
+  Do not ship the POC silently ignoring rollback.
+- **R6 — pco chunk granularity vs SQLite page model.** Prior art warning: bit-
+  level appends into page storage kill throughput. Our design never does this —
+  chunks are compressed complete, stored whole as blobs. Keep it that way.
+- **R7 — OpenZL is C++ and must static-link into a loadable .so** (logs/traces
+  headline ratio depends on it: 12.8x OpenZL vs ~lower with zstd-only).
+  Mitigation: zstd columnar is the v1 codec and is already respectable; OpenZL
+  is a gated stretch spike in Session 5 (as an `openzl-sys` crate). Never
+  block a session on it. Escape hatch: the pure-Rust `timeless-codec` option
+  ("Codec strategy" section) may retire this risk entirely if the bake-off
+  shows OpenZL's marginal gain is small.
+- **R8 — three vtabs, one extension or three?** Ship ONE .so exporting all
+  three modules (`timeless_metrics`, `timeless_logs`, `timeless_traces`) —
+  one trusted.lst entry, one artifact, shared core. Revisit only if size or
+  codec deps force a split.
+
+## Estimate
+
+3–4 weekend-days solo for the polished metrics hero POC (Sessions 1–4);
+minimal insert-query-compress demo after Sessions 1–3. Phase 2 adds ~2.5–3
+days: logs (1.5–2, it builds the shared block skeleton) then traces (~1,
+mostly reuse). Working sessions with Claude Code should compress calendar
+time meaningfully — extraction and vtab boilerplate parallelize well.
+
+## Open questions (decide during, not before)
+
+- Crate/repo name: `timeless-libsql`? `timeless-sqlite`? (artifact name
+  `libtimeless_metrics.so` either way)
+- timestamps: engine uses unix seconds; keep for POC, but batch format v1
+  probably wants ms/ns flag for logs/traces later
+- labels: JSON TEXT for POC; interning/posting-list pushdown is v2
+- upstream ambition: loadable-first is decided; revisit native
+  (vectorvtab.c-style) only after the POC has numbers
+- if timeless-codec wins the bake-off: spin it out as its own published crate?
+  (standalone value — telemetry block codec, no C++, WASM-capable; also the
+  only codec shape viable for an upstream libSQL PR)
+- **Edge telemetry / chunk shipping** (discussed 2026-07-21): routers that run
+  containers (Mikrotik/RouterOS, ARM64) host a tiny collector + local libsql
+  db with this extension; upstream transport = the `_chunks`/`_blocks` blobs
+  themselves (insert into central sqld via Hrana or batch command — no
+  recompression, chunks ARE the wire format). Wins: cross-sample compression
+  beats per-scrape push by 10–100x on constrained backhaul; store-and-forward
+  free from retention-bounded local storage; locally SQL-queryable during WAN
+  outage. Zero-code alternative: central node holds embedded replicas of
+  router dbs, libSQL delta sync ships (already-compressed) WAL frames.
+  Ties into the planned mktxp-replacement Mikrotik collector — it could write
+  local libsql instead of pushing raw samples. Great RESULTS.md demo #2 if the
+  POC lands.
+- **v3 north star — generic `timeless_table` vtab** (discussed 2026-07-21):
+  arbitrary append-only time-keyed STRICT schemas with per-column type-aware
+  codecs. SQLite has only 5 storage classes, all supportable: INTEGER
+  (delta/pco/RLE/bitmap), REAL (pco/ALP), low-card TEXT (dictionary+RLE),
+  high-card TEXT (FSST or dict-zstd), BLOB (zstd floor; JSONB shredding +
+  F32_BLOB byte-stream-split as v2 cleverness), NULL via per-column validity
+  bitmaps. Require STRICT semantics (dynamic typing is the one real hazard;
+  ANY = type-tag stream fallback). Generalize ts_min/ts_max to per-column
+  min/max ZONE MAPS on every block (free pruning on any range predicate);
+  `index_keys=` generalizes to opt-in posting lists for any low-card column.
+  DESIGN CONSEQUENCE FOR NOW: build timeless-codec as *typed column encoders*
+  with adaptive codec choice by sampling at flush (BtrBlocks approach) —
+  logs/traces then become schema presets of the generic engine, not bespoke
+  code. Prior art: Parquet encodings, ClickHouse codecs, DuckDB lightweight
+  compression, BtrBlocks paper.
