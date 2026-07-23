@@ -37,6 +37,7 @@ self-hosted `sqld` (`--extensions-path`, sha256 trusted.lst; SQL over HTTP).
 
 Full methodology, honest asterisks, and known limits: [RESULTS.md](RESULTS.md).
 Design history and decision log: [PLAN.md](PLAN.md).
+Running the suites and benchmarks yourself: [TESTING.md](TESTING.md).
 
 ## Status
 
