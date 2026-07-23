@@ -1,8 +1,11 @@
 # timeless-libsql — Hero POC Results
 
 Two working days (2026-07-22), Sessions 1–4 of PLAN.md. All four success
-criteria met (one with an honest asterisk). Machine: Arch Linux, Rust 1.97,
-SQLite 3.53, sqld built from libsql main.
+criteria met (one with an honest asterisk). Reference machine: Arch Linux,
+Rust 1.97, SQLite 3.53, sqld built from libsql main. Re-run 2026-07-22 on
+Apple M5 Pro (macOS 26.5, Rust 1.97.1, bundled SQLite) — second-run numbers
+per TESTING.md; on-disk sizes were byte-identical across both machines
+(deterministic datasets), so the storage table needs no second column.
 
 ## What it is
 
@@ -24,13 +27,14 @@ SELECT * FROM metrics WHERE name='cpu_usage' AND ts BETWEEN :t0 AND :t1;
 
 ## Ingest rates (1M points, single transaction, release build)
 
-| path | rate | notes |
-|---|---|---|
-| plain SQLite table | ~4–16M rows/s | baseline; pays 52 bytes/row forever |
-| vtab Tier 1 (SQL rows) | ~2–3M pts/s | row-at-a-time xUpdate |
-| **vtab Tier 2 (batch blob v0)** | **18.3M pts/s** | target was ≥8M; beats the Elixir NIF path (~16M) |
+| path | Linux i7 | Apple M5 Pro | notes |
+|---|---|---|---|
+| plain SQLite table | ~4–16M rows/s | 4.2M rows/s | baseline; pays 52 bytes/row forever |
+| vtab Tier 1 (SQL rows) | ~2–3M pts/s | 2.3M pts/s | row-at-a-time xUpdate |
+| **vtab Tier 2 (batch blob v0)** | **18.3M pts/s** | **23.8M pts/s** | target was ≥8M; beats the Elixir NIF path (~16M) |
 
-Flush of 1M buffered points → compressed chunks: ~176ms.
+Flush of 1M buffered points → compressed chunks: ~176ms (Linux) /
+~110ms (M5 Pro).
 
 ## Storage (bytes per point, measured on-disk after close)
 
@@ -58,9 +62,34 @@ point after flush + cold recovery.*
 
 ## Query (Tier 2 db, 1M points, reopened process)
 
-- `count(*)`: 1,000,000 — full scan 205ms
-- name + ts-range (100-step window across 100 hosts): 10,001 rows in 3.0ms
-- 3-point bit-exact f64 spot checks: pass
+- `count(*)`: 1,000,000 — full scan 205ms (Linux) / 110ms (M5 Pro)
+- name + ts-range (100-step window across 100 hosts): 10,001 rows in
+  3.0ms (Linux) / 2.0ms (M5 Pro)
+- 3-point bit-exact f64 spot checks: pass (both machines)
+
+## Apple Silicon run (M5 Pro, 2026-07-22)
+
+Logs and traces query timings vs plain tables in the same file
+(cold reopen, counts verified against the plain-table oracle):
+
+| query | plain | vtab |
+|---|---|---|
+| logs `level='error'` count | 34.5ms | **15.3ms** |
+| logs service+level+range (pushdown) | 119.7ms | **4.2ms** |
+| logs `message LIKE '%timeout%'` | **73.9ms** | 344.1ms |
+| traces `status='error'` count | 38.6ms | **2.8ms** |
+| traces service+range count (pushdown) | 46.7ms | 57.9ms |
+| traces trace_id point lookup | **0.005ms** (indexed) | 2.0ms |
+
+Ingest: logs vtab 1.10M entries/s (plain 3.60M); traces vtab 0.78M
+spans/s (plain+index 0.99M).
+
+bench-codec throughput (the memory-bandwidth-bound comparison TESTING.md
+asks for): codec 5 decode **1043 MB/s** on logs / **1199 MB/s** on traces
+(codec 4: 852 / 1015 — codec 5 decodes faster on both datasets); encode
+183–221 MB/s across codecs. Size verdict unchanged on this machine:
+codec 5 is 8.15% smaller on logs, +0.13% on traces — stays the
+optimize() default.
 
 ## sqld (self-hosted libSQL server) over HTTP
 
