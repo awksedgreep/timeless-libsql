@@ -41,7 +41,7 @@ struct PartitionKey {
 /// flush boundaries, compaction output), and a two-field key would let
 /// the second insert silently shadow the first.
 /// (Ported from the donor fix in timeless_metrics — see
-/// BUG_chunk_index_min_ts_shadowing.md.)
+/// the chunk-index shadowing fix (2026-07-22, see git history).)
 type ChunkKey = (PartitionKey, i64, u64);
 
 /// Full identity of a series for reverse lookups and label queries.

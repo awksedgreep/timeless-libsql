@@ -766,7 +766,7 @@ Gated on: Session 5 (shares the entire block-store skeleton).
       metric-ts constraint (worked around the (series, min_ts) chunk
       index shadowing bug) was lifted once the donor's key-widening
       fix was ported: metric ts are now non-decreasing with occasional
-      duplicates (see BUG_chunk_index_min_ts_shadowing.md).
+      duplicates (see the chunk-index shadowing fix (2026-07-22, see git history)).
 - [x] **kill -9 crash test** (tests/crash.sh, cli.sh section 20): 5
       iterations of killing a live 3000-round ingest (BEGIN; 30 rows
       over 3 signals; flush ×3; COMMIT; watermark print; optimize/

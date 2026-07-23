@@ -144,7 +144,7 @@ compressed telemetry SQL, zero client changes.
 - ~~Metrics chunk index keyed (series, min_ts) — duplicate-min_ts
   chunks shadowed each other~~ **Fixed** (2026-07-22): the donor fix
   (key widened to (series, min_ts, chunk_seq)) is ported to
-  timeless-core; see BUG_chunk_index_min_ts_shadowing.md. The oracle
+  timeless-core; see the chunk-index shadowing fix (2026-07-22, see git history). The oracle
   generator now produces duplicate metric timestamps, including across
   flush boundaries.
 - **Shared-buffer semantics across connections (PLAN R4 — fixed, with

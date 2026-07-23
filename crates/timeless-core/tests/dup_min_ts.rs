@@ -1,5 +1,5 @@
 //! Regression tests for the chunk-index min_ts shadowing bug
-//! (BUG_chunk_index_min_ts_shadowing.md): the index used to be keyed
+//! (the chunk-index shadowing fix (2026-07-22, see git history)): the index used to be keyed
 //! (series, min_ts), so two chunks of one series sharing a min_ts
 //! silently shadowed each other. The key is now widened with a
 //! per-engine monotonic chunk_seq (ported from the donor fix in

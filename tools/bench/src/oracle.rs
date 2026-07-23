@@ -30,7 +30,7 @@
 //!    DUPLICATES — including across flush boundaries. The old
 //!    strictly-increasing workaround (chunk index keyed (series,
 //!    min_ts); duplicate-min_ts chunks shadowed each other — see
-//!    BUG_chunk_index_min_ts_shadowing.md) is gone: the key now
+//!    the chunk-index shadowing fix (2026-07-22, see git history)) is gone: the key now
 //!    carries a chunk_seq, and the engine treats duplicate-ts points
 //!    as DISTINCT points, exactly like the plain mirror table's rows,
 //!    so the invariant holds with duplicates. Logs/traces always got
