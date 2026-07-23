@@ -74,6 +74,22 @@ compressed telemetry SQL, zero client changes.
 - Commands via the FTS5 hidden-column idiom: TEXT = command
   ('flush'/'compact'/'prune:<ts>'), BLOB = Tier 2 batch. Malformed batches
   rejected atomically.
+- **Prometheus ingest** (post-POC): a raw scrape body is just another BLOB
+  in the hidden column — dispatch is by first byte (0x01 = batch v0, else
+  exposition text), so the whole pipeline is one line, zero new syntax:
+  ```sh
+  curl -s target:9100/metrics -o /tmp/scrape.prom && sqlite3 metrics.db \
+    ".load ./libtimeless_ext" \
+    "INSERT INTO metrics(metrics) VALUES (readfile('/tmp/scrape.prom'));
+     INSERT INTO metrics(metrics) VALUES ('flush');"
+  ```
+  (readfile() needs a seekable file, so curl lands the scrape in a temp
+  file rather than a pipe.)
+  Timestamps are stored as EPOCH SECONDS (explicit prom ms timestamps are
+  normalized /1000; timestamp-less samples get wall-clock seconds).
+  Malformed/NaN lines are counted, not fatal — partial success succeeds
+  silently, like a real Prometheus server scrape. The scraping loop stays
+  external by design (cron/curl/Elixir); the vtab is passive.
 
 ## Known limits (documented, accepted for POC)
 
@@ -90,6 +106,6 @@ compressed telemetry SQL, zero client changes.
 
 ```sh
 cargo build --release -p timeless-ext
-./tests/cli.sh                                   # 10 sections
+./tests/cli.sh                                   # 18 sections
 cd tools/bench && cargo run --release -- ../../target/release/libtimeless_ext.so
 ```

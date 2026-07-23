@@ -527,6 +527,21 @@ Nothing blocks on this choice.
 - [x] RESULTS.md written — all four success criteria met (compression
       criterion with honest asterisk: 6.4x on deliberately-hostile TSBS
       variant, 200x friendly; see RESULTS.md)
+- [x] Post-POC (2026-07-22): Prometheus text ingest shipped. The hidden
+      BLOB column now sub-dispatches on its FIRST byte: 0x01 = batch v0
+      (unchanged), 0x00/0x02–0x08 = reserved future batch versions (loud
+      "unknown blob format" error, never mis-parsed as text), anything
+      else = Prometheus text exposition body → engine.ingest_prometheus.
+      SQL surface unchanged: INSERT INTO metrics(metrics) VALUES
+      (readfile('scrape')). UNIT DECISION: tables store EPOCH SECONDS —
+      the engine normalizes explicit prom ms timestamps (/1000), so the
+      wall-clock default for timestamp-less samples is passed in seconds
+      to keep every body internally consistent. Partial success (some
+      samples + some malformed/NaN lines) succeeds silently, like a real
+      Prometheus scrape; only 0-samples-with-errors bodies fail. The
+      scraping LOOP stays external by design (cron/curl/Elixir) — the
+      vtab is passive. cli.sh section 18 + timeless-core
+      tests/prom_ingest.rs pin the semantics.
 
 ### Session 5 — Logs vtab (Phase 2, ≈1.5–2 days) — ✅ CORE COMPLETE 2026-07-22
 Gated on: metrics POC green (vtab skeleton, command idiom, shadow-table store

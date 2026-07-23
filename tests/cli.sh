@@ -26,6 +26,9 @@
 #   15. traces status/service pushdown
 #   16. traces prune removes blocks AND _terms AND _trace_blocks rows
 #   17. traces append-only + kind/status/id-length validation
+#   18. Prometheus text ingest (BLOB dispatch on first byte: 0x01 = batch
+#       v0, reserved 0x00/0x02–0x08 = loud error, else exposition text;
+#       ms timestamps normalized to EPOCH SECONDS; partial success)
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
@@ -694,6 +697,119 @@ elif [[ "$err" == *"unknown command"* ]]; then
 else
   fail "unknown command rejected but with unexpected message: $err"
 fi
+
+# ---------------------------------------------------------------------------
+echo "== section 18: Prometheus text ingest =="
+# The hidden BLOB payload now sub-dispatches on its FIRST BYTE:
+#   0x01            → batch blob v0 (section 7 semantics, unchanged)
+#   0x00, 0x02–0x08 → reserved future batch versions → loud error
+#   anything else   → Prometheus text exposition body
+# TIMESTAMP UNIT (documented in metrics_vtab.rs module docs): the table
+# stores EPOCH SECONDS. Explicit prom timestamps are MILLISECONDS on the
+# wire and the engine normalizes them (/1000); samples without a
+# timestamp get the CURRENT WALL CLOCK in seconds. Fixture covers:
+# HELP/TYPE comments (free), a bare counter (no labels, no ts), a
+# labeled gauge with an explicit ms ts, a histogram-style multi-label
+# line (no ts), one malformed line and one NaN line (each counted as an
+# error, neither fatal — partial success succeeds silently, like a real
+# Prometheus server scrape).
+PROMBODY="$TMP/scrape.prom"
+cat > "$PROMBODY" <<'PROM'
+# HELP http_requests_total Total HTTP requests.
+# TYPE http_requests_total counter
+http_requests_total 1027
+node_temp_celsius{sensor="cpu0",host="pvm1"} 42.5 1753000000123
+http_request_duration_seconds_bucket{le="0.5",method="GET",code="200"} 129389
+this line is definitely not prometheus !!!
+bad_metric NaN
+PROM
+PROMDB="$TMP/prom_test.db"
+got=$(sqlite3 "$PROMDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE metrics USING timeless_metrics;
+INSERT INTO metrics(metrics) VALUES (readfile('$PROMBODY'));
+SELECT 'ingested', last_insert_rowid();
+INSERT INTO metrics(metrics) VALUES ('flush');
+SELECT 'total', COUNT(*) FROM metrics;
+SELECT 'temp', name, ts, value, labels FROM metrics WHERE name = 'node_temp_celsius';
+SELECT 'bucket', value, labels FROM metrics WHERE name = 'http_request_duration_seconds_bucket';
+SELECT 'default_shared', COUNT(DISTINCT ts) FROM metrics WHERE name != 'node_temp_celsius';
+SELECT 'default_sane', COUNT(*) FROM metrics WHERE name != 'node_temp_celsius'
+  AND ts BETWEEN 1750000000 AND 4000000000;
+SQL
+)
+# ingested = 3 samples (rowid = count; the 2 bad lines are errors, not
+# samples, and NOT fatal). 'temp' proves the explicit ms ts came out as
+# SECONDS (1753000000123 ms → 1753000000 s) and labels round-trip in
+# canonical sorted-JSON. 'bucket' pins one exact multi-label value.
+# 'default_shared' = 1: both no-ts samples got the SAME default (one
+# wall-clock read per body). 'default_sane': that default is epoch
+# SECONDS in a sane range — 1750000000 ≈ mid-2025 < now, and the 4e9
+# upper bound would be violated by a milliseconds default (~1.79e12),
+# so this asserts the unit, not just "recent".
+expected='ingested|3
+total|3
+temp|node_temp_celsius|1753000000|42.5|{"host":"pvm1","sensor":"cpu0"}
+bucket|129389.0|{"code":"200","le":"0.5","method":"GET"}
+default_shared|1
+default_sane|2'
+check_eq "prometheus body: count, ms→s ts, labels, shared seconds default" "$got" "$expected"
+
+# Batch v0 still works THROUGH THE SAME DISPATCH into the same table
+# (regression: section 7's blob starts with 0x01 and must keep taking
+# the batch path, not the text path). 3 more points → 6 total. Flushed
+# at the end so they survive into the new-process check below (the POC
+# durability contract: unflushed buffers die with the process).
+got=$(sqlite3 "$PROMDB" <<SQL
+.load $EXT
+INSERT INTO metrics(metrics) VALUES (readfile('$BLOB'));
+SELECT 'batch_rowid', last_insert_rowid();
+SELECT 'total', COUNT(*) FROM metrics;
+INSERT INTO metrics(metrics) VALUES ('flush');
+SQL
+)
+expected='batch_rowid|3
+total|6'
+check_eq "batch v0 blob still dispatches to the batch path" "$got" "$expected"
+
+# An all-garbage body parses as prometheus text but yields 0 samples +
+# errors → must be rejected (that payload was not exposition text).
+printf 'not prometheus at all\nstill not prometheus\n' > "$TMP/garbage.prom"
+if err=$(sqlite3 "$PROMDB" ".load $EXT" \
+    "INSERT INTO metrics(metrics) VALUES (readfile('$TMP/garbage.prom'));" 2>&1); then
+  fail "all-garbage prometheus body should be rejected (got success: $err)"
+elif [[ "$err" == *"0 samples ingested"* ]]; then
+  pass "all-garbage body rejected with '0 samples ingested'"
+else
+  fail "all-garbage body rejected but with unexpected message: $err"
+fi
+
+# A reserved version byte (0x05) must fail LOUDLY — a future batch
+# format fed to this build must never be mis-parsed as text.
+printf '\x05future batch format' > "$TMP/v5.blob"
+if err=$(sqlite3 "$PROMDB" ".load $EXT" \
+    "INSERT INTO metrics(metrics) VALUES (readfile('$TMP/v5.blob'));" 2>&1); then
+  fail "version byte 0x05 should be rejected (got success: $err)"
+elif [[ "$err" == *"unknown blob format: version byte 0x05"* ]]; then
+  pass "reserved version byte 0x05 rejected with a clear error"
+else
+  fail "0x05 blob rejected but with unexpected message: $err"
+fi
+
+# Zero-length blob: no first byte to dispatch on → clear error.
+if err=$(sqlite3 "$PROMDB" ".load $EXT" \
+    "INSERT INTO metrics(metrics) VALUES (x'');" 2>&1); then
+  fail "empty blob should be rejected (got success: $err)"
+elif [[ "$err" == *"empty blob"* ]]; then
+  pass "empty blob rejected with a clear error"
+else
+  fail "empty blob rejected but with unexpected message: $err"
+fi
+
+# Nothing from the rejected payloads may have been stored.
+got=$(sqlite3 "$PROMDB" ".load $EXT" \
+  "INSERT INTO metrics(metrics) VALUES ('flush'); SELECT COUNT(*) FROM metrics;")
+check_eq "rejected payloads stored nothing" "$got" "6"
 
 # ---------------------------------------------------------------------------
 echo

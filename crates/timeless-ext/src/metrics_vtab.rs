@@ -10,18 +10,49 @@
 //!
 //! Write path:  INSERT INTO metrics(name, ts, value, labels) VALUES (...)
 //!              → resolve series → in-memory partition buffer (Tier 1).
-//! Batch path:  INSERT INTO metrics(metrics) VALUES (:blob) — Tier 2.
-//!              The hidden column is overloaded by TYPE: TEXT values are
-//!              commands (below), BLOB values are batch-blob-v0 ingest
-//!              batches (see PLAN.md "Batch blob format v0"). This is
-//!              unambiguous — commands stay TEXT, batches are BLOB — and
-//!              needs zero schema change. Durability semantics are
-//!              IDENTICAL to Tier 1: points land in the same engine
-//!              buffers and become durable at the same 'flush'.
-//! Commands:    INSERT INTO metrics(metrics) VALUES ('flush' | 'compact'
-//!              | 'prune:<unix_ts>') — the FTS5 idiom: an insert that sets
-//!              only the hidden column runs maintenance instead of
-//!              storing a row.
+//!
+//! The hidden command column accepts THREE payload kinds, dispatched by
+//! SQLite TYPE and then (for blobs) by the first byte:
+//!
+//!   TEXT  → maintenance command: 'flush' | 'compact' | 'prune:<unix_ts>'
+//!           (the FTS5 idiom: an insert that sets only the hidden column
+//!           runs maintenance instead of storing a row).
+//!   BLOB, first byte 0x01
+//!         → Tier 2 batch-blob-v0 ingest (PLAN.md "Batch blob format
+//!           v0"; 0x01 is the v0 version byte).
+//!   BLOB, first byte anything else printable
+//!         → Prometheus text exposition body — a raw scrape:
+//!             INSERT INTO metrics(metrics) VALUES (readfile('scrape'));
+//!           Valid exposition text can only start with a metric-name
+//!           byte, '#', or whitespace, so it can never collide with the
+//!           batch version byte. Bytes 0x00 and 0x02–0x08 are RESERVED
+//!           for future batch versions and rejected loudly ("unknown
+//!           blob format") so a future v1 blob fed to an old build fails
+//!           instead of being mis-parsed as text.
+//!
+//! ── TIMESTAMP UNIT: EPOCH SECONDS ────────────────────────────────────
+//! The Prometheus spec says explicit sample timestamps are MILLISECONDS,
+//! but engine.ingest_prometheus NORMALIZES them: any explicit ts >
+//! 1_000_000_000_000 (i.e. an epoch in ms) is divided by 1000, and
+//! samples WITHOUT a timestamp receive default_ts verbatim. ts is an
+//! opaque i64 to the engine — the only thing that matters is that one
+//! table stays internally consistent — so we pass default_ts as the
+//! current wall clock in EPOCH SECONDS, matching what the normalizer
+//! produces for explicit timestamps, matching Tier 1 usage throughout
+//! this repo, and matching 'prune:<unix_ts>'. Everything in a
+//! timeless_metrics table is epoch SECONDS.
+//!
+//! Prometheus error semantics (engine contract, mirrored here):
+//! malformed non-comment lines and NaN/±Inf values are COUNTED but do
+//! not abort the body — partial success (some samples + some errors)
+//! succeeds silently, exactly like a Prometheus server scrape. Only a
+//! body that yields ZERO samples with ≥1 error is rejected, because
+//! that means the payload wasn't exposition text at all.
+//!
+//! Durability semantics are IDENTICAL across all ingest paths: points
+//! land in the same engine buffers and become durable at the same
+//! 'flush'.
+//!
 //! Read path:   buffered points and flushed chunks are merged by the
 //!              engine, so data is queryable immediately after INSERT and
 //!              durable after 'flush'.
@@ -307,6 +338,52 @@ impl MetricsTab {
 
         Ok(n_points as i64)
     }
+
+    /// Prometheus text-exposition ingest: the blob is a raw scrape body
+    /// (`curl target:9100/metrics`), parsed and buffered in one fused
+    /// pass by the engine. The scraping LOOP stays external by design —
+    /// cron/curl/Elixir drive it; the vtab is passive.
+    ///
+    /// ── UNIT DECISION (see module docs): default_ts is EPOCH SECONDS ─
+    /// engine.ingest_prometheus divides explicit millisecond timestamps
+    /// (the Prometheus wire unit) by 1000, so within one body explicit
+    /// timestamps come out as seconds. Passing wall-clock seconds for
+    /// the timestamp-less samples is therefore the ONLY choice that
+    /// keeps a single body — and the whole table — internally
+    /// consistent. (ts is opaque i64 to the engine; consistency is the
+    /// contract, not the unit itself.)
+    ///
+    /// Error semantics (engine contract, documented in module docs):
+    /// malformed lines and NaN/Inf values are counted, not fatal —
+    /// partial success succeeds silently, matching how a real
+    /// Prometheus server treats a scrape. Only "zero samples AND at
+    /// least one error" is rejected: that body was not exposition text.
+    ///
+    /// Like the batch path, this deliberately does NOT flush (same
+    /// durability contract as Tier 1) and returns the sample count as
+    /// the synthetic rowid, visible via last_insert_rowid().
+    fn ingest_prometheus_text(&self, body: &[u8]) -> Result<i64> {
+        // Wall clock in EPOCH SECONDS (the unit decision above). A
+        // pre-1970 system clock would make duration_since fail; falling
+        // back to 0 keeps ingest alive on such a broken clock (ts 0 is
+        // as good as any other wrong answer there).
+        let default_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let (count, errors) = self
+            .engine
+            .ingest_prometheus(body, default_ts)
+            .map_err(module_err)?;
+
+        if count == 0 && errors > 0 {
+            return Err(module_err(format!(
+                "prometheus body: 0 samples ingested, {errors} malformed line(s)"
+            )));
+        }
+        Ok(count as i64)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -487,10 +564,30 @@ impl UpdateVTab<'_> for MetricsTab {
         // hidden column's SQLite TYPE (which we can only see through the
         // raw ValueRef — args.get::<String> would stringify blobs):
         //   TEXT → maintenance command ('flush', 'compact', ...)
-        //   BLOB → Tier 2 batch ingest (batch blob format v0)
+        //   BLOB → binary payload, sub-dispatched on the FIRST BYTE:
+        //          0x01        = batch blob v0 (0x01 is its version byte)
+        //          0x00, 0x02–0x08 = RESERVED future batch versions →
+        //                        loud error, never mis-parsed as text
+        //          anything else = Prometheus text exposition body (valid
+        //                        exposition starts with a name byte, '#',
+        //                        or whitespace — all ≥ 0x09)
         //   NULL → ordinary Tier 1 data row (fall through below)
         match args.iter().nth(6) {
-            Some(ValueRef::Blob(batch)) => return self.ingest_batch(batch),
+            Some(ValueRef::Blob(blob)) => {
+                return match blob.first().copied() {
+                    Some(0x01) => self.ingest_batch(blob),
+                    Some(v @ (0x00 | 0x02..=0x08)) => Err(module_err(format!(
+                        "unknown blob format: version byte 0x{v:02x} \
+                         (this build speaks batch v0 = 0x01 and Prometheus text)"
+                    ))),
+                    Some(_) => self.ingest_prometheus_text(blob),
+                    None => Err(module_err(
+                        "empty blob: cannot determine payload format \
+                         (batch v0 starts with 0x01; Prometheus text is non-empty)"
+                            .into(),
+                    )),
+                };
+            }
             Some(ValueRef::Null) | None => {} // plain data row
             Some(_) => {
                 // TEXT (or something coercible to it — anything else gets
