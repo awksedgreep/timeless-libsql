@@ -14,7 +14,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
+use super::codec::{
+    decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
+};
+use crate::blocks::codec::{PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS};
 use super::engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery};
 use super::mem::MemSpanStore;
 use super::{
@@ -203,11 +206,11 @@ fn span_codec_round_trips_all_codecs() {
             attributes: vec![("k".into(), "".into())],
         },
     ];
-    // CODEC_ZSTD stays in this loop FOREVER even though optimize() no
-    // longer writes it: encode_span_block(.., CODEC_ZSTD, ..) is the
-    // retained legacy encoder path, and this round-trip is the proof
-    // that existing codec-2 span blocks remain decodable.
-    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR] {
+    // CODEC_ZSTD and CODEC_COLUMNAR stay in this loop FOREVER even
+    // though optimize() no longer writes them: the legacy encoder
+    // paths are retained, and this round-trip is the proof that
+    // existing codec-2/4 span blocks remain decodable.
+    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR, CODEC_COLUMNAR_V2] {
         let (bytes, meta) = encode_span_block(&entries, codec, 7).unwrap();
         assert_eq!(meta.ts_min, -42);
         assert_eq!(meta.ts_max, 1_700_000_000_000_000_999);
@@ -216,6 +219,66 @@ fn span_codec_round_trips_all_codecs() {
         let back = decode_span_block(&bytes).unwrap();
         assert_eq!(back, entries, "codec {codec} round-trip");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Codec-5 attribute shredding: the spans twin of the logs hostile
+// tests (the shredding code is SHARED — blocks/codec.rs — so this is
+// mostly proving the spans container wires it up correctly).
+// ---------------------------------------------------------------------------
+
+/// Strategy byte of a codec-5 span block's attributes column (10th
+/// column: header has 10 u32 lengths at offset 22, columns from 62).
+fn attributes_strategy_byte(bytes: &[u8]) -> u8 {
+    let len = |i: usize| {
+        u32::from_le_bytes(bytes[22 + i * 4..26 + i * 4].try_into().unwrap()) as usize
+    };
+    bytes[62 + (0..9).map(len).sum::<usize>()]
+}
+
+fn rt_spans_v2(entries: &[SpanEntry], expect_strategy: u8, label: &str) {
+    let (bytes, meta) = encode_span_block(entries, CODEC_COLUMNAR_V2, 7).unwrap();
+    assert_eq!(meta.codec, CODEC_COLUMNAR_V2);
+    assert_eq!(attributes_strategy_byte(&bytes), expect_strategy, "{label}: strategy byte");
+    let back = decode_span_block(&bytes).unwrap();
+    assert_eq!(&back, entries, "{label}: round-trip");
+}
+
+#[test]
+fn span_codec5_shreds_hostile_attribute_shapes_exactly() {
+    // Disjoint key sets + an empty-attribute span + unicode.
+    rt_spans_v2(
+        &[
+            span(1, 1, None, "a", "api", 1, 1, 100, &[("alpha", "1")]),
+            span(1, 2, Some(1), "b", "db", 2, 1, 200, &[("ベータ", "値🔥")]),
+            span(2, 3, None, "c", "cache", 0, 1, 300, &[]),
+        ],
+        PAIRS_SHREDDED,
+        "disjoint + empty + unicode",
+    );
+
+    // All spans empty attributes; single span; all same pairs.
+    rt_spans_v2(&[span(1, 1, None, "a", "api", 1, 1, 100, &[])], PAIRS_SHREDDED, "single, empty");
+    let same: Vec<SpanEntry> = (0..300)
+        .map(|i| {
+            span(1, i as u8, None, "op", "api", 1, 1, 1000 + i,
+                 &[("http.method", "GET"), ("http.status", "200")])
+        })
+        .collect();
+    rt_spans_v2(&same, PAIRS_SHREDDED, "all same pairs");
+}
+
+#[test]
+fn span_codec5_key_explosion_falls_back_to_legacy() {
+    // > SHRED_MAX_KEYS distinct attribute keys → LEGACY bytes verbatim
+    // (see the cap rationale in blocks/codec.rs), still exact.
+    let entries: Vec<SpanEntry> = (0..(SHRED_MAX_KEYS as i64 + 1))
+        .map(|i| {
+            span(1, i as u8, None, "op", "api", 1, 1, i,
+                 &[(&format!("key-{i:03}") as &str, "v")])
+        })
+        .collect();
+    rt_spans_v2(&entries, PAIRS_LEGACY, "key explosion");
 }
 
 #[test]
@@ -244,10 +307,10 @@ fn span_codec_rejects_garbage() {
 }
 
 #[test]
-fn optimize_writes_codec_4_blocks_that_decode_exactly() {
+fn optimize_writes_codec_5_blocks_that_decode_exactly() {
     // The traces twin of the logs test with the same name: after
-    // optimize, every persisted block must carry codec byte 4
-    // (CODEC_COLUMNAR) — in the store metadata AND in the payload
+    // optimize, every persisted block must carry codec byte 5
+    // (CODEC_COLUMNAR_V2) — in the store metadata AND in the payload
     // itself — and decode back to exactly the pushed spans.
     let shared = Arc::new(MemSpanStore::new());
     let store = SpyStore {
@@ -281,14 +344,14 @@ fn optimize_writes_codec_4_blocks_that_decode_exactly() {
     let scanned = shared.scan().unwrap();
     assert!(!scanned.is_empty());
     for (meta, loc) in scanned {
-        assert_eq!(meta.codec, CODEC_COLUMNAR, "store meta codec byte");
+        assert_eq!(meta.codec, CODEC_COLUMNAR_V2, "store meta codec byte");
         let bytes = shared.read_block(&loc).unwrap();
-        assert_eq!(bytes[1], CODEC_COLUMNAR, "payload codec byte");
+        assert_eq!(bytes[1], CODEC_COLUMNAR_V2, "payload codec byte");
         decoded.extend(decode_span_block(&bytes).unwrap());
     }
     decoded.sort_by_key(|e| (e.start_ts, e.span_id));
     expect.sort_by_key(|e| (e.start_ts, e.span_id));
-    assert_eq!(decoded, expect, "codec-4 optimize output round-trips");
+    assert_eq!(decoded, expect, "codec-5 optimize output round-trips");
 }
 
 #[test]

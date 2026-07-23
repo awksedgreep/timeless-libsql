@@ -31,7 +31,9 @@ pub mod mem;
 #[cfg(test)]
 mod tests;
 
-pub use codec::{decode_block, encode_block, CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
+pub use codec::{
+    decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
+};
 pub use engine::{BlockEngine, BlockEngineConfig, LogQuery};
 pub use mem::MemBlockStore;
 
@@ -104,9 +106,10 @@ pub struct BlockMeta {
     pub ts_min: i64,
     pub ts_max: i64,
     pub entry_count: u32,
-    /// CODEC_RAW, CODEC_ZSTD (legacy, still decodable) or
-    /// CODEC_COLUMNAR (codec byte 3 is reserved for OpenZL — PLAN.md
-    /// "Codec strategy"; blocks with different codecs coexist).
+    /// CODEC_RAW, CODEC_ZSTD / CODEC_COLUMNAR (legacy, still
+    /// decodable) or CODEC_COLUMNAR_V2 (codec byte 3 is reserved for
+    /// OpenZL — PLAN.md "Codec strategy"; blocks with different codecs
+    /// coexist).
     pub codec: u8,
 }
 

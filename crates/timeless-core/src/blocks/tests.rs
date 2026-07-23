@@ -11,7 +11,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::codec::{decode_block, encode_block, CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
+use super::codec::{
+    decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
+    PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS,
+};
 use super::engine::{BlockEngine, BlockEngineConfig, LogQuery};
 use super::mem::MemBlockStore;
 use super::{level_from_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry};
@@ -51,16 +54,17 @@ fn config(index_keys: &[&str]) -> BlockEngineConfig {
 
 #[test]
 fn codec_round_trips_all_codecs() {
-    // CODEC_ZSTD stays in this loop FOREVER even though optimize() no
-    // longer writes it: encode_block(.., CODEC_ZSTD, ..) is the
-    // retained legacy encoder path, and this round-trip is the proof
-    // that existing codec-2 databases remain decodable.
+    // CODEC_ZSTD and CODEC_COLUMNAR stay in this loop FOREVER even
+    // though optimize() no longer writes them: encode_block with the
+    // legacy codecs is the retained legacy encoder path, and this
+    // round-trip is the proof that existing codec-2/4 databases remain
+    // decodable.
     let entries = vec![
         entry(1000, 1, "hello world", &[("service", "api"), ("path", "/x")]),
         entry(1001, 3, "boom 💥 unicode", &[]),
         entry(1005, 0, "", &[("k", "")]), // empty message + empty value
     ];
-    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR] {
+    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR, CODEC_COLUMNAR_V2] {
         let (bytes, meta) = encode_block(&entries, codec, 7).unwrap();
         assert_eq!(meta.ts_min, 1000);
         assert_eq!(meta.ts_max, 1005);
@@ -85,6 +89,120 @@ fn codec_rejects_garbage() {
     // Empty blocks are refused (a block with no entries has no reason
     // to exist and would break ts_min/ts_max).
     assert!(encode_block(&[], CODEC_RAW, 7).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Codec-5 metadata shredding: hostile shapes + the strategy byte.
+// ---------------------------------------------------------------------------
+
+/// The strategy byte of a codec-5 block's metadata column: walk the
+/// container header (4 u32 column lengths at offset 22, columns start
+/// at 38) to the 4th column's first byte.
+fn metadata_strategy_byte(bytes: &[u8]) -> u8 {
+    let len = |i: usize| {
+        u32::from_le_bytes(bytes[22 + i * 4..26 + i * 4].try_into().unwrap()) as usize
+    };
+    bytes[38 + len(0) + len(1) + len(2)]
+}
+
+fn rt_v2(entries: &[LogEntry], expect_strategy: u8, label: &str) {
+    let (bytes, meta) = encode_block(entries, CODEC_COLUMNAR_V2, 7).unwrap();
+    assert_eq!(meta.codec, CODEC_COLUMNAR_V2);
+    assert_eq!(metadata_strategy_byte(&bytes), expect_strategy, "{label}: strategy byte");
+    let back = decode_block(&bytes).unwrap();
+    assert_eq!(&back, entries, "{label}: round-trip");
+}
+
+#[test]
+fn codec5_shreds_hostile_metadata_shapes_exactly() {
+    // Disjoint key sets: no two entries share a key — every per-key
+    // column is a 1-dense-value column with a mostly-empty bitmap.
+    rt_v2(
+        &[
+            entry(1, 1, "a", &[("alpha", "1")]),
+            entry(2, 1, "b", &[("beta", "2")]),
+            entry(3, 1, "c", &[("gamma", "3")]),
+        ],
+        PAIRS_SHREDDED,
+        "disjoint keys",
+    );
+
+    // Empty metadata everywhere: zero keys, the shredded column is
+    // just [strategy][n_keys=0].
+    rt_v2(
+        &[entry(1, 1, "a", &[]), entry(2, 2, "b", &[])],
+        PAIRS_SHREDDED,
+        "all empty",
+    );
+
+    // Unicode keys AND values (multi-byte, emoji, RTL), plus an empty
+    // value and a key present in only some entries. Pair order is the
+    // canonical BYTE order the engines produce (Arabic "مفتاح" starts
+    // 0xD9.., Japanese "サービス" starts 0xE3.. — so Arabic sorts first).
+    rt_v2(
+        &[
+            entry(1, 1, "m", &[("مفتاح", "قيمة"), ("サービス", "決済🚀")]),
+            entry(2, 1, "n", &[("サービス", "")]),
+            entry(3, 1, "o", &[]),
+        ],
+        PAIRS_SHREDDED,
+        "unicode",
+    );
+
+    // Single entry.
+    rt_v2(
+        &[entry(9, 3, "solo", &[("k1", "v1"), ("k2", "v2")])],
+        PAIRS_SHREDDED,
+        "single entry",
+    );
+
+    // All entries carry the SAME pairs: bitmaps are all-ones and the
+    // per-key value columns should dictionary/RLE down to nearly
+    // nothing — the headline case.
+    let same: Vec<LogEntry> = (0..500)
+        .map(|i| entry(i, 1, "steady", &[("service", "api"), ("status", "200")]))
+        .collect();
+    rt_v2(&same, PAIRS_SHREDDED, "all same pairs");
+}
+
+#[test]
+fn codec5_key_explosion_falls_back_to_legacy() {
+    // 65+ distinct keys across the block (> SHRED_MAX_KEYS = 64):
+    // shredding would pay per-key fixed costs with no repetition to
+    // exploit, so the encoder must keep the legacy bytes verbatim —
+    // and still round-trip exactly.
+    let entries: Vec<LogEntry> = (0..(SHRED_MAX_KEYS as i64 + 1))
+        .map(|i| entry(i, 1, "kaboom", &[(&format!("key-{i:03}") as &str, "v")]))
+        .collect();
+    assert_eq!(
+        entries
+            .iter()
+            .flat_map(|e| e.metadata.iter().map(|(k, _)| k.clone()))
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        SHRED_MAX_KEYS + 1
+    );
+    rt_v2(&entries, PAIRS_LEGACY, "key explosion");
+
+    // Exactly at the cap: still shredded.
+    let at_cap: Vec<LogEntry> = (0..SHRED_MAX_KEYS as i64)
+        .map(|i| entry(i, 1, "ok", &[(&format!("key-{i:03}") as &str, "v")]))
+        .collect();
+    rt_v2(&at_cap, PAIRS_SHREDDED, "at the cap");
+}
+
+#[test]
+fn codec5_non_canonical_pairs_fall_back_to_legacy_and_stay_exact() {
+    // The engines canonicalize (sort + dedup) at push(), so encode
+    // only ever sees sorted pair lists — but encode_block is public
+    // API, and the shredded form can only reproduce CANONICAL input.
+    // Unsorted (or duplicate-key) pairs must therefore take the legacy
+    // path and round-trip bit-identically, out-of-order pairs and all.
+    let entries = vec![
+        entry(1, 1, "x", &[("zulu", "1"), ("alpha", "2")]), // unsorted
+        entry(2, 1, "y", &[("dup", "a"), ("dup", "b")]),    // duplicate key
+    ];
+    rt_v2(&entries, PAIRS_LEGACY, "non-canonical pairs");
 }
 
 #[test]
@@ -158,7 +276,7 @@ fn raw_optimize_query_round_trip_is_exact() {
 
 // ---------------------------------------------------------------------------
 // optimize() output codec: prove the compacted blocks carry codec
-// byte 4 (CODEC_COLUMNAR) on disk AND decode back to the exact
+// byte 5 (CODEC_COLUMNAR_V2) on disk AND decode back to the exact
 // entries. A delegating wrapper over a shared MemBlockStore lets the
 // test inspect the store after the engine is done with it.
 // ---------------------------------------------------------------------------
@@ -203,7 +321,7 @@ impl BlockStore for SharedStore {
 }
 
 #[test]
-fn optimize_writes_codec_4_blocks_that_decode_exactly() {
+fn optimize_writes_codec_5_blocks_that_decode_exactly() {
     let shared = Arc::new(MemBlockStore::new());
     let engine =
         BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&["service"])).unwrap();
@@ -222,20 +340,20 @@ fn optimize_writes_codec_4_blocks_that_decode_exactly() {
     engine.flush().unwrap();
     engine.optimize().unwrap();
 
-    // Every persisted block is codec 4 now — in the store metadata AND
+    // Every persisted block is codec 5 now — in the store metadata AND
     // in the payload's own codec byte (offset 1) — and the payloads
     // decode to exactly what was pushed.
     let mut decoded = Vec::new();
     let scanned = shared.scan().unwrap();
     assert!(!scanned.is_empty());
     for (meta, loc) in scanned {
-        assert_eq!(meta.codec, CODEC_COLUMNAR, "store meta codec byte");
+        assert_eq!(meta.codec, CODEC_COLUMNAR_V2, "store meta codec byte");
         let bytes = shared.read_block(&loc).unwrap();
-        assert_eq!(bytes[1], CODEC_COLUMNAR, "payload codec byte");
+        assert_eq!(bytes[1], CODEC_COLUMNAR_V2, "payload codec byte");
         decoded.extend(decode_block(&bytes).unwrap());
     }
     decoded.sort_by_key(|e| e.ts);
-    assert_eq!(decoded, expect, "codec-4 optimize output round-trips");
+    assert_eq!(decoded, expect, "codec-5 optimize output round-trips");
 }
 
 // ---------------------------------------------------------------------------

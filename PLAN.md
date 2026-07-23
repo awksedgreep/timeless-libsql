@@ -355,6 +355,37 @@ Nothing blocks on this choice.
   entered (owner decision); metadata/attributes stay serialized+zstd
   (per-key columns = future format revision).
 
+**DONE 2026-07-22 (Session 8):** codec 5 ("adaptive columnar v2") —
+metadata/attributes SHREDDED into per-key columns. optimize() writes 5;
+decode speaks 1/2/4/5; raw flush stays 1; codec 3 still reserved.
+- Layout (blocks/codec.rs encode_pairs_column, SHARED with spans):
+  strategy byte per block — SHREDDED if distinct keys ≤ 64, else LEGACY
+  (the codec-2/4 bytes verbatim, so key-explosion blocks never regress).
+  SHREDDED = [u16 n_keys][sorted len-prefixed keys] then per key:
+  presence bitmap (ceil(n/8) bytes, timeless-codec bitmap helpers) +
+  DENSE values through encode_str — each key's values get their own
+  adaptive dictionary/concat pick. No outer zstd over the shredded
+  region (values already compressed per key; keys table + bitmaps tiny).
+  Canonical (sorted+deduped) pairs are guaranteed by push() in both
+  engines; the encoder VERIFIES and falls back to LEGACY otherwise.
+- bench-codec (codec 4 vs 5, same 8192-entry partition-pure groups):
+  logs metadata -20.9% (3,596,129 → 2,845,453 B over 125 groups; rep
+  group 29,630 → 23,297 = -21.4%), logs total **-8.1%** (9.21 → 8.46
+  MB). Traces attributes +4.2% (821,762 → 856,384 B) → total +0.13%:
+  the 2-key OTel-ish attribute schema is always-present, so the two
+  all-ones bitmaps (2KB/block) buy nothing the interleaved zstd form
+  didn't already have — the shred pays off with MORE keys and SPARSER
+  keys (the logs shape), not fewer. Decode FASTER both datasets (logs
+  558 → 619 MB/s, traces 628 → 697 MB/s); encode -14% logs / -3%
+  traces, paid at optimize() time only.
+- End-to-end after the switch: logs file 9.65 → 8.93 MB (12.5x →
+  **13.5x** vs plain), traces 35.8 → 35.9 MB (4.3x, unchanged).
+  Queries within noise of recorded: level=error 20.8–23.8ms (rec 24.2),
+  svc+level+range 7.2–8.4ms (rec 7.4), trace lookup 3.41ms (rec 3.36),
+  status=error 4.3ms (rec 4.1) — none near the 20% gate.
+- Decision rule (≥3% total on either dataset, no >20% query
+  regression): **PASS on logs → codec 5 is the optimize() default.**
+
 ---
 
 ## Source-of-truth references (already verified — don't re-derive)

@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_RAW};
+use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR_V2, CODEC_RAW};
 use super::{status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanEntry};
 
 /// Tuning knobs. All ts_* values are in the SAME opaque unit as
@@ -246,10 +246,10 @@ impl SpanBlockEngine {
 
     /// Two-tier compaction ('optimize' command) — the same pass as
     /// blocks/engine.rs::optimize, with STATUS partitions: raw blocks
-    /// are recompressed to CODEC_COLUMNAR (codec 4, adaptive
-    /// per-column strategies — legacy codec-2 blocks stay decodable
-    /// and upgrade whenever a merge rewrites them), small blocks merge
-    /// toward
+    /// are recompressed to CODEC_COLUMNAR_V2 (codec 5, adaptive
+    /// per-column strategies + shredded attributes — legacy codec-2/4
+    /// blocks stay decodable and upgrade whenever a merge rewrites
+    /// them), small blocks merge toward
     /// merge_target_entries WITHIN their status partition only (merging
     /// an error-pure block into an ok-pure one would re-create exactly
     /// the mixed blocks the partitioned flush prevents), subject to the
@@ -352,7 +352,7 @@ impl SpanBlockEngine {
             let terms = extract_terms(&entries);
             let trace_ids = extract_trace_ids(&entries);
             let (data, meta) =
-                encode_span_block(&entries, CODEC_COLUMNAR, self.config.zstd_level)?;
+                encode_span_block(&entries, CODEC_COLUMNAR_V2, self.config.zstd_level)?;
             adds.push(EncodedSpanBlock {
                 meta,
                 data,

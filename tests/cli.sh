@@ -300,10 +300,10 @@ echo "== section 9: timeless_logs round-trip =="
 # Fresh db. Covers: index_keys creation arg; metadata as flat JSON; the
 # index-key hidden columns as INSERT shorthand (service='web' merges
 # into metadata); canonical sorted-JSON metadata output; queryable
-# before AND after flush; 'optimize' transitions codec 1 (raw) -> 4
-# (adaptive columnar v1 — the Session 7 bake-off winner; codec 2 is the
-# legacy zstd-columnar format, still decodable but no longer written)
-# with identical rows; SELECT of a hidden index-key
+# before AND after flush; 'optimize' transitions codec 1 (raw) -> 5
+# (adaptive columnar v2 with per-key shredded metadata — the Session 8
+# winner; codecs 2 and 4 are legacy formats, still decodable but no
+# longer written) with identical rows; SELECT of a hidden index-key
 # column surfaces the value from metadata.
 LOGDB="$TMP/logs_test.db"
 got=$(sqlite3 "$LOGDB" <<SQL
@@ -317,7 +317,7 @@ INSERT INTO logs(logs) VALUES ('flush');
 SELECT 'post', ts, level, message, metadata FROM logs ORDER BY ts;
 SELECT 'raw_blocks', COUNT(*) FROM logs_blocks WHERE codec = 1;
 INSERT INTO logs(logs) VALUES ('optimize');
-SELECT 'codecs', COUNT(*) FILTER (WHERE codec = 1), COUNT(*) FILTER (WHERE codec = 4) FROM logs_blocks;
+SELECT 'codecs', COUNT(*) FILTER (WHERE codec = 1), COUNT(*) FILTER (WHERE codec = 5) FROM logs_blocks;
 SELECT 'opt', ts, level, message, metadata FROM logs ORDER BY ts;
 SELECT 'svc', ts, COALESCE(service, '-') FROM logs ORDER BY ts;
 SQL
@@ -326,7 +326,7 @@ SQL
 # the 3 buffered entries span 3 levels (info/debug/error), so flush
 # writes 3 level-pure raw blocks, and optimize compacts each level
 # partition separately (never merging across levels): 3 raw -> 3
-# codec-4 (adaptive columnar) blocks.
+# codec-5 (adaptive columnar v2, shredded metadata) blocks.
 expected='pre|1000|info|req done|{"path":"/checkout","service":"api","status":"200"}
 pre|1500|debug|noise|{}
 pre|2000|error|boom|{"path":"/pay","service":"web"}
@@ -464,8 +464,9 @@ echo "== section 13: timeless_traces round-trip =="
 # OTel defaults (internal/unset); canonical sorted-JSON attributes;
 # queryable before AND after flush; STATUS-partitioned flush (3
 # statuses buffered -> 3 status-pure raw blocks); 'optimize'
-# transitions codec 1 -> 4 (adaptive columnar v1; codec 2 = legacy,
-# still decodable) per partition with identical rows.
+# transitions codec 1 -> 5 (adaptive columnar v2, shredded attributes;
+# codecs 2/4 = legacy, still decodable) per partition with identical
+# rows.
 TRACEDB="$TMP/traces_test.db"
 got=$(sqlite3 "$TRACEDB" <<SQL
 .load $EXT
@@ -482,14 +483,14 @@ SELECT 'post', hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THE
 SELECT 'raw_blocks', COUNT(*) FROM traces_blocks WHERE codec = 1;
 SELECT 'ts_unit', v FROM traces_meta WHERE k = 'ts_unit';
 INSERT INTO traces(traces) VALUES ('optimize');
-SELECT 'codecs', COUNT(*) FILTER (WHERE codec = 1), COUNT(*) FILTER (WHERE codec = 4) FROM traces_blocks;
+SELECT 'codecs', COUNT(*) FILTER (WHERE codec = 1), COUNT(*) FILTER (WHERE codec = 5) FROM traces_blocks;
 SELECT 'opt', hex(trace_id), name, kind, status FROM traces ORDER BY start_ts;
 SQL
 )
 # Block counts: the 3 buffered spans span 3 statuses (ok/unset/error),
 # so the status-partitioned flush writes 3 status-pure raw blocks and
-# optimize compacts each partition separately: 3 raw -> 3 codec-4
-# (adaptive columnar) blocks.
+# optimize compacts each partition separately: 3 raw -> 3 codec-5
+# (adaptive columnar v2, shredded attributes) blocks.
 expected='pre|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|1111111111111111|-|GET /checkout|api|server|ok|1000|5000|{"http.method":"GET","http.status":"200"}
 pre|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|3333333333333333|-|cache.get|cache|internal|unset|1500|0|{}
 pre|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|2222222222222222|1111111111111111|db.query|db|client|error|2000|700|{}

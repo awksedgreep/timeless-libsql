@@ -1,10 +1,14 @@
-//! bench-codec: the Session 7 codec bake-off (PLAN.md "Codec strategy").
+//! bench-codec: the codec bake-off (PLAN.md "Codec strategy").
+//! Session 7 ran codec 2 (zstd columnar) vs codec 4 (adaptive columnar
+//! v1); Session 8 re-aims it at codec 4 vs codec 5 ("adaptive columnar
+//! v2" — codec 4 plus per-key SHREDDED metadata/attributes), because 4
+//! already beat 2 and the metadata/attributes column — which moved
+//! 0.0% in Session 7 — is exactly what codec 5 attacks. The
+//! metadata/attributes rows of the per-column tables are the headline.
 //!
 //!   bench-codec            (no arguments — no SQLite in the loop)
 //!
-//! Head-to-head of block codec 2 (zstd columnar, the Session 5/6
-//! format) vs codec 4 ("adaptive columnar v1": timeless-codec typed
-//! column encoders) over the EXACT datasets bench-logs and bench-traces
+//! Both codecs run over the EXACT datasets bench-logs and bench-traces
 //! ingest (shared `datasets` module — same PRNG, same bytes).
 //!
 //! Methodology: the 1M-entry logs workload and the ~1M-span traces
@@ -19,20 +23,23 @@
 //! Reported per dataset:
 //!   - per-column stored bytes for one representative group (the
 //!     largest — an info/ok group) and summed over all groups,
-//!   - total encoded bytes + ratio vs codec 2,
+//!   - total encoded bytes + ratio vs codec 4,
 //!   - encode/decode throughput (MB/s over raw column bytes, and
 //!     entries/s),
-//!   - which codec-4 strategy actually won each adaptive column,
-//!   - a verdict line against the PLAN decision rule: codec 4 stays
-//!     the optimize() default only if total bytes improve ≥5% on
-//!     either dataset (query-time regressions are checked by the
-//!     end-to-end benches, not here).
+//!   - which strategy actually won each adaptive column (including
+//!     shredded-vs-legacy for the pairs columns),
+//!   - a verdict line against the Session 8 decision rule: codec 5
+//!     becomes/stays the optimize() default only if total bytes
+//!     improve ≥3% over codec 4 on either dataset (query-time
+//!     regressions are checked by the end-to-end benches, not here).
 
 mod datasets;
 
 use std::time::Instant;
 
-use timeless_core::blocks::{decode_block, encode_block, CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
+use timeless_core::blocks::{
+    decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW,
+};
 use timeless_core::spans::{decode_span_block, encode_span_block};
 use timeless_core::{LogEntry, SpanEntry};
 
@@ -55,10 +62,12 @@ fn column_lens(bytes: &[u8], n_cols: usize) -> Vec<usize> {
         .collect()
 }
 
-/// First byte of each column payload — for codec-4 TYPED columns that
-/// is the timeless-codec encoding id (strategy tag). Meaningless for
-/// the unframed zstd columns (metadata/attributes/parent); the caller
-/// knows which indexes to ask about.
+/// First byte of each column payload — for TYPED columns that is the
+/// timeless-codec encoding id (strategy tag); for a codec-5
+/// metadata/attributes column it is the pairs strategy byte
+/// (0 = legacy, 1 = shredded). Meaningless for the unframed zstd
+/// columns (parent ids, codec-4 pairs); the caller knows which
+/// indexes to ask about.
 fn column_strategy_ids(bytes: &[u8], n_cols: usize) -> Vec<u8> {
     let lens = column_lens(bytes, n_cols);
     let mut off = 22 + n_cols * 4;
@@ -68,6 +77,15 @@ fn column_strategy_ids(bytes: &[u8], n_cols: usize) -> Vec<u8> {
         off += len;
     }
     ids
+}
+
+/// Pairs-column strategy byte (codec 5 metadata/attributes) to name.
+fn pairs_strategy_name(id: u8) -> &'static str {
+    match id {
+        0 => "legacy",
+        1 => "shredded",
+        _ => "?",
+    }
 }
 
 fn strategy_name(id: u8) -> &'static str {
@@ -154,34 +172,34 @@ fn report(
     col_names: &[&str],
     rep_idx: usize,
     rep_len: usize,
-    rep2: &[usize],
-    rep4: &[usize],
-    s2: &CodecStats,
-    s4: &CodecStats,
+    rep_v1: &[usize],
+    rep_v2: &[usize],
+    s_v1: &CodecStats,
+    s_v2: &CodecStats,
     raw_bytes: usize,
     n_entries: usize,
-    wins: &[(usize, Vec<(u8, usize)>)],
+    wins: &[(usize, Vec<(&'static str, usize)>)],
 ) {
     println!("\n### {label}: representative group #{rep_idx} ({rep_len} entries), per-column bytes\n");
-    println!("| column | codec 2 | codec 4 | delta |");
+    println!("| column | codec 4 | codec 5 | delta |");
     println!("|--------|---------|---------|-------|");
     for (i, name) in col_names.iter().enumerate() {
         println!(
             "| {name} | {} | {} | {:+.1}% |",
-            rep2[i],
-            rep4[i],
-            (rep4[i] as f64 / rep2[i].max(1) as f64 - 1.0) * 100.0
+            rep_v1[i],
+            rep_v2[i],
+            (rep_v2[i] as f64 / rep_v1[i].max(1) as f64 - 1.0) * 100.0
         );
     }
     println!(
         "| **group total** | **{}** | **{}** | **{:+.1}%** |",
-        rep2.iter().sum::<usize>(),
-        rep4.iter().sum::<usize>(),
-        (rep4.iter().sum::<usize>() as f64 / rep2.iter().sum::<usize>() as f64 - 1.0) * 100.0
+        rep_v1.iter().sum::<usize>(),
+        rep_v2.iter().sum::<usize>(),
+        (rep_v2.iter().sum::<usize>() as f64 / rep_v1.iter().sum::<usize>() as f64 - 1.0) * 100.0
     );
 
     println!("\n### {label}: all groups, per-column totals\n");
-    println!("| column | codec 2 | codec 4 | delta | codec-4 strategy (groups) |");
+    println!("| column | codec 4 | codec 5 | delta | codec-5 strategy (groups) |");
     println!("|--------|---------|---------|-------|---------------------------|");
     for (i, name) in col_names.iter().enumerate() {
         let strat = wins
@@ -190,30 +208,30 @@ fn report(
             .map(|(_, counts)| {
                 counts
                     .iter()
-                    .map(|(id, cnt)| format!("{} x{}", strategy_name(*id), cnt))
+                    .map(|(name, cnt)| format!("{name} x{cnt}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             })
             .unwrap_or_else(|| "zstd (fixed)".into());
         println!(
             "| {name} | {} | {} | {:+.1}% | {strat} |",
-            s2.per_column[i],
-            s4.per_column[i],
-            (s4.per_column[i] as f64 / s2.per_column[i].max(1) as f64 - 1.0) * 100.0
+            s_v1.per_column[i],
+            s_v2.per_column[i],
+            (s_v2.per_column[i] as f64 / s_v1.per_column[i].max(1) as f64 - 1.0) * 100.0
         );
     }
     println!(
         "| **total** | **{}** | **{}** | **{:+.1}%** | |",
-        fmt_mb(s2.total_bytes),
-        fmt_mb(s4.total_bytes),
-        (s4.total_bytes as f64 / s2.total_bytes as f64 - 1.0) * 100.0
+        fmt_mb(s_v1.total_bytes),
+        fmt_mb(s_v2.total_bytes),
+        (s_v2.total_bytes as f64 / s_v1.total_bytes as f64 - 1.0) * 100.0
     );
 
     let mbs = raw_bytes as f64 / 1.0e6;
     println!("\n### {label}: throughput (raw column bytes: {})\n", fmt_mb(raw_bytes));
     println!("| codec | encode | decode |");
     println!("|-------|--------|--------|");
-    for (name, s) in [("codec 2", s2), ("codec 4", s4)] {
+    for (name, s) in [("codec 4", s_v1), ("codec 5", s_v2)] {
         println!(
             "| {name} | {:.0} MB/s ({:.2}M entries/s) | {:.0} MB/s ({:.2}M entries/s) |",
             mbs / s.encode_secs,
@@ -224,11 +242,13 @@ fn report(
     }
 }
 
-/// Track which strategy id won a typed column, per group.
-fn tally(wins: &mut Vec<(u8, usize)>, id: u8) {
-    match wins.iter_mut().find(|(w, _)| *w == id) {
+/// Track which strategy won a typed column, per group (by NAME — the
+/// pairs columns use a different id namespace than the typed columns,
+/// so callers translate before tallying).
+fn tally(wins: &mut Vec<(&'static str, usize)>, name: &'static str) {
+    match wins.iter_mut().find(|(w, _)| *w == name) {
         Some((_, c)) => *c += 1,
-        None => wins.push((id, 1)),
+        None => wins.push((name, 1)),
     }
 }
 
@@ -237,7 +257,7 @@ fn tally(wins: &mut Vec<(u8, usize)>, id: u8) {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    println!("# timeless bench-codec — codec 2 (zstd columnar) vs codec 4 (adaptive columnar v1)");
+    println!("# timeless bench-codec — codec 4 (adaptive columnar v1) vs codec 5 (v2: shredded metadata/attributes)");
     println!("\ngroups mirror engine flush/optimize: partition-pure, ts-ordered, ≤{GROUP_ENTRIES} entries");
 
     // ══ Logs ═══════════════════════════════════════════════════════
@@ -272,17 +292,19 @@ fn main() {
 
     const LOG_COLS: usize = 4;
     let log_col_names = ["ts", "level", "message", "metadata"];
-    let mut s2 = CodecStats::new(LOG_COLS);
-    let mut s4 = CodecStats::new(LOG_COLS);
+    let mut s_v1 = CodecStats::new(LOG_COLS);
+    let mut s_v2 = CodecStats::new(LOG_COLS);
     let mut raw_bytes = 0usize;
-    // Strategy tallies for the typed columns: ts(0), level(1), message(2).
-    let mut ts_wins: Vec<(u8, usize)> = Vec::new();
-    let mut lvl_wins: Vec<(u8, usize)> = Vec::new();
-    let mut msg_wins: Vec<(u8, usize)> = Vec::new();
+    // Strategy tallies: ts(0), level(1), message(2) are typed columns;
+    // metadata(3) reports shredded-vs-legacy (codec 5's pairs byte).
+    let mut ts_wins: Vec<(&'static str, usize)> = Vec::new();
+    let mut lvl_wins: Vec<(&'static str, usize)> = Vec::new();
+    let mut msg_wins: Vec<(&'static str, usize)> = Vec::new();
+    let mut meta_wins: Vec<(&'static str, usize)> = Vec::new();
 
     // Representative group = the largest (a full 8192-entry info group).
     let rep_idx = (0..groups.len()).max_by_key(|&i| groups[i].len()).unwrap();
-    let (mut rep2, mut rep4) = (vec![0usize; LOG_COLS], vec![0usize; LOG_COLS]);
+    let (mut rep_v1, mut rep_v2) = (vec![0usize; LOG_COLS], vec![0usize; LOG_COLS]);
     let mut rep_len = 0usize;
 
     for (gi, g) in groups.iter().enumerate() {
@@ -292,47 +314,48 @@ fn main() {
         raw_bytes += raw.len() - 38;
 
         let t = Instant::now();
-        let (b2, _) = encode_block(g, CODEC_ZSTD, ZSTD_LEVEL).unwrap();
-        s2.encode_secs += t.elapsed().as_secs_f64();
+        let (b_v1, _) = encode_block(g, CODEC_COLUMNAR, ZSTD_LEVEL).unwrap();
+        s_v1.encode_secs += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let (b4, _) = encode_block(g, CODEC_COLUMNAR, ZSTD_LEVEL).unwrap();
-        s4.encode_secs += t.elapsed().as_secs_f64();
+        let (b_v2, _) = encode_block(g, CODEC_COLUMNAR_V2, ZSTD_LEVEL).unwrap();
+        s_v2.encode_secs += t.elapsed().as_secs_f64();
 
         let t = Instant::now();
-        let d2 = decode_block(&b2).unwrap();
-        s2.decode_secs += t.elapsed().as_secs_f64();
+        let d_v1 = decode_block(&b_v1).unwrap();
+        s_v1.decode_secs += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let d4 = decode_block(&b4).unwrap();
-        s4.decode_secs += t.elapsed().as_secs_f64();
-        assert_eq!(&d2, g, "codec 2 must round-trip exactly");
-        assert_eq!(&d4, g, "codec 4 must round-trip exactly");
+        let d_v2 = decode_block(&b_v2).unwrap();
+        s_v2.decode_secs += t.elapsed().as_secs_f64();
+        assert_eq!(&d_v1, g, "codec 4 must round-trip exactly");
+        assert_eq!(&d_v2, g, "codec 5 must round-trip exactly");
 
-        s2.total_bytes += b2.len();
-        s4.total_bytes += b4.len();
-        let l2 = column_lens(&b2, LOG_COLS);
-        let l4 = column_lens(&b4, LOG_COLS);
+        s_v1.total_bytes += b_v1.len();
+        s_v2.total_bytes += b_v2.len();
+        let l_v1 = column_lens(&b_v1, LOG_COLS);
+        let l_v2 = column_lens(&b_v2, LOG_COLS);
         for i in 0..LOG_COLS {
-            s2.per_column[i] += l2[i];
-            s4.per_column[i] += l4[i];
+            s_v1.per_column[i] += l_v1[i];
+            s_v2.per_column[i] += l_v2[i];
         }
-        let ids = column_strategy_ids(&b4, LOG_COLS);
-        tally(&mut ts_wins, ids[0]);
-        tally(&mut lvl_wins, ids[1]);
-        tally(&mut msg_wins, ids[2]);
+        let ids = column_strategy_ids(&b_v2, LOG_COLS);
+        tally(&mut ts_wins, strategy_name(ids[0]));
+        tally(&mut lvl_wins, strategy_name(ids[1]));
+        tally(&mut msg_wins, strategy_name(ids[2]));
+        tally(&mut meta_wins, pairs_strategy_name(ids[3]));
 
         if gi == rep_idx {
-            rep2 = l2;
-            rep4 = l4;
+            rep_v1 = l_v1;
+            rep_v2 = l_v2;
             rep_len = g.len();
         }
     }
 
-    let log_wins = vec![(0usize, ts_wins), (1, lvl_wins), (2, msg_wins)];
+    let log_wins = vec![(0usize, ts_wins), (1, lvl_wins), (2, msg_wins), (3, meta_wins)];
     report(
-        "logs", &log_col_names, rep_idx, rep_len, &rep2, &rep4, &s2, &s4, raw_bytes, n_entries,
+        "logs", &log_col_names, rep_idx, rep_len, &rep_v1, &rep_v2, &s_v1, &s_v2, raw_bytes, n_entries,
         &log_wins,
     );
-    let logs_improve = 1.0 - s4.total_bytes as f64 / s2.total_bytes as f64;
+    let logs_improve = 1.0 - s_v2.total_bytes as f64 / s_v1.total_bytes as f64;
 
     // ══ Traces ═════════════════════════════════════════════════════
     let t = Instant::now();
@@ -373,16 +396,17 @@ fn main() {
         "trace_id", "span_id", "parent_id", "name", "service", "kind", "status", "start_ts",
         "duration", "attributes",
     ];
-    let mut s2 = CodecStats::new(SPAN_COLS);
-    let mut s4 = CodecStats::new(SPAN_COLS);
+    let mut s_v1 = CodecStats::new(SPAN_COLS);
+    let mut s_v2 = CodecStats::new(SPAN_COLS);
     let mut raw_bytes = 0usize;
     // Typed columns: name(3), service(4), kind(5), status(6),
-    // start_ts(7), duration(8). Ids (0,1) are always fixed+zstd.
-    let mut wins: Vec<(usize, Vec<(u8, usize)>)> =
-        [3usize, 4, 5, 6, 7, 8].iter().map(|&i| (i, Vec::new())).collect();
+    // start_ts(7), duration(8); attributes(9) reports codec 5's
+    // shredded-vs-legacy pairs byte. Ids (0,1) are always fixed+zstd.
+    let mut wins: Vec<(usize, Vec<(&'static str, usize)>)> =
+        [3usize, 4, 5, 6, 7, 8, 9].iter().map(|&i| (i, Vec::new())).collect();
 
     let rep_idx = (0..groups.len()).max_by_key(|&i| groups[i].len()).unwrap();
-    let (mut rep2, mut rep4) = (vec![0usize; SPAN_COLS], vec![0usize; SPAN_COLS]);
+    let (mut rep_v1, mut rep_v2) = (vec![0usize; SPAN_COLS], vec![0usize; SPAN_COLS]);
     let mut rep_len = 0usize;
 
     for (gi, g) in groups.iter().enumerate() {
@@ -390,66 +414,71 @@ fn main() {
         raw_bytes += raw.len() - 62;
 
         let t = Instant::now();
-        let (b2, _) = encode_span_block(g, CODEC_ZSTD, ZSTD_LEVEL).unwrap();
-        s2.encode_secs += t.elapsed().as_secs_f64();
+        let (b_v1, _) = encode_span_block(g, CODEC_COLUMNAR, ZSTD_LEVEL).unwrap();
+        s_v1.encode_secs += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let (b4, _) = encode_span_block(g, CODEC_COLUMNAR, ZSTD_LEVEL).unwrap();
-        s4.encode_secs += t.elapsed().as_secs_f64();
+        let (b_v2, _) = encode_span_block(g, CODEC_COLUMNAR_V2, ZSTD_LEVEL).unwrap();
+        s_v2.encode_secs += t.elapsed().as_secs_f64();
 
         let t = Instant::now();
-        let d2 = decode_span_block(&b2).unwrap();
-        s2.decode_secs += t.elapsed().as_secs_f64();
+        let d_v1 = decode_span_block(&b_v1).unwrap();
+        s_v1.decode_secs += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let d4 = decode_span_block(&b4).unwrap();
-        s4.decode_secs += t.elapsed().as_secs_f64();
-        assert_eq!(&d2, g, "codec 2 must round-trip exactly");
-        assert_eq!(&d4, g, "codec 4 must round-trip exactly");
+        let d_v2 = decode_span_block(&b_v2).unwrap();
+        s_v2.decode_secs += t.elapsed().as_secs_f64();
+        assert_eq!(&d_v1, g, "codec 4 must round-trip exactly");
+        assert_eq!(&d_v2, g, "codec 5 must round-trip exactly");
 
-        s2.total_bytes += b2.len();
-        s4.total_bytes += b4.len();
-        let l2 = column_lens(&b2, SPAN_COLS);
-        let l4 = column_lens(&b4, SPAN_COLS);
+        s_v1.total_bytes += b_v1.len();
+        s_v2.total_bytes += b_v2.len();
+        let l_v1 = column_lens(&b_v1, SPAN_COLS);
+        let l_v2 = column_lens(&b_v2, SPAN_COLS);
         for i in 0..SPAN_COLS {
-            s2.per_column[i] += l2[i];
-            s4.per_column[i] += l4[i];
+            s_v1.per_column[i] += l_v1[i];
+            s_v2.per_column[i] += l_v2[i];
         }
-        let ids = column_strategy_ids(&b4, SPAN_COLS);
+        let ids = column_strategy_ids(&b_v2, SPAN_COLS);
         for (idx, tallies) in wins.iter_mut() {
-            tally(tallies, ids[*idx]);
+            let name = if *idx == 9 {
+                pairs_strategy_name(ids[*idx])
+            } else {
+                strategy_name(ids[*idx])
+            };
+            tally(tallies, name);
         }
 
         if gi == rep_idx {
-            rep2 = l2;
-            rep4 = l4;
+            rep_v1 = l_v1;
+            rep_v2 = l_v2;
             rep_len = g.len();
         }
     }
 
     report(
-        "traces", &span_col_names, rep_idx, rep_len, &rep2, &rep4, &s2, &s4, raw_bytes, n_spans,
+        "traces", &span_col_names, rep_idx, rep_len, &rep_v1, &rep_v2, &s_v1, &s_v2, raw_bytes, n_spans,
         &wins,
     );
-    let traces_improve = 1.0 - s4.total_bytes as f64 / s2.total_bytes as f64;
+    let traces_improve = 1.0 - s_v2.total_bytes as f64 / s_v1.total_bytes as f64;
 
     // ══ Verdict ════════════════════════════════════════════════════
     println!("\n## Verdict\n");
     println!(
-        "- logs: codec 4 total is {:.2}% {} than codec 2",
+        "- logs: codec 5 total is {:.2}% {} than codec 4",
         logs_improve.abs() * 100.0,
         if logs_improve >= 0.0 { "smaller" } else { "LARGER" }
     );
     println!(
-        "- traces: codec 4 total is {:.2}% {} than codec 2",
+        "- traces: codec 5 total is {:.2}% {} than codec 4",
         traces_improve.abs() * 100.0,
         if traces_improve >= 0.0 { "smaller" } else { "LARGER" }
     );
-    let pass = logs_improve >= 0.05 || traces_improve >= 0.05;
+    let pass = logs_improve >= 0.03 || traces_improve >= 0.03;
     println!(
-        "- decision rule (≥5% on either dataset): {}",
+        "- decision rule (≥3% on either dataset): {}",
         if pass {
-            "PASS — codec 4 stays the optimize() default (confirm no >20% query regression in bench-logs/bench-traces)"
+            "PASS — codec 5 stays the optimize() default (confirm no >20% query regression in bench-logs/bench-traces)"
         } else {
-            "FAIL — revert optimize() to codec 2 (the crate still ships; dedupe alone justifies it)"
+            "FAIL — revert optimize() to codec 4 (decode keeps speaking 5 either way)"
         }
     );
 }

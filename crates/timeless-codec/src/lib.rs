@@ -210,6 +210,73 @@ impl<'a> Reader<'a> {
     pub fn i64(&mut self, what: &str) -> Result<i64, String> {
         Ok(i64::from_le_bytes(self.take(8, what)?.try_into().unwrap()))
     }
+
+    /// Consume ONE framed column (`[u8 id][u32 LE len][payload]`) from
+    /// the stream and return the WHOLE frame slice, header included —
+    /// ready to hand to `decode_str`/`decode_i64`/... which expect the
+    /// framed form. This exists for containers that pack SEVERAL framed
+    /// columns back to back with no outer length table (e.g. the
+    /// shredded metadata layout: one `encode_str` column per key):
+    /// [`read_column_frame`] insists the slice is exactly one frame, so
+    /// sequential consumers need this cursor-advancing variant instead.
+    pub fn framed_column(&mut self, what: &str) -> Result<&'a [u8], String> {
+        let start = self.pos;
+        let _encoding = self.u8(what)?;
+        let len = self.u32(what)? as usize;
+        self.take(len, what)?;
+        Ok(&self.buf[start..self.pos])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Presence bitmaps — tiny, but they are WIRE FORMAT, so they live here
+// next to the other on-disk-stable primitives (and get the same testing
+// discipline). Used by callers that shred sparse per-entry key/value
+// pairs into per-key columns: one bit per entry says "this entry has a
+// value in the dense column".
+//
+// Layout: ceil(n/8) bytes, bit i of the stream = byte i/8, bit i%8
+// (LSB-first — bit 0 is the LOWEST bit of byte 0). Trailing pad bits in
+// the last byte MUST be zero and decode validates that: a canonical
+// encoding means byte-identical re-encodes, and a set pad bit is a
+// corruption signal we would otherwise silently swallow.
+// ---------------------------------------------------------------------------
+
+/// Bytes needed for an `n`-bit presence bitmap: ceil(n / 8).
+pub fn bitmap_len(n: usize) -> usize {
+    n.div_ceil(8)
+}
+
+/// Pack bools into an LSB-first bitmap (see the layout note above).
+pub fn encode_bitmap(bits: &[bool]) -> Vec<u8> {
+    let mut out = vec![0u8; bitmap_len(bits.len())];
+    for (i, &b) in bits.iter().enumerate() {
+        if b {
+            out[i / 8] |= 1 << (i % 8);
+        }
+    }
+    out
+}
+
+/// Unpack an `n`-bit LSB-first bitmap. Validates the byte count AND
+/// that trailing pad bits are zero (canonical form — see above).
+pub fn decode_bitmap(bytes: &[u8], n: usize) -> Result<Vec<bool>, String> {
+    if bytes.len() != bitmap_len(n) {
+        return Err(format!(
+            "bitmap: {} byte(s), expected {} for {n} bits",
+            bytes.len(),
+            bitmap_len(n)
+        ));
+    }
+    // Pad-bit check: mask off the n%8 valid bits of the last byte;
+    // anything left set is not a bitmap we wrote.
+    if n % 8 != 0 {
+        let last = bytes[bytes.len() - 1];
+        if last & !((1u8 << (n % 8)) - 1) != 0 {
+            return Err("bitmap: nonzero padding bits in final byte".into());
+        }
+    }
+    Ok((0..n).map(|i| bytes[i / 8] & (1 << (i % 8)) != 0).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +976,50 @@ mod tests {
     fn fixed_bytes_rejects_misaligned() {
         assert!(encode_fixed_bytes(&[1, 2, 3], 2, LVL).is_err());
         assert!(encode_fixed_bytes(&[1, 2, 3], 0, LVL).is_err());
+    }
+
+    #[test]
+    fn bitmap_round_trips() {
+        for n in [0usize, 1, 7, 8, 9, 63, 64, 65, 8192] {
+            // Deterministic mixed pattern (not all-true/all-false).
+            let bits: Vec<bool> = (0..n).map(|i| (i * 7 + 3) % 5 < 2).collect();
+            let enc = encode_bitmap(&bits);
+            assert_eq!(enc.len(), bitmap_len(n));
+            assert_eq!(decode_bitmap(&enc, n).unwrap(), bits, "n = {n}");
+        }
+        assert_eq!(encode_bitmap(&[]), Vec::<u8>::new());
+        assert_eq!(decode_bitmap(&[], 0).unwrap(), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn bitmap_rejects_bad_lengths_and_pad_bits() {
+        assert!(decode_bitmap(&[0, 0], 17).is_err()); // too short for 17 bits
+        assert!(decode_bitmap(&[0], 9).is_err()); // too short
+        assert!(decode_bitmap(&[0, 0, 0], 9).is_err()); // too long
+        assert!(decode_bitmap(&[0xFF], 3).is_err()); // pad bits set
+        assert!(decode_bitmap(&[0x07], 3).is_ok()); // exactly the 3 valid bits
+    }
+
+    #[test]
+    fn reader_framed_column_walks_back_to_back_frames() {
+        // Two encode_str frames packed with no outer length table —
+        // the shredded-metadata consumption pattern.
+        let a = encode_str(["x", "y"].into_iter(), 2, LVL).unwrap().to_bytes();
+        let b = encode_str(["z"].into_iter(), 1, LVL).unwrap().to_bytes();
+        let mut buf = a.clone();
+        buf.extend_from_slice(&b);
+        let mut r = Reader::new(&buf);
+        let fa = r.framed_column("frame a").unwrap();
+        let fb = r.framed_column("frame b").unwrap();
+        assert_eq!(fa, &a[..]);
+        assert_eq!(fb, &b[..]);
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(decode_str(fa, 2).unwrap(), vec!["x", "y"]);
+        assert_eq!(decode_str(fb, 1).unwrap(), vec!["z"]);
+        // Truncated frame: error, not panic.
+        let mut rt = Reader::new(&buf[..buf.len() - 1]);
+        rt.framed_column("frame a").unwrap();
+        assert!(rt.framed_column("frame b").is_err());
     }
 
     #[test]

@@ -31,22 +31,33 @@
 //!                        levels → RLE vs zstd, messages → dictionary
 //!                        vs concat+zstd). The winning strategy id is
 //!                        framed inside the column, so decode never
-//!                        guesses. This is what optimize() writes since
-//!                        the Session 7 bake-off.
+//!                        guesses. The Session 7 format; still fully
+//!                        decodable but no longer written by
+//!                        optimize().
+//!   CODEC_COLUMNAR_V2 (5) — "adaptive columnar v2": identical to
+//!                        codec 4 EXCEPT the metadata column, which is
+//!                        SHREDDED into per-key typed columns (see
+//!                        encode_pairs_column below). This is what
+//!                        optimize() writes since the Session 8
+//!                        shredding bake-off.
 //!
-//! Codec-4 metadata note: the metadata column keeps TODAY'S pair
-//! serialization (below) compressed with plain zstd — same bytes as
-//! codec 2. Splitting metadata into PER-KEY typed columns (a "status"
-//! column would dictionary-encode beautifully) is future work: it
-//! needs a key manifest in the block and interacts with the term
-//! index, so it's a format revision of its own, not a tonight job.
+//! Codec-5 metadata note: codec 4 kept TODAY'S pair serialization
+//! (below) compressed with plain zstd — same bytes as codec 2, and it
+//! moved 0.0% in the Session 7 bake-off while dominating the block
+//! (~29.6KB of a ~44KB 8192-entry logs group). Codec 5 shreds the
+//! column per KEY: each distinct key gets a presence bitmap plus a
+//! DENSE encode_str column of its values, so a "status" column
+//! dictionary-encodes instead of re-paying `status` + the value
+//! serialization per entry. Blocks with pathological key sets fall
+//! back to the legacy bytes verbatim (strategy byte 0) — see the
+//! SHRED_MAX_KEYS rationale.
 //!
 //! Container layout (all integers little-endian, IDENTICAL for all
 //! codecs — only the column payloads differ):
 //!
 //!   offset  size  field
 //!   0       1     format version (0x01)
-//!   1       1     codec (1, 2 or 4)
+//!   1       1     codec (1, 2, 4 or 5)
 //!   2       4     u32 entry_count
 //!   6       8     i64 ts_min
 //!   14      8     i64 ts_max
@@ -61,9 +72,11 @@
 //! (pub(crate), shared with spans/codec.rs); they moved to the
 //! timeless-codec crate — one copy, three consumers.
 
+use std::collections::BTreeSet;
+
 use timeless_codec::{
-    decode_i64, decode_str, decode_u8, encode_i64, encode_str, encode_u8, zstd_compress,
-    zstd_decompress, Reader,
+    bitmap_len, decode_bitmap, decode_i64, decode_str, decode_u8, encode_bitmap, encode_i64,
+    encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
 };
 
 use super::{BlockMeta, LogEntry};
@@ -72,12 +85,15 @@ pub const CODEC_RAW: u8 = 1;
 pub const CODEC_ZSTD: u8 = 2;
 /// Codec 3 stays reserved for OpenZL — see the module header.
 pub const CODEC_COLUMNAR: u8 = 4;
+/// Adaptive columnar v2: codec 4 + shredded metadata/attributes.
+pub const CODEC_COLUMNAR_V2: u8 = 5;
 
 const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = 38;
 
 fn known_codec(codec: u8) -> bool {
     codec == CODEC_RAW || codec == CODEC_ZSTD || codec == CODEC_COLUMNAR
+        || codec == CODEC_COLUMNAR_V2
 }
 
 /// Encode `entries` into one block payload. Entries should already be
@@ -85,7 +101,7 @@ fn known_codec(codec: u8) -> bool {
 /// it (deltas may be negative) but sorted input compresses better and
 /// keeps ts_min/ts_max cheap to trust.
 ///
-/// `zstd_level` is consulted for CODEC_ZSTD and CODEC_COLUMNAR. Level 7
+/// `zstd_level` is consulted for every codec except RAW. Level 7
 /// is the engine's default: measurably better ratio than the zstd
 /// crate's default (3) at a throughput still far above ingest rates.
 pub fn encode_block(
@@ -120,21 +136,29 @@ pub fn encode_block(
     let col_meta_raw = serialize_metadata(entries)?;
 
     let columns: [Vec<u8>; 4] = match codec {
-        CODEC_COLUMNAR => {
-            // Codec 4: typed column encoders pick their own strategy
+        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 => {
+            // Codecs 4/5: typed column encoders pick their own strategy
             // (and record it in the column frame). The ts delta pass
-            // lives INSIDE encode_i64 now; we hand it absolutes.
+            // lives INSIDE encode_i64 now; we hand it absolutes. The
+            // ONLY difference between 4 and 5 is the metadata column.
             let ts_values: Vec<i64> = entries.iter().map(|e| e.ts).collect();
+            let col_meta = if codec == CODEC_COLUMNAR_V2 {
+                // Codec 5: metadata shredded into per-key columns
+                // (with a verbatim-legacy fallback inside).
+                let pairs: Vec<&[(String, String)]> =
+                    entries.iter().map(|e| e.metadata.as_slice()).collect();
+                encode_pairs_column(&pairs, &col_meta_raw, zstd_level)?
+            } else {
+                // Codec 4: today's serialization + zstd, UNFRAMED
+                // (byte-identical to the codec-2 column).
+                zstd_compress(&col_meta_raw, zstd_level)?
+            };
             [
                 encode_i64(&ts_values, zstd_level)?.to_bytes(),
                 encode_u8(&col_lvl_raw, zstd_level)?.to_bytes(),
                 encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?
                     .to_bytes(),
-                // Metadata: today's serialization + zstd, UNFRAMED
-                // (byte-identical to the codec-2 column) — see the
-                // module header for why per-key columns are future
-                // work.
-                zstd_compress(&col_meta_raw, zstd_level)?,
+                col_meta,
             ]
         }
         _ => {
@@ -244,8 +268,8 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
         ));
     }
 
-    // ── Codec 4: typed column decoders ───────────────────────────────
-    if codec == CODEC_COLUMNAR {
+    // ── Codecs 4/5: typed column decoders ────────────────────────────
+    if codec == CODEC_COLUMNAR || codec == CODEC_COLUMNAR_V2 {
         let timestamps = decode_i64(stored[0], n)?;
         let levels = decode_u8(stored[1], n)?;
         for (i, &lvl) in levels.iter().enumerate() {
@@ -254,8 +278,12 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
             }
         }
         let messages = decode_str(stored[2], n)?;
-        let meta_raw = zstd_decompress(stored[3], "metadata column")?;
-        let metadatas = parse_metadata(&meta_raw, n)?;
+        let metadatas = if codec == CODEC_COLUMNAR_V2 {
+            decode_pairs_column(stored[3], n, "metadata", parse_metadata)?
+        } else {
+            let meta_raw = zstd_decompress(stored[3], "metadata column")?;
+            parse_metadata(&meta_raw, n)?
+        };
 
         let mut out = Vec::with_capacity(n);
         let mut msg_it = messages.into_iter();
@@ -379,6 +407,206 @@ fn serialize_metadata(entries: &[LogEntry]) -> Result<Vec<u8>, String> {
         }
     }
     Ok(col_meta)
+}
+
+// ---------------------------------------------------------------------------
+// Codec-5 pair-column shredding — shared by the logs metadata column
+// and (via pub(crate)) the spans attributes column, which store the
+// same shape: per entry, a canonically SORTED, key-DEDUPED list of
+// (String, String) pairs. That canonical form is enforced upstream at
+// ingest, NOT here: blocks/engine.rs push() does
+// `entry.metadata.sort_by(..); entry.metadata.dedup_by(..)` and
+// spans/engine.rs push() does the same for attributes — so by the time
+// a block is encoded, duplicate keys per entry are impossible and the
+// pair order is deterministic. encode_pairs_column still VERIFIES the
+// invariant (strictly increasing keys per entry) and falls back to the
+// legacy bytes if a direct encode_block() caller hands it something
+// else, because the shredded form can only reproduce canonical input
+// bit-exactly.
+// ---------------------------------------------------------------------------
+
+/// SHREDDED vs LEGACY cap: shred only if the block's distinct key set
+/// is ≤ 64 keys. Rationale: every shredded key pays a FIXED overhead
+/// regardless of how many entries actually carry it — a ceil(n/8)-byte
+/// presence bitmap (1KB at the 8192-entry merge target) plus the
+/// ~14-byte frame+zstd floor of an encode_str column. Sane telemetry
+/// schemas (OTel semantic conventions, app log fields) are dozens of
+/// keys, comfortably under 64. A key-EXPLOSION block — request ids or
+/// user ids misused as keys, approaching one distinct key per entry —
+/// would pay that fixed cost thousands of times over (8192 keys ≈ 8MB
+/// of bitmaps for a block whose legacy form is tens of KB), so those
+/// blocks must not shred. 64 keeps the worst shredded overhead bounded
+/// (~66KB/block) while never kicking in on real schemas.
+pub(crate) const SHRED_MAX_KEYS: usize = 64;
+
+/// Strategy byte values for the codec-5 pairs column. LEGACY means the
+/// rest of the column is byte-identical to the codec-2/4 column (the
+/// pair serialization above, zstd'd) — pathological blocks never
+/// regress vs codec 4, they just pay 1 extra byte.
+pub(crate) const PAIRS_LEGACY: u8 = 0;
+pub(crate) const PAIRS_SHREDDED: u8 = 1;
+
+/// Encode a pairs column (logs metadata / span attributes) the codec-5
+/// way. `pairs` is one slice of canonical (sorted, deduped) key/value
+/// pairs per entry; `legacy_raw` is the codec-2/4 serialization of the
+/// same entries (already built by both callers), used verbatim when we
+/// don't shred.
+///
+/// SHREDDED layout (after the strategy byte):
+///
+///   u16               n_keys (≤ SHRED_MAX_KEYS)
+///   per key           u16 key_len + key bytes   (sorted, ascending)
+///   per key, in the   ceil(n_entries/8) bytes   presence bitmap
+///   same sorted       framed encode_str column  DENSE values — only
+///   order                                       the entries whose
+///                                               bitmap bit is set, in
+///                                               entry order
+///
+/// Two deliberate choices worth defending:
+///
+///   - Values go through encode_str, so each key's value list gets the
+///     adaptive dictionary/concat pick on ITS OWN distribution — a
+///     "status" key with 8 distinct values dictionary-encodes even
+///     when it shares the block with a high-cardinality "path" key.
+///   - The shredded region is NOT additionally zstd'd as one blob: the
+///     values (the bulk) are already compressed per key, so an outer
+///     pass would mostly re-chew compressed bytes for nothing, and the
+///     only incompressible leftovers — the keys table and the bitmaps
+///     — are tiny (≤64 keys, ≤1KB/key of bitmap). Keeping them plain
+///     also means decode can walk the layout with zero extra
+///     allocations.
+pub(crate) fn encode_pairs_column(
+    pairs: &[&[(String, String)]],
+    legacy_raw: &[u8],
+    zstd_level: i32,
+) -> Result<Vec<u8>, String> {
+    // Pass 1: collect the distinct key set and verify the canonical
+    // invariant (strictly increasing keys per entry ⇒ sorted AND no
+    // duplicates). BTreeSet gives us the sorted key table for free.
+    let mut keys: BTreeSet<&str> = BTreeSet::new();
+    let mut canonical = true;
+    'outer: for entry in pairs {
+        for w in entry.windows(2) {
+            if w[0].0 >= w[1].0 {
+                canonical = false;
+                break 'outer;
+            }
+        }
+        for (k, _) in entry.iter() {
+            keys.insert(k.as_str());
+        }
+    }
+
+    if !canonical || keys.len() > SHRED_MAX_KEYS {
+        // LEGACY: strategy byte + the codec-2/4 bytes verbatim.
+        let compressed = zstd_compress(legacy_raw, zstd_level)?;
+        let mut out = Vec::with_capacity(1 + compressed.len());
+        out.push(PAIRS_LEGACY);
+        out.extend_from_slice(&compressed);
+        return Ok(out);
+    }
+
+    let n = pairs.len();
+    let mut out = Vec::new();
+    out.push(PAIRS_SHREDDED);
+
+    // Keys table: count + len-prefixed sorted keys. Key length is u16,
+    // same policy as serialize_metadata (a >64KB key is nonsense).
+    out.extend_from_slice(&(keys.len() as u16).to_le_bytes());
+    for k in &keys {
+        if k.len() > u16::MAX as usize {
+            return Err(format!("encode_pairs_column: key {k:?} longer than 64KB"));
+        }
+        out.extend_from_slice(&(k.len() as u16).to_le_bytes());
+        out.extend_from_slice(k.as_bytes());
+    }
+
+    // Per key: presence bitmap + dense value column. binary_search is
+    // valid because we just verified every entry is sorted by key.
+    for k in &keys {
+        let mut present = Vec::with_capacity(n);
+        let mut dense: Vec<&str> = Vec::new();
+        for entry in pairs {
+            match entry.binary_search_by(|(ek, _)| ek.as_str().cmp(k)) {
+                Ok(i) => {
+                    present.push(true);
+                    dense.push(entry[i].1.as_str());
+                }
+                Err(_) => present.push(false),
+            }
+        }
+        out.extend_from_slice(&encode_bitmap(&present));
+        let n_dense = dense.len();
+        out.extend_from_slice(&encode_str(dense, n_dense, zstd_level)?.to_bytes());
+    }
+    Ok(out)
+}
+
+/// Decode a codec-5 pairs column back to one pair list per entry —
+/// bit-identical to the (canonical) input. `what` names the column in
+/// errors ("metadata"/"attribute"); `parse_legacy` is the caller's
+/// legacy pair parser (parse_metadata / parse_attributes), so LEGACY
+/// blocks keep their existing error vocabulary.
+pub(crate) fn decode_pairs_column(
+    bytes: &[u8],
+    n: usize,
+    what: &str,
+    parse_legacy: impl Fn(&[u8], usize) -> Result<Vec<Vec<(String, String)>>, String>,
+) -> Result<Vec<Vec<(String, String)>>, String> {
+    let mut r = Reader::new(bytes);
+    let strategy = r.u8(&format!("{what} strategy byte"))?;
+    match strategy {
+        PAIRS_LEGACY => {
+            let raw = zstd_decompress(r.take(r.remaining(), what)?, &format!("{what} column"))?;
+            parse_legacy(&raw, n)
+        }
+        PAIRS_SHREDDED => {
+            let n_keys = r.u16(&format!("{what} key count"))? as usize;
+            if n_keys > SHRED_MAX_KEYS {
+                return Err(format!(
+                    "{what} column: {n_keys} shredded keys exceeds the cap {SHRED_MAX_KEYS}"
+                ));
+            }
+            // Keys table. Must be strictly ascending — the encoder
+            // writes a BTreeSet — so we validate that too: order is
+            // what lets decode emit each entry's pairs pre-sorted.
+            let mut keys: Vec<String> = Vec::with_capacity(n_keys);
+            for i in 0..n_keys {
+                let klen = r.u16(&format!("{what} key length"))? as usize;
+                let kb = r.take(klen, &format!("{what} key bytes"))?;
+                let k = std::str::from_utf8(kb)
+                    .map_err(|_| format!("{what} column: key {i} is not valid UTF-8"))?;
+                if let Some(prev) = keys.last() {
+                    if prev.as_str() >= k {
+                        return Err(format!("{what} column: keys table is not strictly sorted"));
+                    }
+                }
+                keys.push(k.to_owned());
+            }
+
+            let mut out: Vec<Vec<(String, String)>> = vec![Vec::new(); n];
+            for key in &keys {
+                let bm = r.take(bitmap_len(n), &format!("{what} presence bitmap"))?;
+                let present = decode_bitmap(bm, n)
+                    .map_err(|e| format!("{what} column, key {key:?}: {e}"))?;
+                let n_present = present.iter().filter(|&&b| b).count();
+                let frame = r.framed_column(&format!("{what} value column"))?;
+                let values = decode_str(frame, n_present)
+                    .map_err(|e| format!("{what} column, key {key:?}: {e}"))?;
+                let mut vi = values.into_iter();
+                for (entry, &p) in out.iter_mut().zip(&present) {
+                    if p {
+                        entry.push((key.clone(), vi.next().unwrap()));
+                    }
+                }
+            }
+            if r.remaining() != 0 {
+                return Err(format!("{what} column: trailing bytes after last key"));
+            }
+            Ok(out)
+        }
+        other => Err(format!("{what} column: unknown strategy byte {other}")),
+    }
 }
 
 /// Exact inverse of [`serialize_metadata`], shared by every decode path.

@@ -39,6 +39,15 @@ Flush of 1M buffered points → compressed chunks: ~176ms.
 | TSBS-style hostile (1000 series, ms-jitter ts, noisy values) | 52.6 | **8.3** | **6.4x** |
 | friendly (constant-interval ts, patterned values) | 46.7 | 0.23 | ~200x |
 | periodic sawtooth, chunks only | 16 (raw) | 0.133 | 120x |
+| 1M-entry logs (bench-logs; bytes/entry, codec 5 shredded metadata) | 120.3 | **8.93** | **13.5x** |
+| 960k-span traces (bench-traces; bytes/span, vs indexed plain table) | 161.6 | **37.4** | **4.3x** |
+
+*Logs/traces rows added Session 8: codec 5 ("adaptive columnar v2")
+shreds the metadata/attributes column into per-key typed columns —
+logs metadata -20.9%, whole logs file 9.65 → 8.93 MB (12.5x → 13.5x);
+traces unchanged within noise (35.8 → 35.9 MB, 4.3x) because its 2-key
+always-present attribute schema had nothing to shred. Query timings
+and decode throughput did not regress (decode got faster).*
 
 *Honest asterisk: PLAN criterion said 20–40x on TSBS-style data; we measured
 6.4x — but our generator uses millisecond timestamps with 0–999ms random

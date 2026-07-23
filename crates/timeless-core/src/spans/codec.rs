@@ -30,8 +30,17 @@
 //!                        The Session 6 format; still decodable, no
 //!                        longer written by optimize().
 //!   codec 3 reserved for OpenZL, untouched.
+//!   CODEC_COLUMNAR_V2 (5) — "adaptive columnar v2": codec 4 with the
+//!                        attributes column SHREDDED per key exactly
+//!                        like the logs metadata column (the layouts
+//!                        are byte-identical, so the shredding code is
+//!                        SHARED — encode_pairs_column /
+//!                        decode_pairs_column in blocks/codec.rs).
+//!                        What optimize() writes since Session 8.
 //!   CODEC_COLUMNAR (4) — "adaptive columnar v1", per-column typed
-//!                        encoders from timeless-codec:
+//!                        encoders from timeless-codec (the Session 7
+//!                        format; still decodable, no longer written
+//!                        by optimize()):
 //!             start_ts/durations → encode_i64 (delta+pco vs delta+zstd)
 //!             kinds/statuses     → encode_u8  (RLE vs zstd; status-pure
 //!                                  blocks collapse to one RLE pair)
@@ -50,8 +59,9 @@
 //!                                  column + packed ids is a format
 //!                                  revision for another night)
 //!             attributes         → today's serialization + zstd, same
-//!                                  bytes as codec 2 (per-key columns
-//!                                  are future work, like logs metadata)
+//!                                  bytes as codec 2 (codec 5 is the
+//!                                  per-key revision, like logs
+//!                                  metadata)
 //!
 //! Name/service lengths are u16 (a >64KB operation name is nonsense and
 //! rejected, same policy as metadata keys in logs); attribute values
@@ -62,7 +72,7 @@
 //!
 //!   offset  size   field
 //!   0       1      format version (0x01)
-//!   1       1      codec (1, 2 or 4; 3 reserved for OpenZL)
+//!   1       1      codec (1, 2, 4 or 5; 3 reserved for OpenZL)
 //!   2       4      u32 entry_count
 //!   6       8      i64 ts_min   (min start_ts)
 //!   14      8      i64 ts_max   (max start_ts)
@@ -78,7 +88,9 @@ use timeless_codec::{
     encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
 };
 
-pub use crate::blocks::codec::{CODEC_COLUMNAR, CODEC_RAW, CODEC_ZSTD};
+pub use crate::blocks::codec::{CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD};
+
+use crate::blocks::codec::{decode_pairs_column, encode_pairs_column};
 
 use super::{BlockMeta, SpanEntry};
 
@@ -101,6 +113,7 @@ const COLUMN_NAMES: [&str; N_COLUMNS] = [
 
 fn known_codec(codec: u8) -> bool {
     codec == CODEC_RAW || codec == CODEC_ZSTD || codec == CODEC_COLUMNAR
+        || codec == CODEC_COLUMNAR_V2
 }
 
 /// Encode `entries` into one span block payload. Entries should already
@@ -187,10 +200,23 @@ pub fn encode_span_block(
         }
     }
 
-    let columns: Vec<Vec<u8>> = if codec == CODEC_COLUMNAR {
-        // ── Codec 4: typed encoders per column ──────────────────────
+    let columns: Vec<Vec<u8>> = if codec == CODEC_COLUMNAR || codec == CODEC_COLUMNAR_V2 {
+        // ── Codecs 4/5: typed encoders per column ───────────────────
+        // The ONLY difference between them is the attributes column.
         let starts: Vec<i64> = entries.iter().map(|e| e.start_ts).collect();
         let durs: Vec<i64> = entries.iter().map(|e| e.duration_ns).collect();
+        let col_attr_enc = if codec == CODEC_COLUMNAR_V2 {
+            // Codec 5: attributes shredded per key — same layout, same
+            // SHARED code as the logs metadata column (attributes are
+            // canonicalized by spans/engine.rs push() exactly like
+            // metadata is by blocks/engine.rs push()).
+            let pairs: Vec<&[(String, String)]> =
+                entries.iter().map(|e| e.attributes.as_slice()).collect();
+            encode_pairs_column(&pairs, &col_attr, zstd_level)?
+        } else {
+            // Codec 4: today's serialization + zstd (unframed).
+            zstd_compress(&col_attr, zstd_level)?
+        };
         vec![
             encode_fixed_bytes(&col_trace, 16, zstd_level)?.to_bytes(),
             encode_fixed_bytes(&col_span, 8, zstd_level)?.to_bytes(),
@@ -206,8 +232,8 @@ pub fn encode_span_block(
             // strategy handles their magnitude-similarity best.
             encode_i64(&starts, zstd_level)?.to_bytes(),
             encode_i64(&durs, zstd_level)?.to_bytes(),
-            // Attributes: today's serialization + zstd (unframed).
-            zstd_compress(&col_attr, zstd_level)?,
+            // Attributes: built above (codec-dependent).
+            col_attr_enc,
         ]
     } else {
         // ── Codecs 1/2 — the Session 6 formats, byte-for-byte ────────
@@ -309,8 +335,8 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         ));
     }
 
-    // ── Codec 4: typed column decoders ───────────────────────────────
-    if codec == CODEC_COLUMNAR {
+    // ── Codecs 4/5: typed column decoders ────────────────────────────
+    if codec == CODEC_COLUMNAR || codec == CODEC_COLUMNAR_V2 {
         let trace_flat = decode_fixed_bytes(stored[0], n, 16)?;
         let span_flat = decode_fixed_bytes(stored[1], n, 8)?;
         let parent_raw = zstd_decompress(stored[2], COLUMN_NAMES[2])?;
@@ -331,8 +357,12 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         }
         let timestamps = decode_i64(stored[7], n)?;
         let durations = decode_i64(stored[8], n)?;
-        let attr_raw = zstd_decompress(stored[9], COLUMN_NAMES[9])?;
-        let attrs = parse_attributes(&attr_raw, n)?;
+        let attrs = if codec == CODEC_COLUMNAR_V2 {
+            decode_pairs_column(stored[9], n, "attribute", parse_attributes)?
+        } else {
+            let attr_raw = zstd_decompress(stored[9], COLUMN_NAMES[9])?;
+            parse_attributes(&attr_raw, n)?
+        };
 
         let mut out = Vec::with_capacity(n);
         let mut name_it = names.into_iter();
