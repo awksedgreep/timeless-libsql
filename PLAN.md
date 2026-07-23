@@ -762,10 +762,11 @@ Gated on: Session 5 (shares the entire block-store skeleton).
       prints seed + op index for exact replay. 3 fixed seeds run in
       ~9s. The oracle's own first catch was a bug in ITS generator
       (shared prune cutoff across signals with different ts units) —
-      the harness works. Generator constraint recorded: metric ts are
-      strictly increasing per series because the chunk index is keyed
-      (series, min_ts) — duplicate-min_ts chunks would shadow each
-      other (pre-existing engine limit, now in RESULTS known-limits).
+      the harness works. The generator's original strictly-increasing
+      metric-ts constraint (worked around the (series, min_ts) chunk
+      index shadowing bug) was lifted once the donor's key-widening
+      fix was ported: metric ts are now non-decreasing with occasional
+      duplicates (see BUG_chunk_index_min_ts_shadowing.md).
 - [x] **kill -9 crash test** (tests/crash.sh, cli.sh section 20): 5
       iterations of killing a live 3000-round ingest (BEGIN; 30 rows
       over 3 signals; flush ×3; COMMIT; watermark print; optimize/

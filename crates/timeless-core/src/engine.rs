@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,6 +34,15 @@ pub type Labels = BTreeMap<String, String>;
 struct PartitionKey {
     series_id: i64,
 }
+
+/// Chunk index key. The trailing sequence number is a per-engine
+/// monotonic id (not persisted): two chunks for the same series may
+/// legitimately share a min_ts (backfill, duplicate timestamps across
+/// flush boundaries, compaction output), and a two-field key would let
+/// the second insert silently shadow the first.
+/// (Ported from the donor fix in timeless_metrics — see
+/// BUG_chunk_index_min_ts_shadowing.md.)
+type ChunkKey = (PartitionKey, i64, u64);
 
 /// Full identity of a series for reverse lookups and label queries.
 #[derive(Clone)]
@@ -410,7 +419,10 @@ pub struct Engine {
     /// periodic compactor later merges them into large pco chunks.
     defer_compression: bool,
     partitions: DashMap<PartitionKey, PartitionBuffer>,
-    index: RwLock<BTreeMap<(PartitionKey, i64), ChunkMeta>>,
+    index: RwLock<BTreeMap<ChunkKey, ChunkMeta>>,
+    /// Source of the ChunkKey sequence field. In-memory only — restart
+    /// recovery re-assigns fresh values while scanning.
+    chunk_seq: AtomicU64,
     series: RwLock<SeriesRegistry>,
     flush_queue: Mutex<Vec<PartitionKey>>,
     buffer_memory: AtomicUsize,
@@ -503,10 +515,11 @@ struct TxnJournal {
     /// into the buffers on rollback.
     saved: Vec<(PartitionKey, Vec<i64>, Vec<f64>)>,
     /// Index keys inserted during the txn (their chunk rows roll back).
-    added: HashSet<(PartitionKey, i64)>,
+    added: HashSet<ChunkKey>,
     /// Pre-txn index entries removed during the txn (their chunk rows
-    /// are restored by the host rollback).
-    removed: Vec<((PartitionKey, i64), ChunkMeta)>,
+    /// are restored by the host rollback). Keys carry their original
+    /// chunk_seq, so rollback reinstates entries verbatim.
+    removed: Vec<(ChunkKey, ChunkMeta)>,
 }
 
 struct ColdFlushGuard<'a> {
@@ -520,12 +533,16 @@ impl Drop for ColdFlushGuard<'_> {
 }
 
 impl Engine {
-    fn index_read(&self) -> RwLockReadGuard<'_, BTreeMap<(PartitionKey, i64), ChunkMeta>> {
+    fn index_read(&self) -> RwLockReadGuard<'_, BTreeMap<ChunkKey, ChunkMeta>> {
         self.index.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn index_write(&self) -> RwLockWriteGuard<'_, BTreeMap<(PartitionKey, i64), ChunkMeta>> {
+    fn index_write(&self) -> RwLockWriteGuard<'_, BTreeMap<ChunkKey, ChunkMeta>> {
         self.index.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn next_chunk_seq(&self) -> u64 {
+        self.chunk_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn series_read(&self) -> RwLockReadGuard<'_, SeriesRegistry> {
@@ -694,17 +711,13 @@ impl Engine {
         let mut j = self.txn_guard();
         let mut index = self.index_write();
         for (key, meta) in items {
-            let k = (key, meta.min_ts);
+            // The fresh chunk_seq makes every insert key unique, so an
+            // insert can never overwrite an existing entry (the min_ts
+            // shadowing bug this key shape fixes) — the pre-fix
+            // "journal the shadowed meta" branch is gone because
+            // shadowing is now impossible by construction.
+            let k = (key, meta.min_ts, self.next_chunk_seq());
             if let Some(j) = j.as_deref_mut() {
-                // If this key already exists (two chunks of one series
-                // sharing a min_ts — an index-shadowing edge that
-                // predates the journal), journal the old meta so
-                // rollback restores it rather than losing it.
-                if let Some(old) = index.get(&k) {
-                    if !j.added.contains(&k) {
-                        j.removed.push((k, old.clone()));
-                    }
-                }
                 j.added.insert(k);
             }
             index.insert(k, meta);
@@ -763,6 +776,7 @@ impl Engine {
             defer_compression,
             partitions: DashMap::new(),
             index: RwLock::new(BTreeMap::new()),
+            chunk_seq: AtomicU64::new(0),
             series: RwLock::new(registry),
             flush_queue: Mutex::new(Vec::new()),
             buffer_memory: AtomicUsize::new(0),
@@ -1471,17 +1485,17 @@ impl Engine {
 
         // Group eligible chunks by series: all raw chunks, plus pco
         // chunks small enough that merging improves the ratio.
-        let mut candidates: HashMap<PartitionKey, Vec<(i64, ChunkMeta)>> = HashMap::new();
+        let mut candidates: HashMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> = HashMap::new();
         {
             let index = self.index_read();
-            for ((key, min_ts), meta) in index.iter() {
+            for (chunk_key, meta) in index.iter() {
                 let eligible = meta.max_ts < cutoff_ts
                     && (meta.encoding == ENC_RAW || meta.point_count < SMALL_CHUNK_POINTS);
                 if eligible {
                     candidates
-                        .entry(*key)
+                        .entry(chunk_key.0)
                         .or_default()
-                        .push((*min_ts, meta.clone()));
+                        .push((*chunk_key, meta.clone()));
                 }
             }
         }
@@ -1496,7 +1510,7 @@ impl Engine {
         // Phase 1: re-encode every replacement chunk in memory — nothing
         // is persisted or visible to queries yet. `add` holds the chunks
         // in plan order; each plan records how many are its own.
-        let mut plans: Vec<(PartitionKey, Vec<(i64, ChunkMeta)>, usize)> = Vec::new();
+        let mut plans: Vec<(PartitionKey, Vec<(ChunkKey, ChunkMeta)>, usize)> = Vec::new();
         let mut add: Vec<EncodedChunk> = Vec::new();
 
         for (key, chunks) in candidates {
@@ -1524,9 +1538,9 @@ impl Engine {
 
         // Old storage units are deletable only if no surviving
         // (non-replaced) index entry still references them.
-        let removed: HashSet<(PartitionKey, i64)> = plans
+        let removed: HashSet<ChunkKey> = plans
             .iter()
-            .flat_map(|(key, chunks, _)| chunks.iter().map(move |(ts, _)| (*key, *ts)))
+            .flat_map(|(_, chunks, _)| chunks.iter().map(|(k, _)| *k))
             .collect();
         let deletable: Vec<ChunkLoc> = {
             let index = self.index_read();
@@ -1560,24 +1574,21 @@ impl Engine {
             let mut index = self.index_write();
             let mut next = 0;
             for (key, chunks, new_count) in &plans {
-                for (min_ts, meta) in chunks {
-                    let k = (*key, *min_ts);
+                for (chunk_key, meta) in chunks {
                     if let Some(j) = j.as_deref_mut() {
-                        if !j.added.remove(&k) {
-                            j.removed.push((k, meta.clone()));
+                        if !j.added.remove(chunk_key) {
+                            j.removed.push((*chunk_key, meta.clone()));
                         }
                     }
-                    index.remove(&k);
+                    index.remove(chunk_key);
                 }
                 for i in next..next + new_count {
                     let meta = add[i].meta(locs[i].clone());
-                    let k = (*key, meta.min_ts);
+                    // Fresh chunk_seq → the key cannot collide with any
+                    // existing entry, so no shadowed-meta journaling is
+                    // needed (see index_insert_new).
+                    let k = (*key, meta.min_ts, self.next_chunk_seq());
                     if let Some(j) = j.as_deref_mut() {
-                        if let Some(old) = index.get(&k) {
-                            if !j.added.contains(&k) {
-                                j.removed.push((k, old.clone()));
-                            }
-                        }
                         j.added.insert(k);
                     }
                     index.insert(k, meta);
@@ -1695,8 +1706,8 @@ impl Engine {
         let matching: Vec<ChunkMeta> = {
             let index = self.index_read();
             index
-                .range((pk, i64::MIN)..)
-                .take_while(|((k, _), _)| k == &pk)
+                .range((pk, i64::MIN, u64::MIN)..)
+                .take_while(|((k, _, _), _)| k == &pk)
                 .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
                 .map(|(_, meta)| meta.clone())
                 .collect()
@@ -1768,8 +1779,8 @@ impl Engine {
         let chunks: Vec<ChunkMeta> = {
             let index = self.index_read();
             index
-                .range((pk, i64::MIN)..)
-                .take_while(|((k, _), _)| k == &pk)
+                .range((pk, i64::MIN, u64::MIN)..)
+                .take_while(|((k, _, _), _)| k == &pk)
                 .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
                 .map(|(_, meta)| meta.clone())
                 .collect()
@@ -1897,10 +1908,10 @@ impl Engine {
         let mut j = self.txn_guard();
         let mut index = self.index_write();
 
-        let to_remove: Vec<(PartitionKey, i64)> = index
+        let to_remove: Vec<ChunkKey> = index
             .iter()
             .filter(|(_, meta)| meta.max_ts < before_ts)
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| *k)
             .collect();
 
         let entries_removed = to_remove.len();
@@ -1953,7 +1964,11 @@ impl Engine {
             let key = PartitionKey {
                 series_id: chunk.series_id,
             };
-            index.insert((key, chunk.meta.min_ts), chunk.meta);
+            // Recovery assigns fresh sequence numbers while scanning —
+            // same as the donor fix (the seq is in-memory only, never
+            // persisted), so duplicate-min_ts chunks on disk can never
+            // shadow each other after a restart either.
+            index.insert((key, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
         }
     }
 

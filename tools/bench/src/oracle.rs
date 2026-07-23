@@ -26,13 +26,15 @@
 //!  - Values are generated from PRNG bits but always FINITE: pco and
 //!    plain REAL columns both round-trip any finite f64 bit-exactly,
 //!    and results compare by to_bits(), so floats are exact, not fuzzy.
-//!  - Metric timestamps are STRICTLY INCREASING per series. Known
-//!    engine limit (predates this session, recorded in RESULTS.md):
-//!    the metrics chunk index is keyed (series, min_ts) — two chunks of
-//!    one series sharing a min_ts would shadow each other. Real
-//!    telemetry virtually never does this; the generator avoids
-//!    manufacturing it. Logs/traces have no such key and get duplicate
-//!    timestamps freely.
+//!  - Metric timestamps are NON-DECREASING per series, with occasional
+//!    DUPLICATES — including across flush boundaries. The old
+//!    strictly-increasing workaround (chunk index keyed (series,
+//!    min_ts); duplicate-min_ts chunks shadowed each other — see
+//!    BUG_chunk_index_min_ts_shadowing.md) is gone: the key now
+//!    carries a chunk_seq, and the engine treats duplicate-ts points
+//!    as DISTINCT points, exactly like the plain mirror table's rows,
+//!    so the invariant holds with duplicates. Logs/traces always got
+//!    duplicate timestamps freely.
 //!  - Prune is generated as PRUNE-ALL (flush first, cutoff above every
 //!    stored ts, mirror = DELETE everything). Partial prune is not
 //!    row-mirrorable by design: it deletes whole chunks/blocks below
@@ -216,7 +218,7 @@ fn run_seed(ext: &str, seed: u64) {
     let conn = open_db(&path, ext);
     let mut rng = Rng::new(seed);
 
-    // Per-series strictly-increasing metric timestamps (see header).
+    // Per-series non-decreasing metric timestamps (see header).
     let mut metric_ts: Vec<i64> = vec![1_700_000_000; METRIC_NAMES.len() * LABEL_SETS.len()];
     let mut log_seq: u64 = 0; // message uniqueness counter
     let mut span_seq: u64 = 0; // span_id uniqueness counter
@@ -290,8 +292,8 @@ fn run_seed(ext: &str, seed: u64) {
                 .expect("end txn");
             if !commit {
                 // The mirrors rolled back too, but metric_ts marched
-                // on — harmless (timestamps stay strictly increasing;
-                // gaps are fine). Immediately cross-check all three.
+                // on — harmless (timestamps stay non-decreasing; gaps
+                // are fine). Immediately cross-check all three.
                 run_all_full_checks(&conn, seed, op);
             }
         } else if rng.below(16) != 0 {
@@ -385,8 +387,11 @@ fn insert_one(
             let name_i = rng.below(METRIC_NAMES.len() as u64) as usize;
             let label_i = rng.below(LABEL_SETS.len() as u64) as usize;
             let series = name_i * LABEL_SETS.len() + label_i;
-            // Strictly increasing per series (see module header).
-            metric_ts[series] += 1 + rng.below(50) as i64;
+            // Non-decreasing per series; a 0 step (~1 in 50) produces a
+            // duplicate timestamp, sometimes straddling a flush — the
+            // exact duplicate-min_ts-chunk shape the widened chunk key
+            // fixed (see module header).
+            metric_ts[series] += rng.below(50) as i64;
             let (name, labels, ts, val) = (
                 METRIC_NAMES[name_i],
                 LABEL_SETS[label_i],

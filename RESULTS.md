@@ -141,11 +141,12 @@ compressed telemetry SQL, zero client changes.
   xSavepoint) — only whole-transaction ROLLBACK is journaled. Series/
   metric NAMES registered during a rolled-back transaction stay
   registered in memory as harmless empty series.
-- Metrics chunk index is keyed (series, min_ts): two chunks of one
-  series sharing an identical min_ts would shadow each other
-  (pre-existing engine design inherited from the donor; real telemetry
-  effectively never produces it — the oracle generator documents and
-  avoids manufacturing it).
+- ~~Metrics chunk index keyed (series, min_ts) — duplicate-min_ts
+  chunks shadowed each other~~ **Fixed** (2026-07-22): the donor fix
+  (key widened to (series, min_ts, chunk_seq)) is ported to
+  timeless-core; see BUG_chunk_index_min_ts_shadowing.md. The oracle
+  generator now produces duplicate metric timestamps, including across
+  flush boundaries.
 - **Shared-buffer semantics across connections (PLAN R4 — fixed, with
   this documented trade):** all connections in one process share ONE
   engine per (db file, table), so points one connection has inserted

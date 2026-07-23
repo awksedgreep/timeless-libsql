@@ -1,6 +1,6 @@
 # Bug: chunk index shadowing when two chunks share (series_id, min_ts)
 
-**Status:** open here — **fixed upstream** in timeless_metrics on 2026-07-22
+**Status:** fixed here 2026-07-22 — donor fix ported to `crates/timeless-core/src/engine.rs` (key widened to `(PartitionKey, min_ts, chunk_seq)`; regression tests in `crates/timeless-core/tests/dup_min_ts.rs`; oracle now generates duplicate metric timestamps) — **fixed upstream** in timeless_metrics on 2026-07-22
 (`native/tms_engine/src/lib.rs`, unreleased v6.1.3; see
 `~/Documents/elixir/timeless/timeless_metrics/BUG_chunk_index_min_ts_shadowing.md`)
 **Component:** `crates/timeless-core/src/engine.rs` (metrics engine only —
