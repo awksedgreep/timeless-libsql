@@ -51,6 +51,7 @@ use timeless_core::{
 
 use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_block_store::{self, ShadowBlockStore};
+use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
 
 /// Register the "timeless_logs" module on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection) -> Result<()> {
@@ -99,7 +100,12 @@ pub struct LogsTab {
     /// The allowlist of indexed metadata keys, in declared-column order
     /// (position k ↔ column FIXED_COLS+k ↔ bitmask bit 8<<k).
     index_keys: Vec<String>,
-    engine: Arc<BlockEngine>,
+    /// Shared process-wide across connections via the R4 registry —
+    /// see metrics_vtab.rs and shared.rs for the full story.
+    shared: Arc<SharedEngine<BlockEngine>>,
+    key: RegistryKey,
+    /// True while THIS connection's write txn holds the writer gate.
+    gate_held: bool,
     rowid_counter: i64,
 }
 
@@ -108,15 +114,18 @@ impl LogsTab {
         db: &mut VTabConnection,
         _aux: Option<&()>,
         _module_name: &[u8],
-        _database_name: &[u8],
+        database_name: &[u8],
         table_name: &[u8],
         args: &[&[u8]],
         is_create: bool,
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let handle = unsafe { db.handle() };
+        // Bind the calling connection for every store operation below
+        // (DDL, _meta reads/writes, recovery scans). RAII unbind.
+        let _bind = DbGuard::bind(handle);
 
-        let store = ShadowBlockStore::new(handle, &table);
+        let store = ShadowBlockStore::new(&table);
 
         let index_keys = if is_create {
             let host = unsafe { Connection::from_handle(handle) }?;
@@ -153,20 +162,27 @@ impl LogsTab {
             }
         };
 
-        // BlockEngine::new recovers the block index via store.scan() —
-        // a re-entrant SELECT, safe because THIS thread already holds
-        // the connection mutex (recursively).
-        let engine = BlockEngine::new(
-            Box::new(store),
-            BlockEngineConfig {
-                flush_threshold: FLUSH_THRESHOLD,
-                zstd_level: ZSTD_LEVEL,
-                merge_target_entries: MERGE_TARGET_ENTRIES,
-                merge_max_ts_span: MERGE_MAX_TS_SPAN,
-                index_keys: index_keys.clone(),
-            },
-        )
-        .map_err(module_err)?;
+        // R4: one engine per (db file, table) per process. First
+        // connection in builds it — BlockEngine::new recovers the block
+        // index via store.scan() (a re-entrant SELECT routed to the
+        // calling connection by the DbGuard above, safe because THIS
+        // thread already holds the connection mutex recursively) —
+        // every later xConnect just bumps the Arc, no re-recovery.
+        let key = shared::registry_key(handle, database_name, &table);
+        let index_keys_for_engine = index_keys.clone();
+        let shared_engine = shared::get_or_create(&key, move || {
+            BlockEngine::new(
+                Box::new(store),
+                BlockEngineConfig {
+                    flush_threshold: FLUSH_THRESHOLD,
+                    zstd_level: ZSTD_LEVEL,
+                    merge_target_entries: MERGE_TARGET_ENTRIES,
+                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    index_keys: index_keys_for_engine,
+                },
+            )
+            .map_err(module_err)
+        })?;
 
         // Declared schema, built at runtime: fixed columns + one HIDDEN
         // TEXT column per index key + the hidden command column named
@@ -186,10 +202,33 @@ impl LogsTab {
                 db: handle,
                 table_name: table,
                 index_keys,
-                engine: Arc::new(engine),
+                shared: shared_engine,
+                key,
+                gate_held: false,
                 rowid_counter: 0,
             },
         ))
+    }
+
+    /// Writer-gate helpers — identical shape to metrics_vtab.rs (read
+    /// the comments there); begin() is the primary acquire site.
+    fn acquire_write_gate(&mut self) -> Result<()> {
+        if self.gate_held {
+            return Ok(());
+        }
+        self.shared
+            .write_gate
+            .acquire(self.db as usize, &self.table_name)
+            .map_err(module_err)?;
+        self.gate_held = true;
+        Ok(())
+    }
+
+    fn release_write_gate(&mut self) {
+        if self.gate_held {
+            self.shared.write_gate.release(self.db as usize);
+            self.gate_held = false;
+        }
     }
 
     /// Hidden-column command insert ('flush' | 'optimize' | 'prune:<ts>').
@@ -197,18 +236,18 @@ impl LogsTab {
         if cmd == "flush" {
             // Drain the buffer into one RAW block (+ terms). Durable as
             // soon as the enclosing SQLite transaction commits.
-            self.engine.flush().map_err(module_err)?;
+            self.shared.engine.flush().map_err(module_err)?;
         } else if cmd == "optimize" {
             // Two-tier compaction: raw → zstd-columnar, plus merge of
             // small compressed blocks (span-capped) — one atomic swap.
-            self.engine.optimize().map_err(module_err)?;
+            self.shared.engine.optimize().map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             // Retention: whole-block deletes by ts_max, term rows
             // removed in the same operation.
             let ts: i64 = ts_str.trim().parse().map_err(|_| {
                 module_err(format!("prune: expected 'prune:<ts>', got {cmd:?}"))
             })?;
-            self.engine.prune(ts).map_err(module_err)?;
+            self.shared.engine.prune(ts).map_err(module_err)?;
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'optimize', 'prune:<ts>'"
@@ -368,12 +407,20 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
     fn open(&'vtab mut self) -> Result<Self::Cursor> {
         Ok(LogsCursor {
             base: ffi::sqlite3_vtab_cursor::default(),
-            engine: Arc::clone(&self.engine),
+            shared: Arc::clone(&self.shared),
+            db: self.db,
             index_keys: self.index_keys.clone(),
             rows: Vec::new(),
             pos: 0,
             phantom: PhantomData,
         })
+    }
+}
+
+/// Defensive gate release on teardown — see metrics_vtab.rs.
+impl Drop for LogsTab {
+    fn drop(&mut self) {
+        self.release_write_gate();
     }
 }
 
@@ -392,6 +439,10 @@ impl CreateVTab<'_> for LogsTab {
     }
 
     fn destroy(&self) -> Result<()> {
+        // Registry entry first: the key must never resolve to an
+        // engine whose shadow tables are gone (see metrics_vtab.rs).
+        shared::remove(&self.key);
+        let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
         host.execute_batch(&shadow_block_store::drop_ddl(&self.table_name))
     }
@@ -402,6 +453,13 @@ impl UpdateVTab<'_> for LogsTab {
     /// columns from index 2: 2=ts, 3=level, 4=message, 5=metadata,
     /// 6..6+K = index keys, 6+K = hidden command column.
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
+        // Connection routing + writer gate, as in metrics_vtab.rs
+        // (gate is normally taken by begin(); this is the defensive
+        // re-check). Matters even more here: push() AUTO-FLUSHES at
+        // the threshold, so an insert can write real block rows.
+        let _bind = DbGuard::bind(self.db);
+        self.acquire_write_gate()?;
+
         let cmd_idx = 2 + FIXED_COLS + self.index_keys.len();
         // Command idiom, dispatched by TYPE like metrics: TEXT command,
         // BLOB reserved for a future Tier 2 batch format, NULL = data.
@@ -460,7 +518,7 @@ impl UpdateVTab<'_> for LogsTab {
 
         // push() canonicalizes (sorts) metadata, validates, and
         // auto-flushes at the threshold.
-        self.engine
+        self.shared.engine
             .push(LogEntry {
                 ts,
                 level,
@@ -504,19 +562,32 @@ impl UpdateVTab<'_> for LogsTab {
 /// buffered entries the flush drained back to the buffer. All commands
 /// ('flush', 'optimize', 'prune:<ts>') are journaled and roll back
 /// fully. Same savepoint limitation as metrics (xSavepoint not wired).
+/// R4 ADDITION — writer gate brackets the journal exactly as in
+/// metrics_vtab.rs (read the comment there): acquire before
+/// txn_begin, holder-only commit/rollback, release after.
 impl TransactionVTab<'_> for LogsTab {
     fn begin(&mut self) -> Result<()> {
-        self.engine.txn_begin();
+        let _bind = DbGuard::bind(self.db);
+        self.acquire_write_gate()?;
+        self.shared.engine.txn_begin();
         Ok(())
     }
 
     fn commit(&mut self) -> Result<()> {
-        self.engine.txn_commit();
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_commit();
+            self.release_write_gate();
+        }
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
-        self.engine.txn_rollback();
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_rollback();
+            self.release_write_gate();
+        }
         Ok(())
     }
 }
@@ -536,7 +607,9 @@ struct OutRow {
 #[repr(C)]
 pub struct LogsCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
-    engine: Arc<BlockEngine>,
+    shared: Arc<SharedEngine<BlockEngine>>,
+    /// The connection driving this scan (bound in filter()).
+    db: *mut ffi::sqlite3,
     index_keys: Vec<String>,
     rows: Vec<OutRow>,
     pos: usize,
@@ -553,6 +626,9 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         _idx_str: Option<&str>,
         args: &Filters<'_>,
     ) -> Result<()> {
+        // Route block reads to the connection running this SELECT.
+        let _bind = DbGuard::bind(self.db);
+
         // argv slots were claimed in canonical order (level, ts lo,
         // ts hi, index keys), so the mask alone tells us which
         // positional arg is which.
@@ -617,7 +693,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         let entries = if impossible {
             Vec::new()
         } else {
-            self.engine
+            self.shared.engine
                 .query(&LogQuery {
                     ts_min,
                     ts_max,

@@ -16,25 +16,34 @@
 //! transaction IS our atomicity, which is also why `replace_chunks` needs
 //! no manifest/rename machinery like FsStore does.
 //!
-//! THREAD SAFETY. `ChunkStore` is `Send + Sync` (the engine may call it
-//! from rayon worker threads), but a raw `*mut sqlite3` is neither. We
-//! wrap the handle in a Mutex so all connection access is serialized:
-//! lock → `Connection::from_handle` (borrow, does NOT close on drop) →
-//! run pre-formatted SQL → unlock. Serializing store access is correct
-//! and fine for the POC (SQLite would serialize the connection anyway).
+//! CONNECTION ROUTING (R4). This store holds NO connection at all —
+//! only pre-formatted SQL strings. The engine it serves is SHARED
+//! across every connection of the pool (see shared.rs), so "the host
+//! connection" is not a property of the store; it is a property of
+//! whichever vtab callback is currently executing. Each method fetches
+//! the CALLING connection from the thread-local binding
+//! (shared::current_conn) that the vtab callback established via
+//! DbGuard. That guarantees:
+//!   - store SQL always runs in the caller's transaction context
+//!     (connection B's insert commits/rolls back with B's txn, never
+//!     A's), and
+//!   - no cross-connection re-entry: we only ever touch the connection
+//!     whose mutex the current thread already holds.
+//! A call with no binding is a hard error — the permanent guard
+//! against the old rayon trap (a worker thread reaching the store used
+//! to deadlock on the host connection's mutex; now it gets a message).
 //!
-//! CAUTION that still stands: if the host thread is blocked inside a vtab
-//! callback it holds SQLite's per-connection mutex (serialized threading
-//! mode), so a rayon worker calling into this store would block on that
-//! mutex until the callback returns — a deadlock if the callback is
-//! waiting on the workers. The vtab layer therefore avoids the engine's
-//! rayon-parallel query paths (see metrics_vtab.rs::filter).
+//! With the raw handle gone, this struct is Strings-only and the
+//! compiler derives Send + Sync — the `unsafe impl Send for HostHandle`
+//! that used to live here is deleted, not relocated.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use rusqlite::vtab::escape_double_quote;
-use rusqlite::{ffi, params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use timeless_core::{ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, StoredChunk};
+
+use crate::shared;
 
 /// Shadow-table DDL for a vtab named `table`. The vtab layer executes this
 /// in xCreate (the store assumes the tables exist).
@@ -79,19 +88,7 @@ pub(crate) fn drop_ddl(table: &str) -> String {
     format!(r#"DROP TABLE IF EXISTS "{t}_chunks"; DROP TABLE IF EXISTS "{t}_meta";"#)
 }
 
-/// Newtype around the raw host-connection pointer so we can promise the
-/// compiler it may cross threads. The promise is sound because every use
-/// goes through the Mutex below AND the host SQLite library is built in
-/// serialized threading mode (the default), which allows one connection
-/// to be used from multiple threads.
-///
-/// pub(crate): shadow_block_store.rs (the logs BlockStore backend) wraps
-/// the same host connection with the same Mutex discipline.
-pub(crate) struct HostHandle(pub(crate) *mut ffi::sqlite3);
-unsafe impl Send for HostHandle {}
-
 pub(crate) struct ShadowTableStore {
-    host: Mutex<HostHandle>,
     // Pre-formatted SQL, built once in the constructor so the trait
     // methods never allocate query strings on the hot path. (The table
     // name is baked in — SQLite cannot parameterize identifiers.)
@@ -108,12 +105,11 @@ pub(crate) struct ShadowTableStore {
 }
 
 impl ShadowTableStore {
-    pub(crate) fn new(db: *mut ffi::sqlite3, table: &str) -> Self {
+    pub(crate) fn new(table: &str) -> Self {
         let t = escape_double_quote(table);
         let chunks = format!("\"{t}_chunks\"");
         let meta = format!("\"{t}_meta\"");
         ShadowTableStore {
-            host: Mutex::new(HostHandle(db)),
             insert_sql: format!(
                 "INSERT INTO {chunks} (series_id, ts_min, ts_max, point_count, \
                  min_val, max_val, sum_val, encoding, resolution, ts_data, val_data) \
@@ -141,21 +137,13 @@ impl ShadowTableStore {
         }
     }
 
-    /// Lock the handle for the duration of one store operation. A poisoned
-    /// mutex (a panic while locked) still yields the guard — matching the
-    /// lock style used across timeless-core.
-    fn lock(&self) -> MutexGuard<'_, HostHandle> {
-        self.host.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Borrow the host connection. `Connection::from_handle` wraps the raw
-    /// pointer WITHOUT taking ownership — dropping the returned Connection
-    /// does not close the user's database (the FTS5 re-entrancy trick,
-    /// same as the spike). Note this also means the prepared-statement
-    /// cache is per-borrow; acceptable at POC chunk granularity.
-    fn conn(guard: &MutexGuard<'_, HostHandle>) -> Result<Connection, String> {
-        unsafe { Connection::from_handle(guard.0) }
-            .map_err(|e| format!("from_handle failed: {e}"))
+    /// Borrow the CALLING connection for one store operation — the
+    /// thread-local binding established by the current vtab callback's
+    /// DbGuard (see module docs and shared.rs). from_handle borrows
+    /// without owning; the per-borrow statement cache is acceptable at
+    /// chunk granularity (unchanged from the pre-R4 pattern).
+    fn conn() -> Result<Connection, String> {
+        shared::current_conn()
     }
 
     /// INSERT one row per chunk; shared by put_chunks and replace_chunks.
@@ -197,8 +185,7 @@ impl ChunkStore for ShadowTableStore {
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         self.insert_chunks(&conn, chunks)
     }
 
@@ -216,8 +203,7 @@ impl ChunkStore for ShadowTableStore {
         remove: &[ChunkLoc],
         on_committed: &mut dyn FnMut(&[ChunkLoc]),
     ) -> Result<Vec<ChunkLoc>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
 
         let locs = self.insert_chunks(&conn, add)?;
         on_committed(&locs);
@@ -241,8 +227,7 @@ impl ChunkStore for ShadowTableStore {
         let ChunkLoc::Row { rowid } = loc else {
             return Err(format!("ShadowTableStore cannot read {loc:?}"));
         };
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.read_sql)
             .map_err(|e| format!("prepare chunk read failed: {e}"))?;
@@ -280,8 +265,7 @@ impl ChunkStore for ShadowTableStore {
         if ids.is_empty() {
             return errors;
         }
-        let guard = self.lock();
-        let conn = match Self::conn(&guard) {
+        let conn = match Self::conn() {
             Ok(c) => c,
             Err(e) => {
                 errors.push(e);
@@ -299,8 +283,7 @@ impl ChunkStore for ShadowTableStore {
     /// can rebuild its in-memory index (Engine::with_store → rebuild_index
     /// calls this at every xCreate/xConnect).
     fn scan(&self) -> Result<Vec<StoredChunk>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.scan_sql)
             .map_err(|e| format!("prepare chunk scan failed: {e}"))?;
@@ -327,8 +310,7 @@ impl ChunkStore for ShadowTableStore {
     }
 
     fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.save_registry_sql)
             .map_err(|e| format!("prepare registry save failed: {e}"))?;
@@ -338,8 +320,7 @@ impl ChunkStore for ShadowTableStore {
     }
 
     fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.load_registry_sql)
             .map_err(|e| format!("prepare registry load failed: {e}"))?;
@@ -352,8 +333,7 @@ impl ChunkStore for ShadowTableStore {
     /// so errors degrade to zeros. See stats_sql comment: full aggregate
     /// now, incrementally-maintained counter later.
     fn storage_stats(&self) -> (u64, usize) {
-        let guard = self.lock();
-        let Ok(conn) = Self::conn(&guard) else {
+        let Ok(conn) = Self::conn() else {
             return (0, 0);
         };
         conn.query_row(&self.stats_sql, [], |r| {

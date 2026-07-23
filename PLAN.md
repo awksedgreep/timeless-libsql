@@ -35,7 +35,10 @@ The demo that makes people go "whoa":
   future work)
 - Label-based pushdown beyond metric name + time range (labels stored + returned,
   filterable by SQLite above the vtab; label posting-list pushdown is v2)
-- Multi-connection concurrent writers (single writer assumed; see Risk R4)
+- ~~Multi-connection concurrent writers (single writer assumed; see Risk
+  R4)~~ FIXED in Session 10: process-global engine registry + per-table
+  writer gate (see Risk R4 entry); concurrent writers now serialize with
+  busy-style errors instead of corrupting split state
 - Durability stronger than timeless_metrics today (in-memory buffer until chunk
   flush; raw staging shadow table is a v2 decision with write-amp tradeoff)
 
@@ -532,8 +535,10 @@ decode speaks 1/2/4/5; raw flush stays 1; codec 3 still reserved.
       50k ops, cli.sh section 19); kill -9 crash test (tests/crash.sh,
       cli.sh section 20); R5 real transaction rollback (journal in all
       three engines, TransactionVTab wired — risk register updated).
-- [ ] Still deferred: R4 global engine registry (per-connection engines
-      accepted for POC; single-writer assumption unchanged)
+- [x] DONE 2026-07-22 (Session 10): R4 global engine registry — one
+      engine per (db file, table) per process, thread-local connection
+      routing, per-table writer gate (see that session's block and the
+      risk register R4 entry)
 
 ### Session 4 — Tier 2 + hero benchmark + sqld flourish (≈1–1.5 days)
 - [x] Batch blob format v0 encoder (bench-side) + decoder (ext-side);
@@ -774,6 +779,73 @@ Gated on: Session 5 (shares the entire block-store skeleton).
       green; bench unchanged (tier2 16.8M pts/s, tier1 1.73M, bit-exact
       spot checks OK); cli.sh 47 PASS lines across 20 sections.
 
+### Session 10 — Hardening: R4 shared engine registry — ✅ COMPLETE 2026-07-22
+
+- [x] **Process-global engine registry** (timeless-ext/src/shared.rs):
+      `static REGISTRY: Mutex<HashMap<RegistryKey, Weak<dyn Any+Send+Sync>>>`
+      keyed by (canonical db file path via sqlite3_db_filename(db,
+      database_name) — handles ATTACH aliases, canonicalize with
+      missing-file parent fallback, table name). Empty filename
+      (`:memory:`/temp) → per-connection Private key (db handle
+      address) — each :memory: db is private to its connection, sharing
+      would be corruption. xCreate/xConnect upgrade-or-build under the
+      registry mutex (held across construction so two racing pooled
+      connections can't build two engines); xDisconnect drops the Arc
+      (Weak values: registry never keeps an engine alive — buffered =
+      lost with the process, unchanged); xDestroy removes the entry AND
+      drops shadow tables; dead Weaks swept lazily on every access.
+      Type-erased values (one registry, three engine types), downcast
+      checked with a loud error.
+- [x] **Thread-local connection routing**: `CURRENT_DB:
+      Cell<*mut sqlite3>` + RAII `DbGuard` (saves/restores previous —
+      nest-safe, panic-safe) bound by every callback that can reach a
+      store (connect/create, insert incl. commands, begin/commit/
+      rollback, cursor filter, destroy). All three shadow stores lost
+      their `Mutex<HostHandle>` (and the `unsafe impl Send`) — they are
+      Strings-only now; every op fetches the CALLING connection via
+      `shared::current_conn()` (correct transaction context per
+      connection, no cross-connection mutex re-entry). Unbound thread →
+      hard error naming the rayon lesson (the permanent guard).
+- [x] **WriterGate** (per SharedEngine): `Mutex<Option<usize>>` holder
+      token (conn_id = raw db pointer as usize) + Condvar, 5s bounded
+      wait, re-entrant for the same connection, released only by the
+      holder. Acquired in xBegin (NOT the first insert — DELIBERATE
+      DEVIATION from the R4 sketch: SQLite fires xBegin on connection B
+      before B's first xUpdate, and txn_begin() RESETS the engine
+      journal, so gating xBegin is the only placement that keeps the
+      journal provably single-writer; still lazy — xBegin only fires
+      for transactions that WRITE the vtab). commit/rollback are
+      holder-only (the lone xCommit at CREATE VIRTUAL TABLE must not
+      close another connection's journal) and release after closing
+      the journal; Drop on the vtab releases defensively.
+- [x] **Empirical fact recorded** (VDBE bytecode, cli.sh 21): stock
+      SQLite executes OP_Transaction (file write lock) BEFORE OP_VBegin,
+      so a second writer hits SQLITE_BUSY before reaching the gate —
+      the gate is defense-in-depth on stock SQLite and the ACTIVE
+      journal protection under concurrent-writer hosts (libsql BEGIN
+      CONCURRENT). Its timeout path is unit-tested in Rust (9 new
+      shared.rs tests: gate block/timeout/re-entrancy/stray-release,
+      registry share/isolate/sweep/type-mismatch, DbGuard nesting,
+      unbound-thread error).
+- [x] cli.sh section 21 (python3 sqlite3, TWO connections in ONE
+      process): (a) A insert+flush → B sees rows WITHOUT reopen;
+      (b) A buffered insert → B sees it too (shared-buffer semantics,
+      asserted on purpose); (c) A BEGIN+insert → B's write fails
+      bounded with a lock error (~2s busy_timeout); (d) A COMMIT → B
+      retry succeeds; (e) DROP + recreate on A → both connections sane.
+- [x] Semantics documented (shared.rs module docs + RESULTS.md
+      known-limits): shared buffer = dirty reads of buffered points
+      across connections (accepted telemetry semantics); flushed data
+      remains transactional; sharp edge: another connection querying
+      DURING a foreign uncommitted intra-txn flush can hit a row-read
+      error until that txn commits (bounded, busy-like; single
+      statement window in autocommit).
+- [x] Regression sweep: 71 workspace Rust tests green (62 prior + 9
+      shared.rs); cli.sh 21 sections ALL PASS (oracle + crash
+      unchanged); bench unchanged (tier2 17.6M pts/s, tier1 1.75M,
+      6.4x; logs 13.5x, level=error 21ms; traces 4.3x, trace lookup
+      3.1ms — all within noise of Session 8/9 numbers).
+
 ---
 
 ## Risk register
@@ -785,11 +857,24 @@ Gated on: Session 5 (shares the entire block-store skeleton).
 - **R3 — rustler types entangled in engine internals.** Looked clean in
   inventory (rustler confined to lines 2448+ and EngineResource). Budget a few
   hours of type substitution.
-- **R4 — sqld loads the ext into EVERY connection** → one vtab instance per
-  connection over shared shadow tables. Per-connection engine buffers = split
-  state. POC: single-writer assumption + process-global engine registry keyed
-  by (db path, table). Extensions are one shared lib per process, so a global
-  works. Decide now, cheap; retrofit, expensive.
+- **R4 — sqld loads the ext into EVERY connection. FIXED 2026-07-22
+  (Session 10).** One vtab instance per connection over shared shadow
+  tables no longer means split state: a process-global registry
+  (extensions are one shared lib per process, so a `static` works)
+  hands every connection the SAME engine, keyed by (canonical db file
+  path via sqlite3_db_filename, table name) — :memory:/temp fall back
+  to per-connection keys. Store SQL is routed to the CALLING
+  connection through a thread-local RAII binding (the shadow stores
+  hold no connection at all anymore — the old Mutex<HostHandle> and
+  its unsafe Send impl are gone), and write transactions are
+  serialized per table by a WriterGate (holder = connection id,
+  acquired at xBegin so the engine-global R5 journal stays
+  single-writer, 5s bounded wait → busy-style error). Accepted
+  semantics: one shared buffer per table = cross-connection dirty
+  reads of buffered (pre-durable) points; flushed data remains
+  transactional. Full design + deadlock analysis in
+  crates/timeless-ext/src/shared.rs; proven by cli.sh section 21
+  (two connections, one process) + 9 shared.rs unit tests.
 - **R5 — transaction semantics of in-memory buffers. FIXED 2026-07-22
   (Session 9).** Each engine now keeps a TRANSACTION JOURNAL activated by
   xBegin (SQLite fires it before the first write of every transaction —

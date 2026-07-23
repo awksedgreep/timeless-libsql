@@ -74,6 +74,7 @@ use timeless_core::{Engine, Labels};
 
 use crate::flatjson::{labels_to_json, parse_labels_json};
 use crate::shadow_store::{self, ShadowTableStore};
+use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
 
 /// Register the "timeless_metrics" module on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection) -> Result<()> {
@@ -109,9 +110,20 @@ pub struct MetricsTab {
     /// The vtab's own name — needed to drop its shadow tables.
     table_name: String,
     /// The whole timeless-core engine, chunk-persisting into shadow
-    /// tables via ShadowTableStore. Arc so cursors can hold a reference
-    /// without lifetime gymnastics.
-    engine: Arc<Engine>,
+    /// tables via ShadowTableStore — SHARED process-wide with every
+    /// other connection's vtab instance over the same (db file, table)
+    /// via the R4 registry (see shared.rs). Arc so cursors can hold a
+    /// reference without lifetime gymnastics, and so instances across
+    /// connections co-own one engine.
+    shared: Arc<SharedEngine<Engine>>,
+    /// This instance's registry key — xDestroy must remove the entry.
+    key: RegistryKey,
+    /// True while THIS connection's write transaction holds the shared
+    /// engine's writer gate (acquired in begin(), released in commit()/
+    /// rollback()). Lives in the vtab instance because the instance is
+    /// per-connection — exactly the granularity a "who holds it" flag
+    /// needs — and it lets the insert hot path skip the gate mutex.
+    gate_held: bool,
     /// Synthetic rowid source for inserts (see insert()).
     rowid_counter: i64,
 }
@@ -121,13 +133,17 @@ impl MetricsTab {
         db: &mut VTabConnection,
         _aux: Option<&()>,
         _module_name: &[u8],
-        _database_name: &[u8],
+        database_name: &[u8],
         table_name: &[u8],
         _args: &[&[u8]],
         is_create: bool,
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let handle = unsafe { db.handle() };
+        // Bind the calling connection for the store operations below
+        // (DDL, and the recovery SELECTs Engine::with_store performs
+        // through ShadowTableStore). RAII: unbinds when we return.
+        let _bind = DbGuard::bind(handle);
 
         if is_create {
             // Re-entrant SQL against the host connection (the FTS5 trick
@@ -146,20 +162,26 @@ impl MetricsTab {
         }
         // xConnect: the shadow tables already exist in the reopened db.
 
-        // Engine::with_store performs recovery itself: it loads the series
-        // registry via store.load_registry() and rebuilds the chunk index
-        // via store.scan() — both re-entrant SELECTs on the host
-        // connection, which is safe here because THIS thread already
-        // holds the connection mutex (recursively).
-        let store = ShadowTableStore::new(handle, &table);
-        let engine = Engine::with_store(
-            Box::new(store),
-            FLUSH_THRESHOLD,
-            MIN_FLUSH_SIZE,
-            COMPRESSION_LEVEL,
-            MEMORY_BUDGET,
-            DEFER_COMPRESSION,
-        );
+        // R4: one engine per (db file, table) PER PROCESS, not per
+        // connection. First connection in builds it (Engine::with_store
+        // performs recovery itself: it loads the series registry via
+        // store.load_registry() and rebuilds the chunk index via
+        // store.scan() — both re-entrant SELECTs routed to the calling
+        // connection by the DbGuard above, safe because THIS thread
+        // already holds the connection mutex recursively); every later
+        // xConnect just bumps the Arc.
+        let key = shared::registry_key(handle, database_name, &table);
+        let shared_engine = shared::get_or_create(&key, || {
+            let store = ShadowTableStore::new(&table);
+            Ok(Engine::with_store(
+                Box::new(store),
+                FLUSH_THRESHOLD,
+                MIN_FLUSH_SIZE,
+                COMPRESSION_LEVEL,
+                MEMORY_BUDGET,
+                DEFER_COMPRESSION,
+            ))
+        })?;
 
         // Declared schema. The hidden 5th column is named after the table
         // itself so `INSERT INTO metrics(metrics) VALUES('flush')` works.
@@ -176,10 +198,37 @@ impl MetricsTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
                 table_name: table,
-                engine: Arc::new(engine),
+                shared: shared_engine,
+                key,
+                gate_held: false,
                 rowid_counter: 0,
             },
         ))
+    }
+
+    /// Take the shared engine's writer gate for THIS connection if we
+    /// do not hold it already. Primary call site is begin() — SQLite
+    /// fires xBegin before the first write statement of every
+    /// transaction — with a defensive re-check in insert().
+    fn acquire_write_gate(&mut self) -> Result<()> {
+        if self.gate_held {
+            return Ok(());
+        }
+        self.shared
+            .write_gate
+            .acquire(self.db as usize, &self.table_name)
+            .map_err(module_err)?;
+        self.gate_held = true;
+        Ok(())
+    }
+
+    /// Release the gate at the end of this connection's transaction
+    /// (commit or rollback). No-op if this connection never wrote.
+    fn release_write_gate(&mut self) {
+        if self.gate_held {
+            self.shared.write_gate.release(self.db as usize);
+            self.gate_held = false;
+        }
     }
 
     /// Handle a hidden-column command insert. Returns the (synthetic,
@@ -189,7 +238,7 @@ impl MetricsTab {
             // Drain every partition buffer into pco chunks in _chunks and
             // persist the series registry into _meta. After this the data
             // is exactly as durable as the enclosing SQLite transaction.
-            self.engine.flush_all().map_err(module_err)?;
+            self.shared.engine.flush_all().map_err(module_err)?;
         } else if cmd == "compact" {
             // Merge small/raw chunks into large high-compression chunks.
             // POC: cutoff i64::MAX makes every persisted chunk eligible.
@@ -197,7 +246,7 @@ impl MetricsTab {
             // COMPACT_MIN_AGE_SECS recent-window rule) so narrow
             // dashboard queries keep cheap small chunks; for the POC we
             // want compaction observable immediately.
-            self.engine
+            self.shared.engine
                 .compact_partitions(i64::MAX)
                 .map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
@@ -207,7 +256,7 @@ impl MetricsTab {
             let ts: i64 = ts_str.trim().parse().map_err(|_| {
                 module_err(format!("prune: expected 'prune:<unix_ts>', got {cmd:?}"))
             })?;
-            let (_chunks, _units, errors) = self.engine.delete_before(ts);
+            let (_chunks, _units, errors) = self.shared.engine.delete_before(ts);
             if !errors.is_empty() {
                 return Err(module_err(format!("prune errors: {}", errors.join("; "))));
             }
@@ -309,6 +358,7 @@ impl MetricsTab {
 
         // ── 5. Resolve the whole series table in ONE registry pass ───
         let sids = self
+            .shared
             .engine
             .resolve_series_batch(&entries)
             .map_err(module_err)?;
@@ -334,7 +384,7 @@ impl MetricsTab {
             raw.extend_from_slice(&ts.to_ne_bytes());
             raw.extend_from_slice(&val_bits.to_ne_bytes());
         }
-        self.engine.write_batch_raw(&raw).map_err(module_err)?;
+        self.shared.engine.write_batch_raw(&raw).map_err(module_err)?;
 
         Ok(n_points as i64)
     }
@@ -373,6 +423,7 @@ impl MetricsTab {
             .unwrap_or(0);
 
         let (count, errors) = self
+            .shared
             .engine
             .ingest_prometheus(body, default_ts)
             .map_err(module_err)?;
@@ -525,11 +576,25 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
     fn open(&'vtab mut self) -> Result<Self::Cursor> {
         Ok(MetricsCursor {
             base: ffi::sqlite3_vtab_cursor::default(),
-            engine: Arc::clone(&self.engine),
+            shared: Arc::clone(&self.shared),
+            // The cursor re-binds this connection in filter(): its
+            // chunk reads must run on the connection driving the scan.
+            db: self.db,
             rows: Vec::new(),
             pos: 0,
             phantom: PhantomData,
         })
+    }
+}
+
+/// Defensive gate release: xDisconnect/xDestroy drop the vtab instance,
+/// and the normal paths (commit/rollback) have already released by
+/// then — but if SQLite ever tears a vtab down mid-transaction, a
+/// leaked holder token would lock the table for every other connection
+/// until process exit. Drop makes that impossible.
+impl Drop for MetricsTab {
+    fn drop(&mut self) {
+        self.release_write_gate();
     }
 }
 
@@ -547,8 +612,12 @@ impl CreateVTab<'_> for MetricsTab {
         Self::connect_create(db, aux, module_name, database_name, table_name, args, true)
     }
 
-    /// DROP TABLE on the vtab removes the shadow tables too.
+    /// DROP TABLE on the vtab removes the shadow tables too — and the
+    /// registry entry: the key must never resolve to an engine whose
+    /// tables are gone (a recreate builds a fresh engine).
     fn destroy(&self) -> Result<()> {
+        shared::remove(&self.key);
+        let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
         host.execute_batch(&shadow_store::drop_ddl(&self.table_name))
     }
@@ -559,6 +628,15 @@ impl UpdateVTab<'_> for MetricsTab {
     /// declared columns from index 2:
     ///   2 = name, 3 = ts, 4 = value, 5 = labels, 6 = hidden command.
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
+        // Route this callback's store operations (flush/compact/prune
+        // rows, registry saves) to the calling connection...
+        let _bind = DbGuard::bind(self.db);
+        // ...and make sure this connection's transaction owns the
+        // shared engine. Normally already true — SQLite fired begin()
+        // for this statement's transaction — this is the defensive
+        // re-check (no-op when gate_held).
+        self.acquire_write_gate()?;
+
         // The FTS5 command idiom, extended for Tier 2: a non-NULL hidden
         // column means this "insert" is NOT a data row. We dispatch on the
         // hidden column's SQLite TYPE (which we can only see through the
@@ -617,10 +695,11 @@ impl UpdateVTab<'_> for MetricsTab {
         };
 
         let sid = self
+            .shared
             .engine
             .resolve_cached(&name, &labels)
             .map_err(module_err)?;
-        self.engine.write_point(sid, ts, value);
+        self.shared.engine.write_point(sid, ts, value);
 
         // Vtab rowids here are SYNTHETIC: points live in partition
         // buffers/chunks, not addressable rows, so we just hand SQLite a
@@ -686,19 +765,46 @@ impl UpdateVTab<'_> for MetricsTab {
 /// only whole-transaction ROLLBACK is journaled. Series NAMES
 /// registered during a rolled-back transaction also stay registered
 /// (harmless empty series; documented in the engine journal docs).
+/// R4 ADDITION — the writer gate brackets the journal: begin() takes
+/// the shared engine's gate BEFORE activating the journal, and
+/// commit()/rollback() release it after closing the journal. Why here
+/// and not at the first insert: SQLite fires xBegin on connection B
+/// before B's first xUpdate, and txn_begin() RESETS the journal — if B
+/// could reach it while A's transaction is journaling, A's rollback
+/// state would be clobbered. Gating xBegin keeps the engine-global
+/// journal provably single-writer, and it is still lazy in the way
+/// that matters: xBegin only fires for transactions that WRITE to this
+/// vtab, so reads never wait. A blocked begin() times out after 5s
+/// with a busy-style error (see shared.rs for the deadlock analysis).
 impl TransactionVTab<'_> for MetricsTab {
     fn begin(&mut self) -> Result<()> {
-        self.engine.txn_begin();
+        let _bind = DbGuard::bind(self.db);
+        self.acquire_write_gate()?;
+        self.shared.engine.txn_begin();
         Ok(())
     }
 
     fn commit(&mut self) -> Result<()> {
-        self.engine.txn_commit();
+        let _bind = DbGuard::bind(self.db);
+        // Only the gate holder may close the journal: an xCommit that
+        // arrives WITHOUT a gated xBegin on this connection (the lone
+        // xCommit SQLite emits at CREATE VIRTUAL TABLE is the known
+        // case) must not touch a journal that may belong to ANOTHER
+        // connection's in-flight transaction.
+        if self.gate_held {
+            self.shared.engine.txn_commit();
+            self.release_write_gate();
+        }
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
-        self.engine.txn_rollback();
+        let _bind = DbGuard::bind(self.db);
+        // Same holder-only rule as commit().
+        if self.gate_held {
+            self.shared.engine.txn_rollback();
+            self.release_write_gate();
+        }
         Ok(())
     }
 }
@@ -718,7 +824,10 @@ struct OutRow {
 #[repr(C)]
 pub struct MetricsCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
-    engine: Arc<Engine>,
+    shared: Arc<SharedEngine<Engine>>,
+    /// The connection driving this scan — filter() binds it so the
+    /// engine's chunk reads run on the caller (see shared.rs).
+    db: *mut ffi::sqlite3,
     rows: Vec<OutRow>,
     pos: usize,
     /// Ties the cursor lifetime to its vtab so Rust prevents use-after-free.
@@ -739,7 +848,7 @@ impl MetricsCursor<'_> {
         // Snapshot (series_id, labels) pairs, then drop the registry lock
         // before querying (queries take their own locks).
         let candidates: Vec<(i64, Labels)> = {
-            let reg = self.engine.series_read();
+            let reg = self.shared.engine.series_read();
             reg.find_series(metric, &BTreeMap::new())
                 .into_iter()
                 .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
@@ -749,6 +858,7 @@ impl MetricsCursor<'_> {
         let mut out = Vec::new();
         for (sid, labels) in candidates {
             let points = self
+                .shared
                 .engine
                 .query_range_by_id(sid, t0, t1)
                 .map_err(module_err)?;
@@ -778,6 +888,9 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
         _idx_str: Option<&str>,
         args: &Filters<'_>,
     ) -> Result<()> {
+        // Route chunk reads to the connection running this SELECT.
+        let _bind = DbGuard::bind(self.db);
+
         // argv slots were assigned in canonical order (name, lo, hi), so
         // the mask alone tells us which positional arg is which.
         let mut arg = 0usize;
@@ -812,7 +925,7 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
             // WHERE name = NULL matches nothing: rows stays empty.
         } else {
             // Full scan: every metric the registry knows about.
-            let metrics = self.engine.series_read().list_metrics();
+            let metrics = self.shared.engine.series_read().list_metrics();
             for metric in metrics {
                 rows.extend(self.collect_metric(&metric, t0, t1)?);
             }

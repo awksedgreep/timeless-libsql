@@ -2,8 +2,10 @@
 //! persists span blocks + their inverted term index + the TRACE INDEX
 //! into shadow tables on the HOST SQLite connection — the traces twin
 //! of shadow_block_store.rs (read that header, and shadow_store.rs
-//! before it, for the re-entrancy / no-transactions / Mutex<HostHandle>
-//! reasoning; every word applies here too).
+//! before it, for the re-entrancy / no-transactions / thread-local
+//! connection-routing (R4) reasoning; every word applies here too:
+//! this store holds only SQL strings and fetches the CALLING
+//! connection via shared::current_conn per operation).
 //!
 //! What is different from the logs block store:
 //!   - a THIRD index table, `"<name>_trace_blocks"`, maps each packed
@@ -16,14 +18,12 @@
 //!     probe of the trace index joined against the block metadata —
 //!     `WHERE trace_id = x'...'` never scans anything.
 
-use std::sync::{Mutex, MutexGuard};
-
 use rusqlite::types::Value;
 use rusqlite::vtab::escape_double_quote;
-use rusqlite::{ffi, params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use timeless_core::{BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore};
 
-use crate::shadow_store::HostHandle;
+use crate::shared;
 
 /// Shadow-table DDL for a traces vtab named `table` (executed by
 /// xCreate; the store assumes the tables exist).
@@ -74,7 +74,6 @@ pub(crate) fn drop_ddl(table: &str) -> String {
 }
 
 pub(crate) struct ShadowSpanStore {
-    host: Mutex<HostHandle>,
     // Pre-formatted SQL, built once (table names cannot be parameters;
     // prepare_cached keyed by these strings makes every statement a
     // one-time parse — the Session 1 lesson).
@@ -100,14 +99,13 @@ pub(crate) struct ShadowSpanStore {
 }
 
 impl ShadowSpanStore {
-    pub(crate) fn new(db: *mut ffi::sqlite3, table: &str) -> Self {
+    pub(crate) fn new(table: &str) -> Self {
         let t = escape_double_quote(table);
         let blocks = format!("\"{t}_blocks\"");
         let terms = format!("\"{t}_terms\"");
         let traces = format!("\"{t}_trace_blocks\"");
         let meta = format!("\"{t}_meta\"");
         ShadowSpanStore {
-            host: Mutex::new(HostHandle(db)),
             insert_block_sql: format!(
                 "INSERT INTO {blocks} (ts_min, ts_max, entry_count, codec, data) \
                  VALUES (?1, ?2, ?3, ?4, ?5)"
@@ -147,14 +145,10 @@ impl ShadowSpanStore {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HostHandle> {
-        self.host.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Borrow (never own) the host connection — see shadow_store.rs.
-    fn conn(guard: &MutexGuard<'_, HostHandle>) -> Result<Connection, String> {
-        unsafe { Connection::from_handle(guard.0) }
-            .map_err(|e| format!("from_handle failed: {e}"))
+    /// Borrow (never own) the CALLING connection — the thread-local
+    /// binding set by the current vtab callback (see shadow_store.rs).
+    fn conn() -> Result<Connection, String> {
+        shared::current_conn()
     }
 
     /// INSERT one block row + its term rows + its trace-index rows.
@@ -252,8 +246,7 @@ impl SpanBlockStore for ShadowSpanStore {
     /// contract) — the caller's enclosing host transaction makes the
     /// batch atomic.
     fn put_blocks(&self, blocks: &[EncodedSpanBlock]) -> Result<Vec<BlockLoc>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         blocks
             .iter()
             .map(|block| self.insert_block(&conn, block))
@@ -269,8 +262,7 @@ impl SpanBlockStore for ShadowSpanStore {
         remove: &[BlockLoc],
         on_committed: &mut dyn FnMut(&[BlockLoc]),
     ) -> Result<Vec<BlockLoc>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
 
         let mut locs = Vec::with_capacity(add.len());
         for block in add {
@@ -284,8 +276,7 @@ impl SpanBlockStore for ShadowSpanStore {
     }
 
     fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.read_sql)
             .map_err(|e| format!("prepare block read failed: {e}"))?;
@@ -295,8 +286,7 @@ impl SpanBlockStore for ShadowSpanStore {
 
     fn delete_blocks(&self, locs: &[BlockLoc]) -> Vec<String> {
         let ids: Vec<i64> = locs.iter().map(|l| l.id).collect();
-        let guard = self.lock();
-        let conn = match Self::conn(&guard) {
+        let conn = match Self::conn() {
             Ok(c) => c,
             Err(e) => return vec![e],
         };
@@ -310,8 +300,7 @@ impl SpanBlockStore for ShadowSpanStore {
     /// untouched) so SpanBlockEngine::new can rebuild its index at
     /// xCreate/xConnect.
     fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.scan_sql)
             .map_err(|e| format!("prepare block scan failed: {e}"))?;
@@ -364,8 +353,7 @@ impl SpanBlockStore for ShadowSpanStore {
             binds.push(Value::Text(t.clone()));
         }
 
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&sql)
             .map_err(|e| format!("prepare term query failed: {e}"))?;
@@ -377,8 +365,7 @@ impl SpanBlockStore for ShadowSpanStore {
     /// memcmp), block metadata joined in — payload blobs untouched
     /// until the engine reads the survivors.
     fn query_trace(&self, trace_id: &[u8; 16]) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.query_trace_sql)
             .map_err(|e| format!("prepare trace query failed: {e}"))?;
@@ -390,8 +377,7 @@ impl SpanBlockStore for ShadowSpanStore {
     }
 
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.save_meta_sql)
             .map_err(|e| format!("prepare meta save failed: {e}"))?;
@@ -401,8 +387,7 @@ impl SpanBlockStore for ShadowSpanStore {
     }
 
     fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.load_meta_sql)
             .map_err(|e| format!("prepare meta load failed: {e}"))?;

@@ -16,6 +16,13 @@
 //!     shadow_span_store::ShadowSpanStore (SpanBlockStore). Three
 //!     signals, one .so (PLAN.md R8).
 //!
+//! MULTI-CONNECTION (PLAN.md R4, shared.rs): all connections in one
+//! process that open the same (db file, table) share ONE engine via a
+//! process-global registry; store SQL is routed to the calling
+//! connection through a thread-local, and write transactions are
+//! serialized per table by a 5s-bounded writer gate (busy-style error
+//! on contention). See shared.rs for the full design + semantics notes.
+//!
 //! Usage:
 //!   .load target/release/libtimeless_ext
 //!   CREATE VIRTUAL TABLE metrics USING timeless_metrics;
@@ -30,6 +37,7 @@ mod metrics_vtab;
 mod shadow_block_store;
 mod shadow_span_store;
 mod shadow_store;
+mod shared;
 mod spike;
 mod traces_vtab;
 

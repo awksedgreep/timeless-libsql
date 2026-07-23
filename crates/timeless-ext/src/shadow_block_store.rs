@@ -2,7 +2,9 @@
 //! persists log blocks + their inverted term index into shadow tables
 //! on the HOST SQLite connection — the logs twin of shadow_store.rs
 //! (read that file's header for the re-entrancy, no-transactions, and
-//! Mutex<HostHandle> reasoning; every word applies here too).
+//! thread-local connection-routing reasoning (R4); every word applies
+//! here too: this store holds only SQL strings and fetches the CALLING
+//! connection via shared::current_conn per operation).
 //!
 //! What is different from the metrics chunk store:
 //!   - a `_terms` posting-list table rides along with `_blocks`, and the
@@ -15,14 +17,12 @@
 //!     against the blocks' ts range — the whole point of keeping term
 //!     storage on the store side of the seam.
 
-use std::sync::{Mutex, MutexGuard};
-
 use rusqlite::types::Value;
 use rusqlite::vtab::escape_double_quote;
-use rusqlite::{ffi, params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use timeless_core::{BlockLoc, BlockMeta, BlockStore, EncodedBlock};
 
-use crate::shadow_store::HostHandle;
+use crate::shared;
 
 /// Shadow-table DDL for a logs vtab named `table` (executed by xCreate;
 /// the store assumes the tables exist).
@@ -69,7 +69,6 @@ pub(crate) fn drop_ddl(table: &str) -> String {
 }
 
 pub(crate) struct ShadowBlockStore {
-    host: Mutex<HostHandle>,
     // Pre-formatted SQL, built once (table names cannot be parameters).
     insert_block_sql: String,
     insert_term_sql: String,
@@ -89,13 +88,12 @@ pub(crate) struct ShadowBlockStore {
 }
 
 impl ShadowBlockStore {
-    pub(crate) fn new(db: *mut ffi::sqlite3, table: &str) -> Self {
+    pub(crate) fn new(table: &str) -> Self {
         let t = escape_double_quote(table);
         let blocks = format!("\"{t}_blocks\"");
         let terms = format!("\"{t}_terms\"");
         let meta = format!("\"{t}_meta\"");
         ShadowBlockStore {
-            host: Mutex::new(HostHandle(db)),
             insert_block_sql: format!(
                 "INSERT INTO {blocks} (ts_min, ts_max, entry_count, codec, data) \
                  VALUES (?1, ?2, ?3, ?4, ?5)"
@@ -124,14 +122,10 @@ impl ShadowBlockStore {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HostHandle> {
-        self.host.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Borrow (never own) the host connection — see shadow_store.rs.
-    fn conn(guard: &MutexGuard<'_, HostHandle>) -> Result<Connection, String> {
-        unsafe { Connection::from_handle(guard.0) }
-            .map_err(|e| format!("from_handle failed: {e}"))
+    /// Borrow (never own) the CALLING connection — the thread-local
+    /// binding set by the current vtab callback (see shadow_store.rs).
+    fn conn() -> Result<Connection, String> {
+        shared::current_conn()
     }
 
     /// INSERT one block row + its term rows. The caller's enclosing host
@@ -186,8 +180,7 @@ impl ShadowBlockStore {
 
 impl BlockStore for ShadowBlockStore {
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         self.insert_block(&conn, block)
     }
 
@@ -199,8 +192,7 @@ impl BlockStore for ShadowBlockStore {
     /// (store contract): the caller's enclosing host transaction makes
     /// the batch atomic, exactly as for a single put_block.
     fn put_blocks(&self, blocks: &[EncodedBlock]) -> Result<Vec<BlockLoc>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         blocks
             .iter()
             .map(|block| self.insert_block(&conn, block))
@@ -216,8 +208,7 @@ impl BlockStore for ShadowBlockStore {
         remove: &[BlockLoc],
         on_committed: &mut dyn FnMut(&[BlockLoc]),
     ) -> Result<Vec<BlockLoc>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
 
         let mut locs = Vec::with_capacity(add.len());
         for block in add {
@@ -231,8 +222,7 @@ impl BlockStore for ShadowBlockStore {
     }
 
     fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.read_sql)
             .map_err(|e| format!("prepare block read failed: {e}"))?;
@@ -242,8 +232,7 @@ impl BlockStore for ShadowBlockStore {
 
     fn delete_blocks(&self, locs: &[BlockLoc]) -> Vec<String> {
         let ids: Vec<i64> = locs.iter().map(|l| l.id).collect();
-        let guard = self.lock();
-        let conn = match Self::conn(&guard) {
+        let conn = match Self::conn() {
             Ok(c) => c,
             Err(e) => return vec![e],
         };
@@ -256,8 +245,7 @@ impl BlockStore for ShadowBlockStore {
     /// Recovery: metadata for every persisted block (payloads untouched)
     /// so BlockEngine::new can rebuild its index at xCreate/xConnect.
     fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.scan_sql)
             .map_err(|e| format!("prepare block scan failed: {e}"))?;
@@ -313,8 +301,7 @@ impl BlockStore for ShadowBlockStore {
             binds.push(Value::Text(t.clone()));
         }
 
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&sql)
             .map_err(|e| format!("prepare term query failed: {e}"))?;
@@ -337,8 +324,7 @@ impl BlockStore for ShadowBlockStore {
     }
 
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.save_meta_sql)
             .map_err(|e| format!("prepare meta save failed: {e}"))?;
@@ -348,8 +334,7 @@ impl BlockStore for ShadowBlockStore {
     }
 
     fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let guard = self.lock();
-        let conn = Self::conn(&guard)?;
+        let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.load_meta_sql)
             .map_err(|e| format!("prepare meta load failed: {e}"))?;

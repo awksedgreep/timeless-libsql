@@ -116,6 +116,17 @@ compressed telemetry SQL, zero client changes.
   joins verified by tests/crash.sh over 5 random-timing kills),
   buffered = lost with the process, never corrupt (integrity_check ok
   every time).
+- **Multi-connection sharing is real (PLAN R4 fixed, Session 10).**
+  sqld loads the extension into every pooled connection; a
+  process-global registry now hands each of them the SAME engine per
+  (db file, table), with store SQL routed to the calling connection
+  via a thread-local and writers serialized by a bounded per-table
+  gate. One connection's inserts and flushes are queryable from
+  another connection immediately, no reopen — proven by cli.sh
+  section 21 (two connections in one process: flushed + buffered
+  visibility, bounded lock error under write contention, retry after
+  commit, drop/recreate). See the shared-buffer semantics note under
+  Known limits.
 - **Oracle property test:** 3 seeds × 50k randomized ops (inserts,
   commands, every pushdown plan family, mirrored transactions with
   rollback, prune) against mirrored plain tables in the same db —
@@ -135,8 +146,20 @@ compressed telemetry SQL, zero client changes.
   (pre-existing engine design inherited from the donor; real telemetry
   effectively never produces it — the oracle generator documents and
   avoids manufacturing it).
-- One engine per connection over shared shadow tables — single-writer
-  assumption (PLAN R4).
+- **Shared-buffer semantics across connections (PLAN R4 — fixed, with
+  this documented trade):** all connections in one process share ONE
+  engine per (db file, table), so points one connection has inserted
+  but not yet committed are visible to every other connection's
+  queries immediately — a dirty read of buffered telemetry. Accepted
+  on purpose: buffered points were already pre-durable (lost on
+  crash), so pre-commit visibility keeps the same mental model, and
+  FLUSHED data remains fully transactional. Write transactions are
+  serialized per table (writer gate, 5s bounded wait → busy-style
+  error; on stock SQLite the file write lock serializes writers even
+  earlier). Sharp edge: a query on connection B DURING connection A's
+  uncommitted intra-transaction 'flush' can fail with a row-read
+  error until A commits (bounded, SQLITE_BUSY-like; in autocommit the
+  window is a single statement).
 - Engine rayon paths (par_iter queries) must not be called from vtab
   callbacks — deadlock via the host connection mutex (documented in PLAN;
   cursor uses sequential reads).
@@ -146,7 +169,8 @@ compressed telemetry SQL, zero client changes.
 
 ```sh
 cargo build --release -p timeless-ext
-./tests/cli.sh              # 20 sections, incl. oracle (19) + crash (20)
+./tests/cli.sh              # 21 sections, incl. oracle (19), crash (20),
+                            # multi-connection shared engine (21)
 tests/crash.sh target/release/libtimeless_ext.so            # standalone
 cd tools/bench
 cargo run --release --bin oracle -- ../../target/release/libtimeless_ext.so [seed]

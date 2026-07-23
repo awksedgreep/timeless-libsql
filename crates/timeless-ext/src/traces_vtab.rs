@@ -57,6 +57,7 @@ use timeless_core::{
 
 use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_span_store::{self, ShadowSpanStore};
+use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
 
 /// Register the "timeless_traces" module on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection) -> Result<()> {
@@ -161,7 +162,12 @@ pub struct TracesTab {
     /// Raw handle to the HOST connection, kept for xDestroy's DDL.
     db: *mut ffi::sqlite3,
     table_name: String,
-    engine: Arc<SpanBlockEngine>,
+    /// Shared process-wide across connections via the R4 registry —
+    /// see metrics_vtab.rs and shared.rs for the full story.
+    shared: Arc<SharedEngine<SpanBlockEngine>>,
+    key: RegistryKey,
+    /// True while THIS connection's write txn holds the writer gate.
+    gate_held: bool,
     rowid_counter: i64,
 }
 
@@ -170,13 +176,16 @@ impl TracesTab {
         db: &mut VTabConnection,
         _aux: Option<&()>,
         _module_name: &[u8],
-        _database_name: &[u8],
+        database_name: &[u8],
         table_name: &[u8],
         args: &[&[u8]],
         is_create: bool,
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let handle = unsafe { db.handle() };
+        // Bind the calling connection for every store operation below
+        // (DDL, _meta writes, recovery scans). RAII unbind.
+        let _bind = DbGuard::bind(handle);
 
         // No creation args: unlike logs there is no index_keys knob
         // (spans/mod.rs explains why the four span dimensions are
@@ -191,7 +200,7 @@ impl TracesTab {
             )));
         }
 
-        let store = ShadowSpanStore::new(handle, &table);
+        let store = ShadowSpanStore::new(&table);
         if is_create {
             let host = unsafe { Connection::from_handle(handle) }?;
             // Same incremental auto-vacuum attempt as metrics/logs
@@ -204,19 +213,26 @@ impl TracesTab {
             store.save_meta("ts_unit", b"ns").map_err(module_err)?;
         }
 
-        // SpanBlockEngine::new recovers the block index via scan() and
-        // status partitions via the `status:` posting lists — re-entrant
-        // SELECTs, safe because THIS thread holds the connection.
-        let engine = SpanBlockEngine::new(
-            Box::new(store),
-            SpanEngineConfig {
-                flush_threshold: FLUSH_THRESHOLD,
-                zstd_level: ZSTD_LEVEL,
-                merge_target_entries: MERGE_TARGET_ENTRIES,
-                merge_max_ts_span: MERGE_MAX_TS_SPAN,
-            },
-        )
-        .map_err(module_err)?;
+        // R4: one engine per (db file, table) per process. First
+        // connection in builds it — SpanBlockEngine::new recovers the
+        // block index via scan() and status partitions via the
+        // `status:` posting lists (re-entrant SELECTs routed to the
+        // calling connection by the DbGuard above, safe because THIS
+        // thread holds the connection mutex recursively) — every later
+        // xConnect just bumps the Arc, no re-recovery.
+        let key = shared::registry_key(handle, database_name, &table);
+        let shared_engine = shared::get_or_create(&key, move || {
+            SpanBlockEngine::new(
+                Box::new(store),
+                SpanEngineConfig {
+                    flush_threshold: FLUSH_THRESHOLD,
+                    zstd_level: ZSTD_LEVEL,
+                    merge_target_entries: MERGE_TARGET_ENTRIES,
+                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                },
+            )
+            .map_err(module_err)
+        })?;
 
         let schema = format!(
             "CREATE TABLE x(trace_id BLOB, span_id BLOB, parent_span_id BLOB, \
@@ -234,23 +250,46 @@ impl TracesTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
                 table_name: table,
-                engine: Arc::new(engine),
+                shared: shared_engine,
+                key,
+                gate_held: false,
                 rowid_counter: 0,
             },
         ))
     }
 
+    /// Writer-gate helpers — identical shape to metrics_vtab.rs (read
+    /// the comments there); begin() is the primary acquire site.
+    fn acquire_write_gate(&mut self) -> Result<()> {
+        if self.gate_held {
+            return Ok(());
+        }
+        self.shared
+            .write_gate
+            .acquire(self.db as usize, &self.table_name)
+            .map_err(module_err)?;
+        self.gate_held = true;
+        Ok(())
+    }
+
+    fn release_write_gate(&mut self) {
+        if self.gate_held {
+            self.shared.write_gate.release(self.db as usize);
+            self.gate_held = false;
+        }
+    }
+
     /// Hidden-column command insert ('flush' | 'optimize' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "flush" {
-            self.engine.flush().map_err(module_err)?;
+            self.shared.engine.flush().map_err(module_err)?;
         } else if cmd == "optimize" {
-            self.engine.optimize().map_err(module_err)?;
+            self.shared.engine.optimize().map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             let ts: i64 = ts_str.trim().parse().map_err(|_| {
                 module_err(format!("prune: expected 'prune:<ts>' (ns), got {cmd:?}"))
             })?;
-            self.engine.prune(ts).map_err(module_err)?;
+            self.shared.engine.prune(ts).map_err(module_err)?;
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'optimize', 'prune:<ts>'"
@@ -382,11 +421,19 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
     fn open(&'vtab mut self) -> Result<Self::Cursor> {
         Ok(TracesCursor {
             base: ffi::sqlite3_vtab_cursor::default(),
-            engine: Arc::clone(&self.engine),
+            shared: Arc::clone(&self.shared),
+            db: self.db,
             rows: Vec::new(),
             pos: 0,
             phantom: PhantomData,
         })
+    }
+}
+
+/// Defensive gate release on teardown — see metrics_vtab.rs.
+impl Drop for TracesTab {
+    fn drop(&mut self) {
+        self.release_write_gate();
     }
 }
 
@@ -405,6 +452,10 @@ impl CreateVTab<'_> for TracesTab {
     }
 
     fn destroy(&self) -> Result<()> {
+        // Registry entry first: the key must never resolve to an
+        // engine whose shadow tables are gone (see metrics_vtab.rs).
+        shared::remove(&self.key);
+        let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
         host.execute_batch(&shadow_span_store::drop_ddl(&self.table_name))
     }
@@ -415,6 +466,12 @@ impl UpdateVTab<'_> for TracesTab {
     /// columns from index 2 (COL_* + 2); the hidden command column is
     /// argv[12].
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
+        // Connection routing + writer gate, as in metrics_vtab.rs
+        // (gate is normally taken by begin(); this is the defensive
+        // re-check). push() auto-flushes, so inserts can write rows.
+        let _bind = DbGuard::bind(self.db);
+        self.acquire_write_gate()?;
+
         let cmd_idx = 2 + COL_COMMAND;
         // Command idiom, dispatched by TYPE like metrics/logs: TEXT =
         // command, BLOB reserved for a future Tier 2 batch, NULL = data.
@@ -505,7 +562,7 @@ impl UpdateVTab<'_> for TracesTab {
 
         // push() canonicalizes (sorts) attributes, validates, and
         // auto-flushes at the threshold.
-        self.engine
+        self.shared.engine
             .push(SpanEntry {
                 trace_id,
                 span_id,
@@ -550,19 +607,32 @@ impl UpdateVTab<'_> for TracesTab {
 /// blocks — never-dangle holds through rollback too). Auto-flush
 /// inside a transaction is fully covered, as are all commands. Same
 /// savepoint limitation as the others (xSavepoint not wired).
+/// R4 ADDITION — writer gate brackets the journal exactly as in
+/// metrics_vtab.rs (read the comment there): acquire before
+/// txn_begin, holder-only commit/rollback, release after.
 impl TransactionVTab<'_> for TracesTab {
     fn begin(&mut self) -> Result<()> {
-        self.engine.txn_begin();
+        let _bind = DbGuard::bind(self.db);
+        self.acquire_write_gate()?;
+        self.shared.engine.txn_begin();
         Ok(())
     }
 
     fn commit(&mut self) -> Result<()> {
-        self.engine.txn_commit();
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_commit();
+            self.release_write_gate();
+        }
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
-        self.engine.txn_rollback();
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_rollback();
+            self.release_write_gate();
+        }
         Ok(())
     }
 }
@@ -581,7 +651,9 @@ struct OutRow {
 #[repr(C)]
 pub struct TracesCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
-    engine: Arc<SpanBlockEngine>,
+    shared: Arc<SharedEngine<SpanBlockEngine>>,
+    /// The connection driving this scan (bound in filter()).
+    db: *mut ffi::sqlite3,
     rows: Vec<OutRow>,
     pos: usize,
     phantom: PhantomData<&'vtab TracesTab>,
@@ -597,6 +669,9 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         _idx_str: Option<&str>,
         args: &Filters<'_>,
     ) -> Result<()> {
+        // Route block reads to the connection running this SELECT.
+        let _bind = DbGuard::bind(self.db);
+
         // argv slots were claimed in canonical order (trace, service,
         // kind, status, name, ts lo, ts hi) — the mask alone tells us
         // which positional arg is which.
@@ -698,7 +773,7 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         let entries = if impossible {
             Vec::new()
         } else {
-            self.engine
+            self.shared.engine
                 .query(&SpanQuery {
                     ts_min,
                     ts_max,

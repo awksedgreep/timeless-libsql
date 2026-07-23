@@ -41,6 +41,10 @@
 #   20. kill -9 crash test (tests/crash.sh: 5 random-timing kills of a
 #       live ingest; integrity_check, index-join invariants, and the
 #       flushed-= -durable watermark contract on reopen)
+#   21. R4 shared engine: TWO connections in ONE process (python3
+#       sqlite3) — flushed + buffered data visible across connections
+#       without reopen, writer-gate busy timeout, retry after commit,
+#       drop/recreate sanity
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
@@ -997,6 +1001,122 @@ if "$ROOT/tests/crash.sh" "$EXT"; then
 else
   fail "crash test failed (see output above)"
 fi
+
+# ---------------------------------------------------------------------------
+echo "== section 21: R4 shared engine — two connections, one process =="
+# The sqld reality: the extension is loaded into EVERY pooled connection
+# and each connection xConnects its own vtab instance over the same
+# shadow tables. shared.rs must make them share ONE engine (registry
+# keyed by canonical db path + table), route store SQL to the calling
+# connection, and serialize writers with the 5s-bounded gate.
+#
+# The sqlite3 CLI is one connection per process, so this section drives
+# TWO connections in ONE process through python3's sqlite3 module (which
+# links the same system libsqlite3 and supports enable_load_extension —
+# verified: if your python was built without it, this section fails
+# loudly at load_extension, not silently).
+#
+# Checks:
+#  (a) A inserts + flushes; B sees the rows WITHOUT reopening — under
+#      the old per-connection engines B's index snapshot (taken at its
+#      earlier xConnect) would have been stale/empty.
+#  (b) A inserts with NO flush; B sees the BUFFERED point too — the
+#      documented shared-buffer semantics (dirty reads of buffered
+#      telemetry; flushed data stays transactional).
+#  (c) A holds BEGIN + INSERT (writer gate held); B's INSERT must fail
+#      BOUNDED with a busy-style error. Empirical fact (VDBE bytecode:
+#      OP_Transaction runs before OP_VBegin): stock SQLite takes the
+#      FILE write lock before the vtab's xBegin, so B collides with
+#      SQLITE_BUSY ("database is locked") before it can reach our
+#      gate — the gate's own 5s timeout path is therefore covered by
+#      Rust unit tests in shared.rs (it is the active protection only
+#      under concurrent-writer hosts like libsql BEGIN CONCURRENT).
+#      Here we assert the user-visible contract: a second writer fails
+#      bounded, with a lock error, and never hangs or corrupts.
+#  (d) A COMMITs; B's retried INSERT succeeds (gate released).
+#  (e) A DROPs and recreates the table; both connections stay sane
+#      (registry entry removed at xDestroy, fresh engine after).
+DB21="$TMP/multiconn.db"
+py_out=$(python3 - "$EXT" "$DB21" <<'PYEOF'
+import sqlite3, sys, time
+
+ext, db = sys.argv[1], sys.argv[2]
+
+def connect():
+    c = sqlite3.connect(db, timeout=30)
+    c.isolation_level = None  # autocommit; explicit BEGIN issued by hand
+    c.enable_load_extension(True)
+    c.load_extension(ext)
+    return c
+
+A = connect()
+B = connect()
+
+A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
+# Force B's xConnect NOW, before any data exists: a stale second engine
+# would snapshot emptiness here and never see A's work.
+assert B.execute("SELECT count(*) FROM m").fetchone()[0] == 0
+
+# (a) flushed data crosses connections without a reopen
+A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 100, 1.5)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+print("a", B.execute("SELECT name, ts, value FROM m").fetchall())
+
+# (b) BUFFERED (unflushed) data is visible too: one shared buffer.
+# This is the accepted telemetry semantics, asserted on purpose so a
+# future change to it is a deliberate decision, not an accident.
+A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 200, 2.5)")
+print("b", B.execute("SELECT count(*) FROM m WHERE name = 'cpu'").fetchone()[0])
+
+# (c) A's open write txn locks B's writes out, BOUNDED. On stock
+# SQLite the failure is SQLite's own "database is locked" (file write
+# lock precedes xBegin — see the section comment); our gate message
+# ("locked by another connection") is accepted too, for hosts where
+# the vtab gate is reached first. Either way: bounded, never a hang.
+B.execute("PRAGMA busy_timeout = 2000")
+A.execute("BEGIN")
+A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 300, 3.5)")
+t0 = time.time()
+try:
+    B.execute("INSERT INTO m(name, ts, value) VALUES ('mem', 300, 9.0)")
+    print("c UNEXPECTED-SUCCESS")
+except sqlite3.OperationalError as e:
+    dt = time.time() - t0
+    if "locked" in str(e) and 1.5 <= dt <= 20.0:
+        print("c busy-after-bounded-wait")
+    else:
+        print("c UNEXPECTED", repr(str(e)), round(dt, 1))
+B.execute("PRAGMA busy_timeout = 30000")
+
+# (d) commit releases the gate; B's retry succeeds
+A.execute("COMMIT")
+B.execute("INSERT INTO m(name, ts, value) VALUES ('mem', 300, 9.0)")
+# 4 = ts100 (flushed) + ts200/ts300 (A, buffered) + mem300 (B, buffered):
+# A reading B's buffered point is the same shared-buffer semantics.
+print("d", A.execute("SELECT count(*) FROM m").fetchone()[0])
+
+# (e) DROP on A (xDestroy: shadow tables dropped, registry entry
+# removed), recreate, then BOTH connections use the fresh engine.
+A.execute("DROP TABLE m")
+A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
+B.execute("INSERT INTO m(name, ts, value) VALUES ('disk', 400, 7.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+print("e", A.execute("SELECT name, ts, value FROM m").fetchall(),
+      B.execute("SELECT count(*) FROM m").fetchone()[0])
+
+A.close(); B.close()
+PYEOF
+) || { fail "section 21 python driver crashed"; py_out=""; }
+check_eq "(a) B sees A's flushed rows without reopen" \
+  "$(grep '^a ' <<<"$py_out")" "a [('cpu', 100, 1.5)]"
+check_eq "(b) B sees A's BUFFERED point (shared-buffer semantics)" \
+  "$(grep '^b ' <<<"$py_out")" "b 2"
+check_eq "(c) second writer fails BOUNDED with a lock error (gate unit-tested in shared.rs)" \
+  "$(grep '^c ' <<<"$py_out")" "c busy-after-bounded-wait"
+check_eq "(d) B's retry succeeds after A commits" \
+  "$(grep '^d ' <<<"$py_out")" "d 4"
+check_eq "(e) drop + recreate: both connections sane on the new engine" \
+  "$(grep '^e ' <<<"$py_out")" "e [('disk', 400, 7.0)] 1"
 
 # ---------------------------------------------------------------------------
 echo
