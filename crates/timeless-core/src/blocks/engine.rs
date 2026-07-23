@@ -10,7 +10,8 @@
 //! re-enter SQLite on the host connection whose mutex the vtab callback
 //! thread holds; a worker thread touching the store would deadlock.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use super::codec::{decode_block, encode_block, CODEC_COLUMNAR_V2, CODEC_RAW};
@@ -103,6 +104,50 @@ struct IndexEntry {
     partition: Option<u8>,
 }
 
+/// Transaction journal (PLAN.md risk R5) — the blocks twin of the
+/// metrics Engine's TxnJournal; read engine.rs (metrics) for the full
+/// design story. Short version: block/term rows ride the host SQLite
+/// transaction, engine memory does not. While a journal is active
+/// (between txn_begin and txn_commit/txn_rollback — SQLite brackets
+/// EVERY write, including autocommit single statements), mutations
+/// record their undo:
+///
+///   - buffer_mark: buffered entry count at begin. Entries above the
+///     mark were pushed during the txn; rollback truncates them.
+///   - saved: PRE-txn buffered entries that an intra-txn flush drained
+///     into a block (whose row rolls back!) or an intra-txn prune
+///     dropped (whose... nothing — but the buffer retain must undo
+///     together with the block DELETEs it accompanied). Restored into
+///     the buffer on rollback. Whenever an operation is about to
+///     disturb the pre-txn prefix (flush sorts + drains, prune
+///     retains), it first snapshots buffer[..mark] here and zeroes the
+///     mark — from then on the whole buffer is txn-era.
+///   - added: BlockLoc ids of blocks persisted during the txn; their
+///     rows vanish on rollback, so the index entries must go too.
+///   - removed: pre-txn IndexEntry values removed during the txn
+///     (optimize/prune). Host rollback restores the deleted rows under
+///     their original rowids (page-level undo), so restoring these
+///     verbatim — including the partition tag — is exactly right.
+///     Dedup rule: removing a block that `added` contains cancels the
+///     add instead (a block born and deleted inside one txn must not
+///     be resurrected).
+///
+/// NOT journaled (accepted): nothing — blocks have no registry; term
+/// and trace rows are store-side and ride the host transaction.
+/// Precondition: the store must be transactional (shadow tables); the
+/// txn_* API is meaningless over MemBlockStore except in tests that
+/// treat it as always-committed.
+///
+/// LOCK ORDER: txn journal → buffer → index. Every site that touches
+/// the journal acquires it first.
+#[derive(Default)]
+struct TxnJournal {
+    buffer_mark: usize,
+    saved: Vec<LogEntry>,
+    added: HashSet<i64>,
+    removed: Vec<IndexEntry>,
+}
+
 pub struct BlockEngine {
     store: Box<dyn BlockStore>,
     config: BlockEngineConfig,
@@ -114,6 +159,10 @@ pub struct BlockEngine {
     /// optimize() and prune() plan from this; the QUERY path asks the
     /// store instead (posting lists live store-side).
     index: Mutex<Vec<IndexEntry>>,
+    /// True between txn_begin and txn_commit/txn_rollback; an atomic so
+    /// the no-transaction fast path costs one load (see TxnJournal).
+    txn_active: AtomicBool,
+    txn: Mutex<TxnJournal>,
 }
 
 impl BlockEngine {
@@ -160,6 +209,8 @@ impl BlockEngine {
             config,
             buffer: Mutex::new(Vec::new()),
             index: Mutex::new(index),
+            txn_active: AtomicBool::new(false),
+            txn: Mutex::new(TxnJournal::default()),
         })
     }
 
@@ -175,6 +226,81 @@ impl BlockEngine {
 
     fn index_lock(&self) -> std::sync::MutexGuard<'_, Vec<IndexEntry>> {
         self.index.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn txn_lock(&self) -> std::sync::MutexGuard<'_, TxnJournal> {
+        self.txn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Acquire the journal iff a transaction is active. Mutation sites
+    /// call this FIRST (lock order: txn → buffer → index).
+    fn txn_guard(&self) -> Option<std::sync::MutexGuard<'_, TxnJournal>> {
+        if self.txn_active.load(Ordering::SeqCst) {
+            Some(self.txn_lock())
+        } else {
+            None
+        }
+    }
+
+    // ── Transaction journal API (PLAN.md R5; see TxnJournal docs) ────
+
+    /// Start journaling. Called from the vtab's xBegin — which SQLite
+    /// fires before the first write of EVERY transaction, including
+    /// the implicit per-statement one in autocommit mode — so it must
+    /// stay cheap: one usize mark, capacity-retaining clears, zero
+    /// steady-state allocations. Nested begins are impossible from
+    /// SQLite; debug builds assert, release builds restart the journal.
+    pub fn txn_begin(&self) {
+        let mut j = self.txn_lock();
+        debug_assert!(
+            !self.txn_active.load(Ordering::SeqCst),
+            "txn_begin while a transaction journal is already active (nested xBegin?)"
+        );
+        j.buffer_mark = self.buffer_lock().len();
+        j.saved.clear();
+        j.added.clear();
+        j.removed.clear();
+        self.txn_active.store(true, Ordering::SeqCst);
+    }
+
+    /// Commit: the host transaction made everything permanent — drop
+    /// the journal (contents are cleared lazily by the next begin).
+    pub fn txn_commit(&self) {
+        let _j = self.txn_lock(); // serialize against in-flight recorders
+        self.txn_active.store(false, Ordering::SeqCst);
+    }
+
+    /// Rollback: undo journaled mutations in the mirror image of what
+    /// the host rollback did to the shadow tables — truncate txn-era
+    /// buffered entries, restore drained pre-txn entries, drop index
+    /// entries whose block rows vanished, restore entries whose rows
+    /// came back (verbatim, partition tag included — same rowids).
+    pub fn txn_rollback(&self) {
+        let mut j = self.txn_lock();
+        if !self.txn_active.load(Ordering::SeqCst) {
+            return; // xRollback without xBegin — nothing recorded
+        }
+        // Split-borrow the journal so the retain closure below can
+        // borrow `added` while we drain `removed`.
+        let TxnJournal {
+            buffer_mark,
+            saved,
+            added,
+            removed,
+        } = &mut *j;
+        {
+            let mut buf = self.buffer_lock();
+            buf.truncate(*buffer_mark);
+            // Order inside the buffer is irrelevant: flush sorts before
+            // encoding and queries sort their results.
+            buf.append(saved);
+        }
+        {
+            let mut index = self.index_lock();
+            index.retain(|e| !added.contains(&e.loc.id));
+            index.append(removed);
+        }
+        self.txn_active.store(false, Ordering::SeqCst);
     }
 
     /// Append one entry to the buffer. Validates the level, sorts the
@@ -229,12 +355,25 @@ impl BlockEngine {
     /// store in ONE put_blocks call (one lock + prepared-statement
     /// reuse in the SQLite backend).
     pub fn flush(&self) -> Result<usize, String> {
-        // Hold the buffer lock for the whole flush so a concurrent push
+        // Journal first (lock order: txn → buffer → index), then hold
+        // the buffer lock for the whole flush so a concurrent push
         // can't slip entries between encode and clear. Single-threaded
         // in the vtab anyway; correctness is free here.
+        let mut j = self.txn_guard();
         let mut buf = self.buffer_lock();
         if buf.is_empty() {
             return Ok(0);
+        }
+        // R5: this flush drains PRE-txn entries (below the mark) into
+        // blocks whose rows roll back with the host transaction — and
+        // the sort below scrambles positions anyway. Snapshot the
+        // pre-txn prefix into the journal and zero the mark: from here
+        // on, rollback restores from `saved` and truncates the rest.
+        if let Some(j) = j.as_deref_mut() {
+            if j.buffer_mark > 0 {
+                j.saved.extend_from_slice(&buf[..j.buffer_mark]);
+                j.buffer_mark = 0;
+            }
         }
         // Sort by (level, ts): this makes each level's entries one
         // CONTIGUOUS ts-ordered run, so the per-level blocks can be
@@ -264,6 +403,12 @@ impl BlockEngine {
         {
             let mut index = self.index_lock();
             for ((block, loc), level) in blocks.iter().zip(&locs).zip(&levels) {
+                // R5: blocks born inside a transaction are journaled so
+                // rollback can drop their index entries when their rows
+                // vanish.
+                if let Some(j) = j.as_deref_mut() {
+                    j.added.insert(loc.id);
+                }
                 index.push(IndexEntry {
                     meta: block.meta,
                     loc: *loc,
@@ -435,15 +580,33 @@ impl BlockEngine {
         // One atomic swap. The on_committed callback rewrites the
         // in-memory index at the moment both generations exist in the
         // store, so no query window ever sees a missing block.
+        //
+        // Journal (R5): grabbed BEFORE replace_blocks so the lock order
+        // inside the callback stays txn → index. Removed pre-txn
+        // entries are journaled verbatim (host rollback restores their
+        // rows under the same rowids, partition tags ride along);
+        // removing a block this txn itself created just cancels the
+        // add; new blocks journal their locs.
+        let mut j = self.txn_guard();
         let add_metas: Vec<BlockMeta> = adds.iter().map(|b| b.meta).collect();
         let removed = removes.len();
         self.store
             .replace_blocks(&adds, &removes, &mut |new_locs: &[BlockLoc]| {
                 let mut index = self.index_lock();
+                if let Some(j) = j.as_deref_mut() {
+                    for e in index.iter().filter(|e| removes.contains(&e.loc)) {
+                        if !j.added.remove(&e.loc.id) {
+                            j.removed.push(*e);
+                        }
+                    }
+                }
                 index.retain(|e| !removes.contains(&e.loc));
                 for ((meta, loc), partition) in
                     add_metas.iter().zip(new_locs).zip(&add_partitions)
                 {
+                    if let Some(j) = j.as_deref_mut() {
+                        j.added.insert(loc.id);
+                    }
                     index.push(IndexEntry {
                         meta: *meta,
                         loc: *loc,
@@ -451,6 +614,7 @@ impl BlockEngine {
                     });
                 }
             })?;
+        drop(j);
         Ok((removed, add_metas.len()))
     }
 
@@ -460,13 +624,30 @@ impl BlockEngine {
     /// than the cutoff. The store removes term rows in the same
     /// operation. Returns the number of blocks deleted.
     pub fn prune(&self, cutoff: i64) -> Result<usize, String> {
+        // Journal first (lock order: txn → buffer → index). Two things
+        // must be undoable: the buffer retain (it may drop PRE-txn
+        // entries, and it shifts positions, invalidating the mark) and
+        // the index removals (their rows are restored by host
+        // rollback). Same prefix-snapshot trick as flush: preserve
+        // buffer[..mark] into `saved`, zero the mark, then mutate
+        // freely — rollback truncates everything and restores `saved`.
+        let mut j = self.txn_guard();
         let victims: Vec<BlockLoc> = self
             .index_lock()
             .iter()
             .filter(|e| e.meta.ts_max < cutoff)
             .map(|e| e.loc)
             .collect();
-        self.buffer_lock().retain(|e| e.ts >= cutoff);
+        {
+            let mut buf = self.buffer_lock();
+            if let Some(j) = j.as_deref_mut() {
+                if j.buffer_mark > 0 {
+                    j.saved.extend_from_slice(&buf[..j.buffer_mark]);
+                    j.buffer_mark = 0;
+                }
+            }
+            buf.retain(|e| e.ts >= cutoff);
+        }
         if victims.is_empty() {
             return Ok(0);
         }
@@ -474,8 +655,17 @@ impl BlockEngine {
         if !errors.is_empty() {
             return Err(format!("prune errors: {}", errors.join("; ")));
         }
-        self.index_lock()
-            .retain(|e| e.meta.ts_max >= cutoff);
+        {
+            let mut index = self.index_lock();
+            if let Some(j) = j.as_deref_mut() {
+                for e in index.iter().filter(|e| e.meta.ts_max < cutoff) {
+                    if !j.added.remove(&e.loc.id) {
+                        j.removed.push(*e);
+                    }
+                }
+            }
+            index.retain(|e| e.meta.ts_max >= cutoff);
+        }
         Ok(victims.len())
     }
 

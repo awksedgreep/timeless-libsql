@@ -690,3 +690,106 @@ fn push_validates_and_canonicalizes_attributes() {
         vec![("a".to_string(), "2".to_string()), ("z".to_string(), "3".to_string())]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Transaction journal (PLAN.md R5) — the spans mirror of the blocks
+// journal tests; same scope note: MemSpanStore is not transactional, so
+// these verify the engine-memory half; tests/cli.sh and the oracle
+// assert the store-side half over real SQLite.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn txn_rollback_discards_buffered_spans() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    engine.push(span(1, 1, None, "pre", "s", 0, 0, 10, &[])).unwrap();
+
+    engine.txn_begin();
+    engine.push(span(1, 2, None, "txn", "s", 0, 2, 20, &[])).unwrap();
+    assert_eq!(engine.buffered_count(), 2);
+    engine.txn_rollback();
+
+    assert_eq!(engine.buffered_count(), 1);
+    let got = engine.query(&full_range_query()).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].name, "pre");
+}
+
+#[test]
+fn txn_rollback_restores_pretxn_spans_drained_by_intra_txn_flush() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    engine.push(span(1, 1, None, "pre-1", "s", 0, 1, 10, &[])).unwrap();
+    engine.push(span(2, 2, None, "pre-2", "s", 0, 2, 20, &[])).unwrap();
+
+    engine.txn_begin();
+    engine.push(span(3, 3, None, "txn-1", "s", 0, 0, 30, &[])).unwrap();
+    engine.flush().unwrap(); // drains all 3 into status-pure blocks
+    assert_eq!(engine.buffered_count(), 0);
+    engine.txn_rollback();
+
+    // Index emptied, pre-txn spans back in the buffer. (No query
+    // assertion: MemSpanStore is not transactional, so the phantom
+    // blocks are still store-visible here; cli.sh proves the query
+    // side over real SQLite.)
+    assert_eq!(engine.stats().0, 0);
+    assert_eq!(engine.buffered_count(), 2);
+    // A committed flush afterwards persists exactly the restored spans.
+    engine.flush().unwrap();
+    assert_eq!(engine.stats().0, 2); // ok-pure + error-pure
+}
+
+#[test]
+fn txn_rollback_undoes_optimize_index_swap() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    engine.push(span(1, 1, None, "a", "s", 0, 1, 10, &[])).unwrap();
+    engine.flush().unwrap();
+    engine.push(span(1, 2, None, "b", "s", 0, 1, 20, &[])).unwrap();
+    engine.flush().unwrap();
+    assert_eq!(engine.stats(), (2, 2, 0));
+
+    // optimize inside a txn, rolled back → raw entries restored
+    // verbatim (metas, locs, partition tags — IndexEntry journaled
+    // wholesale). No store reads after rollback: the mem store is not
+    // transactional so the restored locs dangle HERE; over real SQLite
+    // the rows come back with the host rollback (cli.sh asserts it).
+    engine.txn_begin();
+    assert_eq!(engine.optimize().unwrap(), (2, 1));
+    engine.txn_rollback();
+    assert_eq!(engine.stats(), (2, 2, 0));
+}
+
+#[test]
+fn txn_rollback_undoes_prune_removals_and_buffer_retain() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    engine.push(span(1, 1, None, "a", "s", 0, 1, 10, &[])).unwrap();
+    engine.flush().unwrap();
+    engine.push(span(2, 3, None, "buf", "s", 0, 0, 5, &[])).unwrap();
+    assert_eq!(engine.stats(), (1, 1, 1));
+
+    engine.txn_begin();
+    assert_eq!(engine.prune(1_000).unwrap(), 1);
+    assert_eq!(engine.stats(), (0, 0, 0));
+    engine.txn_rollback();
+    assert_eq!(engine.stats(), (1, 1, 1));
+}
+
+#[test]
+fn txn_add_then_remove_in_one_txn_cancels() {
+    // flush + optimize inside ONE rolled-back transaction: blocks born
+    // in the txn are consumed by its own optimize; rollback must not
+    // resurrect them.
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    engine.txn_begin();
+    engine.push(span(3, 4, None, "t1", "s", 0, 1, 30, &[])).unwrap();
+    engine.flush().unwrap();
+    engine.push(span(3, 5, None, "t2", "s", 0, 1, 40, &[])).unwrap();
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    assert_eq!(engine.stats().0, 1);
+    engine.txn_rollback();
+    assert_eq!(engine.stats(), (0, 0, 0));
+}

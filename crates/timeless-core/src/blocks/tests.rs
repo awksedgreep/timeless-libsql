@@ -981,3 +981,140 @@ fn push_validates_level_and_canonicalizes_metadata() {
         vec![("a".to_string(), "2".to_string()), ("z".to_string(), "3".to_string())]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Transaction journal (PLAN.md R5)
+//
+// Scope note: MemBlockStore is NOT transactional, so these tests verify
+// the ENGINE-MEMORY half of rollback (buffer truncation/restore, index
+// add/remove/restore, journal dedup). The store-side half — block/term
+// rows actually vanishing and reappearing with the host transaction —
+// only exists over real SQLite and is asserted end-to-end by
+// tests/cli.sh (rollback sections) and the oracle property test.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn txn_rollback_discards_buffered_entries() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    engine.push(entry(1, 1, "pre-1", &[])).unwrap();
+    engine.push(entry(2, 2, "pre-2", &[])).unwrap();
+
+    engine.txn_begin();
+    engine.push(entry(3, 1, "txn-1", &[])).unwrap();
+    engine.push(entry(4, 3, "txn-2", &[])).unwrap();
+    assert_eq!(engine.buffered_count(), 4);
+    engine.txn_rollback();
+
+    // Only the pre-txn entries remain, and they are still queryable.
+    assert_eq!(engine.buffered_count(), 2);
+    let got = engine.query(&full_range_query()).unwrap();
+    assert_eq!(
+        got.iter().map(|e| e.message.as_str()).collect::<Vec<_>>(),
+        vec!["pre-1", "pre-2"]
+    );
+}
+
+#[test]
+fn txn_commit_keeps_everything() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    engine.txn_begin();
+    engine.push(entry(1, 1, "a", &[])).unwrap();
+    engine.flush().unwrap();
+    engine.push(entry(2, 1, "b", &[])).unwrap();
+    engine.txn_commit();
+
+    assert_eq!(engine.stats(), (1, 1, 1)); // 1 block (raw), 1 buffered
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 2);
+}
+
+#[test]
+fn txn_rollback_restores_pretxn_entries_drained_by_intra_txn_flush() {
+    // THE R5 nightmare case: entries buffered by COMMITTED statements
+    // get drained into a block by a flush INSIDE a later transaction.
+    // The block row rolls back with the host txn — without the journal
+    // `saved` machinery those committed entries would be silently lost.
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    engine.push(entry(1, 1, "pre-1", &[])).unwrap();
+    engine.push(entry(2, 3, "pre-2", &[])).unwrap();
+
+    engine.txn_begin();
+    engine.push(entry(3, 1, "txn-1", &[])).unwrap();
+    engine.flush().unwrap(); // drains ALL 3 into level-pure blocks
+    assert_eq!(engine.buffered_count(), 0);
+    assert!(engine.stats().0 > 0);
+    engine.txn_rollback();
+
+    // Index entries for the intra-txn blocks are gone (their rows
+    // would be too, over a real store — MemBlockStore keeps them, so
+    // no query assertion here; cli.sh proves the query side) and the
+    // pre-txn entries are back in the buffer...
+    assert_eq!(engine.stats().0, 0);
+    assert_eq!(engine.buffered_count(), 2);
+    // ...and a subsequent (committed) flush persists exactly them.
+    engine.flush().unwrap();
+    assert_eq!(engine.buffered_count(), 0);
+    assert_eq!(engine.stats().0, 2); // one info-pure + one error-pure block
+}
+
+#[test]
+fn txn_rollback_undoes_optimize_index_swap() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    // Two committed raw flushes → two raw info-pure blocks.
+    engine.push(entry(1, 1, "a", &[])).unwrap();
+    engine.flush().unwrap();
+    engine.push(entry(2, 1, "b", &[])).unwrap();
+    engine.flush().unwrap();
+    assert_eq!(engine.stats(), (2, 2, 0));
+
+    engine.txn_begin();
+    let (removed, written) = engine.optimize().unwrap();
+    assert_eq!((removed, written), (2, 1));
+    assert_eq!(engine.stats(), (1, 0, 0));
+    engine.txn_rollback();
+
+    // The pre-txn raw entries are restored VERBATIM (metas, locs and
+    // partition tags — IndexEntry is journaled wholesale) and the
+    // merged block's entry is gone. No store reads after this point:
+    // MemBlockStore is not transactional, so the restored locs dangle
+    // HERE — over real SQLite the host rollback restores the rows
+    // under the same ids, which cli.sh asserts end-to-end.
+    assert_eq!(engine.stats(), (2, 2, 0));
+}
+
+#[test]
+fn txn_rollback_undoes_prune_removals_and_buffer_retain() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    engine.push(entry(100, 1, "old-flushed", &[])).unwrap();
+    engine.flush().unwrap();
+    engine.push(entry(200, 1, "old-buffered", &[])).unwrap();
+    assert_eq!(engine.stats(), (1, 1, 1));
+
+    engine.txn_begin();
+    // Cutoff above everything: drops the block AND the pre-txn
+    // buffered entry (prune retains only ts >= cutoff).
+    assert_eq!(engine.prune(1_000).unwrap(), 1);
+    assert_eq!(engine.stats(), (0, 0, 0));
+    engine.txn_rollback();
+
+    // Index entry restored, buffered entry restored.
+    assert_eq!(engine.stats(), (1, 1, 1));
+}
+
+#[test]
+fn txn_add_then_remove_in_one_txn_cancels() {
+    // flush + optimize inside ONE transaction: the raw blocks born in
+    // the txn are consumed by the txn's own optimize. Rollback must not
+    // resurrect them (their rows never survive the host rollback).
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    engine.txn_begin();
+    engine.push(entry(1, 1, "a", &[])).unwrap();
+    engine.flush().unwrap();
+    engine.push(entry(2, 1, "b", &[])).unwrap();
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    assert_eq!(engine.stats().0, 1);
+    engine.txn_rollback();
+
+    // Nothing left: no phantom raw entries, no merged entry, no buffer.
+    assert_eq!(engine.stats(), (0, 0, 0));
+}

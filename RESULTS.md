@@ -100,10 +100,41 @@ compressed telemetry SQL, zero client changes.
   silently, like a real Prometheus server scrape. The scraping loop stays
   external by design (cron/curl/Elixir); the vtab is passive.
 
+## Transactions & crash safety (hardening session, 2026-07-22)
+
+- **ROLLBACK is real (PLAN R5 fixed).** All three engines keep a
+  transaction journal bracketed by xBegin/xCommit/xRollback: rolled-back
+  buffered writes vanish (pre- and post-reopen), intra-transaction
+  flushes roll back completely (chunk/block/term/trace-index rows ride
+  the host transaction; the journal removes their in-memory index
+  entries and RESTORES any pre-transaction buffered data the flush
+  drained), and flush/compact/optimize/prune all work inside explicit
+  transactions. Asserted by cli.sh sections 6/6b/6c and the oracle's
+  rollback ops.
+- **Durability contract, crash-tested:** flushed = durable (survives
+  kill -9 at any instant; SQLite journal recovery + never-dangle index
+  joins verified by tests/crash.sh over 5 random-timing kills),
+  buffered = lost with the process, never corrupt (integrity_check ok
+  every time).
+- **Oracle property test:** 3 seeds × 50k randomized ops (inserts,
+  commands, every pushdown plan family, mirrored transactions with
+  rollback, prune) against mirrored plain tables in the same db —
+  result sets identical after every query (order-insensitive, floats
+  bit-exact). `tools/bench` bin `oracle`; any failure prints its seed
+  and op index for exact replay.
+
 ## Known limits (documented, accepted for POC)
 
-- Rollback does not discard buffered (unflushed) points — they die with the
-  process instead (PLAN R5; TransactionVTab hooks exist for the fix).
+- SAVEPOINT-granular rollback is not supported (rusqlite's
+  update_module_with_tx wires xBegin/xSync/xCommit/xRollback but not
+  xSavepoint) — only whole-transaction ROLLBACK is journaled. Series/
+  metric NAMES registered during a rolled-back transaction stay
+  registered in memory as harmless empty series.
+- Metrics chunk index is keyed (series, min_ts): two chunks of one
+  series sharing an identical min_ts would shadow each other
+  (pre-existing engine design inherited from the donor; real telemetry
+  effectively never produces it — the oracle generator documents and
+  avoids manufacturing it).
 - One engine per connection over shared shadow tables — single-writer
   assumption (PLAN R4).
 - Engine rayon paths (par_iter queries) must not be called from vtab
@@ -115,6 +146,9 @@ compressed telemetry SQL, zero client changes.
 
 ```sh
 cargo build --release -p timeless-ext
-./tests/cli.sh                                   # 18 sections
-cd tools/bench && cargo run --release -- ../../target/release/libtimeless_ext.so
+./tests/cli.sh              # 20 sections, incl. oracle (19) + crash (20)
+tests/crash.sh target/release/libtimeless_ext.so            # standalone
+cd tools/bench
+cargo run --release --bin oracle -- ../../target/release/libtimeless_ext.so [seed]
+cargo run --release -- ../../target/release/libtimeless_ext.so
 ```

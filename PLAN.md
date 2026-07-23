@@ -527,9 +527,13 @@ decode speaks 1/2/4/5; raw flush stays 1; codec 3 still reserved.
       connection whose mutex the host thread holds inside xFilter → deadlock.
       Cursor uses sequential query_range_by_id per series. Fix candidates for
       later: sequential variants in timeless-core, or rayon-off engine mode.
-- [ ] Deferred: property test vs plain-table oracle; kill -9 crash test;
-      R4 global engine registry (per-connection engines accepted for POC);
-      R5 rollback of buffered points (documented no-op)
+- [x] DONE 2026-07-22 (Session 9 hardening — see that session's block):
+      plain-table oracle property test (tools/bench `oracle`, 3 seeds ×
+      50k ops, cli.sh section 19); kill -9 crash test (tests/crash.sh,
+      cli.sh section 20); R5 real transaction rollback (journal in all
+      three engines, TransactionVTab wired — risk register updated).
+- [ ] Still deferred: R4 global engine registry (per-connection engines
+      accepted for POC; single-writer assumption unchanged)
 
 ### Session 4 — Tier 2 + hero benchmark + sqld flourish (≈1–1.5 days)
 - [x] Batch blob format v0 encoder (bench-side) + decoder (ext-side);
@@ -723,6 +727,53 @@ Gated on: Session 5 (shares the entire block-store skeleton).
       metric by name, log by service pushdown, trace by trace_id (hex
       round-trip). The original pitch, running.
 
+### Session 9 — Hardening: R5 rollback, oracle, crash test — ✅ COMPLETE 2026-07-22
+
+- [x] **R5 real transaction rollback in all three engines** (metrics
+      Engine, BlockEngine, SpanBlockEngine): transaction journal keyed
+      off xBegin/xCommit/xRollback (TransactionVTab wired in all three
+      vtabs). Full details in the risk register R5 entry. Empirical
+      fact recorded: SQLite calls xBegin per WRITE STATEMENT in
+      autocommit and once per explicit BEGIN (plus one lone xCommit at
+      CREATE VIRTUAL TABLE — commit on an inactive journal is a no-op),
+      so txn_begin is deliberately O(active partitions)/O(1) with
+      capacity-retaining reuse. Design choice: NO commands are refused
+      inside transactions — flush/compact/optimize/prune are all fully
+      journaled (the "restore removed entries" branch works because
+      SQLite rollback restores deleted rows under their original
+      rowids). 11 new core unit tests (blocks 6, spans 4 + metrics
+      integration file tests/txn_journal.rs) + cli.sh sections 6/6b/6c
+      rewritten from "rollback caveat WARNING" to hard assertions
+      (buffered rollback, intra-txn flush rollback with buffer restore,
+      auto-flush-in-txn for logs/traces, optimize-in-txn, dangling-row
+      joins, integrity_check, reopen).
+- [x] **Plain-table oracle property test** (tools/bench src/oracle.rs,
+      cli.sh section 19): one db, three vtabs + three mirrored plain
+      tables; splitmix64-seeded generator drives 50k ops/seed (85%
+      inserts, commands, pushdown queries of every plan family,
+      explicit txns that rollback or commit — half with intra-txn
+      flush — and mirrored prune-alls); every query op compares
+      canonicalized (sorted, float-by-bits) result sets; mismatch
+      prints seed + op index for exact replay. 3 fixed seeds run in
+      ~9s. The oracle's own first catch was a bug in ITS generator
+      (shared prune cutoff across signals with different ts units) —
+      the harness works. Generator constraint recorded: metric ts are
+      strictly increasing per series because the chunk index is keyed
+      (series, min_ts) — duplicate-min_ts chunks would shadow each
+      other (pre-existing engine limit, now in RESULTS known-limits).
+- [x] **kill -9 crash test** (tests/crash.sh, cli.sh section 20): 5
+      iterations of killing a live 3000-round ingest (BEGIN; 30 rows
+      over 3 signals; flush ×3; COMMIT; watermark print; optimize/
+      compact every 25 rounds) at a random 0.1–0.8s, then reopen and
+      assert: integrity_check ok; vtabs recover and FULLY decode;
+      count ≥ last-watermark counts (flushed = durable); zero dangling
+      _terms/_trace_blocks rows and zero term-less blocks (never-dangle
+      through crashes); pushdown queries answer. Documented contract:
+      flushed = durable, buffered = lost, never corrupt.
+- [x] Regression sweep: timeless-core 55 tests + timeless-codec 16
+      green; bench unchanged (tier2 16.8M pts/s, tier1 1.73M, bit-exact
+      spot checks OK); cli.sh 47 PASS lines across 20 sections.
+
 ---
 
 ## Risk register
@@ -739,10 +790,28 @@ Gated on: Session 5 (shares the entire block-store skeleton).
   state. POC: single-writer assumption + process-global engine registry keyed
   by (db path, table). Extensions are one shared lib per process, so a global
   works. Decide now, cheap; retrofit, expensive.
-- **R5 — transaction semantics of in-memory buffers.** Rollback after buffered
-  (unflushed) inserts should discard those points → implement
-  xBegin/xCommit/xRollback minimally, or document POC limitation explicitly.
-  Do not ship the POC silently ignoring rollback.
+- **R5 — transaction semantics of in-memory buffers. FIXED 2026-07-22
+  (Session 9).** Each engine now keeps a TRANSACTION JOURNAL activated by
+  xBegin (SQLite fires it before the first write of every transaction —
+  verified empirically: once per statement in autocommit, once per
+  explicit BEGIN; SELECTs never). Journaled: buffer marks (rollback
+  truncates txn-era points), pre-txn buffered data drained by an
+  intra-txn flush (RESTORED on rollback — its chunk/block rows roll back
+  with the host txn), index additions (removed on rollback — no dangling
+  locs) and index removals with metas (restored verbatim on rollback —
+  SQLite's page-level undo brings the deleted rows back under the same
+  rowids, partition tags ride along in the journaled IndexEntry). ALL
+  commands (flush/compact/optimize/prune) work inside explicit
+  transactions and roll back fully; add-then-remove within one txn
+  cancels (nothing resurrects). Cheap by construction: txn_begin is
+  O(active partitions) marks (metrics) / one usize (blocks, spans) into
+  capacity-retaining collections — it is on the autocommit per-statement
+  path. Remaining documented limits: SAVEPOINT-granular rollback is not
+  implemented (rusqlite wires xBegin/xSync/xCommit/xRollback, not
+  xSavepoint — whole-transaction rollback only); series NAMES registered
+  during a rolled-back txn stay registered in memory (harmless empty
+  series); the journal presumes a transactional store (the vtab's shadow
+  stores — over FsStore the txn_* API must simply not be used).
 - **R6 — pco chunk granularity vs SQLite page model.** Prior art warning: bit-
   level appends into page storage kill throughput. Our design never does this —
   chunks are compressed complete, stored whole as blobs. Keep it that way.

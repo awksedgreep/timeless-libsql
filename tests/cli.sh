@@ -11,7 +11,13 @@
 #   3. reopen recovery (new process; ShadowTableStore.scan rebuilds index)
 #   4. 'prune:<ts>' retention command
 #   5. 'compact' command (chunk merge through replace_chunks)
-#   6. rollback caveat (documented POC behavior, WARNING not failure)
+#   6. metrics transaction rollback (R5 FIXED: buffered inserts,
+#      intra-txn flush with chunk-row rollback + buffer restore,
+#      auto-queue rebuild, integrity_check, reopen)
+#   6b. logs transaction rollback (real auto-flush inside the txn,
+#       optimize-in-txn, no dangling _terms rows)
+#   6c. traces transaction rollback (auto-flush + _trace_blocks rows
+#       vanish with their blocks; never-dangle through rollback)
 #   7. Tier 2 batch blob ingest (format v0; blob in the hidden column)
 #   8. malformed batch blobs rejected atomically (truncation, bad index)
 #   9. timeless_logs round-trip (metadata + index-key columns, pre/post
@@ -29,10 +35,19 @@
 #   18. Prometheus text ingest (BLOB dispatch on first byte: 0x01 = batch
 #       v0, reserved 0x00/0x02–0x08 = loud error, else exposition text;
 #       ms timestamps normalized to EPOCH SECONDS; partial success)
+#   19. plain-table oracle property test (tools/bench oracle: 3 seeds x
+#       50k randomized ops, vtab results must equal a mirrored plain
+#       table after every query; prints seed+op for replay on mismatch)
+#   20. kill -9 crash test (tests/crash.sh: 5 random-timing kills of a
+#       live ingest; integrity_check, index-join invariants, and the
+#       flushed-= -durable watermark contract on reopen)
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
 # contract, so every section flushes before relying on a reopen.
+# ROLLBACK, however, is now REAL (R5 fixed): sections 6/6b/6c assert
+# that rolled-back buffered writes AND rolled-back intra-txn flushes
+# leave no trace, in memory or on disk.
 
 set -euo pipefail
 
@@ -178,32 +193,179 @@ net_data|3000010|2.0'
 check_eq "compact merges 2 chunks into 1, data intact" "$got" "$expected"
 
 # ---------------------------------------------------------------------------
-echo "== section 6: rollback caveat (documented POC behavior) =="
-# A data-row INSERT only touches engine memory (partition buffers), never
-# SQL — so ROLLBACK has nothing to undo and the buffered point remains
-# visible until the process exits (it is never flushed, so it does NOT
-# survive reopen). Accepted POC limitation, tracked as PLAN.md risk R5.
-got=$(sqlite3 "$DB" <<SQL
+echo "== section 6: metrics transaction rollback (R5 — real semantics) =="
+# PLAN.md risk R5 is FIXED: the engines keep a transaction journal
+# activated by xBegin (which SQLite fires before the first write of
+# EVERY transaction — one per statement in autocommit, one per explicit
+# BEGIN). ROLLBACK must:
+#   - discard points buffered during the txn (pre- AND post-reopen),
+#   - undo intra-txn 'flush' completely: the chunk ROWS roll back with
+#     the host txn, the journal removes their index entries (no
+#     dangling locs), and pre-txn buffered points the flush drained are
+#     RESTORED to the buffer (they came from committed statements!),
+#   - leave the db bit-happy (PRAGMA integrity_check) with no orphan
+#     index state (queries return exactly the pre-txn data).
+RBDB="$TMP/rollback_metrics.db"
+got=$(sqlite3 "$RBDB" <<SQL
 .load $EXT
+CREATE VIRTUAL TABLE metrics USING timeless_metrics;
+INSERT INTO metrics(name, ts, value) VALUES ('base', 100, 1.0);
+INSERT INTO metrics(metrics) VALUES ('flush');
+INSERT INTO metrics(name, ts, value) VALUES ('base', 200, 2.0);
+SELECT 'pre', COUNT(*) FROM metrics;
 BEGIN;
-INSERT INTO metrics(name, ts, value) VALUES ('rb', 5555, 9.9);
+INSERT INTO metrics(name, ts, value) VALUES ('rb', 300, 9.9);
+SELECT 'in_txn', COUNT(*) FROM metrics;
 ROLLBACK;
-SELECT 'rbcount', COUNT(*) FROM metrics WHERE name = 'rb';
+SELECT 'post', COUNT(*), (SELECT COUNT(*) FROM metrics WHERE name='rb') FROM metrics;
+BEGIN;
+INSERT INTO metrics(name, ts, value) VALUES ('rb2', 400, 4.4);
+INSERT INTO metrics(metrics) VALUES ('flush');
+SELECT 'chunks_in_txn', COUNT(*) FROM metrics_chunks;
+ROLLBACK;
+SELECT 'chunks_post', COUNT(*) FROM metrics_chunks;
+SELECT 'rows_post', name, ts, value FROM metrics ORDER BY ts;
+BEGIN;
+INSERT INTO metrics(name, ts, value) SELECT 'big', 1000 + value, 0.5 FROM generate_series(1, 5000);
+ROLLBACK;
+SELECT 'big_post', COUNT(*) FROM metrics WHERE name = 'big';
+PRAGMA integrity_check;
+INSERT INTO metrics(metrics) VALUES ('flush');
 SQL
 )
-if [[ "$got" == "rbcount|1" ]]; then
-  pass "rollback behavior is the documented one"
-  echo "WARNING: buffered (unflushed) writes survive ROLLBACK — accepted POC"
-  echo "WARNING: limitation (PLAN.md R5); they vanish when the process exits."
-elif [[ "$got" == "rbcount|0" ]]; then
-  pass "rollback discarded the buffered point (better than documented)"
-  echo "NOTE: update the R5 notes — rollback currently discards buffered writes."
-else
-  fail "unexpected rollback result: $got"
-fi
-# Confirm the un-flushed 'rb' point did NOT become durable:
-got=$(sqlite3 "$DB" ".load $EXT" "SELECT COUNT(*) FROM metrics WHERE name = 'rb';")
-check_eq "unflushed point lost on reopen (expected POC semantics)" "$got" "0"
+# pre: base@100 (flushed) + base@200 (buffered) = 2.
+# chunks_in_txn: baseline chunk + intra-txn flush of base@200 and
+# rb2@400 (one chunk per series) = 3; back to 1 after ROLLBACK.
+# rows_post: base@100 from the chunk, base@200 RESTORED to the buffer.
+# big: 5000 points cross the 4096 auto-queue threshold inside the txn —
+# all gone after ROLLBACK (and the flush queue must be rebuilt, which
+# the final committed 'flush' exercises).
+expected='pre|2
+in_txn|3
+post|2|0
+chunks_in_txn|3
+chunks_post|1
+rows_post|base|100|1.0
+rows_post|base|200|2.0
+big_post|0
+ok'
+check_eq "metrics rollback: buffered + intra-txn flush + auto-queue" "$got" "$expected"
+
+# Reopen in a NEW process: rolled-back data must not resurface, the
+# restored-and-then-flushed base@200 must be durable.
+got=$(sqlite3 "$RBDB" <<SQL
+.load $EXT
+SELECT COUNT(*), (SELECT COUNT(*) FROM metrics WHERE name IN ('rb','rb2','big')) FROM metrics;
+PRAGMA integrity_check;
+SQL
+)
+check_eq "metrics rollback state survives reopen" "$got" "2|0
+ok"
+
+# ---------------------------------------------------------------------------
+echo "== section 6b: logs transaction rollback (incl. real auto-flush) =="
+# The logs engine AUTO-FLUSHES inside push() at 8192 buffered entries,
+# so a big INSERT...SELECT inside an explicit txn writes real block +
+# term rows mid-transaction. ROLLBACK must remove them (rows roll back,
+# journal drops the index entries), restore the pre-txn buffered entry
+# the auto-flush drained, and leave zero orphan index state.
+RLDB="$TMP/rollback_logs.db"
+got=$(sqlite3 "$RLDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');
+INSERT INTO logs(ts, level, message, service) VALUES (1000, 'info', 'keep-flushed', 'api');
+INSERT INTO logs(logs) VALUES ('flush');
+INSERT INTO logs(ts, level, message, service) VALUES (2000, 'error', 'keep-buffered', 'web');
+SELECT 'pre', COUNT(*), (SELECT COUNT(*) FROM logs_blocks), (SELECT COUNT(*) FROM logs_terms) FROM logs;
+BEGIN;
+INSERT INTO logs(ts, level, message) SELECT 10000 + value, 'info', 'bulk-' || value FROM generate_series(1, 9000);
+SELECT 'in_txn', (SELECT COUNT(*) FROM logs_blocks) > 1, COUNT(*) FROM logs;
+ROLLBACK;
+SELECT 'post', COUNT(*), (SELECT COUNT(*) FROM logs_blocks), (SELECT COUNT(*) FROM logs_terms) FROM logs;
+SELECT 'rows', ts, level, message FROM logs ORDER BY ts;
+BEGIN;
+INSERT INTO logs(logs) VALUES ('flush');
+INSERT INTO logs(logs) VALUES ('optimize');
+SELECT 'opt_in_txn', COUNT(*) FILTER (WHERE codec != 1) FROM logs_blocks;
+ROLLBACK;
+SELECT 'opt_post', (SELECT COUNT(*) FROM logs_blocks), (SELECT COUNT(*) FILTER (WHERE codec = 1) FROM logs_blocks), (SELECT COUNT(*) FROM logs_terms);
+SELECT 'final', COUNT(*) FROM logs;
+PRAGMA integrity_check;
+INSERT INTO logs(logs) VALUES ('flush');
+SQL
+)
+# pre: 2 rows; 1 raw block (info: level:info + service:api = 2 terms).
+# in_txn: at 8192 buffered the auto-flush fired (blocks > 1 → 1) and
+# all 9002 rows are visible (blocks + remaining buffer).
+# post: blocks/terms back to 1/2, keep-buffered RESTORED to the buffer.
+# opt txn: flush + optimize inside one rolled-back txn (add-then-remove
+# journal dedup): everything back to the single raw pre-txn block.
+expected='pre|2|1|2
+in_txn|1|9002
+post|2|1|2
+rows|1000|info|keep-flushed
+rows|2000|error|keep-buffered
+opt_in_txn|2
+opt_post|1|1|2
+final|2
+ok'
+check_eq "logs rollback: auto-flush + optimize in txn fully undone" "$got" "$expected"
+
+got=$(sqlite3 "$RLDB" <<SQL
+.load $EXT
+SELECT COUNT(*), (SELECT COUNT(*) FROM logs WHERE message LIKE 'bulk-%') FROM logs;
+SELECT t.term FROM logs_terms t LEFT JOIN logs_blocks b ON t.block_id = b.id WHERE b.id IS NULL;
+PRAGMA integrity_check;
+SQL
+)
+check_eq "logs rollback state survives reopen, no dangling terms" "$got" "2|0
+ok"
+
+# ---------------------------------------------------------------------------
+echo "== section 6c: traces transaction rollback (incl. _trace_blocks) =="
+# Same story as logs plus the trace index: rows in _trace_blocks are
+# created in the same operation as their blocks, so ROLLBACK must take
+# them away together — never-dangle holds THROUGH rollback.
+RTDB="$TMP/rollback_traces.db"
+got=$(sqlite3 "$RTDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE traces USING timeless_traces;
+INSERT INTO traces(trace_id, span_id, name, service, status, start_ts) VALUES (x'11111111111111111111111111111111', x'0000000000000001', 'keep-flushed', 'api', 'ok', 1000);
+INSERT INTO traces(traces) VALUES ('flush');
+INSERT INTO traces(trace_id, span_id, name, service, status, start_ts) VALUES (x'22222222222222222222222222222222', x'0000000000000002', 'keep-buffered', 'web', 'error', 2000);
+SELECT 'pre', COUNT(*), (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks) FROM traces;
+BEGIN;
+INSERT INTO traces(trace_id, span_id, name, service, start_ts) SELECT randomblob(16), randomblob(8), 'bulk', 'svc', 10000 + value FROM generate_series(1, 9000);
+SELECT 'in_txn', (SELECT COUNT(*) FROM traces_blocks) > 1, (SELECT COUNT(*) FROM traces_trace_blocks) > 1, COUNT(*) FROM traces;
+ROLLBACK;
+SELECT 'post', COUNT(*), (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks) FROM traces;
+SELECT 'rows', name, status, start_ts FROM traces ORDER BY start_ts;
+PRAGMA integrity_check;
+INSERT INTO traces(traces) VALUES ('flush');
+SQL
+)
+# pre: 2 spans; 1 ok-pure raw block (4 terms: kind/name/service/status)
+# + 1 trace row. in_txn: auto-flush at 8192 wrote blocks + trace rows.
+# post: everything back — 1 block / 4 terms / 1 trace row — and the
+# pre-txn buffered error span RESTORED.
+expected='pre|2|1|4|1
+in_txn|1|1|9002
+post|2|1|4|1
+rows|keep-flushed|ok|1000
+rows|keep-buffered|error|2000
+ok'
+check_eq "traces rollback: auto-flush + trace-index rows fully undone" "$got" "$expected"
+
+got=$(sqlite3 "$RTDB" <<SQL
+.load $EXT
+SELECT COUNT(*), (SELECT COUNT(*) FROM traces WHERE name = 'bulk') FROM traces;
+SELECT hex(tb.trace_id) FROM traces_trace_blocks tb LEFT JOIN traces_blocks b ON tb.block_id = b.id WHERE b.id IS NULL;
+SELECT t.term FROM traces_terms t LEFT JOIN traces_blocks b ON t.block_id = b.id WHERE b.id IS NULL;
+PRAGMA integrity_check;
+SQL
+)
+check_eq "traces rollback state survives reopen, no dangling index rows" "$got" "2|0
+ok"
 
 # ---------------------------------------------------------------------------
 echo "== section 7: Tier 2 batch blob ingest (format v0) =="
@@ -811,6 +973,30 @@ fi
 got=$(sqlite3 "$PROMDB" ".load $EXT" \
   "INSERT INTO metrics(metrics) VALUES ('flush'); SELECT COUNT(*) FROM metrics;")
 check_eq "rejected payloads stored nothing" "$got" "6"
+
+# ---------------------------------------------------------------------------
+echo "== section 19: plain-table oracle property test (3 seeds) =="
+# tools/bench/src/oracle.rs: a seeded PRNG drives ~50k ops per seed
+# (inserts / flush / optimize / compact / queries / explicit txns with
+# rollback / prune-all) against the three vtabs AND mirrored plain
+# tables in one db; after every query op the result sets must match
+# exactly (order-insensitive, floats by bit pattern). A failure prints
+# the seed + op index — replay with:  oracle <ext.so> <seed>
+if (cd "$ROOT/tools/bench" && cargo run --release --quiet --bin oracle -- "$EXT"); then
+  pass "oracle: 3 seeds, 50k ops each, vtab == plain table throughout"
+else
+  fail "oracle property test found a divergence (seed/op printed above)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== section 20: kill -9 crash test =="
+# tests/crash.sh: repeatedly kill -9 a live ingest+flush workload, then
+# reopen and verify integrity + the flushed-data durability contract.
+if "$ROOT/tests/crash.sh" "$EXT"; then
+  pass "crash test: 5 kill -9 iterations, integrity + watermarks held"
+else
+  fail "crash test failed (see output above)"
+fi
 
 # ---------------------------------------------------------------------------
 echo

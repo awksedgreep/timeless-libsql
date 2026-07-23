@@ -541,16 +541,28 @@ impl UpdateVTab<'_> for TracesTab {
     }
 }
 
-/// Same POC transaction semantics as metrics/logs (PLAN.md R5):
-/// buffered spans only touch engine memory, so commit/rollback are
-/// no-ops and an un-flushed buffer survives ROLLBACK (and dies with
-/// the process).
+/// Real transaction semantics (PLAN.md R5 — FIXED), same shape as
+/// metrics/logs (read metrics_vtab.rs for the full comment): xBegin
+/// activates the SpanBlockEngine's journal, xCommit drops it,
+/// xRollback undoes engine memory to mirror the host rollback of
+/// `_blocks`/`_terms`/`_trace_blocks` (the trace-index rows ride the
+/// same host transaction, so they vanish and reappear with their
+/// blocks — never-dangle holds through rollback too). Auto-flush
+/// inside a transaction is fully covered, as are all commands. Same
+/// savepoint limitation as the others (xSavepoint not wired).
 impl TransactionVTab<'_> for TracesTab {
+    fn begin(&mut self) -> Result<()> {
+        self.engine.txn_begin();
+        Ok(())
+    }
+
     fn commit(&mut self) -> Result<()> {
+        self.engine.txn_commit();
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
+        self.engine.txn_rollback();
         Ok(())
     }
 }

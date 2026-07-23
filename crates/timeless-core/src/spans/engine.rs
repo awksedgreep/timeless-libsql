@@ -19,7 +19,8 @@
 //!     store.query_trace() instead of the term index.
 
 use std::collections::BTreeSet;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR_V2, CODEC_RAW};
@@ -89,6 +90,24 @@ struct IndexEntry {
     partition: Option<u8>,
 }
 
+/// Transaction journal (PLAN.md risk R5) — the spans twin of the
+/// blocks TxnJournal, line-for-line (read blocks/engine.rs for the
+/// full story, and the metrics engine.rs for the original design
+/// rationale). Block/term/trace-index rows ride the host SQLite
+/// transaction; engine memory does not — the journal records enough
+/// to undo buffer growth, intra-txn drains (flush) and retains
+/// (prune), and index entry adds/removals, so txn_rollback leaves the
+/// engine exactly as the host rollback leaves the shadow tables.
+/// Dedup rule, preconditions and LOCK ORDER (txn → buffer → index)
+/// are identical to blocks.
+#[derive(Default)]
+struct TxnJournal {
+    buffer_mark: usize,
+    saved: Vec<SpanEntry>,
+    added: HashSet<i64>,
+    removed: Vec<IndexEntry>,
+}
+
 pub struct SpanBlockEngine {
     store: Box<dyn SpanBlockStore>,
     config: SpanEngineConfig,
@@ -98,6 +117,10 @@ pub struct SpanBlockEngine {
     /// In-memory metadata index of every persisted block; optimize()
     /// and prune() plan from this, the query path asks the store.
     index: Mutex<Vec<IndexEntry>>,
+    /// True between txn_begin and txn_commit/txn_rollback; an atomic
+    /// so the no-transaction fast path costs one load.
+    txn_active: AtomicBool,
+    txn: Mutex<TxnJournal>,
 }
 
 impl SpanBlockEngine {
@@ -140,6 +163,8 @@ impl SpanBlockEngine {
             config,
             buffer: Mutex::new(Vec::new()),
             index: Mutex::new(index),
+            txn_active: AtomicBool::new(false),
+            txn: Mutex::new(TxnJournal::default()),
         })
     }
 
@@ -154,6 +179,73 @@ impl SpanBlockEngine {
 
     fn index_lock(&self) -> std::sync::MutexGuard<'_, Vec<IndexEntry>> {
         self.index.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn txn_lock(&self) -> std::sync::MutexGuard<'_, TxnJournal> {
+        self.txn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Acquire the journal iff a transaction is active. Mutation sites
+    /// call this FIRST (lock order: txn → buffer → index).
+    fn txn_guard(&self) -> Option<std::sync::MutexGuard<'_, TxnJournal>> {
+        if self.txn_active.load(Ordering::SeqCst) {
+            Some(self.txn_lock())
+        } else {
+            None
+        }
+    }
+
+    // ── Transaction journal API (PLAN.md R5; see blocks/engine.rs) ───
+
+    /// Start journaling — cheap on purpose (one usize mark, capacity-
+    /// retaining clears): SQLite calls xBegin before the first write
+    /// of EVERY transaction, autocommit statements included. Nested
+    /// begins are impossible from SQLite; debug builds assert.
+    pub fn txn_begin(&self) {
+        let mut j = self.txn_lock();
+        debug_assert!(
+            !self.txn_active.load(Ordering::SeqCst),
+            "txn_begin while a transaction journal is already active (nested xBegin?)"
+        );
+        j.buffer_mark = self.buffer_lock().len();
+        j.saved.clear();
+        j.added.clear();
+        j.removed.clear();
+        self.txn_active.store(true, Ordering::SeqCst);
+    }
+
+    /// Commit: drop the journal (cleared lazily by the next begin).
+    pub fn txn_commit(&self) {
+        let _j = self.txn_lock(); // serialize against in-flight recorders
+        self.txn_active.store(false, Ordering::SeqCst);
+    }
+
+    /// Rollback: truncate txn-era buffered spans, restore drained
+    /// pre-txn spans, drop index entries whose block rows vanished,
+    /// restore entries whose rows came back (verbatim, partition tag
+    /// included — host rollback restores the same rowids).
+    pub fn txn_rollback(&self) {
+        let mut j = self.txn_lock();
+        if !self.txn_active.load(Ordering::SeqCst) {
+            return; // xRollback without xBegin — nothing recorded
+        }
+        let TxnJournal {
+            buffer_mark,
+            saved,
+            added,
+            removed,
+        } = &mut *j;
+        {
+            let mut buf = self.buffer_lock();
+            buf.truncate(*buffer_mark);
+            buf.append(saved);
+        }
+        {
+            let mut index = self.index_lock();
+            index.retain(|e| !added.contains(&e.loc.id));
+            index.append(removed);
+        }
+        self.txn_active.store(false, Ordering::SeqCst);
     }
 
     /// Append one span. Validates kind/status, sorts attributes
@@ -201,12 +293,24 @@ impl SpanBlockEngine {
     /// put_blocks operation as the block rows (never dangles). Returns
     /// the number of spans flushed.
     pub fn flush(&self) -> Result<usize, String> {
-        // Hold the buffer lock for the whole flush (single-threaded in
+        // Journal first (lock order: txn → buffer → index), then hold
+        // the buffer lock for the whole flush (single-threaded in
         // the vtab anyway; correctness is free). The buffer stays
         // intact if any encode or store call fails.
+        let mut j = self.txn_guard();
         let mut buf = self.buffer_lock();
         if buf.is_empty() {
             return Ok(0);
+        }
+        // R5: this flush drains PRE-txn spans (below the mark) into
+        // blocks whose rows roll back with the host transaction — and
+        // the sort below scrambles positions anyway. Snapshot the
+        // pre-txn prefix into the journal and zero the mark.
+        if let Some(j) = j.as_deref_mut() {
+            if j.buffer_mark > 0 {
+                j.saved.extend_from_slice(&buf[..j.buffer_mark]);
+                j.buffer_mark = 0;
+            }
         }
         buf.sort_by_key(|e| (e.status, e.start_ts));
 
@@ -232,6 +336,12 @@ impl SpanBlockEngine {
         {
             let mut index = self.index_lock();
             for ((block, loc), status) in blocks.iter().zip(&locs).zip(&statuses) {
+                // R5: blocks born inside a transaction are journaled so
+                // rollback can drop their index entries when their rows
+                // (and trace-index rows) vanish.
+                if let Some(j) = j.as_deref_mut() {
+                    j.added.insert(loc.id);
+                }
                 index.push(IndexEntry {
                     meta: block.meta,
                     loc: *loc,
@@ -368,15 +478,33 @@ impl SpanBlockEngine {
 
         // One atomic swap; the callback rewrites the in-memory index at
         // the moment both generations exist in the store.
+        //
+        // Journal (R5): grabbed BEFORE replace_blocks so the lock order
+        // inside the callback stays txn → index. Same rules as blocks:
+        // removed pre-txn entries journaled verbatim (host rollback
+        // restores their rows — and trace-index rows — under the same
+        // rowids), intra-txn blocks cancel their own add, new blocks
+        // journal their locs.
+        let mut j = self.txn_guard();
         let add_metas: Vec<BlockMeta> = adds.iter().map(|b| b.meta).collect();
         let removed = removes.len();
         self.store
             .replace_blocks(&adds, &removes, &mut |new_locs: &[BlockLoc]| {
                 let mut index = self.index_lock();
+                if let Some(j) = j.as_deref_mut() {
+                    for e in index.iter().filter(|e| removes.contains(&e.loc)) {
+                        if !j.added.remove(&e.loc.id) {
+                            j.removed.push(*e);
+                        }
+                    }
+                }
                 index.retain(|e| !removes.contains(&e.loc));
                 for ((meta, loc), partition) in
                     add_metas.iter().zip(new_locs).zip(&add_partitions)
                 {
+                    if let Some(j) = j.as_deref_mut() {
+                        j.added.insert(loc.id);
+                    }
                     index.push(IndexEntry {
                         meta: *meta,
                         loc: *loc,
@@ -384,6 +512,7 @@ impl SpanBlockEngine {
                     });
                 }
             })?;
+        drop(j);
         Ok((removed, add_metas.len()))
     }
 
@@ -392,13 +521,29 @@ impl SpanBlockEngine {
     /// trace-index rows in the same operation (never-dangle rule).
     /// Returns the number of blocks deleted.
     pub fn prune(&self, cutoff: i64) -> Result<usize, String> {
+        // Journal first (lock order: txn → buffer → index). Same
+        // prefix-snapshot trick as flush: the buffer retain may drop
+        // PRE-txn spans and shifts positions, so preserve
+        // buffer[..mark] into `saved` and zero the mark before
+        // mutating; index removals journal their entries (host
+        // rollback restores the rows).
+        let mut j = self.txn_guard();
         let victims: Vec<BlockLoc> = self
             .index_lock()
             .iter()
             .filter(|e| e.meta.ts_max < cutoff)
             .map(|e| e.loc)
             .collect();
-        self.buffer_lock().retain(|e| e.start_ts >= cutoff);
+        {
+            let mut buf = self.buffer_lock();
+            if let Some(j) = j.as_deref_mut() {
+                if j.buffer_mark > 0 {
+                    j.saved.extend_from_slice(&buf[..j.buffer_mark]);
+                    j.buffer_mark = 0;
+                }
+            }
+            buf.retain(|e| e.start_ts >= cutoff);
+        }
         if victims.is_empty() {
             return Ok(0);
         }
@@ -406,7 +551,17 @@ impl SpanBlockEngine {
         if !errors.is_empty() {
             return Err(format!("prune errors: {}", errors.join("; ")));
         }
-        self.index_lock().retain(|e| e.meta.ts_max >= cutoff);
+        {
+            let mut index = self.index_lock();
+            if let Some(j) = j.as_deref_mut() {
+                for e in index.iter().filter(|e| e.meta.ts_max < cutoff) {
+                    if !j.added.remove(&e.loc.id) {
+                        j.removed.push(*e);
+                    }
+                }
+            }
+            index.retain(|e| e.meta.ts_max >= cutoff);
+        }
         Ok(victims.len())
     }
 

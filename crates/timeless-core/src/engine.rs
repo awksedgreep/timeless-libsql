@@ -419,6 +419,94 @@ pub struct Engine {
     /// Fast resolution cache: hash(metric, labels) → series_id.
     /// Persists across batches — steady-state scraping is pure cache hits.
     resolve_cache: DashMap<u64, i64>,
+    /// True while a transaction journal is recording (between txn_begin
+    /// and txn_commit/txn_rollback). An atomic so the hot paths can
+    /// skip journal work with a single relaxed-ish load when no
+    /// transaction is active (the overwhelmingly common case).
+    txn_active: AtomicBool,
+    /// The transaction journal itself (PLAN.md risk R5). See txn_begin
+    /// for the full design story.
+    txn: Mutex<TxnJournal>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Transaction journal (PLAN.md risk R5)
+//
+// THE PROBLEM: the engine buffers points in memory and persists chunks
+// through the store. When the store is SQLite shadow tables, chunk ROWS
+// ride the host transaction — ROLLBACK removes them — but the engine's
+// in-memory state (partition buffers, chunk index, flush queue) knows
+// nothing about SQL transactions. Without a journal, ROLLBACK leaves:
+//   - buffered points that SQL says never happened, and worse
+//   - index entries pointing at chunk rows that no longer exist
+//     (dangling locs → read errors on the next query).
+//
+// THE FIX: while a journal is active, every mutation of engine memory
+// records enough to undo itself. SQLite calls xBegin before the FIRST
+// write of ANY transaction — including the implicit per-statement
+// transaction wrapping a bare INSERT in autocommit mode (verified
+// empirically, see metrics_vtab.rs) — so txn_begin must be CHEAP:
+// O(active partitions) usize marks into reused (capacity-retaining)
+// collections, zero steady-state allocations.
+//
+// WHAT IS JOURNALED:
+//   - buffer_marks: each partition's buffered length at begin. Rollback
+//     truncates back to the mark (points pushed during the txn vanish).
+//   - saved: pre-txn buffered points that an intra-txn flush DRAINED
+//     into chunks. Those chunk rows roll back with the host txn, so the
+//     points must return to the buffer or they would be silently lost
+//     (they were inserted by previously-COMMITTED statements!).
+//   - added: index keys inserted during the txn (flush/compact). Their
+//     rows vanish at rollback, so the entries must be removed or they
+//     would dangle.
+//   - removed: pre-txn index entries removed during the txn (compact /
+//     prune), WITH their metas. SQLite's rollback restores the deleted
+//     rows under their original rowids (page-level undo), so restoring
+//     the entries verbatim — same ChunkLoc::Row ids — is exactly right.
+//
+// The added/removed pair follows one dedup rule to stay consistent when
+// one txn both adds and removes the same entry (flush then compact):
+// removing an entry that is in `added` cancels the add instead of
+// journaling a removal — that chunk never existed as far as rollback is
+// concerned. Restores therefore never resurrect intra-txn chunks.
+//
+// WHAT IS *NOT* JOURNALED (accepted + documented):
+//   - Series registered during the txn stay registered in memory. They
+//     are harmless empty series (their chunks rolled back); rollback
+//     marks the registry dirty so the next save_series re-persists a
+//     blob consistent with the in-memory state (the intra-txn blob
+//     write rolled back with everything else).
+//   - The resolve cache: ids stay valid because the registry keeps them.
+//
+// PRECONDITIONS:
+//   - The store must be transactional (shadow tables riding the host
+//     txn). Over FsStore, file writes/deletes cannot roll back — the
+//     txn_* API must simply not be used there (the vtab is the only
+//     caller and always uses ShadowTableStore).
+//   - SQLite never nests xBegin (savepoints would use xSavepoint, which
+//     this module does not implement), so txn_begin asserts no journal
+//     is already active.
+//
+// LOCK ORDER (deadlock rule): txn journal → partitions/flush_queue →
+// index → series. Every site that touches the journal acquires it
+// FIRST, before any other engine lock.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+struct TxnJournal {
+    /// Partition buffer lengths at txn_begin (or 0 after an intra-txn
+    /// flush drained a partition — its pre-txn points moved to `saved`).
+    /// Partitions absent from the map were created during the txn:
+    /// their mark is implicitly 0.
+    buffer_marks: HashMap<PartitionKey, usize>,
+    /// Pre-txn buffered points drained by intra-txn flushes; restored
+    /// into the buffers on rollback.
+    saved: Vec<(PartitionKey, Vec<i64>, Vec<f64>)>,
+    /// Index keys inserted during the txn (their chunk rows roll back).
+    added: HashSet<(PartitionKey, i64)>,
+    /// Pre-txn index entries removed during the txn (their chunk rows
+    /// are restored by the host rollback).
+    removed: Vec<((PartitionKey, i64), ChunkMeta)>,
 }
 
 struct ColdFlushGuard<'a> {
@@ -450,6 +538,177 @@ impl Engine {
 
     fn flush_queue_lock(&self) -> MutexGuard<'_, Vec<PartitionKey>> {
         self.flush_queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn txn_lock(&self) -> MutexGuard<'_, TxnJournal> {
+        self.txn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Acquire the journal iff a transaction is active. Every mutation
+    /// site calls this FIRST (lock order: txn → everything else); the
+    /// atomic makes the no-txn fast path a single load.
+    fn txn_guard(&self) -> Option<MutexGuard<'_, TxnJournal>> {
+        if self.txn_active.load(Ordering::SeqCst) {
+            Some(self.txn_lock())
+        } else {
+            None
+        }
+    }
+
+    // ── Transaction journal API (PLAN.md R5; see TxnJournal docs) ────
+
+    /// Start journaling. Called from the vtab's xBegin — which SQLite
+    /// fires before the first write of EVERY transaction, including the
+    /// implicit one wrapping each bare INSERT statement in autocommit
+    /// mode, so this is on the per-statement path and must stay cheap:
+    /// O(active partitions) marks into capacity-retaining collections.
+    ///
+    /// Nested begins are impossible from SQLite (savepoints would be
+    /// xSavepoint, which is not implemented); debug builds assert it,
+    /// release builds defensively restart the journal.
+    pub fn txn_begin(&self) {
+        let mut j = self.txn_lock();
+        debug_assert!(
+            !self.txn_active.load(Ordering::SeqCst),
+            "txn_begin while a transaction journal is already active (nested xBegin?)"
+        );
+        j.buffer_marks.clear();
+        j.saved.clear();
+        j.added.clear();
+        j.removed.clear();
+        for e in self.partitions.iter() {
+            j.buffer_marks.insert(*e.key(), e.value().timestamps.len());
+        }
+        self.txn_active.store(true, Ordering::SeqCst);
+    }
+
+    /// Commit: the host transaction made every journaled mutation
+    /// permanent — drop the journal. Contents are cleared lazily by the
+    /// next txn_begin; only the flag needs to flip here.
+    pub fn txn_commit(&self) {
+        let _j = self.txn_lock(); // serialize against in-flight recorders
+        self.txn_active.store(false, Ordering::SeqCst);
+    }
+
+    /// Rollback: undo every journaled mutation, in an order that
+    /// mirrors what the host rollback did to the shadow tables:
+    ///   1. truncate partition buffers to their marks (points inserted
+    ///      during the txn vanish, exactly like their SQL statements),
+    ///   2. restore pre-txn points that intra-txn flushes drained (their
+    ///      chunk rows just rolled back — the points move back home),
+    ///   3. rebuild the flush queue from actual buffer sizes (intra-txn
+    ///      flushes may have consumed pre-txn queue entries),
+    ///   4. remove index entries added during the txn (their rows are
+    ///      gone) and restore entries removed during it (their rows are
+    ///      back, same rowids — SQLite rollback is page-level undo),
+    ///   5. mark the series registry dirty: any intra-txn registry blob
+    ///      write rolled back, so the next save_series must re-persist.
+    pub fn txn_rollback(&self) {
+        let mut j = self.txn_lock();
+        if !self.txn_active.load(Ordering::SeqCst) {
+            return; // xRollback without xBegin — nothing recorded
+        }
+
+        // 1. Truncate buffers. Partitions with no mark were created
+        //    during the txn → truncate to 0 (the empty PartitionBuffer
+        //    entry itself is harmless and stays).
+        for mut e in self.partitions.iter_mut() {
+            let mark = j.buffer_marks.get(e.key()).copied().unwrap_or(0);
+            let buf = e.value_mut();
+            if buf.timestamps.len() > mark {
+                let before = buf.memory_bytes();
+                buf.timestamps.truncate(mark);
+                buf.values.truncate(mark);
+                let freed = before - buf.memory_bytes();
+                if freed > 0 {
+                    self.buffer_memory.fetch_sub(freed, Ordering::Relaxed);
+                }
+            }
+        }
+
+        // 2. Restore drained pre-txn points. Order within the buffer
+        //    does not matter: flush sorts before encoding and queries
+        //    sort results.
+        for (key, timestamps, values) in j.saved.drain(..) {
+            let added = partition_vec_memory(&timestamps, &values);
+            let mut entry = self
+                .partitions
+                .entry(key)
+                .or_insert_with(PartitionBuffer::new);
+            let buf = entry.value_mut();
+            buf.timestamps.extend(timestamps);
+            buf.values.extend(values);
+            drop(entry);
+            if added > 0 {
+                self.buffer_memory.fetch_add(added, Ordering::Relaxed);
+            }
+        }
+
+        // 3. Rebuild the flush queue from scratch. Cheaper than trying
+        //    to reconcile marks with whatever intra-txn flushes did to
+        //    it, and rollback is not a hot path.
+        {
+            let mut queue = self.flush_queue_lock();
+            queue.clear();
+            for mut e in self.partitions.iter_mut() {
+                let key = *e.key();
+                let buf = e.value_mut();
+                let should_queue = buf.timestamps.len() >= self.flush_threshold;
+                buf.queued_for_flush = should_queue;
+                if should_queue {
+                    queue.push(key);
+                }
+            }
+        }
+
+        // 4. Index: adds out, removals back in. The dedup rule at
+        //    record time guarantees `removed` never contains an entry
+        //    whose chunk row was created inside this txn.
+        {
+            let mut index = self.index_write();
+            for key in j.added.drain() {
+                index.remove(&key);
+            }
+            for (key, meta) in j.removed.drain(..) {
+                index.insert(key, meta);
+            }
+        }
+
+        // 5. Registry: force the next save_series to write the blob
+        //    even if an intra-txn save cleared the dirty flag — that
+        //    write rolled back with the host transaction.
+        self.series_write().dirty = true;
+
+        self.txn_active.store(false, Ordering::SeqCst);
+    }
+
+    /// Insert freshly-persisted chunk metas into the index, journaling
+    /// the additions (and any silent overwrites of pre-existing keys)
+    /// when a transaction is active. THE single index-insertion path
+    /// for all flush routes — centralizing it here is what makes the
+    /// journal complete by construction.
+    fn index_insert_new(&self, items: Vec<(PartitionKey, ChunkMeta)>) {
+        if items.is_empty() {
+            return;
+        }
+        let mut j = self.txn_guard();
+        let mut index = self.index_write();
+        for (key, meta) in items {
+            let k = (key, meta.min_ts);
+            if let Some(j) = j.as_deref_mut() {
+                // If this key already exists (two chunks of one series
+                // sharing a min_ts — an index-shadowing edge that
+                // predates the journal), journal the old meta so
+                // rollback restores it rather than losing it.
+                if let Some(old) = index.get(&k) {
+                    if !j.added.contains(&k) {
+                        j.removed.push((k, old.clone()));
+                    }
+                }
+                j.added.insert(k);
+            }
+            index.insert(k, meta);
+        }
     }
 
     /// Convenience constructor over the filesystem backend — the
@@ -510,6 +769,8 @@ impl Engine {
             cold_flush_running: AtomicBool::new(false),
             compaction_running: AtomicBool::new(false),
             resolve_cache: DashMap::new(),
+            txn_active: AtomicBool::new(false),
+            txn: Mutex::new(TxnJournal::default()),
         };
         engine.rebuild_index();
         engine
@@ -856,7 +1117,7 @@ impl Engine {
             {
                 let cp = self.compress_partition(&key, &timestamps, &values)?;
                 let meta = self.put_single_chunk(&cp)?;
-                self.index.write().unwrap().insert((key, meta.min_ts), meta);
+                self.index_insert_new(vec![(key, meta)]);
                 count += 1;
             } else {
                 self.clear_flush_queued(&key);
@@ -873,10 +1134,7 @@ impl Engine {
         {
             let cp = self.compress_partition(key, &timestamps, &values)?;
             let meta = self.put_single_chunk(&cp)?;
-            self.index
-                .write()
-                .unwrap()
-                .insert((*key, meta.min_ts), meta);
+            self.index_insert_new(vec![(*key, meta)]);
         }
         Ok(())
     }
@@ -947,10 +1205,7 @@ impl Engine {
         let mut files_written = 0;
         for batch in compressed.chunks(1000) {
             let metas = self.put_chunk_batch(batch)?;
-            let mut index = self.index_write();
-            for (key, meta) in metas {
-                index.insert((key, meta.min_ts), meta);
-            }
+            self.index_insert_new(metas);
             files_written += 1;
         }
 
@@ -991,10 +1246,7 @@ impl Engine {
         if !compressed.is_empty() {
             for batch in compressed.chunks(BATCH_CHUNK_SIZE) {
                 let metas = self.put_chunk_batch(batch)?;
-                let mut index = self.index_write();
-                for (key, meta) in metas {
-                    index.insert((key, meta.min_ts), meta);
-                }
+                self.index_insert_new(metas);
             }
         }
         self.save_series()?;
@@ -1029,12 +1281,7 @@ impl Engine {
         for batch in small_compressed.chunks(BATCH_CHUNK_SIZE) {
             all_metas.extend(self.put_chunk_batch(batch)?);
         }
-        if !all_metas.is_empty() {
-            let mut index = self.index_write();
-            for (key, meta) in all_metas {
-                index.insert((key, meta.min_ts), meta);
-            }
-        }
+        self.index_insert_new(all_metas);
         self.save_series()?;
         Ok(())
     }
@@ -1300,20 +1547,45 @@ impl Engine {
         // renames). The commit callback swaps the index while the new
         // chunks are live but the old ones not yet removed, so queries
         // never see a deleted unit.
+        //
+        // Journal (R5): grabbed BEFORE replace_chunks so the lock order
+        // inside the callback stays txn → index. Removals journal their
+        // metas — the host rollback restores the deleted rows under
+        // their original rowids, so restoring the entries verbatim is
+        // correct — EXCEPT entries this same txn added (flush → compact
+        // in one txn): removing those just cancels the add. Additions
+        // journal their keys so rollback can drop them.
+        let mut j = self.txn_guard();
         self.store.replace_chunks(&add, &deletable, &mut |locs| {
             let mut index = self.index_write();
             let mut next = 0;
             for (key, chunks, new_count) in &plans {
-                for (min_ts, _) in chunks {
-                    index.remove(&(*key, *min_ts));
+                for (min_ts, meta) in chunks {
+                    let k = (*key, *min_ts);
+                    if let Some(j) = j.as_deref_mut() {
+                        if !j.added.remove(&k) {
+                            j.removed.push((k, meta.clone()));
+                        }
+                    }
+                    index.remove(&k);
                 }
                 for i in next..next + new_count {
                     let meta = add[i].meta(locs[i].clone());
-                    index.insert((*key, meta.min_ts), meta);
+                    let k = (*key, meta.min_ts);
+                    if let Some(j) = j.as_deref_mut() {
+                        if let Some(old) = index.get(&k) {
+                            if !j.added.contains(&k) {
+                                j.removed.push((k, old.clone()));
+                            }
+                        }
+                        j.added.insert(k);
+                    }
+                    index.insert(k, meta);
                 }
                 next += new_count;
             }
         })?;
+        drop(j);
 
         let series_compacted = plans.len();
         let chunks_replaced = plans.iter().map(|(_, chunks, _)| chunks.len()).sum();
@@ -1328,10 +1600,29 @@ impl Engine {
     where
         F: FnOnce(&PartitionBuffer) -> bool,
     {
+        // Journal first (lock order: txn → partitions). Draining while
+        // a transaction is active moves pre-txn points into chunks
+        // whose rows would vanish on rollback — so the pre-txn prefix
+        // (everything below this partition's mark) is SAVED before the
+        // drain and the mark drops to 0: from here on, everything in
+        // this buffer is txn-era and rollback simply truncates it.
+        let mut j = self.txn_guard();
         let mut entry = self.partitions.get_mut(key)?;
         if !should_drain(&entry) {
             return None;
         }
+        if let Some(j) = j.as_deref_mut() {
+            let mark = j.buffer_marks.get(key).copied().unwrap_or(0);
+            if mark > 0 {
+                j.saved.push((
+                    *key,
+                    entry.timestamps[..mark].to_vec(),
+                    entry.values[..mark].to_vec(),
+                ));
+                j.buffer_marks.insert(*key, 0);
+            }
+        }
+        drop(j);
 
         let freed = entry.memory_bytes();
         let timestamps = std::mem::take(&mut entry.timestamps);
@@ -1598,6 +1889,12 @@ impl Engine {
     // ── Retention ────────────────────────────────────────────────────
 
     pub fn delete_before(&self, before_ts: i64) -> (usize, usize, Vec<String>) {
+        // Journal first (lock order: txn → index). Pruned rows are
+        // DELETEd through the store inside the host transaction, so a
+        // rollback restores them — the journal restores the matching
+        // index entries. Entries added by this same txn cancel instead
+        // (their rows will not come back).
+        let mut j = self.txn_guard();
         let mut index = self.index_write();
 
         let to_remove: Vec<(PartitionKey, i64)> = index
@@ -1624,10 +1921,16 @@ impl Engine {
                         units_to_delete.insert(unit);
                     }
                 }
+                if let Some(j) = j.as_deref_mut() {
+                    if !j.added.remove(key) {
+                        j.removed.push((*key, meta));
+                    }
+                }
             }
         }
 
         drop(index);
+        drop(j);
         let files_deleted = units_to_delete.len();
         let units: Vec<ChunkLoc> = units_to_delete.into_iter().collect();
         let errors = self.store.delete_chunks(&units);

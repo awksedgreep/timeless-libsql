@@ -647,21 +647,58 @@ impl UpdateVTab<'_> for MetricsTab {
     }
 }
 
-/// POC transaction semantics (PLAN.md risk R5, accepted for now):
-/// - commit(): no-op. Buffered points are queryable immediately and
-///   become durable at 'flush' — we do NOT flush per-commit, because a
-///   flush per tiny transaction would produce confetti chunks and defeat
-///   the whole buffering design.
-/// - rollback(): no-op, which means buffered writes SURVIVE a rollback
-///   (they only touched engine memory, not the database). Documented POC
-///   limitation; tests/cli.sh section 6 demonstrates it. The real fix
-///   (R5) is journaling buffered points per savepoint.
+/// Real transaction semantics (PLAN.md risk R5 — FIXED):
+///
+/// SQLite calls xBegin before the FIRST write to the vtab in ANY
+/// transaction — verified empirically: in autocommit mode every bare
+/// INSERT statement gets its own xBegin/xSync/xCommit bracket, and an
+/// explicit BEGIN...COMMIT gets exactly one for all its statements.
+/// (SELECTs never trigger xBegin. One quirk seen in the wild: CREATE
+/// VIRTUAL TABLE produces a lone xCommit with no matching xBegin —
+/// txn_commit on an inactive journal is a deliberate no-op.) That
+/// per-statement reality is why Engine::txn_begin is O(active
+/// partitions) marks into reused, capacity-retaining collections — it
+/// is on the autocommit hot path.
+///
+/// - begin(): activate the engine's transaction journal. From here,
+///   buffered-point growth, intra-txn flush/compact/prune index
+///   mutations, and pre-txn points drained by an intra-txn flush are
+///   all recorded.
+/// - commit(): drop the journal — the host transaction just made the
+///   shadow-table side permanent, and engine memory already reflects
+///   it. We still do NOT flush per-commit: a flush per tiny transaction
+///   would produce confetti chunks and defeat the buffering design.
+///   Durability of buffered points still begins at 'flush'.
+/// - rollback(): undo engine memory to mirror what the host rollback
+///   did to the shadow tables — txn-era buffered points vanish, index
+///   entries for rolled-back chunk rows are removed (no dangling locs),
+///   entries whose rows were restored come back, and pre-txn points
+///   drained by an intra-txn flush return to the buffer.
+///
+/// ALL commands ('flush', 'compact', 'prune:<ts>') are allowed inside
+/// explicit transactions and roll back fully — the journal covers their
+/// index mutations, and their row mutations ride the host transaction.
+///
+/// KNOWN LIMIT (documented, accepted): SAVEPOINT-granular rollback.
+/// rusqlite's update_module_with_tx wires xBegin/xSync/xCommit/
+/// xRollback but not xSavepoint/xRelease/xRollbackTo, so ROLLBACK TO
+/// <savepoint> inside a transaction cannot partially unwind the vtab —
+/// only whole-transaction ROLLBACK is journaled. Series NAMES
+/// registered during a rolled-back transaction also stay registered
+/// (harmless empty series; documented in the engine journal docs).
 impl TransactionVTab<'_> for MetricsTab {
+    fn begin(&mut self) -> Result<()> {
+        self.engine.txn_begin();
+        Ok(())
+    }
+
     fn commit(&mut self) -> Result<()> {
+        self.engine.txn_commit();
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
+        self.engine.txn_rollback();
         Ok(())
     }
 }

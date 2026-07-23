@@ -10,9 +10,10 @@ name = "bench"
 version = "0.1.0"
 edition = "2021"
 
-# Four binaries, one crate: the Session 4 metrics bench (bench), the
+# Five binaries, one crate: the Session 4 metrics bench (bench), the
 # Session 5 logs bench (bench-logs), the Session 6 traces bench
-# (bench-traces) and the Session 7 codec bake-off (bench-codec) share
+# (bench-traces), the Session 7 codec bake-off (bench-codec) and the
+# hardening-session plain-table oracle property test (oracle) share
 # the workspace-detachment + bundled-sqlite rationale above.
 [[bin]]
 name = "bench"
@@ -29,6 +30,10 @@ path = "src/bench_traces.rs"
 [[bin]]
 name = "bench-codec"
 path = "src/bench_codec.rs"
+
+[[bin]]
+name = "oracle"
+path = "src/oracle.rs"
 
 [dependencies]
 # bundled         = compile SQLite in, ignore the system library

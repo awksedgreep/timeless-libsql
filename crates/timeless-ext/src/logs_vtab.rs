@@ -490,15 +490,33 @@ impl UpdateVTab<'_> for LogsTab {
     }
 }
 
-/// Same POC transaction semantics as metrics (PLAN.md R5): buffered
-/// entries only touch engine memory, so commit/rollback are no-ops and
-/// an un-flushed buffer survives ROLLBACK (and dies with the process).
+/// Real transaction semantics (PLAN.md R5 — FIXED), same shape as
+/// metrics_vtab.rs (read the full comment there): xBegin activates the
+/// BlockEngine's journal (cheap on purpose — SQLite brackets every
+/// autocommit write statement with xBegin/xCommit, verified
+/// empirically), xCommit drops it, xRollback undoes engine memory to
+/// mirror the host rollback of `_blocks`/`_terms`.
+///
+/// This matters MORE here than for metrics: push() AUTO-FLUSHES at the
+/// threshold, so a big INSERT inside a transaction writes real block
+/// rows mid-txn. On ROLLBACK those rows vanish — the journal removes
+/// their index entries (no dangling locs) and returns any pre-txn
+/// buffered entries the flush drained back to the buffer. All commands
+/// ('flush', 'optimize', 'prune:<ts>') are journaled and roll back
+/// fully. Same savepoint limitation as metrics (xSavepoint not wired).
 impl TransactionVTab<'_> for LogsTab {
+    fn begin(&mut self) -> Result<()> {
+        self.engine.txn_begin();
+        Ok(())
+    }
+
     fn commit(&mut self) -> Result<()> {
+        self.engine.txn_commit();
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<()> {
+        self.engine.txn_rollback();
         Ok(())
     }
 }
