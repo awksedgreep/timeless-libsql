@@ -469,9 +469,9 @@ Nothing blocks on this choice.
       hostile random walk (ms-jitter timestamps, 4-decimal noise) 3.9 B/pt
       (4x lossless). Real telemetry lands between; TSBS in Session 4 is the
       quotable number.
-- [ ] Implement `ShadowTableStore` in timeless-ext: prepared statements against
+- [x] Implement `ShadowTableStore` in timeless-ext: prepared statements against
       `_chunks`/`_series` on the host connection (→ rolls into Session 3)
-- [ ] Unit tests for round-trip: write chunks through ShadowTableStore, recover
+- [x] Unit tests for round-trip: write chunks through ShadowTableStore, recover
       registry + metadata from tables (→ rolls into Session 3)
 
 ### Session 3 — The vtab, end to end — ✅ CORE COMPLETE 2026-07-22
