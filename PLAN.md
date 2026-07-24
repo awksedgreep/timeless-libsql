@@ -31,8 +31,10 @@ The demo that makes people go "whoa":
 
 ## Non-goals (POC)
 
-- PromQL, rollups, retention, alerting, scraping (stays in timeless_metrics /
-  future work)
+- PromQL, rollups, retention, alerting, scraping (stays in timeless_metrics —
+  permanently for PromQL semantics; see "Query interface tiers & the PromQL
+  layering contract" below for why and for what the engine SHOULD eventually
+  offer the query layer)
 - Label-based pushdown beyond metric name + time range (labels stored + returned,
   filterable by SQLite above the vtab; label posting-list pushdown is v2)
 - ~~Multi-connection concurrent writers (single writer assumed; see Risk
@@ -113,6 +115,55 @@ is not protobuf territory.
 - `INSERT INTO metrics(metrics) VALUES ('flush')` — force chunk flush
 - `INSERT INTO metrics(metrics, batch) VALUES ('ingest', ?)` — Tier 2
 - (later: 'optimize' for merge compaction, 'stats')
+
+## Query interface tiers & the PromQL layering contract (added 2026-07-24)
+
+Learned from the timeless_metrics 6.2.0 VM-parity work (full PromQL +
+MetricsQL rewritten as a windowed evaluator, 158-query differential parity
+against live VictoriaMetrics — see timeless_metrics
+notes/promql_conformance_audit_2026-07-24.md and scripts/vm_diff.exs). These
+are the consequences for this engine's *read* side and for the eventual
+engine swap inside timeless_metrics.
+
+**The narrow waist.** The entire PromQL/MetricsQL engine consumes storage
+through two calls: `query_multi(metric, matchers, from, to) →
+[{labels, [{ts, value}]}]` and `list_metrics()`. Everything above that —
+grid evaluation, lookback, range windows, reset-adjusted rate, vector
+matching, histogram_quantile, the MetricsQL behavioral trivia — is
+storage-agnostic Elixir. Any engine that serves that waist is, by
+construction, still a drop-in VictoriaMetrics: the conformance suite and the
+vm_diff referee certify it without knowing which engine is underneath. That
+is the migration insurance for the swap. (Empirical support: all five
+production bugs the 6.2.0 work uncovered lived AT the engine boundary —
+ts/value swap, matcher decoding, registry routing — not above or below it.
+Boundaries are where risk concentrates; keep exactly one, thin and dumb.)
+
+**Rule for what may be pushed down:** only *semantics-free data reduction*.
+Anything the VM referee has ever corrected (implicit-zero series heads, the
+rollupDelta magnitude heuristic, per-function __name__ policy, NaN
+stripping, subquery grid alignment) stays above the waist — it churns with
+VM versions and must remain hot-iterable, not frozen into a storage engine.
+
+| Tier | Interface | Semantics | Scope |
+|------|-----------|-----------|-------|
+| Q1 | raw range scan: all samples for matching series in `[from, to]` (what xFilter + chunk pruning already give) | none — evaluator does everything | POC. Sufficient for embedded deployments; this is the waist itself |
+| Q2 | mechanical reduction kernels, opt-in accelerators behind the same waist: (a) last-sample-per-grid-point (`start`, `step`, `lookback`) — covers instant selectors, the dominant query shape; (b) sliding-window sum/min/max/count/avg per series; (c) matcher evaluation in the engine (posting lists — same v2 item as label pushdown) | zero — each kernel is bit-for-bit verifiable against the Elixir evaluator, which stays as fallback | v2, added only when a bench shows a real workload needs one |
+| Q3 | rate/counter math, vector matching, histogram_quantile, MetricsQL functions | — | NEVER in the engine. Cross-series, semantics-heavy, referee-sensitive |
+
+**When Q2 stops being optional:** embedded (in-process) deployments ship raw
+samples across a function call — cheap, and the evaluator's sample budget
+bounds it. But sqld/Hrana, embedded replicas, and the edge chunk-shipping
+idea (Open questions) put a network inside the waist, multiplying the
+raw-sample tax. Any remote deployment of this extension should treat Q2(a)
+and Q2(b) as launch requirements, not optimizations. Design xBestIndex/the
+command surface so these kernels can be added without changing the waist
+contract: the Elixir side probes for them and falls back to Q1 raw scans.
+
+**Verification asset carried over:** timeless_metrics' vm_diff harness +
+conformance suite double as this engine's acceptance test. Wire the swapped
+engine behind `query_multi`, run both, and 158/158 either holds or names the
+exact query and timestamp where the new engine disagrees with
+VictoriaMetrics.
 
 ## Shadow tables (created by xCreate)
 
