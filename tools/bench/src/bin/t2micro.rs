@@ -3,7 +3,11 @@
 //! but times each INSERT statement separately to attribute first-touch
 //! (series-catalog) cost vs steady-state cost.
 //!
-//!   t2micro <path-to-extension> [iterations]
+//!   t2micro <path-to-extension> [iterations] [n_blobs] [steps_per_blob]
+//!
+//! Default 10 blobs x 100 steps mirrors bench's Tier 2 shape (1M points
+//! total). Pass e.g. `1 1000` to send the same million points as ONE
+//! statement and isolate per-statement overhead.
 
 use std::env;
 use std::fs;
@@ -12,11 +16,9 @@ use std::time::Instant;
 use rusqlite::{params, Connection};
 
 const N_SERIES: usize = 1000;
-const BLOBS: usize = 10;
-const STEPS_PER_BLOB: usize = 100; // 100 steps x 1000 series = 100k pts/blob
 
-fn encode_blob(blob_idx: usize) -> Vec<u8> {
-    let n_points = STEPS_PER_BLOB * N_SERIES;
+fn encode_blob(blob_idx: usize, steps: usize) -> Vec<u8> {
+    let n_points = steps * N_SERIES;
     let mut out = Vec::with_capacity(64 * 1024 + n_points * 20);
     out.push(0x01);
     out.push(0x00);
@@ -31,18 +33,18 @@ fn encode_blob(blob_idx: usize) -> Vec<u8> {
         out.extend_from_slice(&(labels.len() as u32).to_le_bytes());
         out.extend_from_slice(labels.as_bytes());
     }
-    for _ in 0..STEPS_PER_BLOB {
+    for _ in 0..steps {
         for s in 0..N_SERIES {
             out.extend_from_slice(&(s as u32).to_le_bytes());
         }
     }
-    let base = 1_700_000_000_000i64 + (blob_idx * STEPS_PER_BLOB) as i64 * 10_000;
-    for i in 0..STEPS_PER_BLOB {
+    let base = 1_700_000_000_000i64 + (blob_idx * steps) as i64 * 10_000;
+    for i in 0..steps {
         for _ in 0..N_SERIES {
             out.extend_from_slice(&(base + i as i64 * 10_000).to_le_bytes());
         }
     }
-    for i in 0..STEPS_PER_BLOB {
+    for i in 0..steps {
         for s in 0..N_SERIES {
             out.extend_from_slice(&((s * 7 + i) as f64 * 0.31).to_le_bytes());
         }
@@ -55,10 +57,12 @@ fn main() {
     let ext = args.get(1).expect("usage: t2micro <ext> [iters]");
     let iters: usize = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(5);
 
-    let blobs: Vec<Vec<u8>> = (0..BLOBS).map(encode_blob).collect();
+    let n_blobs: usize = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(10);
+    let steps: usize = args.get(4).map(|s| s.parse().unwrap()).unwrap_or(100);
+    let blobs: Vec<Vec<u8>> = (0..n_blobs).map(|b| encode_blob(b, steps)).collect();
 
     // per-statement times in ms, [iteration][blob]
-    let mut times = vec![vec![0f64; BLOBS]; iters];
+    let mut times = vec![vec![0f64; n_blobs]; iters];
 
     for it in 0..iters {
         let path = format!("/tmp/tl_t2micro_{it}.db");
@@ -92,7 +96,7 @@ fn main() {
 
     // median per blob position across iterations
     print!("blob-ms:");
-    for b in 0..BLOBS {
+    for b in 0..n_blobs {
         let mut col: Vec<f64> = (0..iters).map(|i| times[i][b]).collect();
         col.sort_by(|a, b| a.partial_cmp(b).unwrap());
         print!(" {:.2}", col[iters / 2]);
@@ -112,7 +116,7 @@ fn main() {
         {
             let mut c: Vec<f64> = (0..iters).flat_map(|i| times[i][1..].to_vec()).collect();
             c.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            c[c.len() / 2]
+            if c.is_empty() { f64::NAN } else { c[c.len() / 2] }
         }
     );
 }

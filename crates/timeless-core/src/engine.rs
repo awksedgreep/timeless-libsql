@@ -1297,6 +1297,17 @@ impl Engine {
 
     #[inline]
     pub fn write_point(&self, series_id: i64, ts: i64, val: f64) {
+        self.write_point_at(series_id, ts, val, Instant::now());
+    }
+
+    /// write_point with the wall-clock stamp hoisted out so batch ingest
+    /// reads the clock once per statement instead of once per point.
+    /// last_write feeds an IDLE-SECONDS heuristic, so statement
+    /// granularity is far more precision than it needs. Measured effect
+    /// is small (~2% of Tier 2 — the commpage clock read pipelines well;
+    /// a sampling profiler wildly over-attributes it), but it is free.
+    #[inline]
+    fn write_point_at(&self, series_id: i64, ts: i64, val: f64, now: Instant) {
         let key = PartitionKey { series_id };
         let should_queue_flush;
         let mem_delta: isize;
@@ -1310,7 +1321,7 @@ impl Engine {
             let old_cap = buf.memory_bytes();
             buf.timestamps.push(ts);
             buf.values.push(val);
-            buf.last_write = Instant::now();
+            buf.last_write = now;
             let new_cap = buf.memory_bytes();
             mem_delta = (new_cap as isize) - (old_cap as isize);
             should_queue_flush =
@@ -1401,9 +1412,10 @@ impl Engine {
         &self,
         entries: Vec<(String, HashMap<String, String>, i64, f64)>,
     ) -> EngineResult<()> {
+        let now = Instant::now();
         for (metric, labels_hm, ts, val) in entries {
             let series_id = self.resolve_cached(&metric, &labels_hm)?;
-            self.write_point(series_id, ts, val);
+            self.write_point_at(series_id, ts, val, now);
         }
         Ok(())
     }
@@ -1420,12 +1432,13 @@ impl Engine {
             ));
         }
         let count = data.len() / ENTRY_SIZE;
+        let now = Instant::now();
         for i in 0..count {
             let o = i * ENTRY_SIZE;
             let series_id = i64::from_ne_bytes(data[o..o + 8].try_into().unwrap());
             let ts = i64::from_ne_bytes(data[o + 8..o + 16].try_into().unwrap());
             let val = f64::from_ne_bytes(data[o + 16..o + 24].try_into().unwrap());
-            self.write_point(series_id, ts, val);
+            self.write_point_at(series_id, ts, val, now);
         }
         Ok(())
     }
@@ -1480,6 +1493,7 @@ impl Engine {
     pub fn ingest_prometheus(&self, body: &[u8], default_ts: i64) -> EngineResult<(usize, usize)> {
         let mut sorted: Vec<(&str, &str)> = Vec::with_capacity(16);
         let mut failure: EngineResult<()> = Ok(());
+        let now = Instant::now();
 
         let (count, errors) = parse_prom_body_visit(body, |name, labels, value, ts| {
             if failure.is_err() {
@@ -1495,7 +1509,7 @@ impl Engine {
             };
 
             match self.resolve_entry(name, labels, &mut sorted) {
-                Ok(series_id) => self.write_point(series_id, ts, value),
+                Ok(series_id) => self.write_point_at(series_id, ts, value, now),
                 Err(e) => failure = Err(e),
             }
         });

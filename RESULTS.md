@@ -151,21 +151,30 @@ Remediation, kept inside the R2 correctness contract:
    `resolve_series_batch` now drops all engine locks around the store
    call (safe under the writer gate).
 
-Interleaved results after the fix (M5 Pro, 5 pairs):
+3. **Per-statement clock stamping.** A per-blob sweep (t2micro with
+   1x1M / 10x100k / 100x10k shapes) showed the residual steady cost
+   scaled with POINTS per statement, not statements — refuting the
+   savepoint-wiring attribution too. write_point read the wall clock
+   once per point for the idle-flush heuristic (seconds granularity);
+   batch paths now stamp once per statement. Small (~2%) but free.
+   (Profiler note for posterity: a sampling profiler attributed ~85% of
+   the write path to that clock read; removing it recovered ~2%. Inlined
+   release-build frames misattribute — trust A/B deltas, not samples.)
 
-| metric | master | R1-R8 + fix | delta |
+Interleaved results after all three fixes (M5 Pro, 5 pairs):
+
+| metric | master | R1-R8 + fixes | delta |
 |---|---:|---:|---:|
-| name + range query | 2.0-2.4ms | 2.1-2.3ms | **parity** (was ~2x) |
-| Tier 1 ingest | ~2.15M pts/s | ~2.13M pts/s | **parity** (was -7%) |
-| Tier 2 ingest | ~23.3M pts/s | ~20.7M pts/s | -11% (was -13 to -17%) |
-| Tier 2 first blob (t2micro) | 4.2ms | 6.3ms | catalog first-touch, once per new series |
-| Tier 2 steady blob (t2micro) | 4.3ms | 4.7ms | R1 savepoint wiring, ~+7% |
+| name + range query | 2.0-2.2ms | 2.1-2.3ms | **parity** (was ~2x) |
+| Tier 1 ingest | ~2.13M pts/s | ~2.06M pts/s | **parity/noise** (was -7%) |
+| Tier 2 ingest | ~22.9M pts/s | ~23.1M pts/s | **parity** (was -13 to -17%) |
+| Tier 2 first blob (t2micro) | 4.1ms | 5.4ms | catalog first-touch, once per new series |
+| Tier 2 steady blob (t2micro) | 4.5ms | 4.5ms | **parity** |
 
-Remaining honest cost of R1-R8: ~+2ms once per 1,000 brand-new series
+Remaining honest cost of R1-R8: ~+1.3ms once per 1,000 brand-new series
 (authoritative catalog population — amortizes to zero for long-lived
-tables) and ~7% on steady Tier 2 / large multi-statement ingest
-transactions from the savepoint frames. Logs and traces remain at parity.
-Tier 2 stays 2.6x above the PLAN target of ≥8M pts/s.
+tables). Steady-state ingest and queries are at master parity on every
+tier; logs and traces were never affected.
 
 ## What it is
 
