@@ -112,6 +112,61 @@ The earlier R1-R4 Tier 2 and selective metrics-query regressions against
 nor fixed them. Before acting on the noisy trace/flush outliers, rerun on an
 idle host with a fixed performance governor.
 
+## Apple M5 Pro isolation + remediation of the R1-R4 regressions (2026-07-26)
+
+Method: interleaved master/branch A/B runs (session-to-session drift on
+this laptop exceeds the effect size — single-session comparisons of the
+~50ms Tier 2 window are meaningless), plus `tools/bench` bin `t2micro`,
+which times each of the 10 Tier 2 blob statements separately.
+
+Isolation findings (correcting the R1-R4 audit's hypothesis above):
+
+- The selective-query regression (2.0 → 3.9ms here, +54% on Intel) was
+  100% the R2 query-boundary `refresh_authoritative_state()` — a full
+  series-catalog reload + chunk-metadata rescan on every SELECT.
+- The Tier 2 regression was NOT the per-series resolver locks: restoring
+  a batched read-lock fast path recovered nothing measurable. It was
+  (a) ~55% first-touch catalog population — the first blob naming 1,000
+  new series paid a statement pair per series — and (b) ~30% steady
+  per-statement overhead from the R1 savepoint wiring (~0.35ms per
+  100k-point blob).
+
+Remediation, kept inside the R2 correctness contract:
+
+1. **Catalog generation check.** `_meta['chunk_gen']` is bumped inside the
+   caller's transaction by every chunk-mutating store call; the series
+   half of the generation is `MAX(id)` on the append-only `_series` table
+   (zero write-side cost). Refresh compares one cached single-row SELECT
+   against the last-loaded generation and skips the reload when nothing
+   committed changed. Cross-process visibility is preserved: any
+   committed change moves the generation. All r1-r8 correctness suites,
+   the 150k-op oracle, five crash rounds, and all 77 cli.sh sections pass.
+2. **Bulk series resolver.** `resolve_series_bulk` allocates a whole
+   series table in one multi-row `INSERT ... ON CONFLICT DO NOTHING
+   RETURNING id` (exact `created` flags, journaled for rollback) plus one
+   VALUES-join SELECT, instead of a statement pair and a lock cycle per
+   series. LESSON, paid in a deadlock: multi-row DML opens a SQLite
+   statement journal, which re-entrantly fires xSavepoint on the calling
+   vtab — so no engine lock may be held across re-entrant store SQL.
+   `resolve_series_batch` now drops all engine locks around the store
+   call (safe under the writer gate).
+
+Interleaved results after the fix (M5 Pro, 5 pairs):
+
+| metric | master | R1-R8 + fix | delta |
+|---|---:|---:|---:|
+| name + range query | 2.0-2.4ms | 2.1-2.3ms | **parity** (was ~2x) |
+| Tier 1 ingest | ~2.15M pts/s | ~2.13M pts/s | **parity** (was -7%) |
+| Tier 2 ingest | ~23.3M pts/s | ~20.7M pts/s | -11% (was -13 to -17%) |
+| Tier 2 first blob (t2micro) | 4.2ms | 6.3ms | catalog first-touch, once per new series |
+| Tier 2 steady blob (t2micro) | 4.3ms | 4.7ms | R1 savepoint wiring, ~+7% |
+
+Remaining honest cost of R1-R8: ~+2ms once per 1,000 brand-new series
+(authoritative catalog population — amortizes to zero for long-lived
+tables) and ~7% on steady Tier 2 / large multi-statement ingest
+transactions from the savepoint frames. Logs and traces remain at parity.
+Tier 2 stays 2.6x above the PLAN target of ≥8M pts/s.
+
 ## What it is
 
 A loadable SQLite/libSQL extension. `CREATE VIRTUAL TABLE metrics USING

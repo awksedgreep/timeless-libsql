@@ -186,10 +186,46 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not provide authoritative series resolution".to_string())
     }
 
+    /// Resolve many (name, labels) pairs at once. Same contract per entry
+    /// as resolve_series (allocate-or-return the authoritative id inside
+    /// the caller's transaction, `created` true only if THIS call inserted
+    /// the row); results are positional. The default loops; SQL-backed
+    /// stores override with multi-row statements so first-touch of a large
+    /// series population is not one round-trip per series.
+    fn resolve_series_bulk(
+        &self,
+        entries: &[(&str, Vec<(String, String)>)],
+    ) -> Result<Vec<ResolvedSeries>, String> {
+        entries
+            .iter()
+            .map(|(name, labels)| self.resolve_series(name, labels))
+            .collect()
+    }
+
     /// Import legacy registry rows. Implementations must be idempotent so
     /// two processes opening the same legacy database cannot corrupt it.
     fn migrate_series(&self, _series: &[StoredSeries]) -> Result<(), String> {
         Err("store does not support series migration".to_string())
+    }
+
+    /// Cheap change-detection token for the authoritative catalog + chunk
+    /// state, so `Engine::refresh_authoritative_state` can skip its full
+    /// reload when nothing has been committed since the last refresh.
+    ///
+    /// Contract: any committed change that would alter the result of
+    /// `load_series()` or `scan()` MUST change the returned value, and the
+    /// token must ride the same transaction as the change it describes.
+    /// `None` means the store cannot answer — callers must do the full
+    /// reload (the always-correct fallback).
+    ///
+    /// The shadow-store implementation returns
+    /// `(max _series id, chunk generation counter)`: the series half is
+    /// sound because committed catalog rows are append-only (rollback undo
+    /// is page-level and removes only never-committed rows) — if a series
+    /// GC/delete path is ever added, that half MUST move to a bumped
+    /// counter too.
+    fn catalog_generation(&self) -> Result<Option<(i64, i64)>, String> {
+        Ok(None)
     }
 
     /// For Engine::info(): (total_bytes, file_or_row_count).

@@ -566,6 +566,15 @@ pub struct Engine {
     /// The transaction journal itself (PLAN.md risk R5). See txn_begin
     /// for the full design story.
     txn: Mutex<TxnJournal>,
+    /// Store catalog generation observed by the last completed
+    /// refresh_authoritative_state reload (None = never refreshed, or the
+    /// store cannot report one). Lets refresh skip its full catalog +
+    /// chunk-index reload when nothing has been committed since — the
+    /// per-query cost drops from O(series + chunks) SQL to one cached
+    /// single-row SELECT. Own-process mutations do NOT update this, so
+    /// the first refresh after a local flush/compact/prune/new-series
+    /// does one (redundant but harmless) reload.
+    catalog_gen: Mutex<Option<(i64, i64)>>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -727,6 +736,10 @@ impl Engine {
 
     fn txn_lock(&self) -> MutexGuard<'_, TxnJournal> {
         self.txn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn catalog_gen_lock(&self) -> MutexGuard<'_, Option<(i64, i64)>> {
+        self.catalog_gen.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Acquire the journal iff a transaction is active. Every mutation
@@ -1133,6 +1146,7 @@ impl Engine {
             resolve_cache: DashMap::new(),
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
+            catalog_gen: Mutex::new(None),
         };
         engine.replace_index(stored_chunks);
         Ok(engine)
@@ -1169,11 +1183,98 @@ impl Engine {
         Ok(resolved.id)
     }
 
+    /// Batch resolution for Tier 2 ingest: one registry pass for hits, and
+    /// misses go to the store through ONE bulk call instead of a statement
+    /// pair per series. Semantics per entry are identical to
+    /// resolve_series — authoritative ids allocated in the caller's
+    /// transaction, created ids journaled for rollback.
+    ///
+    /// LOCK HAZARD: the bulk store call runs multi-row SQL, and multi-row
+    /// DML makes SQLite open a statement journal, which fires xSavepoint
+    /// on every vtab in the transaction — re-entrantly, into THIS engine's
+    /// txn_savepoint, which takes the journal mutex. So no engine lock may
+    /// be held across the store call: misses are detected under a read
+    /// lock that is dropped first, and results are recorded under locks
+    /// taken after the call returns. The writer gate (held by every
+    /// caller) is what makes the between-locks window safe: no other
+    /// writer can touch the registry, and refresh skips while txn_active.
     pub fn resolve_series_batch(&self, entries: &[(String, Labels)]) -> EngineResult<Vec<i64>> {
-        entries
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = vec![0i64; entries.len()];
+        let mut misses: Vec<usize> = Vec::new();
+        {
+            let reg = self.series_read();
+            for (idx, (metric_name, labels)) in entries.iter().enumerate() {
+                if let Some(&id) = reg.series_map.get(&(metric_name.clone(), labels.clone())) {
+                    out[idx] = id;
+                } else {
+                    misses.push(idx);
+                }
+            }
+        }
+        if misses.is_empty() {
+            return Ok(out);
+        }
+        if !self.authoritative_series {
+            let mut reg = self.series_write();
+            for &idx in &misses {
+                out[idx] = reg.get_or_create(&entries[idx].0, &entries[idx].1);
+            }
+            return Ok(out);
+        }
+
+        // Dedupe repeated keys so the store sees each new series once and
+        // the registry insert stays idempotent within the batch.
+        let mut first_slot: HashMap<&(String, Labels), usize> = HashMap::new();
+        let mut unique: Vec<usize> = Vec::new();
+        for &idx in &misses {
+            first_slot.entry(&entries[idx]).or_insert_with(|| {
+                unique.push(idx);
+                unique.len() - 1
+            });
+        }
+        let requests: Vec<(&str, Vec<(String, String)>)> = unique
             .iter()
-            .map(|(metric_name, labels)| self.resolve_series(metric_name, labels))
-            .collect()
+            .map(|&idx| {
+                let (name, labels) = &entries[idx];
+                (
+                    name.as_str(),
+                    labels
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        // NO engine locks held here — see the lock-hazard note above.
+        let resolved = self
+            .store
+            .resolve_series_bulk(&requests)
+            .map_err(|err| format!("failed to bulk-resolve series: {err}"))?;
+        if resolved.len() != unique.len() {
+            return Err(format!(
+                "bulk series resolution returned {} of {} entries",
+                resolved.len(),
+                unique.len()
+            ));
+        }
+        let mut journal = self.txn_guard();
+        let mut reg = self.series_write();
+        for (&idx, res) in unique.iter().zip(&resolved) {
+            let (name, labels) = &entries[idx];
+            reg.insert_known(res.id, name, labels, false)?;
+            if res.created {
+                if let Some(journal) = journal.as_deref_mut() {
+                    journal.series_added.insert(res.id);
+                }
+            }
+        }
+        for &idx in &misses {
+            out[idx] = resolved[first_slot[&entries[idx]]].id;
+        }
+        Ok(out)
     }
 
     fn save_series(&self) -> EngineResult<()> {
@@ -2359,6 +2460,24 @@ impl Engine {
             return Ok(());
         }
 
+        // Fast path: skip the reload when the store's catalog generation
+        // matches the one the last reload observed. The unlocked
+        // txn_active pre-check mirrors the locked check below (an active
+        // writer keeps its journaled view either way); a raced skip is
+        // equivalent to the pre-existing early return. Reading the
+        // generation BEFORE the reload below keeps a concurrent commit
+        // safe: at worst we cache a stale token and reload once more.
+        if self.txn_active.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let observed = self
+            .store
+            .catalog_generation()
+            .map_err(|err| format!("failed to read catalog generation: {err}"))?;
+        if observed.is_some() && observed == *self.catalog_gen_lock() {
+            return Ok(());
+        }
+
         let _transition = self.transition_write();
         let _journal = self.txn_lock();
         if self.txn_active.load(Ordering::SeqCst) {
@@ -2393,6 +2512,7 @@ impl Engine {
         *index = new_index;
         *series = registry;
         self.resolve_cache.clear();
+        *self.catalog_gen_lock() = observed;
         Ok(())
     }
 

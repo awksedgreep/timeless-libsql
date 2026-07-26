@@ -140,6 +140,17 @@ pub(crate) struct ShadowTableStore {
     /// with the actual rowid list (rowids are i64s we produced ourselves,
     /// so inlining them is injection-safe).
     delete_prefix: String,
+    /// Qualified `_series` identifier, kept for the bulk resolver whose
+    /// multi-row VALUES statements are sized per call and so cannot be
+    /// pre-formatted like the fixed-arity SQL above.
+    series_ident: String,
+    /// One-row read backing catalog_generation(): (max series id, chunk
+    /// generation counter). See the trait docs for the soundness argument.
+    generation_sql: String,
+    /// Upsert bumping the chunk half of the generation. Executed once per
+    /// chunk-mutating call, inside the caller's transaction, so other
+    /// processes observe the bump if and only if they observe the change.
+    bump_chunk_gen_sql: String,
 }
 
 impl ShadowTableStore {
@@ -184,7 +195,27 @@ impl ShadowTableStore {
                  VALUES(?1, ?2, ?3)"
             ),
             delete_prefix: format!("DELETE FROM {chunks} WHERE id IN ("),
+            series_ident: series.clone(),
+            generation_sql: format!(
+                "SELECT (SELECT COALESCE(MAX(id), 0) FROM {series}), \
+                 COALESCE((SELECT v FROM {meta} WHERE k = 'chunk_gen'), 0)"
+            ),
+            bump_chunk_gen_sql: format!(
+                "INSERT INTO {meta} (k, v) VALUES ('chunk_gen', 1) \
+                 ON CONFLICT(k) DO UPDATE SET v = v + 1"
+            ),
         }
+    }
+
+    /// Bump the chunk generation inside the caller's transaction. Called
+    /// by every chunk-mutating trait method; failing to bump would let a
+    /// stale reader skip a refresh, so errors propagate.
+    fn bump_chunk_generation(&self, conn: &Connection) -> Result<(), String> {
+        conn.prepare_cached(&self.bump_chunk_gen_sql)
+            .map_err(|e| format!("prepare chunk generation bump failed: {e}"))?
+            .execute([])
+            .map_err(|e| format!("chunk generation bump failed: {e}"))?;
+        Ok(())
     }
 
     /// Borrow the CALLING connection for one store operation — the
@@ -320,7 +351,9 @@ impl ChunkStore for ShadowTableStore {
             return Ok(Vec::new());
         }
         let conn = Self::conn()?;
-        self.insert_chunks(&conn, chunks)
+        let locs = self.insert_chunks(&conn, chunks)?;
+        self.bump_chunk_generation(&conn)?;
+        Ok(locs)
     }
 
     /// Compaction swap. Unlike FsStore there is no pending/manifest/rename
@@ -354,6 +387,7 @@ impl ChunkStore for ShadowTableStore {
             conn.execute(&sql, [])
                 .map_err(|e| format!("compaction delete failed: {e}"))?;
         }
+        self.bump_chunk_generation(&conn)?;
         Ok(locs)
     }
 
@@ -409,6 +443,8 @@ impl ChunkStore for ShadowTableStore {
         let sql = format!("{}{})", self.delete_prefix, ids.join(","));
         if let Err(e) = conn.execute(&sql, []) {
             errors.push(format!("batched chunk delete failed: {e}"));
+        } else if let Err(e) = self.bump_chunk_generation(&conn) {
+            errors.push(e);
         }
         errors
     }
@@ -467,6 +503,21 @@ impl ChunkStore for ShadowTableStore {
         true
     }
 
+    /// (max series id, chunk generation). The series half needs no
+    /// write-side bump because committed `_series` rows are append-only;
+    /// the chunk half is the `_meta` counter the mutating methods bump.
+    /// One cached single-row SELECT — cheap enough for every query.
+    fn catalog_generation(&self) -> Result<Option<(i64, i64)>, String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.generation_sql)
+            .map_err(|e| format!("prepare catalog generation read failed: {e}"))?;
+        let gen = stmt
+            .query_row([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| format!("catalog generation read failed: {e}"))?;
+        Ok(Some(gen))
+    }
+
     fn load_series(&self) -> Result<Vec<StoredSeries>, String> {
         let conn = Self::conn()?;
         let mut stmt = conn
@@ -514,6 +565,115 @@ impl ChunkStore for ShadowTableStore {
             .query_row(params![name, &labels], |row| row.get(0))
             .map_err(|e| format!("series resolution failed: {e}"))?;
         Ok(ResolvedSeries { id, created })
+    }
+
+    /// Bulk resolve: one multi-row INSERT (RETURNING the ids THIS call
+    /// created, so `created` stays exact under cross-process races) plus
+    /// one VALUES-join SELECT per chunk — instead of two statements and a
+    /// lock cycle per series. Everything rides the caller's transaction,
+    /// same as resolve_series.
+    fn resolve_series_bulk(
+        &self,
+        entries: &[(&str, Vec<(String, String)>)],
+    ) -> Result<Vec<ResolvedSeries>, String> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = Self::conn()?;
+        let encoded: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|(_, labels)| Self::encode_labels(labels))
+            .collect::<Result<_, _>>()?;
+
+        // Stay far below SQLITE_MAX_VARIABLE_NUMBER (3 params/row on the
+        // wider statement).
+        const CHUNK: usize = 4000;
+        let series = &self.series_ident;
+        let mut out = Vec::with_capacity(entries.len());
+        let mut start = 0;
+        while start < entries.len() {
+            let end = (start + CHUNK).min(entries.len());
+            let rows = end - start;
+
+            let mut insert_sql = format!("INSERT INTO {series}(name, canonical_labels) VALUES ");
+            for i in 0..rows {
+                if i > 0 {
+                    insert_sql.push(',');
+                }
+                insert_sql.push_str("(?,?)");
+            }
+            insert_sql.push_str(" ON CONFLICT(name, canonical_labels) DO NOTHING RETURNING id");
+            let mut created_ids = std::collections::HashSet::new();
+            {
+                let mut stmt = conn
+                    .prepare(&insert_sql)
+                    .map_err(|e| format!("prepare bulk series insert failed: {e}"))?;
+                let params = rusqlite::params_from_iter((start..end).flat_map(|i| {
+                    [
+                        rusqlite::types::Value::Text(entries[i].0.to_owned()),
+                        rusqlite::types::Value::Blob(encoded[i].clone()),
+                    ]
+                }));
+                let mut returned = stmt
+                    .query(params)
+                    .map_err(|e| format!("bulk series insert failed: {e}"))?;
+                while let Some(row) = returned
+                    .next()
+                    .map_err(|e| format!("bulk series insert row failed: {e}"))?
+                {
+                    created_ids.insert(
+                        row.get::<_, i64>(0)
+                            .map_err(|e| format!("bulk series insert id failed: {e}"))?,
+                    );
+                }
+            }
+
+            // Ordinals are literals we generate, not user input.
+            let mut select_sql = String::from("WITH req(ord, name, labels) AS (VALUES ");
+            for i in 0..rows {
+                if i > 0 {
+                    select_sql.push(',');
+                }
+                select_sql.push_str(&format!("({i},?,?)"));
+            }
+            select_sql.push_str(&format!(
+                ") SELECT req.ord, s.id FROM req JOIN {series} s \
+                 ON s.name = req.name AND s.canonical_labels = req.labels \
+                 ORDER BY req.ord"
+            ));
+            let mut stmt = conn
+                .prepare(&select_sql)
+                .map_err(|e| format!("prepare bulk series resolution failed: {e}"))?;
+            let params = rusqlite::params_from_iter((start..end).flat_map(|i| {
+                [
+                    rusqlite::types::Value::Text(entries[i].0.to_owned()),
+                    rusqlite::types::Value::Blob(encoded[i].clone()),
+                ]
+            }));
+            let resolved: Vec<(i64, i64)> = stmt
+                .query_map(params, |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| format!("bulk series resolution failed: {e}"))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("bulk series resolution row failed: {e}"))?;
+            if resolved.len() != rows {
+                return Err(format!(
+                    "bulk series resolution returned {} of {} rows",
+                    resolved.len(),
+                    rows
+                ));
+            }
+            for (ord, id) in resolved {
+                if ord as usize != out.len() - start {
+                    return Err(format!("bulk series resolution ordinal {ord} out of order"));
+                }
+                out.push(ResolvedSeries {
+                    id,
+                    created: created_ids.contains(&id),
+                });
+            }
+            start = end;
+        }
+        Ok(out)
     }
 
     fn migrate_series(&self, series: &[StoredSeries]) -> Result<(), String> {
