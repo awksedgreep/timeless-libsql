@@ -15,7 +15,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 }
 
 fn new_engine(dir: &std::path::Path) -> Engine {
-    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false)
+    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap()
 }
 
 /// Sum of all file bytes under dir - the disk truth, no engine bookkeeping.

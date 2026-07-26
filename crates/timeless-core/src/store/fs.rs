@@ -23,6 +23,9 @@ use super::{
 /// How long a compressed chunk file stays in the read cache.
 const FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+static FAIL_COMPACTION_DELETE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 fn read_exact_at(file: &mut File, offset: u64, len: usize) -> Result<Vec<u8>, String> {
     let mut buf = vec![0u8; len];
     file.seek(SeekFrom::Start(offset))
@@ -39,22 +42,27 @@ pub struct FsStore {
     file_cache: DashMap<PathBuf, (Instant, Arc<Vec<u8>>)>,
 }
 
+struct CompactionManifest {
+    renames: Vec<(PathBuf, PathBuf)>,
+    deletes: Vec<PathBuf>,
+}
+
 impl FsStore {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf) -> Result<Self, String> {
         let instance_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         // Finish any compaction interrupted by a crash BEFORE the engine
         // scans files into its index, so superseded chunks never resurface.
-        Self::recover_compaction_manifest(&data_dir);
-        FsStore {
+        Self::recover_compaction_manifest(&data_dir)?;
+        Ok(FsStore {
             data_dir,
             created_dirs: Mutex::new(HashSet::new()),
             batch_counter: AtomicUsize::new(0),
             instance_id,
             file_cache: DashMap::new(),
-        }
+        })
     }
 
     fn created_dirs_lock(&self) -> MutexGuard<'_, HashSet<PathBuf>> {
@@ -85,7 +93,7 @@ impl FsStore {
             .to_path_buf();
         let mut dirs = self.created_dirs_lock();
         if !dirs.contains(&dir) {
-            fs::create_dir_all(&dir)?;
+            Self::create_dir_all_synced(&dir)?;
             dirs.insert(dir);
         }
         Ok(())
@@ -94,6 +102,54 @@ impl FsStore {
     fn next_file_id(&self) -> String {
         let seq = self.batch_counter.fetch_add(1, Ordering::Relaxed);
         format!("{}_{:08}", self.instance_id, seq)
+    }
+
+    fn write_and_sync(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+        let mut file = File::create(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
+    fn create_dir_all_synced(path: &std::path::Path) -> io::Result<()> {
+        let mut missing = Vec::new();
+        let mut current = path;
+        while !current.try_exists()? {
+            missing.push(current.to_path_buf());
+            current = current.parent().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("directory has no existing ancestor: {}", path.display()),
+                )
+            })?;
+        }
+
+        fs::create_dir_all(path)?;
+        for created in missing.iter().rev() {
+            if let Some(parent) = created.parent() {
+                Self::sync_dir(parent)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn sync_dir(path: &std::path::Path) -> io::Result<()> {
+        File::open(path)?.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn sync_dir(_path: &std::path::Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn sync_parent(path: &std::path::Path) -> io::Result<()> {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("path has no parent: {}", path.display()),
+            )
+        })?;
+        Self::sync_dir(parent)
     }
 
     // ── Individual chunk writer (PCO1) ───────────────────────────────
@@ -142,8 +198,7 @@ impl FsStore {
         out.extend_from_slice(&cp.val_bytes);
 
         let tmp_path = path.with_extension("pco1.tmp");
-        fs::File::create(&tmp_path)
-            .and_then(|mut file| file.write_all(&out))
+        Self::write_and_sync(&tmp_path, &out)
             .map_err(|err| format!("failed to write chunk {}: {err}", path.display()))?;
 
         let written = if pending {
@@ -153,6 +208,8 @@ impl FsStore {
         };
         fs::rename(&tmp_path, &written)
             .map_err(|err| format!("failed to rename chunk {}: {err}", written.display()))?;
+        Self::sync_parent(&written)
+            .map_err(|err| format!("failed to sync chunk dir {}: {err}", written.display()))?;
 
         Ok((path, written))
     }
@@ -213,11 +270,12 @@ impl FsStore {
         }
 
         let tmp_path = path.with_extension("pcb1.tmp");
-        fs::File::create(&tmp_path)
-            .and_then(|mut file| file.write_all(&out))
+        Self::write_and_sync(&tmp_path, &out)
             .map_err(|err| format!("failed to write batch {}: {err}", path.display()))?;
         fs::rename(&tmp_path, &path)
             .map_err(|err| format!("failed to rename batch {}: {err}", path.display()))?;
+        Self::sync_parent(&path)
+            .map_err(|err| format!("failed to sync batch dir {}: {err}", path.display()))?;
 
         Ok(partitions
             .iter()
@@ -237,28 +295,246 @@ impl FsStore {
 
     /// Durably record compaction intent: pending->final renames and the
     /// old files to delete. Written via tmp+rename so it is atomic.
-    fn write_compaction_manifest(
-        &self,
-        renames: &[(PathBuf, PathBuf)],
-        deletes: &HashSet<PathBuf>,
-    ) -> Result<(), String> {
-        let mut out = String::new();
-        for (pending, final_path) in renames {
+    fn write_compaction_manifest(&self, plan: &CompactionManifest) -> Result<(), String> {
+        if plan.renames.is_empty() {
+            return Err("refusing to compact without a replacement chunk".to_string());
+        }
+
+        let mut out = String::from("V\t1\n");
+        for (pending, final_path) in &plan.renames {
+            Self::validate_manifest_path(pending)?;
+            Self::validate_manifest_path(final_path)?;
             out.push_str(&format!(
                 "P\t{}\t{}\n",
                 pending.display(),
                 final_path.display()
             ));
         }
-        for path in deletes {
+        for path in &plan.deletes {
+            Self::validate_manifest_path(path)?;
             out.push_str(&format!("D\t{}\n", path.display()));
         }
+        // The footer makes truncation on an operation boundary detectable.
+        // Pre-R6 manifests have no version header and remain recoverable.
+        out.push_str("E\n");
 
         let manifest = Self::manifest_path(&self.data_dir);
         let tmp = manifest.with_extension("manifest.tmp");
-        fs::write(&tmp, out).map_err(|e| format!("failed to write manifest: {e}"))?;
+        Self::create_dir_all_synced(&self.data_dir)
+            .map_err(|e| format!("failed to create manifest directory: {e}"))?;
+        Self::write_and_sync(&tmp, out.as_bytes())
+            .map_err(|e| format!("failed to write manifest: {e}"))?;
         fs::rename(&tmp, &manifest).map_err(|e| format!("failed to commit manifest: {e}"))?;
+        Self::sync_dir(&self.data_dir)
+            .map_err(|e| format!("failed to sync committed manifest: {e}"))?;
         Ok(())
+    }
+
+    fn validate_manifest_path(path: &std::path::Path) -> Result<(), String> {
+        let value = path
+            .to_str()
+            .ok_or_else(|| format!("manifest path is not valid UTF-8: {}", path.display()))?;
+        if value.is_empty() || value.contains(['\t', '\r', '\n']) {
+            return Err(format!(
+                "manifest path cannot be represented safely: {value:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn parse_compaction_manifest(
+        manifest_path: &std::path::Path,
+        content: &str,
+    ) -> Result<CompactionManifest, String> {
+        if content.is_empty() {
+            return Err(format!(
+                "compaction manifest {} is empty",
+                manifest_path.display()
+            ));
+        }
+        if !content.ends_with('\n') {
+            return Err(format!(
+                "compaction manifest {} is truncated: missing final newline",
+                manifest_path.display()
+            ));
+        }
+
+        let mut plan = CompactionManifest {
+            renames: Vec::new(),
+            deletes: Vec::new(),
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let (operation_lines, line_offset) = match lines.first() {
+            Some(&"V\t1") => {
+                if lines.last() != Some(&"E") {
+                    return Err(format!(
+                        "compaction manifest {} is truncated: missing completion footer",
+                        manifest_path.display()
+                    ));
+                }
+                (&lines[1..lines.len() - 1], 1)
+            }
+            Some(line) if line.starts_with("V\t") => {
+                return Err(format!(
+                    "compaction manifest {} has unsupported header {line:?}",
+                    manifest_path.display()
+                ));
+            }
+            _ => (lines.as_slice(), 0),
+        };
+        for (line_index, line) in operation_lines.iter().enumerate() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields.as_slice() {
+                ["P", pending, final_path] if !pending.is_empty() && !final_path.is_empty() => {
+                    plan.renames
+                        .push((PathBuf::from(pending), PathBuf::from(final_path)));
+                }
+                ["D", path] if !path.is_empty() => {
+                    plan.deletes.push(PathBuf::from(path));
+                }
+                _ => {
+                    return Err(format!(
+                        "malformed compaction manifest {} at line {}: {line:?}",
+                        manifest_path.display(),
+                        line_index + line_offset + 1
+                    ));
+                }
+            }
+        }
+        if plan.renames.is_empty() {
+            return Err(format!(
+                "compaction manifest {} contains no replacement records",
+                manifest_path.display()
+            ));
+        }
+        Ok(plan)
+    }
+
+    fn read_compaction_manifest(
+        data_dir: &std::path::Path,
+    ) -> Result<Option<CompactionManifest>, String> {
+        let manifest = Self::manifest_path(data_dir);
+        let content = match fs::read_to_string(&manifest) {
+            Ok(content) => content,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(format!(
+                    "failed to read compaction manifest {}: {err}",
+                    manifest.display()
+                ));
+            }
+        };
+        Self::parse_compaction_manifest(&manifest, &content).map(Some)
+    }
+
+    fn remove_compaction_file(path: &std::path::Path) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fail_path = FAIL_COMPACTION_DELETE
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if fail_path.as_deref() == Some(path) {
+                *fail_path = None;
+                return Err(io::Error::other("injected compaction delete failure"));
+            }
+        }
+        fs::remove_file(path)
+    }
+
+    fn finish_compaction_renames(plan: &CompactionManifest) -> Result<(), String> {
+        for (pending, final_path) in &plan.renames {
+            let pending_exists = pending.try_exists().map_err(|err| {
+                format!(
+                    "failed to inspect pending chunk {}: {err}",
+                    pending.display()
+                )
+            })?;
+            let final_exists = final_path.try_exists().map_err(|err| {
+                format!(
+                    "failed to inspect final chunk {}: {err}",
+                    final_path.display()
+                )
+            })?;
+            match (pending_exists, final_exists) {
+                (true, false) => {
+                    fs::rename(pending, final_path).map_err(|err| {
+                        format!(
+                            "failed to finalize chunk {} -> {}: {err}",
+                            pending.display(),
+                            final_path.display()
+                        )
+                    })?;
+                }
+                (false, true) => {}
+                (false, false) => {
+                    return Err(format!(
+                        "cannot recover compaction: neither pending {} nor final {} exists",
+                        pending.display(),
+                        final_path.display()
+                    ));
+                }
+                (true, true) => {
+                    return Err(format!(
+                        "cannot recover compaction: both pending {} and final {} exist",
+                        pending.display(),
+                        final_path.display()
+                    ));
+                }
+            }
+            Self::sync_parent(final_path).map_err(|err| {
+                format!(
+                    "failed to sync finalized chunk directory {}: {err}",
+                    final_path.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn finish_compaction_deletes(plan: &CompactionManifest) -> Result<(), String> {
+        for path in &plan.deletes {
+            match Self::remove_compaction_file(path) {
+                Ok(()) => {
+                    Self::sync_parent(path).map_err(|err| {
+                        format!(
+                            "failed to sync superseded chunk directory {}: {err}",
+                            path.display()
+                        )
+                    })?;
+                }
+                // All replacement paths were verified before deletion began.
+                // A missing old path therefore proves a prior attempt already
+                // completed this operation.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    return Err(format!(
+                        "failed to remove superseded chunk {}: {err}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_compaction_manifest(data_dir: &std::path::Path) -> Result<(), String> {
+        let manifest = Self::manifest_path(data_dir);
+        match fs::remove_file(&manifest) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to remove completed compaction manifest {}: {err}",
+                    manifest.display()
+                ));
+            }
+        }
+        Self::sync_dir(data_dir).map_err(|err| {
+            format!(
+                "failed to sync manifest removal in {}: {err}",
+                data_dir.display()
+            )
+        })
     }
 
     /// Complete an interrupted compaction at startup: finish any pending
@@ -267,32 +543,13 @@ impl FsStore {
     /// exists this is a no-op (stray .pending files from a pre-manifest
     /// crash are swept by scan_dir_recursive instead, leaving the
     /// pre-compaction state).
-    fn recover_compaction_manifest(data_dir: &std::path::Path) {
-        let manifest = Self::manifest_path(data_dir);
-        let Ok(content) = fs::read_to_string(&manifest) else {
-            return;
+    fn recover_compaction_manifest(data_dir: &std::path::Path) -> Result<(), String> {
+        let Some(plan) = Self::read_compaction_manifest(data_dir)? else {
+            return Ok(());
         };
-
-        for line in content.lines() {
-            let mut parts = line.split('\t');
-            match parts.next() {
-                Some("P") => {
-                    if let (Some(pending), Some(final_path)) = (parts.next(), parts.next()) {
-                        let pending = PathBuf::from(pending);
-                        if pending.exists() {
-                            let _ = fs::rename(&pending, PathBuf::from(final_path));
-                        }
-                    }
-                }
-                Some("D") => {
-                    if let Some(path) = parts.next() {
-                        let _ = fs::remove_file(path);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let _ = fs::remove_file(&manifest);
+        Self::finish_compaction_renames(&plan)?;
+        Self::finish_compaction_deletes(&plan)?;
+        Self::clear_compaction_manifest(data_dir)
     }
 
     // ── Reading ──────────────────────────────────────────────────────
@@ -575,6 +832,19 @@ impl ChunkStore for FsStore {
         remove: &[ChunkLoc],
         on_committed: &mut dyn FnMut(&[ChunkLoc]),
     ) -> Result<Vec<ChunkLoc>, String> {
+        let manifest = Self::manifest_path(&self.data_dir);
+        if manifest.try_exists().map_err(|err| {
+            format!(
+                "failed to inspect compaction manifest {}: {err}",
+                manifest.display()
+            )
+        })? {
+            return Err(format!(
+                "cannot start compaction while unresolved manifest {} exists; reopen the store to retry recovery",
+                manifest.display()
+            ));
+        }
+
         // Phase 1: write every replacement chunk as .pending — invisible
         // to scan() and queries until renamed.
         let mut locs = Vec::with_capacity(add.len());
@@ -599,25 +869,24 @@ impl ChunkStore for FsStore {
             }
         }
 
-        // Phase 2: durable intent, then execute. From here, a crash is
-        // completed by recovery at next startup.
-        self.write_compaction_manifest(&renames, &deletes)?;
+        let mut deletes: Vec<PathBuf> = deletes.into_iter().collect();
+        deletes.sort();
+        let plan = CompactionManifest { renames, deletes };
 
-        for (pending, final_path) in &renames {
-            fs::rename(pending, final_path).map_err(|err| {
-                format!("failed to finalize chunk {}: {err}", final_path.display())
-            })?;
-        }
+        // Phase 2: durable intent, then execute. From here, a crash or
+        // returned error is completed by recovery at next startup.
+        self.write_compaction_manifest(&plan)?;
+        Self::finish_compaction_renames(&plan)?;
 
         // New chunks are live; let the engine swap its index before the
         // old files disappear.
         on_committed(&locs);
 
-        for path in &deletes {
+        for path in &plan.deletes {
             self.file_cache.remove(path);
-            let _ = fs::remove_file(path);
         }
-        let _ = fs::remove_file(Self::manifest_path(&self.data_dir));
+        Self::finish_compaction_deletes(&plan)?;
+        Self::clear_compaction_manifest(&self.data_dir)?;
 
         Ok(locs)
     }
@@ -716,5 +985,231 @@ impl ChunkStore for FsStore {
     fn sweep_cache(&self) {
         self.file_cache
             .retain(|_, (cached_at, _)| cached_at.elapsed() < FILE_CACHE_TTL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "timeless_fs_r6_{name}_{}_{}",
+            std::process::id(),
+            sequence
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn raw_chunk(series_id: i64, ts: i64) -> EncodedChunk {
+        EncodedChunk {
+            series_id,
+            min_ts: ts,
+            max_ts: ts,
+            point_count: 1,
+            min_val: ts as f64,
+            max_val: ts as f64,
+            sum_val: ts as f64,
+            encoding: ENC_RAW,
+            ts_bytes: ts.to_be_bytes().to_vec(),
+            val_bytes: (ts as f64).to_be_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn malformed_manifest_is_not_discarded() {
+        let dir = temp_dir("malformed");
+        let manifest = FsStore::manifest_path(&dir);
+        fs::write(&manifest, "P\tmissing-final-path\n").unwrap();
+
+        let err = match FsStore::new(dir.clone()) {
+            Ok(_) => panic!("store opened with malformed recovery state"),
+            Err(err) => err,
+        };
+
+        assert!(
+            manifest.exists(),
+            "malformed recovery state must remain for diagnosis and retry"
+        );
+        assert!(err.contains("line 1"), "unexpected error: {err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn truncated_manifest_is_not_discarded() {
+        let dir = temp_dir("truncated");
+        let manifest = FsStore::manifest_path(&dir);
+        fs::write(
+            &manifest,
+            format!(
+                "V\t1\nP\t{}\t{}\nD\t{}\n",
+                dir.join("new.pending").display(),
+                dir.join("new.pco1").display(),
+                dir.join("old.pco1").display()
+            ),
+        )
+        .unwrap();
+
+        let err = match FsStore::new(dir.clone()) {
+            Ok(_) => panic!("store opened with truncated recovery state"),
+            Err(err) => err,
+        };
+
+        assert!(manifest.exists(), "truncated manifest was discarded");
+        assert!(err.contains("truncated"), "unexpected error: {err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_recovery_rename_keeps_old_generation_and_manifest() {
+        let dir = temp_dir("rename");
+        let pending = dir.join("replacement.pco1.pending");
+        let final_path = dir.join("missing-parent").join("replacement.pco1");
+        let old = dir.join("old.pco1");
+        fs::write(&pending, b"new").unwrap();
+        fs::write(&old, b"old").unwrap();
+        let manifest = FsStore::manifest_path(&dir);
+        fs::write(
+            &manifest,
+            format!(
+                "P\t{}\t{}\nD\t{}\n",
+                pending.display(),
+                final_path.display(),
+                old.display()
+            ),
+        )
+        .unwrap();
+
+        let err = FsStore::recover_compaction_manifest(&dir).unwrap_err();
+
+        assert!(
+            old.exists(),
+            "old generation was deleted after rename failed"
+        );
+        assert!(
+            manifest.exists(),
+            "failed recovery must retain its manifest"
+        );
+        assert!(
+            err.contains("failed to finalize chunk"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn partial_recovery_keeps_manifest_until_retry_completes() {
+        let dir = temp_dir("partial");
+        let pending = dir.join("replacement.pco1.pending");
+        let final_path = dir.join("replacement.pco1");
+        let old_deleted = dir.join("old-a.pco1");
+        let old_blocked = dir.join("old-b.pco1");
+        fs::write(&pending, b"new").unwrap();
+        fs::write(&old_deleted, b"old-a").unwrap();
+        fs::create_dir(&old_blocked).unwrap();
+        let manifest = FsStore::manifest_path(&dir);
+        fs::write(
+            &manifest,
+            format!(
+                "P\t{}\t{}\nD\t{}\nD\t{}\n",
+                pending.display(),
+                final_path.display(),
+                old_deleted.display(),
+                old_blocked.display()
+            ),
+        )
+        .unwrap();
+
+        FsStore::recover_compaction_manifest(&dir).unwrap_err();
+
+        assert!(final_path.exists(), "replacement rename did not complete");
+        assert!(!old_deleted.exists(), "successful delete did not complete");
+        assert!(
+            old_blocked.exists(),
+            "blocked delete unexpectedly succeeded"
+        );
+        assert!(
+            manifest.exists(),
+            "partial recovery discarded its retry record"
+        );
+
+        fs::remove_dir(&old_blocked).unwrap();
+        FsStore::recover_compaction_manifest(&dir).unwrap();
+        assert!(
+            !manifest.exists(),
+            "successful retry did not clear manifest"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn normal_compaction_propagates_delete_failure_and_keeps_manifest() {
+        let dir = temp_dir("delete");
+        let store = FsStore::new(dir.clone()).unwrap();
+        let old_locs = store.put_chunks(&[raw_chunk(1, 1)]).unwrap();
+        let old_path = match &old_locs[0] {
+            ChunkLoc::File { path, .. } => path.clone(),
+            other => panic!("unexpected old location {other:?}"),
+        };
+        *FAIL_COMPACTION_DELETE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(old_path.clone());
+
+        let mut replacement_locs = Vec::new();
+        let result = store.replace_chunks(&[raw_chunk(1, 2)], &old_locs, &mut |committed| {
+            replacement_locs.extend_from_slice(committed);
+        });
+
+        assert!(result.is_err(), "delete failure was silently accepted");
+        let replacement_path = match &replacement_locs[0] {
+            ChunkLoc::File { path, .. } => path,
+            other => panic!("unexpected replacement location {other:?}"),
+        };
+        assert!(
+            old_path.exists(),
+            "failed deletion removed the old generation"
+        );
+        assert!(
+            replacement_path.exists(),
+            "replacement was not complete before deletion"
+        );
+        assert!(
+            FsStore::manifest_path(&dir).exists(),
+            "failed compaction discarded its retry manifest"
+        );
+        let retained_manifest = fs::read(FsStore::manifest_path(&dir)).unwrap();
+        let retry = store.replace_chunks(&[raw_chunk(1, 3)], &old_locs, &mut |_| {});
+        assert!(
+            retry.unwrap_err().contains("unresolved manifest"),
+            "a later compaction did not refuse unresolved recovery state"
+        );
+        assert_eq!(
+            fs::read(FsStore::manifest_path(&dir)).unwrap(),
+            retained_manifest,
+            "a later compaction overwrote the retained manifest"
+        );
+
+        let recovered = FsStore::new(dir.clone()).unwrap();
+        let chunks = recovered.scan().unwrap();
+        assert_eq!(
+            chunks.len(),
+            1,
+            "restart exposed old and replacement chunks"
+        );
+        assert_eq!(chunks[0].meta.min_ts, 2);
+        assert!(
+            !old_path.exists(),
+            "recovery did not finish the old deletion"
+        );
+        assert!(
+            !FsStore::manifest_path(&dir).exists(),
+            "successful recovery did not clear its manifest"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 }

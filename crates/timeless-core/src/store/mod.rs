@@ -98,6 +98,24 @@ pub struct StoredChunk {
     pub meta: ChunkMeta,
 }
 
+/// One durable series identity. Stores with an authoritative catalog use
+/// these rows instead of replacing a process-local registry snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredSeries {
+    pub id: i64,
+    pub name: String,
+    pub labels: Vec<(String, String)>,
+}
+
+/// Result of resolving a durable series identity.
+pub struct ResolvedSeries {
+    pub id: i64,
+    /// True only when this call inserted the authoritative row. The engine
+    /// journals that fact so a host-transaction rollback can invalidate its
+    /// matching in-memory cache entry.
+    pub created: bool,
+}
+
 /// One chunk's stored payload: ts/val byte ranges into a shared buffer.
 /// Fs chunks are slices of a cached whole file; a backend holding ts and
 /// val separately can concatenate them into one buffer.
@@ -148,6 +166,31 @@ pub trait ChunkStore: Send + Sync {
 
     fn save_registry(&self, bytes: &[u8]) -> Result<(), String>;
     fn load_registry(&self) -> Result<Option<Vec<u8>>, String>;
+
+    /// Whether series identity is owned by normalized store rows rather than
+    /// the legacy whole-registry blob. Filesystem stores retain the blob
+    /// implementation; SQLite stores override this catalog API.
+    fn has_authoritative_series(&self) -> bool {
+        false
+    }
+
+    fn load_series(&self) -> Result<Vec<StoredSeries>, String> {
+        Err("store does not provide an authoritative series catalog".to_string())
+    }
+
+    fn resolve_series(
+        &self,
+        _name: &str,
+        _labels: &[(String, String)],
+    ) -> Result<ResolvedSeries, String> {
+        Err("store does not provide authoritative series resolution".to_string())
+    }
+
+    /// Import legacy registry rows. Implementations must be idempotent so
+    /// two processes opening the same legacy database cannot corrupt it.
+    fn migrate_series(&self, _series: &[StoredSeries]) -> Result<(), String> {
+        Err("store does not support series migration".to_string())
+    }
 
     /// For Engine::info(): (total_bytes, file_or_row_count).
     fn storage_stats(&self) -> (u64, usize);

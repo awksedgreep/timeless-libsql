@@ -29,7 +29,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 #[test]
 fn prometheus_ingest_semantics() {
     let dir = temp_dir("prom_ingest");
-    let engine = Engine::new(dir.clone(), 1000, 0, 8, 64 * 1024 * 1024, false);
+    let engine = Engine::new(dir.clone(), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap();
 
     // One body exercising every rule at once — the same shape cli.sh
     // section 18 feeds through the vtab.

@@ -93,7 +93,8 @@ SELECT 'pre', name, ts, value, labels FROM metrics ORDER BY ts, name;
 INSERT INTO metrics(metrics) VALUES ('flush');
 SELECT 'post', name, ts, value, labels FROM metrics ORDER BY ts, name;
 SELECT 'chunks', COUNT(*), SUM(point_count) FROM metrics_chunks;
-SELECT 'registry', COUNT(*) FROM metrics_meta WHERE k = 'series_registry';
+SELECT 'series', COUNT(*) FROM metrics_series;
+SELECT 'legacy_registry', COUNT(*) FROM metrics_meta WHERE k = 'series_registry';
 SQL
 )
 expected='pre|cpu|100|1.5|{"host":"a"}
@@ -103,7 +104,8 @@ post|cpu|100|1.5|{"host":"a"}
 post|mem|150|3.0|{"host":"b"}
 post|cpu|200|2.5|{"host":"a"}
 chunks|2|3
-registry|1'
+series|2
+legacy_registry|0'
 check_eq "insert/select/flush round-trip + shadow tables" "$got" "$expected"
 
 # ---------------------------------------------------------------------------

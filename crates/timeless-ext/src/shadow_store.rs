@@ -39,11 +39,13 @@
 
 use std::sync::Arc;
 
-use rusqlite::vtab::escape_double_quote;
 use rusqlite::{params, Connection, OptionalExtension};
-use timeless_core::{ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, StoredChunk};
+use timeless_core::{
+    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, ResolvedSeries, StoredChunk,
+    StoredSeries,
+};
 
-use crate::shared;
+use crate::{shared, sql_ident};
 
 /// Shadow-table DDL for a vtab named `table`. The vtab layer executes this
 /// in xCreate (the store assumes the tables exist).
@@ -58,11 +60,15 @@ use crate::shared;
 /// - `resolution INTEGER DEFAULT 0` is the v2 rollup-ladder column from
 ///   PLAN.md "Pruning & retention" — costs one column now, saves a schema
 ///   migration later. 0 = raw resolution.
-pub(crate) fn ddl(table: &str) -> String {
-    let t = escape_double_quote(table);
+pub(crate) fn ddl(database: &str, table: &str) -> String {
+    let chunks = sql_ident::qualified_shadow(database, table, "chunks");
+    let chunks_local = sql_ident::quoted_shadow(table, "chunks");
+    let chunks_index = sql_ident::qualified_shadow(database, table, "chunks_series_ts");
+    let meta = sql_ident::qualified_shadow(database, table, "meta");
+    let series = sql_ident::qualified_shadow(database, table, "series");
     format!(
         r#"
-CREATE TABLE IF NOT EXISTS "{t}_chunks" (
+CREATE TABLE IF NOT EXISTS {chunks} (
   id          INTEGER PRIMARY KEY,
   series_id   INTEGER NOT NULL,
   ts_min      INTEGER NOT NULL,
@@ -76,16 +82,44 @@ CREATE TABLE IF NOT EXISTS "{t}_chunks" (
   ts_data     BLOB NOT NULL,
   val_data    BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "{t}_chunks_series_ts" ON "{t}_chunks"(series_id, ts_min);
-CREATE TABLE IF NOT EXISTS "{t}_meta" (k TEXT PRIMARY KEY, v BLOB);
+CREATE INDEX IF NOT EXISTS {chunks_index} ON {chunks_local}(series_id, ts_min);
+CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
+CREATE TABLE IF NOT EXISTS {series} (
+  id               INTEGER PRIMARY KEY,
+  name             TEXT NOT NULL,
+  canonical_labels BLOB NOT NULL,
+  UNIQUE(name, canonical_labels)
+);
+"#
+    )
+}
+
+/// Catalog-only DDL used by xConnect to upgrade databases created before the
+/// normalized series table existed.
+pub(crate) fn series_ddl(database: &str, table: &str) -> String {
+    let series = sql_ident::qualified_shadow(database, table, "series");
+    format!(
+        r#"
+CREATE TABLE IF NOT EXISTS {series} (
+  id               INTEGER PRIMARY KEY,
+  name             TEXT NOT NULL,
+  canonical_labels BLOB NOT NULL,
+  UNIQUE(name, canonical_labels)
+);
 "#
     )
 }
 
 /// Statements to remove the shadow tables again (vtab xDestroy).
-pub(crate) fn drop_ddl(table: &str) -> String {
-    let t = escape_double_quote(table);
-    format!(r#"DROP TABLE IF EXISTS "{t}_chunks"; DROP TABLE IF EXISTS "{t}_meta";"#)
+pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
+    let chunks = sql_ident::qualified_shadow(database, table, "chunks");
+    let meta = sql_ident::qualified_shadow(database, table, "meta");
+    let series = sql_ident::qualified_shadow(database, table, "series");
+    format!(
+        r#"DROP TABLE IF EXISTS {chunks};
+DROP TABLE IF EXISTS {meta};
+DROP TABLE IF EXISTS {series};"#
+    )
 }
 
 pub(crate) struct ShadowTableStore {
@@ -98,6 +132,10 @@ pub(crate) struct ShadowTableStore {
     stats_sql: String,
     save_registry_sql: String,
     load_registry_sql: String,
+    load_series_sql: String,
+    insert_series_sql: String,
+    select_series_sql: String,
+    migrate_series_sql: String,
     /// "DELETE FROM ... WHERE id IN (" — completed per delete_chunks call
     /// with the actual rowid list (rowids are i64s we produced ourselves,
     /// so inlining them is injection-safe).
@@ -105,10 +143,10 @@ pub(crate) struct ShadowTableStore {
 }
 
 impl ShadowTableStore {
-    pub(crate) fn new(table: &str) -> Self {
-        let t = escape_double_quote(table);
-        let chunks = format!("\"{t}_chunks\"");
-        let meta = format!("\"{t}_meta\"");
+    pub(crate) fn new(database: &str, table: &str) -> Self {
+        let chunks = sql_ident::qualified_shadow(database, table, "chunks");
+        let meta = sql_ident::qualified_shadow(database, table, "meta");
+        let series = sql_ident::qualified_shadow(database, table, "series");
         ShadowTableStore {
             insert_sql: format!(
                 "INSERT INTO {chunks} (series_id, ts_min, ts_max, point_count, \
@@ -133,6 +171,18 @@ impl ShadowTableStore {
                 "INSERT OR REPLACE INTO {meta} (k, v) VALUES ('series_registry', ?1)"
             ),
             load_registry_sql: format!("SELECT v FROM {meta} WHERE k = 'series_registry'"),
+            load_series_sql: format!("SELECT id, name, canonical_labels FROM {series} ORDER BY id"),
+            insert_series_sql: format!(
+                "INSERT INTO {series}(name, canonical_labels) VALUES(?1, ?2) \
+                 ON CONFLICT(name, canonical_labels) DO NOTHING"
+            ),
+            select_series_sql: format!(
+                "SELECT id FROM {series} WHERE name = ?1 AND canonical_labels = ?2"
+            ),
+            migrate_series_sql: format!(
+                "INSERT OR IGNORE INTO {series}(id, name, canonical_labels) \
+                 VALUES(?1, ?2, ?3)"
+            ),
             delete_prefix: format!("DELETE FROM {chunks} WHERE id IN ("),
         }
     }
@@ -144,6 +194,90 @@ impl ShadowTableStore {
     /// chunk granularity (unchanged from the pre-R4 pattern).
     fn conn() -> Result<Connection, String> {
         shared::current_conn()
+    }
+
+    fn encode_labels(labels: &[(String, String)]) -> Result<Vec<u8>, String> {
+        let count = u32::try_from(labels.len())
+            .map_err(|_| "too many labels to encode in series catalog".to_string())?;
+        let mut out = Vec::new();
+        out.extend_from_slice(&count.to_be_bytes());
+        for (key, value) in labels {
+            let key = key.as_bytes();
+            let value = value.as_bytes();
+            let key_len = u32::try_from(key.len())
+                .map_err(|_| "series label key is too large".to_string())?;
+            let value_len = u32::try_from(value.len())
+                .map_err(|_| "series label value is too large".to_string())?;
+            out.extend_from_slice(&key_len.to_be_bytes());
+            out.extend_from_slice(key);
+            out.extend_from_slice(&value_len.to_be_bytes());
+            out.extend_from_slice(value);
+        }
+        Ok(out)
+    }
+
+    fn decode_labels(data: &[u8]) -> Result<Vec<(String, String)>, String> {
+        fn take_u32(data: &[u8], pos: &mut usize, what: &str) -> Result<usize, String> {
+            let end = pos
+                .checked_add(4)
+                .ok_or_else(|| format!("series label catalog overflow reading {what}"))?;
+            let bytes = data
+                .get(*pos..end)
+                .ok_or_else(|| format!("truncated series label catalog reading {what}"))?;
+            *pos = end;
+            Ok(u32::from_be_bytes(bytes.try_into().unwrap()) as usize)
+        }
+
+        fn take_string(
+            data: &[u8],
+            pos: &mut usize,
+            len: usize,
+            what: &str,
+        ) -> Result<String, String> {
+            let end = pos
+                .checked_add(len)
+                .ok_or_else(|| format!("series label catalog overflow reading {what}"))?;
+            let bytes = data
+                .get(*pos..end)
+                .ok_or_else(|| format!("truncated series label catalog reading {what}"))?;
+            *pos = end;
+            String::from_utf8(bytes.to_vec())
+                .map_err(|e| format!("invalid UTF-8 in series catalog {what}: {e}"))
+        }
+
+        let mut pos = 0;
+        let count = take_u32(data, &mut pos, "label count")?;
+        let max_possible = data.len().saturating_sub(pos) / 8;
+        if count > max_possible {
+            return Err(format!(
+                "series label catalog count {count} exceeds payload capacity {max_possible}"
+            ));
+        }
+        let mut labels = Vec::with_capacity(count);
+        let mut previous_key: Option<String> = None;
+        for index in 0..count {
+            let key_len = take_u32(data, &mut pos, "label key length")?;
+            let key = take_string(data, &mut pos, key_len, &format!("label {index} key"))?;
+            if previous_key
+                .as_deref()
+                .is_some_and(|previous| previous >= key.as_str())
+            {
+                return Err(format!(
+                    "series labels are not in strict canonical order at key {key:?}"
+                ));
+            }
+            let value_len = take_u32(data, &mut pos, "label value length")?;
+            let value = take_string(data, &mut pos, value_len, &format!("label {index} value"))?;
+            previous_key = Some(key.clone());
+            labels.push((key, value));
+        }
+        if pos != data.len() {
+            return Err(format!(
+                "series label catalog has {} trailing bytes",
+                data.len() - pos
+            ));
+        }
+        Ok(labels)
     }
 
     /// INSERT one row per chunk; shared by put_chunks and replace_chunks.
@@ -327,6 +461,72 @@ impl ChunkStore for ShadowTableStore {
         stmt.query_row([], |r| r.get::<_, Vec<u8>>(0))
             .optional()
             .map_err(|e| format!("registry load failed: {e}"))
+    }
+
+    fn has_authoritative_series(&self) -> bool {
+        true
+    }
+
+    fn load_series(&self) -> Result<Vec<StoredSeries>, String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.load_series_sql)
+            .map_err(|e| format!("prepare series catalog load failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|e| format!("series catalog load failed: {e}"))?;
+
+        let mut series = Vec::new();
+        for row in rows {
+            let (id, name, labels) = row.map_err(|e| format!("series catalog row failed: {e}"))?;
+            series.push(StoredSeries {
+                id,
+                name,
+                labels: Self::decode_labels(&labels)
+                    .map_err(|e| format!("series {id} labels are invalid: {e}"))?,
+            });
+        }
+        Ok(series)
+    }
+
+    fn resolve_series(
+        &self,
+        name: &str,
+        labels: &[(String, String)],
+    ) -> Result<ResolvedSeries, String> {
+        let conn = Self::conn()?;
+        let labels = Self::encode_labels(labels)?;
+        let created = conn
+            .prepare_cached(&self.insert_series_sql)
+            .map_err(|e| format!("prepare series insert failed: {e}"))?
+            .execute(params![name, &labels])
+            .map_err(|e| format!("series insert failed: {e}"))?
+            > 0;
+        let id = conn
+            .prepare_cached(&self.select_series_sql)
+            .map_err(|e| format!("prepare series resolution failed: {e}"))?
+            .query_row(params![name, &labels], |row| row.get(0))
+            .map_err(|e| format!("series resolution failed: {e}"))?;
+        Ok(ResolvedSeries { id, created })
+    }
+
+    fn migrate_series(&self, series: &[StoredSeries]) -> Result<(), String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.migrate_series_sql)
+            .map_err(|e| format!("prepare legacy series migration failed: {e}"))?;
+        for item in series {
+            let labels = Self::encode_labels(&item.labels)?;
+            stmt.execute(params![item.id, &item.name, labels])
+                .map_err(|e| format!("legacy series {} migration failed: {e}", item.id))?;
+        }
+        Ok(())
     }
 
     /// (total_bytes, row_count) for Engine::info(). Infallible signature,

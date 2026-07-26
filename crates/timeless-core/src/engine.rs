@@ -1,8 +1,12 @@
-use crate::store::{ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, ENC_PCO, ENC_RAW};
+use crate::store::{
+    ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk, StoredSeries, ENC_PCO,
+    ENC_RAW,
+};
 use dashmap::DashMap;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -140,6 +144,123 @@ impl SeriesRegistry {
 
         self.dirty = true;
         id
+    }
+
+    fn insert_known(
+        &mut self,
+        id: i64,
+        metric_name: &str,
+        labels: &Labels,
+        dirty: bool,
+    ) -> Result<(), String> {
+        if id <= 0 {
+            return Err(format!("series id must be positive, got {id}"));
+        }
+        let key = (metric_name.to_string(), labels.clone());
+        if let Some(existing_id) = self.series_map.get(&key) {
+            return if *existing_id == id {
+                Ok(())
+            } else {
+                Err(format!(
+                    "series identity {metric_name:?} maps to both {existing_id} and {id}"
+                ))
+            };
+        }
+        if let Some(existing) = self.series_info.get(&id) {
+            return Err(format!(
+                "series id {id} maps to both {:?} and {metric_name:?}",
+                existing.metric_name
+            ));
+        }
+
+        self.series_map.insert(key, id);
+        self.series_info.insert(
+            id,
+            SeriesInfo {
+                metric_name: metric_name.to_string(),
+                labels: labels.clone(),
+            },
+        );
+        self.metric_index
+            .entry(metric_name.to_string())
+            .or_default()
+            .insert(id);
+        for (key, value) in labels {
+            self.label_index
+                .entry((key.clone(), value.clone()))
+                .or_default()
+                .insert(id);
+        }
+        let next_after_id = id
+            .checked_add(1)
+            .ok_or_else(|| format!("series id {id} cannot be incremented"))?;
+        let next_id = self.next_id.load(Ordering::Relaxed).max(next_after_id);
+        self.next_id.store(next_id, Ordering::Relaxed);
+        self.dirty |= dirty;
+        Ok(())
+    }
+
+    fn remove_id(&mut self, id: i64) {
+        let Some(info) = self.series_info.remove(&id) else {
+            return;
+        };
+        self.series_map
+            .remove(&(info.metric_name.clone(), info.labels.clone()));
+        if let Some(ids) = self.metric_index.get_mut(&info.metric_name) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.metric_index.remove(&info.metric_name);
+            }
+        }
+        for (key, value) in info.labels {
+            let index_key = (key, value);
+            if let Some(ids) = self.label_index.get_mut(&index_key) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    self.label_index.remove(&index_key);
+                }
+            }
+        }
+    }
+
+    fn from_stored(rows: &[StoredSeries]) -> Result<Self, String> {
+        let mut registry = Self::new();
+        for row in rows {
+            let mut labels = Labels::new();
+            let mut previous_key: Option<&str> = None;
+            for (key, value) in &row.labels {
+                if previous_key.is_some_and(|previous| previous >= key.as_str()) {
+                    return Err(format!(
+                        "series {} labels are not in strict canonical order",
+                        row.id
+                    ));
+                }
+                if labels.insert(key.clone(), value.clone()).is_some() {
+                    return Err(format!("series {} has duplicate label key {key:?}", row.id));
+                }
+                previous_key = Some(key);
+            }
+            registry.insert_known(row.id, &row.name, &labels, false)?;
+        }
+        Ok(registry)
+    }
+
+    fn stored_rows(&self) -> Vec<StoredSeries> {
+        let mut rows: Vec<StoredSeries> = self
+            .series_info
+            .iter()
+            .map(|(&id, info)| StoredSeries {
+                id,
+                name: info.metric_name.clone(),
+                labels: info
+                    .labels
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id);
+        rows
     }
 
     pub fn info_for(&self, id: i64) -> Option<&SeriesInfo> {
@@ -349,31 +470,31 @@ impl SeriesRegistry {
                     )
                 })?;
                 pos += vl;
-                labels.insert(k, v);
+                if labels.insert(k.clone(), v).is_some() {
+                    return Err(format!(
+                        "series registry entry {} has duplicate label key {k:?}",
+                        entry_idx
+                    ));
+                }
             }
 
-            let key = (metric_name.clone(), labels.clone());
-            reg.series_map.insert(key, id);
-            reg.series_info.insert(
-                id,
-                SeriesInfo {
-                    metric_name: metric_name.clone(),
-                    labels: labels.clone(),
-                },
-            );
-            reg.metric_index.entry(metric_name).or_default().insert(id);
-            for (k, v) in &labels {
-                reg.label_index
-                    .entry((k.clone(), v.clone()))
-                    .or_default()
-                    .insert(id);
-            }
+            reg.insert_known(id, &metric_name, &labels, false)?;
             if id > max_id {
                 max_id = id;
             }
         }
 
-        reg.next_id = AtomicI64::new(max_id + 1);
+        if pos != data.len() {
+            return Err(format!(
+                "series registry has {} trailing bytes",
+                data.len() - pos
+            ));
+        }
+        reg.next_id = AtomicI64::new(
+            max_id
+                .checked_add(1)
+                .ok_or_else(|| "series registry maximum id cannot be incremented".to_string())?,
+        );
         Ok(reg)
     }
 }
@@ -411,6 +532,12 @@ pub struct Engine {
     /// Chunk persistence backend (filesystem today, SQLite shadow
     /// tables later). All bytes-at-rest go through this seam.
     store: Box<dyn ChunkStore>,
+    /// Pins one complete query-visible generation. Queries hold a shared
+    /// guard from candidate lookup through payload and buffer reads;
+    /// maintenance holds the exclusive guard while moving data between
+    /// buffers, indexes, and the store.
+    transition: RwLock<()>,
+    authoritative_series: bool,
     flush_threshold: usize,
     min_flush_size: usize,
     compression_level: usize,
@@ -482,30 +609,32 @@ pub struct Engine {
 // journaling a removal — that chunk never existed as far as rollback is
 // concerned. Restores therefore never resurrect intra-txn chunks.
 //
-// WHAT IS *NOT* JOURNALED (accepted + documented):
-//   - Series registered during the txn stay registered in memory. They
-//     are harmless empty series (their chunks rolled back); rollback
-//     marks the registry dirty so the next save_series re-persists a
-//     blob consistent with the in-memory state (the intra-txn blob
-//     write rolled back with everything else).
-//   - The resolve cache: ids stay valid because the registry keeps them.
+// SERIES CATALOG:
+//   - Filesystem stores retain the legacy registry blob behavior.
+//   - Authoritative stores record IDs inserted by each frame. Rollback
+//     removes those identities from memory and clears the resolve cache,
+//     matching the host rollback of their `_series` rows.
 //
 // PRECONDITIONS:
 //   - The store must be transactional (shadow tables riding the host
 //     txn). Over FsStore, file writes/deletes cannot roll back — the
 //     txn_* API must simply not be used there (the vtab is the only
 //     caller and always uses ShadowTableStore).
-//   - SQLite never nests xBegin (savepoints would use xSavepoint, which
-//     this module does not implement), so txn_begin asserts no journal
-//     is already active.
+//   - SQLite never nests xBegin. Savepoints create additional undo
+//     frames inside the one outer transaction journal.
 //
-// LOCK ORDER (deadlock rule): txn journal → partitions/flush_queue →
-// index → series. Every site that touches the journal acquires it
-// FIRST, before any other engine lock.
+// LOCK ORDER (deadlock rule): transition → txn journal →
+// partitions/flush_queue → store callbacks → index → series. Queries
+// take only a shared transition guard; their candidate index guard is
+// released before store reads, and store reads finish before buffer access.
+// Store callbacks re-enter only the caller's SQLite connection and
+// never call back into this engine, so holding the transition guard
+// across them cannot form an engine/connection lock cycle.
 // ═══════════════════════════════════════════════════════════════════════
 
 #[derive(Default)]
-struct TxnJournal {
+struct TxnFrame {
+    savepoint: Option<i32>,
     /// Partition buffer lengths at txn_begin (or 0 after an intra-txn
     /// flush drained a partition — its pre-txn points moved to `saved`).
     /// Partitions absent from the map were created during the txn:
@@ -520,6 +649,37 @@ struct TxnJournal {
     /// are restored by the host rollback). Keys carry their original
     /// chunk_seq, so rollback reinstates entries verbatim.
     removed: Vec<(ChunkKey, ChunkMeta)>,
+    /// Authoritative series rows first inserted inside this frame.
+    series_added: HashSet<i64>,
+}
+
+#[derive(Default)]
+struct TxnJournal {
+    /// Frame zero is the outer transaction. Later frames correspond to
+    /// SQLite savepoint numbers and receive mutations exclusively until
+    /// release or rollback-to.
+    frames: Vec<TxnFrame>,
+    /// Capacity-retaining frames recycled across autocommit statements
+    /// and repeated savepoint use.
+    spares: Vec<TxnFrame>,
+}
+
+impl Deref for TxnJournal {
+    type Target = TxnFrame;
+
+    fn deref(&self) -> &Self::Target {
+        self.frames
+            .last()
+            .expect("active journal has an undo frame")
+    }
+}
+
+impl DerefMut for TxnJournal {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.frames
+            .last_mut()
+            .expect("active journal has an undo frame")
+    }
 }
 
 struct ColdFlushGuard<'a> {
@@ -533,6 +693,14 @@ impl Drop for ColdFlushGuard<'_> {
 }
 
 impl Engine {
+    fn transition_read(&self) -> RwLockReadGuard<'_, ()> {
+        self.transition.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn transition_write(&self) -> RwLockWriteGuard<'_, ()> {
+        self.transition.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn index_read(&self) -> RwLockReadGuard<'_, BTreeMap<ChunkKey, ChunkMeta>> {
         self.index.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -562,14 +730,15 @@ impl Engine {
     }
 
     /// Acquire the journal iff a transaction is active. Every mutation
-    /// site calls this FIRST (lock order: txn → everything else); the
-    /// atomic makes the no-txn fast path a single load.
+    /// site calls this before buffer/index/series locks, after taking
+    /// any required transition guard; the atomic makes the no-txn fast
+    /// path a single load.
     fn txn_guard(&self) -> Option<MutexGuard<'_, TxnJournal>> {
-        if self.txn_active.load(Ordering::SeqCst) {
-            Some(self.txn_lock())
-        } else {
-            None
+        if !self.txn_active.load(Ordering::SeqCst) {
+            return None;
         }
+        let journal = self.txn_lock();
+        self.txn_active.load(Ordering::SeqCst).then_some(journal)
     }
 
     // ── Transaction journal API (PLAN.md R5; see TxnJournal docs) ────
@@ -580,22 +749,19 @@ impl Engine {
     /// mode, so this is on the per-statement path and must stay cheap:
     /// O(active partitions) marks into capacity-retaining collections.
     ///
-    /// Nested begins are impossible from SQLite (savepoints would be
-    /// xSavepoint, which is not implemented); debug builds assert it,
-    /// release builds defensively restart the journal.
+    /// Nested begins are impossible from SQLite; savepoints add frames
+    /// through txn_savepoint instead.
     pub fn txn_begin(&self) {
         let mut j = self.txn_lock();
         debug_assert!(
             !self.txn_active.load(Ordering::SeqCst),
             "txn_begin while a transaction journal is already active (nested xBegin?)"
         );
-        j.buffer_marks.clear();
-        j.saved.clear();
-        j.added.clear();
-        j.removed.clear();
-        for e in self.partitions.iter() {
-            j.buffer_marks.insert(*e.key(), e.value().timestamps.len());
+        while let Some(frame) = j.frames.pop() {
+            j.spares.push(frame);
         }
+        let frame = j.spares.pop().unwrap_or_default();
+        j.frames.push(self.reset_txn_frame(frame, None));
         self.txn_active.store(true, Ordering::SeqCst);
     }
 
@@ -603,7 +769,10 @@ impl Engine {
     /// permanent — drop the journal. Contents are cleared lazily by the
     /// next txn_begin; only the flag needs to flip here.
     pub fn txn_commit(&self) {
-        let _j = self.txn_lock(); // serialize against in-flight recorders
+        let mut j = self.txn_lock(); // serialize against in-flight recorders
+        while let Some(frame) = j.frames.pop() {
+            j.spares.push(frame);
+        }
         self.txn_active.store(false, Ordering::SeqCst);
     }
 
@@ -618,19 +787,112 @@ impl Engine {
     ///   4. remove index entries added during the txn (their rows are
     ///      gone) and restore entries removed during it (their rows are
     ///      back, same rowids — SQLite rollback is page-level undo),
-    ///   5. mark the series registry dirty: any intra-txn registry blob
-    ///      write rolled back, so the next save_series must re-persist.
+    ///   5. remove authoritative series inserted during the transaction,
+    ///      or mark a legacy blob registry dirty for re-persistence.
     pub fn txn_rollback(&self) {
+        let _transition = self.transition_write();
         let mut j = self.txn_lock();
         if !self.txn_active.load(Ordering::SeqCst) {
             return; // xRollback without xBegin — nothing recorded
         }
+        while let Some(mut frame) = j.frames.pop() {
+            self.rollback_txn_frame(&mut frame);
+            j.spares.push(frame);
+        }
+        self.rebuild_flush_queue();
+        if !self.authoritative_series {
+            self.series_write().dirty = true;
+        }
+        self.txn_active.store(false, Ordering::SeqCst);
+    }
 
+    /// Start an undo frame for SQLite savepoint `id`.
+    pub fn txn_savepoint(&self, id: i32) {
+        let mut j = self.txn_lock();
+        if !self.txn_active.load(Ordering::SeqCst) {
+            return;
+        }
+        debug_assert!(
+            j.frames.iter().all(|frame| frame.savepoint != Some(id)),
+            "duplicate savepoint id {id}"
+        );
+        let frame = j.spares.pop().unwrap_or_default();
+        j.frames.push(self.reset_txn_frame(frame, Some(id)));
+    }
+
+    /// Release `id` and every nested frame, merging their undo records
+    /// into the parent so an outer rollback still restores its own start.
+    pub fn txn_release(&self, id: i32) {
+        let mut j = self.txn_lock();
+        let Some(pos) = j
+            .frames
+            .iter()
+            .position(|frame| frame.savepoint == Some(id))
+        else {
+            return;
+        };
+        if pos == 0 {
+            return;
+        }
+        let released = j.frames.split_off(pos);
+        for mut child in released {
+            {
+                let parent = j
+                    .frames
+                    .last_mut()
+                    .expect("savepoint frame has an outer parent");
+                Self::merge_txn_frame(parent, &mut child);
+            }
+            j.spares.push(child);
+        }
+    }
+
+    /// Restore the state captured by `id`, discard nested frames, and
+    /// leave `id` active so SQLite may roll back to it again.
+    pub fn txn_rollback_to(&self, id: i32) {
+        let _transition = self.transition_write();
+        let mut j = self.txn_lock();
+        let Some(pos) = j
+            .frames
+            .iter()
+            .position(|frame| frame.savepoint == Some(id))
+        else {
+            return;
+        };
+        while j.frames.len() > pos {
+            let mut frame = j.frames.pop().expect("frame length checked");
+            self.rollback_txn_frame(&mut frame);
+            j.spares.push(frame);
+        }
+        let frame = j.spares.pop().unwrap_or_default();
+        j.frames.push(self.reset_txn_frame(frame, Some(id)));
+        self.rebuild_flush_queue();
+        if !self.authoritative_series {
+            self.series_write().dirty = true;
+        }
+    }
+
+    fn reset_txn_frame(&self, mut frame: TxnFrame, savepoint: Option<i32>) -> TxnFrame {
+        frame.savepoint = savepoint;
+        frame.buffer_marks.clear();
+        frame.saved.clear();
+        frame.added.clear();
+        frame.removed.clear();
+        frame.series_added.clear();
+        for entry in self.partitions.iter() {
+            frame
+                .buffer_marks
+                .insert(*entry.key(), entry.value().timestamps.len());
+        }
+        frame
+    }
+
+    fn rollback_txn_frame(&self, frame: &mut TxnFrame) {
         // 1. Truncate buffers. Partitions with no mark were created
-        //    during the txn → truncate to 0 (the empty PartitionBuffer
+        //    during the frame → truncate to 0 (the empty PartitionBuffer
         //    entry itself is harmless and stays).
         for mut e in self.partitions.iter_mut() {
-            let mark = j.buffer_marks.get(e.key()).copied().unwrap_or(0);
+            let mark = frame.buffer_marks.get(e.key()).copied().unwrap_or(0);
             let buf = e.value_mut();
             if buf.timestamps.len() > mark {
                 let before = buf.memory_bytes();
@@ -646,7 +908,7 @@ impl Engine {
         // 2. Restore drained pre-txn points. Order within the buffer
         //    does not matter: flush sorts before encoding and queries
         //    sort results.
-        for (key, timestamps, values) in j.saved.drain(..) {
+        for (key, timestamps, values) in frame.saved.drain(..) {
             let added = partition_vec_memory(&timestamps, &values);
             let mut entry = self
                 .partitions
@@ -661,42 +923,62 @@ impl Engine {
             }
         }
 
-        // 3. Rebuild the flush queue from scratch. Cheaper than trying
-        //    to reconcile marks with whatever intra-txn flushes did to
-        //    it, and rollback is not a hot path.
-        {
-            let mut queue = self.flush_queue_lock();
-            queue.clear();
-            for mut e in self.partitions.iter_mut() {
-                let key = *e.key();
-                let buf = e.value_mut();
-                let should_queue = buf.timestamps.len() >= self.flush_threshold;
-                buf.queued_for_flush = should_queue;
-                if should_queue {
-                    queue.push(key);
-                }
-            }
-        }
-
-        // 4. Index: adds out, removals back in. The dedup rule at
+        // 3. Index: adds out, removals back in. The dedup rule at
         //    record time guarantees `removed` never contains an entry
-        //    whose chunk row was created inside this txn.
+        //    whose chunk row was created inside this frame.
         {
             let mut index = self.index_write();
-            for key in j.added.drain() {
+            for key in frame.added.drain() {
                 index.remove(&key);
             }
-            for (key, meta) in j.removed.drain(..) {
+            for (key, meta) in frame.removed.drain(..) {
                 index.insert(key, meta);
             }
         }
 
-        // 5. Registry: force the next save_series to write the blob
-        //    even if an intra-txn save cleared the dirty flag — that
-        //    write rolled back with the host transaction.
-        self.series_write().dirty = true;
+        if !frame.series_added.is_empty() {
+            let mut series = self.series_write();
+            for id in frame.series_added.drain() {
+                series.remove_id(id);
+            }
+            self.resolve_cache.clear();
+        }
+    }
 
-        self.txn_active.store(false, Ordering::SeqCst);
+    fn rebuild_flush_queue(&self) {
+        let mut queue = self.flush_queue_lock();
+        queue.clear();
+        for mut entry in self.partitions.iter_mut() {
+            let key = *entry.key();
+            let buf = entry.value_mut();
+            let should_queue = buf.timestamps.len() >= self.flush_threshold;
+            buf.queued_for_flush = should_queue;
+            if should_queue {
+                queue.push(key);
+            }
+        }
+    }
+
+    fn merge_txn_frame(parent: &mut TxnFrame, child: &mut TxnFrame) {
+        for (key, mut timestamps, mut values) in child.saved.drain(..) {
+            let Some(mark) = parent.buffer_marks.get_mut(&key) else {
+                continue;
+            };
+            if *mark == 0 {
+                continue;
+            }
+            timestamps.truncate(*mark);
+            values.truncate(*mark);
+            parent.saved.push((key, timestamps, values));
+            *mark = 0;
+        }
+        for (key, meta) in child.removed.drain(..) {
+            if !parent.added.remove(&key) {
+                parent.removed.push((key, meta));
+            }
+        }
+        parent.added.extend(child.added.drain());
+        parent.series_added.extend(child.series_added.drain());
     }
 
     /// Insert freshly-persisted chunk metas into the index, journaling
@@ -724,8 +1006,9 @@ impl Engine {
         }
     }
 
-    /// Convenience constructor over the filesystem backend — the
-    /// pre-seam signature and behavior, byte-for-byte on disk.
+    /// Convenience constructor over the filesystem backend. Opening is
+    /// fallible because interrupted compaction recovery must complete
+    /// before the store can safely scan persisted chunks.
     pub fn new(
         data_dir: PathBuf,
         flush_threshold: usize,
@@ -733,9 +1016,10 @@ impl Engine {
         compression_level: usize,
         memory_budget: usize,
         defer_compression: bool,
-    ) -> Self {
+    ) -> EngineResult<Self> {
+        let store = FsStore::new(data_dir)?;
         Self::with_store(
-            Box::new(FsStore::new(data_dir)),
+            Box::new(store),
             flush_threshold,
             min_flush_size,
             compression_level,
@@ -754,21 +1038,85 @@ impl Engine {
         compression_level: usize,
         memory_budget: usize,
         defer_compression: bool,
-    ) -> Self {
-        let registry = match store.load_registry() {
-            Ok(Some(bytes)) => SeriesRegistry::from_bytes(&bytes).unwrap_or_else(|e| {
-                eprintln!("WARNING: corrupt series registry, starting fresh: {}", e);
-                SeriesRegistry::new()
-            }),
-            Ok(None) => SeriesRegistry::new(),
-            Err(e) => {
-                eprintln!("WARNING: unreadable series registry, starting fresh: {}", e);
-                SeriesRegistry::new()
+    ) -> EngineResult<Self> {
+        let authoritative_series = store.has_authoritative_series();
+        let stored_chunks = store
+            .scan()
+            .map_err(|err| format!("failed to recover chunk index: {err}"))?;
+
+        let registry = if authoritative_series {
+            let mut rows = store
+                .load_series()
+                .map_err(|err| format!("failed to load series catalog: {err}"))?;
+            let mut registry = SeriesRegistry::from_stored(&rows)
+                .map_err(|err| format!("series catalog is invalid: {err}"))?;
+            let needs_legacy =
+                rows.is_empty() || Self::validate_chunk_series(&registry, &stored_chunks).is_err();
+            if needs_legacy {
+                match store
+                    .load_registry()
+                    .map_err(|err| format!("failed to load legacy series registry: {err}"))?
+                {
+                    Some(bytes) => {
+                        let legacy = SeriesRegistry::from_bytes(&bytes)
+                            .map_err(|err| format!("legacy series registry is corrupt: {err}"))?;
+                        let legacy_rows = legacy.stored_rows();
+                        if !legacy_rows.is_empty() {
+                            store.migrate_series(&legacy_rows).map_err(|err| {
+                                format!("failed to migrate legacy series registry: {err}")
+                            })?;
+                            rows = store.load_series().map_err(|err| {
+                                format!("failed to reload migrated series catalog: {err}")
+                            })?;
+                            registry = SeriesRegistry::from_stored(&rows).map_err(|err| {
+                                format!("migrated series catalog is invalid: {err}")
+                            })?;
+                            for row in &legacy_rows {
+                                let labels: Labels = row.labels.iter().cloned().collect();
+                                if registry
+                                    .series_map
+                                    .get(&(row.name.clone(), labels))
+                                    .copied()
+                                    != Some(row.id)
+                                {
+                                    return Err(format!(
+                                        "legacy series {} did not migrate with its original id",
+                                        row.id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    None if !stored_chunks.is_empty() || !rows.is_empty() => {
+                        return Err(
+                            "the authoritative series catalog does not identify every persisted \
+                             chunk and no legacy registry is available"
+                                .to_string(),
+                        );
+                    }
+                    None => {}
+                }
+            }
+            registry
+        } else {
+            match store
+                .load_registry()
+                .map_err(|err| format!("failed to load series registry: {err}"))?
+            {
+                Some(bytes) => SeriesRegistry::from_bytes(&bytes)
+                    .map_err(|err| format!("series registry is corrupt: {err}"))?,
+                None if !stored_chunks.is_empty() => {
+                    return Err("persisted chunks exist without a series registry".to_string());
+                }
+                None => SeriesRegistry::new(),
             }
         };
+        Self::validate_chunk_series(&registry, &stored_chunks)?;
 
         let engine = Engine {
             store,
+            transition: RwLock::new(()),
+            authoritative_series,
             flush_threshold,
             min_flush_size,
             compression_level,
@@ -786,8 +1134,8 @@ impl Engine {
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
         };
-        engine.rebuild_index();
-        engine
+        engine.replace_index(stored_chunks);
+        Ok(engine)
     }
 
     // ── Series resolution ────────────────────────────────────────────
@@ -795,46 +1143,43 @@ impl Engine {
     /// Resolve (metric, labels) → series_id. Fast read path, slow write path.
     fn resolve_series(&self, metric_name: &str, labels: &Labels) -> EngineResult<i64> {
         let key = (metric_name.to_string(), labels.clone());
+        let mut journal = self.txn_guard();
         let mut reg = self.series_write();
         if let Some(&id) = reg.series_map.get(&key) {
             return Ok(id);
         }
-        Ok(reg.get_or_create(metric_name, labels))
+        if !self.authoritative_series {
+            return Ok(reg.get_or_create(metric_name, labels));
+        }
+
+        let label_pairs: Vec<(String, String)> = labels
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let resolved = self
+            .store
+            .resolve_series(metric_name, &label_pairs)
+            .map_err(|err| format!("failed to resolve series {metric_name:?}: {err}"))?;
+        reg.insert_known(resolved.id, metric_name, labels, false)?;
+        if resolved.created {
+            if let Some(journal) = journal.as_deref_mut() {
+                journal.series_added.insert(resolved.id);
+            }
+        }
+        Ok(resolved.id)
     }
 
     pub fn resolve_series_batch(&self, entries: &[(String, Labels)]) -> EngineResult<Vec<i64>> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut out = Vec::with_capacity(entries.len());
-        let mut misses: Vec<(usize, &str, &Labels)> = Vec::new();
-
-        {
-            let reg = self.series_read();
-            for (idx, (metric_name, labels)) in entries.iter().enumerate() {
-                if let Some(&id) = reg.series_map.get(&(metric_name.clone(), labels.clone())) {
-                    out.push(id);
-                } else {
-                    out.push(0);
-                    misses.push((idx, metric_name.as_str(), labels));
-                }
-            }
-        }
-
-        if misses.is_empty() {
-            return Ok(out);
-        }
-
-        let mut reg = self.series_write();
-        for (idx, metric_name, labels) in misses {
-            out[idx] = reg.get_or_create(metric_name, labels);
-        }
-
-        Ok(out)
+        entries
+            .iter()
+            .map(|(metric_name, labels)| self.resolve_series(metric_name, labels))
+            .collect()
     }
 
     fn save_series(&self) -> EngineResult<()> {
+        if self.authoritative_series {
+            return Ok(());
+        }
         let mut reg = self.series_write();
         if !reg.dirty {
             return Ok(());
@@ -892,7 +1237,11 @@ impl Engine {
     /// Slow path: full registry resolve + cache insert.
     /// Verification prevents silent data corruption from hash collisions.
     #[inline]
-    pub fn resolve_cached(&self, metric: &str, labels: &HashMap<String, String>) -> EngineResult<i64> {
+    pub fn resolve_cached(
+        &self,
+        metric: &str,
+        labels: &HashMap<String, String>,
+    ) -> EngineResult<i64> {
         let hash = fast_series_hash(metric, labels);
 
         // Fast path: cache hit with verification
@@ -1120,6 +1469,7 @@ impl Engine {
     // ── Flush ────────────────────────────────────────────────────────
 
     pub fn flush_pending(&self) -> EngineResult<usize> {
+        let _transition = self.transition_write();
         let keys: Vec<PartitionKey> = {
             let mut queue = self.flush_queue_lock();
             std::mem::take(&mut *queue)
@@ -1143,6 +1493,7 @@ impl Engine {
 
     #[allow(dead_code)]
     fn flush_partition_individual(&self, key: &PartitionKey) -> EngineResult<()> {
+        let _transition = self.transition_write();
         if let Some((timestamps, values)) =
             self.drain_partition_if(key, |buf| !buf.timestamps.is_empty())
         {
@@ -1190,6 +1541,7 @@ impl Engine {
             self.compact_partitions(cutoff)?;
         }
 
+        let _transition = self.transition_write();
         let now = Instant::now();
         let cold_keys: Vec<PartitionKey> = self
             .partitions
@@ -1228,6 +1580,7 @@ impl Engine {
     }
 
     pub fn flush_by_memory(&self) -> EngineResult<usize> {
+        let _transition = self.transition_write();
         let current = self.buffer_memory.load(Ordering::Relaxed);
         if current <= self.memory_budget {
             return Ok(0);
@@ -1268,6 +1621,7 @@ impl Engine {
     }
 
     pub fn flush_all(&self) -> EngineResult<()> {
+        let _transition = self.transition_write();
         let keys: Vec<(PartitionKey, usize)> = self
             .partitions
             .iter()
@@ -1366,15 +1720,15 @@ impl Engine {
             (ts_raw, val_raw)
         } else {
             let config = pco::ChunkConfig::default().with_compression_level(level);
-            let ts_compressed = pco::standalone::simple_compress(ts_slice, &config)
-                .map_err(|err| {
+            let ts_compressed =
+                pco::standalone::simple_compress(ts_slice, &config).map_err(|err| {
                     format!(
                         "failed to compress timestamps for series {}: {err}",
                         key.series_id
                     )
                 })?;
-            let val_compressed = pco::standalone::simple_compress(val_slice, &config)
-                .map_err(|err| {
+            let val_compressed =
+                pco::standalone::simple_compress(val_slice, &config).map_err(|err| {
                     format!(
                         "failed to compress values for series {}: {err}",
                         key.series_id
@@ -1482,6 +1836,7 @@ impl Engine {
         let _guard = ColdFlushGuard {
             flag: &self.compaction_running,
         };
+        let _transition = self.transition_write();
 
         // Group eligible chunks by series: all raw chunks, plus pco
         // chunks small enough that merging improves the ratio.
@@ -1611,7 +1966,8 @@ impl Engine {
     where
         F: FnOnce(&PartitionBuffer) -> bool,
     {
-        // Journal first (lock order: txn → partitions). Draining while
+        // The caller holds the transition guard. Journal before the
+        // partition lock: draining while
         // a transaction is active moves pre-txn points into chunks
         // whose rows would vanish on rollback — so the pre-txn prefix
         // (everything below this partition's mark) is SAVED before the
@@ -1665,6 +2021,7 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<(Labels, Vec<(i64, f64)>)>> {
+        let _transition = self.transition_read();
         let candidates: Vec<(i64, Labels)> = {
             let reg = self.series_read();
             reg.find_series(metric_name, label_filter)
@@ -1676,7 +2033,7 @@ impl Engine {
         candidates
             .into_par_iter()
             .map(|(sid, labels)| {
-                let points = self.query_range_by_id(sid, t_start, t_end)?;
+                let points = self.query_range_by_id_inner(sid, t_start, t_end)?;
                 Ok(if points.is_empty() {
                     None
                 } else {
@@ -1696,6 +2053,16 @@ impl Engine {
     /// Query a single series by ID. Repeated reads of a shared chunk
     /// file within one query hit the store's read cache.
     pub fn query_range_by_id(
+        &self,
+        series_id: i64,
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<Vec<(i64, f64)>> {
+        let _transition = self.transition_read();
+        self.query_range_by_id_inner(series_id, t_start, t_end)
+    }
+
+    fn query_range_by_id_inner(
         &self,
         series_id: i64,
         t_start: i64,
@@ -1740,6 +2107,7 @@ impl Engine {
         t_end: i64,
         agg: AggFn,
     ) -> EngineResult<Vec<(Labels, f64)>> {
+        let _transition = self.transition_read();
         let candidates: Vec<(i64, Labels)> = {
             let reg = self.series_read();
             reg.find_series(metric_name, label_filter)
@@ -1900,7 +2268,8 @@ impl Engine {
     // ── Retention ────────────────────────────────────────────────────
 
     pub fn delete_before(&self, before_ts: i64) -> (usize, usize, Vec<String>) {
-        // Journal first (lock order: txn → index). Pruned rows are
+        let _transition = self.transition_write();
+        // Transition is already exclusive; journal before index. Pruned rows are
         // DELETEd through the store inside the host transaction, so a
         // rollback restores them — the journal restores the matching
         // index entries. Entries added by this same txn cancel instead
@@ -1949,17 +2318,26 @@ impl Engine {
         (entries_removed, files_deleted, errors)
     }
 
-    // ── Index rebuild ────────────────────────────────────────────────
+    // ── Authoritative state recovery/refresh ─────────────────────────
 
-    fn rebuild_index(&self) {
-        let stored = match self.store.scan() {
-            Ok(chunks) => chunks,
-            Err(e) => {
-                eprintln!("WARNING: chunk scan failed during recovery: {}", e);
-                return;
+    fn validate_chunk_series(
+        registry: &SeriesRegistry,
+        chunks: &[StoredChunk],
+    ) -> EngineResult<()> {
+        for chunk in chunks {
+            if registry.info_for(chunk.series_id).is_none() {
+                return Err(format!(
+                    "persisted chunk {:?} references unknown series {}",
+                    chunk.meta.loc, chunk.series_id
+                ));
             }
-        };
+        }
+        Ok(())
+    }
+
+    fn replace_index(&self, stored: Vec<StoredChunk>) {
         let mut index = self.index_write();
+        index.clear();
         for chunk in stored {
             let key = PartitionKey {
                 series_id: chunk.series_id,
@@ -1972,6 +2350,51 @@ impl Engine {
         }
     }
 
+    /// Refresh process-local catalog and chunk snapshots from a store that
+    /// may be changed by another process. Callers bind the host SQLite
+    /// connection first, so both scans observe that connection's transaction
+    /// snapshot. Active writer transactions retain their journaled view.
+    pub fn refresh_authoritative_state(&self) -> EngineResult<()> {
+        if !self.authoritative_series {
+            return Ok(());
+        }
+
+        let _transition = self.transition_write();
+        let _journal = self.txn_lock();
+        if self.txn_active.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let rows = self
+            .store
+            .load_series()
+            .map_err(|err| format!("failed to refresh series catalog: {err}"))?;
+        let registry = SeriesRegistry::from_stored(&rows)
+            .map_err(|err| format!("refreshed series catalog is invalid: {err}"))?;
+        let chunks = self
+            .store
+            .scan()
+            .map_err(|err| format!("failed to refresh chunk index: {err}"))?;
+        Self::validate_chunk_series(&registry, &chunks)?;
+
+        let mut new_index = BTreeMap::new();
+        for chunk in chunks {
+            let key = PartitionKey {
+                series_id: chunk.series_id,
+            };
+            new_index.insert((key, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
+        }
+
+        // Lock order remains transition -> txn -> index -> series. Holding
+        // both write locks prevents readers from pairing a newly visible
+        // series with an old chunk snapshot.
+        let mut index = self.index_write();
+        let mut series = self.series_write();
+        *index = new_index;
+        *series = registry;
+        self.resolve_cache.clear();
+        Ok(())
+    }
 
     pub fn info(&self) -> EngineInfo {
         let index = self.index_read();
@@ -2147,9 +2570,7 @@ fn parse_prom_line_into<'a>(
     let name = &line[..name_end];
 
     let rest = if line[name_end] == b'{' {
-        let close = name_end
-            + 1
-            + line[name_end + 1..].iter().position(|&b| b == b'}')?;
+        let close = name_end + 1 + line[name_end + 1..].iter().position(|&b| b == b'}')?;
         parse_prom_labels_into(&line[name_end + 1..close], labels);
         &line[close + 1..]
     } else {

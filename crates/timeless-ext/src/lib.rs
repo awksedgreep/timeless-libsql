@@ -35,11 +35,14 @@ mod flatjson;
 mod logs_vtab;
 mod metrics_vtab;
 mod shadow_block_store;
+mod shadow_meta;
 mod shadow_span_store;
 mod shadow_store;
 mod shared;
+mod sql_ident;
 mod spike;
 mod traces_vtab;
+mod vtab_tx;
 
 use std::ffi::{c_char, c_int};
 

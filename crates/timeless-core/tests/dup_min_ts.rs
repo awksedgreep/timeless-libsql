@@ -5,6 +5,7 @@
 //! per-engine monotonic chunk_seq (ported from the donor fix in
 //! timeless_metrics), making collisions impossible.
 
+use std::collections::HashMap;
 use timeless_core::Engine;
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -20,7 +21,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn engine(dir: &std::path::Path) -> Engine {
     // min_flush_size 1 → every flush_all writes individual chunks,
     // matching the donor regression test's parameters.
-    Engine::new(dir.to_path_buf(), 100, 1, 8, usize::MAX, false)
+    Engine::new(dir.to_path_buf(), 100, 1, 8, usize::MAX, false).unwrap()
 }
 
 /// Donor regression test `duplicate_min_ts_chunks_do_not_shadow`,
@@ -33,15 +34,16 @@ fn duplicate_min_ts_chunks_do_not_shadow() {
     // must stay queryable.
     let dir = temp_dir("shadow");
     let e = engine(&dir);
+    let sid = e.resolve_cached("duplicate", &HashMap::new()).unwrap();
 
-    e.write_point(1, 100, 1.0);
+    e.write_point(sid, 100, 1.0);
     e.flush_all().unwrap(); // chunk A: min_ts=100
-    e.write_point(1, 100, 2.0);
-    e.write_point(1, 200, 3.0);
+    e.write_point(sid, 100, 2.0);
+    e.write_point(sid, 200, 3.0);
     e.flush_all().unwrap(); // chunk B: min_ts=100
 
     assert_eq!(e.info().chunk_count, 2);
-    let points = e.query_range_by_id(1, 0, 1000).unwrap();
+    let points = e.query_range_by_id(sid, 0, 1000).unwrap();
     assert_eq!(
         points.iter().map(|&(ts, _)| ts).collect::<Vec<_>>(),
         vec![100, 100, 200]
@@ -56,19 +58,21 @@ fn duplicate_min_ts_chunks_do_not_shadow() {
 #[test]
 fn duplicate_min_ts_chunks_survive_restart_recovery() {
     let dir = temp_dir("restart");
+    let sid;
     {
         let e = engine(&dir);
-        e.write_point(1, 100, 1.0);
+        sid = e.resolve_cached("duplicate", &HashMap::new()).unwrap();
+        e.write_point(sid, 100, 1.0);
         e.flush_all().unwrap(); // chunk A: min_ts=100
-        e.write_point(1, 100, 2.0);
-        e.write_point(1, 200, 3.0);
+        e.write_point(sid, 100, 2.0);
+        e.write_point(sid, 200, 3.0);
         e.flush_all().unwrap(); // chunk B: min_ts=100
         e.shutdown().unwrap();
     }
 
     let restarted = engine(&dir);
     assert_eq!(restarted.info().chunk_count, 2);
-    let points = restarted.query_range_by_id(1, 0, 1000).unwrap();
+    let points = restarted.query_range_by_id(sid, 0, 1000).unwrap();
     assert_eq!(points.len(), 3);
     assert_eq!(
         points.iter().map(|&(ts, _)| ts).collect::<Vec<_>>(),

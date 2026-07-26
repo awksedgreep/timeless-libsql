@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-codec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pco",
  "zstd",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dashmap",
  "pco",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-ext"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "timeless-core",

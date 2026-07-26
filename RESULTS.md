@@ -7,6 +7,111 @@ Apple M5 Pro (macOS 26.5, Rust 1.97.1, bundled SQLite) — second-run numbers
 per TESTING.md; on-disk sizes were byte-identical across both machines
 (deterministic datasets), so the storage table needs no second column.
 
+## Intel Core Ultra 9 185H regression audit (2026-07-26)
+
+The earlier hero numbers below may have been recorded on a different host, so
+they are not used as the regression baseline here. This audit compares an
+isolated build of `HEAD` (`0645d99`) with the current R1-R4 review working
+tree on the same Intel Core Ultra 9 185H. For the controlled metrics
+comparison, both extensions were loaded by the same current benchmark binary.
+The host ran Arch Linux 7.1.3, Rust 1.97.0, bundled SQLite 3.53.2, and the
+`powersave` CPU governor.
+
+Each benchmark was run twice and the second run is quoted, following
+`TESTING.md`. Lower is better for timings; higher is better for rates.
+
+| metrics workload | `HEAD` | R1-R4 tree | delta |
+|---|---:|---:|---:|
+| plain ingest | 4.01M pts/s | 3.87M pts/s | -3.5% |
+| Tier 1 ingest | 1.88M pts/s | 1.79M pts/s | -4.8% |
+| Tier 1 / plain normalized | 0.469x | 0.463x | -1.3% |
+| Tier 2 ingest | 17.87M pts/s | 14.30M pts/s | **-20.0%** |
+| Tier 2 / plain normalized | 4.456x | 3.695x | **-17.1%** |
+| Tier 2 flush | 182.7ms | 178.7ms | -2.2% |
+| name + range query | 3.5ms | 5.4ms | **+54.3%** |
+| full-scan count | 195.5ms | 188.8ms | -3.4% |
+| compressed size | 8.274 B/pt | 8.348 B/pt | +0.9% |
+
+The regression is metrics-specific. Second-run logs and traces results stayed
+within the repository's +/-15% noise band or improved:
+
+| workload | `HEAD` | R1-R4 tree | delta |
+|---|---:|---:|---:|
+| logs ingest | 0.80M entries/s | 0.83M entries/s | +3.7% |
+| logs optimize | 1364.3ms | 1373.4ms | +0.7% |
+| logs level query | 22.2ms | 21.4ms | -3.6% |
+| logs service/range query | 8.4ms | 8.9ms | +6.0% |
+| traces ingest | 0.54M spans/s | 0.59M spans/s | +9.3% |
+| traces optimize | 1928.0ms | 1824.4ms | -5.4% |
+| traces point lookup | 3.195ms | 3.055ms | -4.4% |
+| traces service/range query | 109.9ms | 120.0ms | +9.2% |
+
+Codec 5 throughput also did not regress: logs encode/decode improved
+116->122 MB/s and 582->605 MB/s; traces improved 106->121 MB/s and
+668->751 MB/s.
+
+The Tier 2 diff has a concrete optimization target: its old batched series
+resolver took one registry read lock per blob, while the reviewed
+implementation currently calls the single-series resolver for every series
+entry. This workload has 1,000 series in each of 10 blobs, turning that into
+10,000 transaction/registry lock cycles. Restore a true batched fast path
+without weakening the authoritative-series rollback rules, then repeat this
+same comparison. The selective query regression still needs profiling.
+
+## Intel Core Ultra 9 185H checkpoint after R8 (2026-07-26)
+
+This checkpoint measures the current R1-R8 review tree against the R1-R4
+checkpoint above. The benchmark sources and deterministic datasets are
+unchanged. The machine, release-build mode, benchmark binaries, `powersave`
+governor, and two-run method are also unchanged; per `TESTING.md`, the second
+run is quoted.
+
+Raw metrics ingest slowed together with the plain-table control. Normalized
+against that control, Tier 1 is flat and Tier 2 is slightly better:
+
+| metrics workload | R1-R4 | R1-R8 | delta |
+|---|---:|---:|---:|
+| plain ingest | 3.87M pts/s | 3.46M pts/s | -10.6% |
+| Tier 1 ingest | 1.79M pts/s | 1.59M pts/s | -11.2% |
+| Tier 1 / plain normalized | 0.463x | 0.460x | -0.7% |
+| Tier 2 ingest | 14.30M pts/s | 13.12M pts/s | -8.3% |
+| Tier 2 / plain normalized | 3.695x | 3.792x | +2.6% |
+| Tier 2 flush | 178.7ms | 210.7ms | +17.9% |
+| name + range query | 5.4ms | 5.6ms | +3.7% |
+| full-scan count | 188.8ms | 201.5ms | +6.7% |
+| compressed size | 8.348 B/pt | 8.344 B/pt | -0.0% |
+
+Logs stayed flat except for the small level query, and trace ingest/optimize
+stayed within the repository's +/-15% noise band:
+
+| workload | R1-R4 | R1-R8 | delta |
+|---|---:|---:|---:|
+| logs ingest | 0.83M entries/s | 0.81M entries/s | -2.4% |
+| logs optimize | 1373.4ms | 1367.2ms | -0.5% |
+| logs level query | 21.4ms | 25.2ms | +17.8% |
+| logs service/range query | 8.9ms | 8.6ms | -3.4% |
+| traces ingest | 0.59M spans/s | 0.55M spans/s | -6.8% |
+| traces optimize | 1824.4ms | 1936.8ms | +6.2% |
+| traces point lookup | 3.055ms | 3.637ms | +19.1% |
+| traces service/range query | 120.0ms | 149.2ms | +24.3% |
+
+The three second-run timing outliers are not repeatable within this
+checkpoint. The first current runs measured metrics flush at 179.6ms
+(+0.5% vs R1-R4), trace lookup at 3.085ms (+1.0%), and trace service/range at
+117.0ms (-2.5%). The paired-run variance itself was 17-28%, so these are
+recorded as noisy warnings rather than confirmed code regressions.
+
+Codec 5 throughput remains healthy: logs encode/decode improved from
+122/605 MB/s at R1-R4 to 131/640 MB/s, while traces held at 121/749 MB/s
+versus 121/751 MB/s. Storage is also unchanged: metrics are 8.344 B/point,
+logs 8.93 B/entry, and traces 37.36 B/span.
+
+Conclusion: no repeatable R5-R8 performance regression was established.
+The earlier R1-R4 Tier 2 and selective metrics-query regressions against
+`HEAD` remain open optimization targets; this checkpoint neither worsened
+nor fixed them. Before acting on the noisy trace/flush outliers, rerun on an
+idle host with a fixed performance governor.
+
 ## What it is
 
 A loadable SQLite/libSQL extension. `CREATE VIRTUAL TABLE metrics USING

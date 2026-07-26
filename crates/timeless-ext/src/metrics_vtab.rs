@@ -73,12 +73,15 @@ use rusqlite::{Connection, Error, Result};
 use timeless_core::{Engine, Labels};
 
 use crate::flatjson::{labels_to_json, parse_labels_json};
+use crate::shadow_meta;
 use crate::shadow_store::{self, ShadowTableStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
+use crate::sql_ident;
+use crate::vtab_tx::{self, SavepointVTab};
 
 /// Register the "timeless_metrics" module on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection) -> Result<()> {
-    const MODULE: Module<MetricsTab> = Module::update_module_with_tx();
+    const MODULE: Module<MetricsTab> = vtab_tx::update_module_with_savepoints();
     db.create_module(c"timeless_metrics", &MODULE, None::<()>)
 }
 
@@ -109,6 +112,8 @@ pub struct MetricsTab {
     db: *mut ffi::sqlite3,
     /// The vtab's own name — needed to drop its shadow tables.
     table_name: String,
+    /// Owning SQLite schema ("main", "temp", or an ATTACH alias).
+    database_name: String,
     /// The whole timeless-core engine, chunk-persisting into shadow
     /// tables via ShadowTableStore — SHARED process-wide with every
     /// other connection's vtab instance over the same (db file, table)
@@ -116,7 +121,7 @@ pub struct MetricsTab {
     /// reference without lifetime gymnastics, and so instances across
     /// connections co-own one engine.
     shared: Arc<SharedEngine<Engine>>,
-    /// This instance's registry key — xDestroy must remove the entry.
+    /// Durable instance key used to bridge transactional xDestroy rollback.
     key: RegistryKey,
     /// True while THIS connection's write transaction holds the shared
     /// engine's writer gate (acquired in begin(), released in commit()/
@@ -139,16 +144,17 @@ impl MetricsTab {
         is_create: bool,
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
+        let database = String::from_utf8_lossy(database_name).into_owned();
         let handle = unsafe { db.handle() };
         // Bind the calling connection for the store operations below
         // (DDL, and the recovery SELECTs Engine::with_store performs
         // through ShadowTableStore). RAII: unbinds when we return.
         let _bind = DbGuard::bind(handle);
 
+        // Re-entrant SQL against the host connection (the FTS5 trick
+        // proven by the spike): from_handle borrows without owning.
+        let host = unsafe { Connection::from_handle(handle) }?;
         if is_create {
-            // Re-entrant SQL against the host connection (the FTS5 trick
-            // proven by the spike): from_handle borrows without owning.
-            let host = unsafe { Connection::from_handle(handle) }?;
 
             // Retention plan (PLAN.md "Pruning & retention"): incremental
             // auto-vacuum lets maintenance return freed pages to the OS in
@@ -156,31 +162,39 @@ impl MetricsTab {
             // only takes effect if the database has no pages yet (it
             // changes the file format), so on a non-empty db it is a
             // silent no-op — hence: attempt and ignore errors.
-            let _ = host.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;");
+            let _ = host.execute_batch(&sql_ident::incremental_auto_vacuum(&database));
 
-            host.execute_batch(&shadow_store::ddl(&table))?;
+            host.execute_batch(&shadow_store::ddl(&database, &table))?;
+        } else {
+            // Databases created before R2 do not have the normalized catalog.
+            // Create only that new shadow table here; Engine::with_store then
+            // imports and validates the legacy registry blob.
+            host.execute_batch(&shadow_store::series_ddl(&database, &table))?;
         }
+        let instance_id =
+            shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
         // xConnect: the shadow tables already exist in the reopened db.
 
-        // R4: one engine per (db file, table) PER PROCESS, not per
-        // connection. First connection in builds it (Engine::with_store
+        // R4: one engine per (db file, schema alias, table, instance)
+        // per process. First connection in builds it (Engine::with_store
         // performs recovery itself: it loads the series registry via
         // store.load_registry() and rebuilds the chunk index via
         // store.scan() — both re-entrant SELECTs routed to the calling
         // connection by the DbGuard above, safe because THIS thread
         // already holds the connection mutex recursively); every later
         // xConnect just bumps the Arc.
-        let key = shared::registry_key(handle, database_name, &table);
+        let key = shared::registry_key(handle, database_name, &table, instance_id);
         let shared_engine = shared::get_or_create(&key, || {
-            let store = ShadowTableStore::new(&table);
-            Ok(Engine::with_store(
+            let store = ShadowTableStore::new(&database, &table);
+            Engine::with_store(
                 Box::new(store),
                 FLUSH_THRESHOLD,
                 MIN_FLUSH_SIZE,
                 COMPRESSION_LEVEL,
                 MEMORY_BUDGET,
                 DEFER_COMPRESSION,
-            ))
+            )
+            .map_err(module_err)
         })?;
 
         // Declared schema. The hidden 5th column is named after the table
@@ -198,6 +212,7 @@ impl MetricsTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
                 table_name: table,
+                database_name: database,
                 shared: shared_engine,
                 key,
                 gate_held: false,
@@ -612,14 +627,17 @@ impl CreateVTab<'_> for MetricsTab {
         Self::connect_create(db, aux, module_name, database_name, table_name, args, true)
     }
 
-    /// DROP TABLE on the vtab removes the shadow tables too — and the
-    /// registry entry: the key must never resolve to an engine whose
-    /// tables are gone (a recreate builds a fresh engine).
+    /// DROP TABLE removes the shadow tables. The registry entry is left
+    /// untouched until its Weak dies: rollback reconnects with the restored
+    /// instance_id, while committed recreate receives a new identity.
     fn destroy(&self) -> Result<()> {
-        shared::remove(&self.key);
+        shared::pin_for_drop(self.db, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
-        host.execute_batch(&shadow_store::drop_ddl(&self.table_name))
+        host.execute_batch(&shadow_store::drop_ddl(
+            &self.database_name,
+            &self.table_name,
+        ))
     }
 }
 
@@ -758,13 +776,12 @@ impl UpdateVTab<'_> for MetricsTab {
 /// explicit transactions and roll back fully — the journal covers their
 /// index mutations, and their row mutations ride the host transaction.
 ///
-/// KNOWN LIMIT (documented, accepted): SAVEPOINT-granular rollback.
-/// rusqlite's update_module_with_tx wires xBegin/xSync/xCommit/
-/// xRollback but not xSavepoint/xRelease/xRollbackTo, so ROLLBACK TO
-/// <savepoint> inside a transaction cannot partially unwind the vtab —
-/// only whole-transaction ROLLBACK is journaled. Series NAMES
-/// registered during a rolled-back transaction also stay registered
-/// (harmless empty series; documented in the engine journal docs).
+/// SAVEPOINT ADDITION — rusqlite's update_module_with_tx does not wire
+/// xSavepoint/xRelease/xRollbackTo, so vtab_tx.rs fills those version-2
+/// module slots. The engine keeps one undo frame per SQLite savepoint;
+/// statement failures and explicit ROLLBACK TO therefore restore engine
+/// memory together with the shadow rows, including authoritative series
+/// rows first created inside the rolled-back frame.
 /// R4 ADDITION — the writer gate brackets the journal: begin() takes
 /// the shared engine's gate BEFORE activating the journal, and
 /// commit()/rollback() release it after closing the journal. Why here
@@ -780,6 +797,10 @@ impl TransactionVTab<'_> for MetricsTab {
     fn begin(&mut self) -> Result<()> {
         let _bind = DbGuard::bind(self.db);
         self.acquire_write_gate()?;
+        if let Err(err) = self.shared.engine.refresh_authoritative_state() {
+            self.release_write_gate();
+            return Err(module_err(err));
+        }
         self.shared.engine.txn_begin();
         Ok(())
     }
@@ -806,6 +827,29 @@ impl TransactionVTab<'_> for MetricsTab {
             self.release_write_gate();
         }
         Ok(())
+    }
+}
+
+impl SavepointVTab for MetricsTab {
+    fn savepoint(&mut self, id: c_int) {
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_savepoint(id);
+        }
+    }
+
+    fn release(&mut self, id: c_int) {
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_release(id);
+        }
+    }
+
+    fn rollback_to(&mut self, id: c_int) {
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_rollback_to(id);
+        }
     }
 }
 
@@ -890,6 +934,10 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
     ) -> Result<()> {
         // Route chunk reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
+        self.shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
 
         // argv slots were assigned in canonical order (name, lo, hi), so
         // the mask alone tells us which positional arg is which.
@@ -901,33 +949,47 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
         } else {
             None
         };
-        // Unconstrained bounds default to (almost) the full i64 range;
-        // the ±1 keeps them safely away from any sentinel arithmetic.
+        let mut impossible = idx_num & 1 != 0 && name.is_none();
+        // Unconstrained bounds cover the full i64 range. A pushed NULL
+        // bound makes the SQL predicate UNKNOWN, so the scan is empty.
         let t0: i64 = if idx_num & 2 != 0 {
-            let v = args.get(arg)?;
+            let v: Option<i64> = args.get(arg)?;
             arg += 1;
-            v
+            match v {
+                Some(v) => v,
+                None => {
+                    impossible = true;
+                    i64::MIN
+                }
+            }
         } else {
-            i64::MIN + 1
+            i64::MIN
         };
         let t1: i64 = if idx_num & 4 != 0 {
-            args.get(arg)?
+            match args.get::<Option<i64>>(arg)? {
+                Some(v) => v,
+                None => {
+                    impossible = true;
+                    i64::MAX
+                }
+            }
         } else {
-            i64::MAX - 1
+            i64::MAX
         };
 
         let mut rows = Vec::new();
-        if idx_num & 1 != 0 {
-            // Name pushdown: only this metric's series.
-            if let Some(name) = name {
-                rows = self.collect_metric(&name, t0, t1)?;
-            }
-            // WHERE name = NULL matches nothing: rows stays empty.
-        } else {
-            // Full scan: every metric the registry knows about.
-            let metrics = self.shared.engine.series_read().list_metrics();
-            for metric in metrics {
-                rows.extend(self.collect_metric(&metric, t0, t1)?);
+        if !impossible {
+            if idx_num & 1 != 0 {
+                // Name pushdown: only this metric's series.
+                if let Some(name) = name {
+                    rows = self.collect_metric(&name, t0, t1)?;
+                }
+            } else {
+                // Full scan: every metric the registry knows about.
+                let metrics = self.shared.engine.series_read().list_metrics();
+                for metric in metrics {
+                    rows.extend(self.collect_metric(&metric, t0, t1)?);
+                }
             }
         }
 

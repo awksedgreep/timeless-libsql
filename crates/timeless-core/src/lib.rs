@@ -21,6 +21,9 @@ pub use spans::{
     SpanBlockEngine, SpanBlockStore, SpanEngineConfig, SpanEntry, SpanQuery,
 };
 pub use engine::*;
-pub use store::{ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk};
+pub use store::{
+    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, ResolvedSeries,
+    StoredChunk, StoredSeries,
+};
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -11,8 +11,9 @@
 //! thread holds; a worker thread touching the store would deadlock.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::codec::{decode_block, encode_block, CODEC_COLUMNAR_V2, CODEC_RAW};
 use super::{level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry};
@@ -57,7 +58,7 @@ impl Default for BlockEngineConfig {
 }
 
 /// One query. All filters are optional except the ts range (pass
-/// i64::MIN+1 / i64::MAX-1 for "unbounded", like the metrics vtab).
+/// i64::MIN / i64::MAX for "unbounded", like the metrics vtab).
 pub struct LogQuery {
     pub ts_min: i64,
     pub ts_max: i64,
@@ -138,19 +139,48 @@ struct IndexEntry {
 /// txn_* API is meaningless over MemBlockStore except in tests that
 /// treat it as always-committed.
 ///
-/// LOCK ORDER: txn journal → buffer → index. Every site that touches
-/// the journal acquires it first.
+/// LOCK ORDER: transition → txn journal → buffer → store callbacks →
+/// index. Queries hold a shared transition guard through candidate
+/// lookup, payload decoding, and the buffered merge. Store callbacks
+/// never call back into this engine.
 #[derive(Default)]
-struct TxnJournal {
+struct TxnFrame {
+    savepoint: Option<i32>,
     buffer_mark: usize,
     saved: Vec<LogEntry>,
     added: HashSet<i64>,
     removed: Vec<IndexEntry>,
 }
 
+#[derive(Default)]
+struct TxnJournal {
+    frames: Vec<TxnFrame>,
+    spares: Vec<TxnFrame>,
+}
+
+impl Deref for TxnJournal {
+    type Target = TxnFrame;
+
+    fn deref(&self) -> &Self::Target {
+        self.frames
+            .last()
+            .expect("active journal has an undo frame")
+    }
+}
+
+impl DerefMut for TxnJournal {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.frames
+            .last_mut()
+            .expect("active journal has an undo frame")
+    }
+}
+
 pub struct BlockEngine {
     store: Box<dyn BlockStore>,
     config: BlockEngineConfig,
+    /// Pins the buffer/store/index generation seen by a complete query.
+    transition: RwLock<()>,
     /// Entries pushed but not yet flushed into a block. Queryable (the
     /// same queryable-before-flush property the metrics engine has).
     buffer: Mutex<Vec<LogEntry>>,
@@ -207,6 +237,7 @@ impl BlockEngine {
         Ok(BlockEngine {
             store,
             config,
+            transition: RwLock::new(()),
             buffer: Mutex::new(Vec::new()),
             index: Mutex::new(index),
             txn_active: AtomicBool::new(false),
@@ -224,6 +255,14 @@ impl BlockEngine {
         self.buffer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn transition_read(&self) -> RwLockReadGuard<'_, ()> {
+        self.transition.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn transition_write(&self) -> RwLockWriteGuard<'_, ()> {
+        self.transition.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn index_lock(&self) -> std::sync::MutexGuard<'_, Vec<IndexEntry>> {
         self.index.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -233,13 +272,13 @@ impl BlockEngine {
     }
 
     /// Acquire the journal iff a transaction is active. Mutation sites
-    /// call this FIRST (lock order: txn → buffer → index).
+    /// call this after the transition guard and before buffer/index.
     fn txn_guard(&self) -> Option<std::sync::MutexGuard<'_, TxnJournal>> {
-        if self.txn_active.load(Ordering::SeqCst) {
-            Some(self.txn_lock())
-        } else {
-            None
+        if !self.txn_active.load(Ordering::SeqCst) {
+            return None;
         }
+        let journal = self.txn_lock();
+        self.txn_active.load(Ordering::SeqCst).then_some(journal)
     }
 
     // ── Transaction journal API (PLAN.md R5; see TxnJournal docs) ────
@@ -247,26 +286,29 @@ impl BlockEngine {
     /// Start journaling. Called from the vtab's xBegin — which SQLite
     /// fires before the first write of EVERY transaction, including
     /// the implicit per-statement one in autocommit mode — so it must
-    /// stay cheap: one usize mark, capacity-retaining clears, zero
-    /// steady-state allocations. Nested begins are impossible from
-    /// SQLite; debug builds assert, release builds restart the journal.
+    /// stay cheap: one usize mark. Nested begins are impossible from
+    /// SQLite; savepoints add undo frames through txn_savepoint.
     pub fn txn_begin(&self) {
         let mut j = self.txn_lock();
         debug_assert!(
             !self.txn_active.load(Ordering::SeqCst),
             "txn_begin while a transaction journal is already active (nested xBegin?)"
         );
-        j.buffer_mark = self.buffer_lock().len();
-        j.saved.clear();
-        j.added.clear();
-        j.removed.clear();
+        while let Some(frame) = j.frames.pop() {
+            j.spares.push(frame);
+        }
+        let frame = j.spares.pop().unwrap_or_default();
+        j.frames.push(self.reset_txn_frame(frame, None));
         self.txn_active.store(true, Ordering::SeqCst);
     }
 
     /// Commit: the host transaction made everything permanent — drop
     /// the journal (contents are cleared lazily by the next begin).
     pub fn txn_commit(&self) {
-        let _j = self.txn_lock(); // serialize against in-flight recorders
+        let mut j = self.txn_lock(); // serialize against in-flight recorders
+        while let Some(frame) = j.frames.pop() {
+            j.spares.push(frame);
+        }
         self.txn_active.store(false, Ordering::SeqCst);
     }
 
@@ -276,18 +318,92 @@ impl BlockEngine {
     /// entries whose block rows vanished, restore entries whose rows
     /// came back (verbatim, partition tag included — same rowids).
     pub fn txn_rollback(&self) {
+        let _transition = self.transition_write();
         let mut j = self.txn_lock();
         if !self.txn_active.load(Ordering::SeqCst) {
             return; // xRollback without xBegin — nothing recorded
         }
-        // Split-borrow the journal so the retain closure below can
-        // borrow `added` while we drain `removed`.
-        let TxnJournal {
+        while let Some(mut frame) = j.frames.pop() {
+            self.rollback_txn_frame(&mut frame);
+            j.spares.push(frame);
+        }
+        self.txn_active.store(false, Ordering::SeqCst);
+    }
+
+    pub fn txn_savepoint(&self, id: i32) {
+        let mut j = self.txn_lock();
+        if !self.txn_active.load(Ordering::SeqCst) {
+            return;
+        }
+        debug_assert!(
+            j.frames.iter().all(|frame| frame.savepoint != Some(id)),
+            "duplicate savepoint id {id}"
+        );
+        let frame = j.spares.pop().unwrap_or_default();
+        j.frames.push(self.reset_txn_frame(frame, Some(id)));
+    }
+
+    pub fn txn_release(&self, id: i32) {
+        let mut j = self.txn_lock();
+        let Some(pos) = j
+            .frames
+            .iter()
+            .position(|frame| frame.savepoint == Some(id))
+        else {
+            return;
+        };
+        if pos == 0 {
+            return;
+        }
+        let released = j.frames.split_off(pos);
+        for mut child in released {
+            {
+                let parent = j
+                    .frames
+                    .last_mut()
+                    .expect("savepoint frame has an outer parent");
+                Self::merge_txn_frame(parent, &mut child);
+            }
+            j.spares.push(child);
+        }
+    }
+
+    pub fn txn_rollback_to(&self, id: i32) {
+        let _transition = self.transition_write();
+        let mut j = self.txn_lock();
+        let Some(pos) = j
+            .frames
+            .iter()
+            .position(|frame| frame.savepoint == Some(id))
+        else {
+            return;
+        };
+        while j.frames.len() > pos {
+            let mut frame = j.frames.pop().expect("frame length checked");
+            self.rollback_txn_frame(&mut frame);
+            j.spares.push(frame);
+        }
+        let frame = j.spares.pop().unwrap_or_default();
+        j.frames.push(self.reset_txn_frame(frame, Some(id)));
+    }
+
+    fn reset_txn_frame(&self, mut frame: TxnFrame, savepoint: Option<i32>) -> TxnFrame {
+        frame.savepoint = savepoint;
+        frame.buffer_mark = self.buffer_lock().len();
+        frame.saved.clear();
+        frame.added.clear();
+        frame.removed.clear();
+        frame
+    }
+
+    fn rollback_txn_frame(&self, frame: &mut TxnFrame) {
+        let TxnFrame {
             buffer_mark,
             saved,
             added,
             removed,
-        } = &mut *j;
+            ..
+        } = frame;
         {
             let mut buf = self.buffer_lock();
             buf.truncate(*buffer_mark);
@@ -300,7 +416,20 @@ impl BlockEngine {
             index.retain(|e| !added.contains(&e.loc.id));
             index.append(removed);
         }
-        self.txn_active.store(false, Ordering::SeqCst);
+    }
+
+    fn merge_txn_frame(parent: &mut TxnFrame, child: &mut TxnFrame) {
+        if parent.buffer_mark > 0 && !child.saved.is_empty() {
+            child.saved.truncate(parent.buffer_mark);
+            parent.saved.append(&mut child.saved);
+            parent.buffer_mark = 0;
+        }
+        for entry in child.removed.drain(..) {
+            if !parent.added.remove(&entry.loc.id) {
+                parent.removed.push(entry);
+            }
+        }
+        parent.added.extend(child.added.drain());
     }
 
     /// Append one entry to the buffer. Validates the level, sorts the
@@ -355,7 +484,8 @@ impl BlockEngine {
     /// store in ONE put_blocks call (one lock + prepared-statement
     /// reuse in the SQLite backend).
     pub fn flush(&self) -> Result<usize, String> {
-        // Journal first (lock order: txn → buffer → index), then hold
+        let _transition = self.transition_write();
+        // Transition is already exclusive; journal before buffer/index, then hold
         // the buffer lock for the whole flush so a concurrent push
         // can't slip entries between encode and clear. Single-threaded
         // in the vtab anyway; correctness is free here.
@@ -371,7 +501,8 @@ impl BlockEngine {
         // on, rollback restores from `saved` and truncates the rest.
         if let Some(j) = j.as_deref_mut() {
             if j.buffer_mark > 0 {
-                j.saved.extend_from_slice(&buf[..j.buffer_mark]);
+                let mark = j.buffer_mark;
+                j.saved.extend_from_slice(&buf[..mark]);
                 j.buffer_mark = 0;
             }
         }
@@ -464,6 +595,7 @@ impl BlockEngine {
     ///
     /// Returns (blocks_removed, blocks_written).
     pub fn optimize(&self) -> Result<(usize, usize), String> {
+        let _transition = self.transition_write();
         // Snapshot the index; plan on the copy (no lock held while we
         // read/decode block payloads).
         let candidates: Vec<IndexEntry> = self
@@ -519,10 +651,9 @@ impl BlockEngine {
                     let new_min = cur_min.min(m.ts_min);
                     let new_max = cur_max.max(m.ts_max);
                     // saturating_sub: spans near i64 extremes must not wrap.
-                    let span_ok =
-                        new_max.saturating_sub(new_min) <= self.config.merge_max_ts_span;
-                    let size_ok = cur_entries + m.entry_count as usize
-                        <= self.config.merge_target_entries;
+                    let span_ok = new_max.saturating_sub(new_min) <= self.config.merge_max_ts_span;
+                    let size_ok =
+                        cur_entries + m.entry_count as usize <= self.config.merge_target_entries;
                     span_ok && size_ok
                 };
                 if !fits {
@@ -555,8 +686,7 @@ impl BlockEngine {
         let mut add_partitions: Vec<Option<u8>> = Vec::new();
         let mut removes: Vec<BlockLoc> = Vec::new();
         for (group, partition) in &groups {
-            let worth_it =
-                group.len() >= 2 || group.iter().any(|e| e.meta.codec == CODEC_RAW);
+            let worth_it = group.len() >= 2 || group.iter().any(|e| e.meta.codec == CODEC_RAW);
             if !worth_it {
                 continue;
             }
@@ -567,8 +697,7 @@ impl BlockEngine {
             }
             entries.sort_by_key(|e| e.ts);
             let terms = self.extract_terms(&entries);
-            let (data, meta) =
-                encode_block(&entries, CODEC_COLUMNAR_V2, self.config.zstd_level)?;
+            let (data, meta) = encode_block(&entries, CODEC_COLUMNAR_V2, self.config.zstd_level)?;
             adds.push(EncodedBlock { meta, data, terms });
             add_partitions.push(*partition);
             removes.extend(group.iter().map(|e| e.loc));
@@ -601,8 +730,7 @@ impl BlockEngine {
                     }
                 }
                 index.retain(|e| !removes.contains(&e.loc));
-                for ((meta, loc), partition) in
-                    add_metas.iter().zip(new_locs).zip(&add_partitions)
+                for ((meta, loc), partition) in add_metas.iter().zip(new_locs).zip(&add_partitions)
                 {
                     if let Some(j) = j.as_deref_mut() {
                         j.added.insert(loc.id);
@@ -624,7 +752,8 @@ impl BlockEngine {
     /// than the cutoff. The store removes term rows in the same
     /// operation. Returns the number of blocks deleted.
     pub fn prune(&self, cutoff: i64) -> Result<usize, String> {
-        // Journal first (lock order: txn → buffer → index). Two things
+        let _transition = self.transition_write();
+        // Transition is already exclusive; journal before buffer/index. Two things
         // must be undoable: the buffer retain (it may drop PRE-txn
         // entries, and it shifts positions, invalidating the mark) and
         // the index removals (their rows are restored by host
@@ -642,7 +771,8 @@ impl BlockEngine {
             let mut buf = self.buffer_lock();
             if let Some(j) = j.as_deref_mut() {
                 if j.buffer_mark > 0 {
-                    j.saved.extend_from_slice(&buf[..j.buffer_mark]);
+                    let mark = j.buffer_mark;
+                    j.saved.extend_from_slice(&buf[..mark]);
                     j.buffer_mark = 0;
                 }
             }
@@ -680,6 +810,7 @@ impl BlockEngine {
     ///   4. merge in matching BUFFERED entries (queryable-before-flush),
     ///   5. sort by ts.
     pub fn query(&self, q: &LogQuery) -> Result<Vec<LogEntry>, String> {
+        let _transition = self.transition_read();
         let mut terms: Vec<String> = Vec::new();
         if let Some(lvl) = q.level {
             if lvl > 3 {
@@ -717,14 +848,26 @@ impl BlockEngine {
     }
 
     /// (persisted blocks, raw blocks, buffered entries) — for stats or
-    /// debugging; cheap, index-only.
+    /// debugging; cheap and payload-free.
     pub fn stats(&self) -> (usize, usize, usize) {
-        let index = self.index_lock();
-        let raw = index
-            .iter()
-            .filter(|e| e.meta.codec == CODEC_RAW)
-            .count();
-        (index.len(), raw, self.buffered_count())
+        self.stats_with_after_index(|| {})
+    }
+
+    fn stats_with_after_index(&self, after_index: impl FnOnce()) -> (usize, usize, usize) {
+        // Flush holds buffer through persistence and then takes index.
+        // Never retain index while reading the buffered count.
+        let (blocks, raw) = {
+            let index = self.index_lock();
+            let raw = index.iter().filter(|e| e.meta.codec == CODEC_RAW).count();
+            (index.len(), raw)
+        };
+        after_index();
+        (blocks, raw, self.buffered_count())
+    }
+
+    #[cfg(test)]
+    pub(super) fn stats_after_index(&self, after_index: impl FnOnce()) -> (usize, usize, usize) {
+        self.stats_with_after_index(after_index)
     }
 }
 

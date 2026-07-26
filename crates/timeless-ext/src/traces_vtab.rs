@@ -56,12 +56,15 @@ use timeless_core::{
 };
 
 use crate::flatjson::{pairs_to_json, parse_labels_json};
+use crate::shadow_meta;
 use crate::shadow_span_store::{self, ShadowSpanStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
+use crate::sql_ident;
+use crate::vtab_tx::{self, SavepointVTab};
 
 /// Register the "timeless_traces" module on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection) -> Result<()> {
-    const MODULE: Module<TracesTab> = Module::update_module_with_tx();
+    const MODULE: Module<TracesTab> = vtab_tx::update_module_with_savepoints();
     db.create_module(c"timeless_traces", &MODULE, None::<()>)
 }
 
@@ -162,6 +165,7 @@ pub struct TracesTab {
     /// Raw handle to the HOST connection, kept for xDestroy's DDL.
     db: *mut ffi::sqlite3,
     table_name: String,
+    database_name: String,
     /// Shared process-wide across connections via the R4 registry —
     /// see metrics_vtab.rs and shared.rs for the full story.
     shared: Arc<SharedEngine<SpanBlockEngine>>,
@@ -182,6 +186,7 @@ impl TracesTab {
         is_create: bool,
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
+        let database = String::from_utf8_lossy(database_name).into_owned();
         let handle = unsafe { db.handle() };
         // Bind the calling connection for every store operation below
         // (DDL, _meta writes, recovery scans). RAII unbind.
@@ -200,27 +205,29 @@ impl TracesTab {
             )));
         }
 
-        let store = ShadowSpanStore::new(&table);
+        let host = unsafe { Connection::from_handle(handle) }?;
+        let store = ShadowSpanStore::new(&database, &table);
         if is_create {
-            let host = unsafe { Connection::from_handle(handle) }?;
             // Same incremental auto-vacuum attempt as metrics/logs
             // (no-op on a non-empty db; see metrics_vtab.rs).
-            let _ = host.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;");
-            host.execute_batch(&shadow_span_store::ddl(&table))?;
+            let _ = host.execute_batch(&sql_ident::incremental_auto_vacuum(&database));
+            host.execute_batch(&shadow_span_store::ddl(&database, &table))?;
             // PLAN.md: the shared block code never assumes a ts unit —
             // record OURS in _meta so tooling (and future readers of
             // this db) know these blocks speak nanoseconds.
             store.save_meta("ts_unit", b"ns").map_err(module_err)?;
         }
+        let instance_id =
+            shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
 
-        // R4: one engine per (db file, table) per process. First
+        // R4: one engine per (db file, schema alias, table, instance). First
         // connection in builds it — SpanBlockEngine::new recovers the
         // block index via scan() and status partitions via the
         // `status:` posting lists (re-entrant SELECTs routed to the
         // calling connection by the DbGuard above, safe because THIS
         // thread holds the connection mutex recursively) — every later
         // xConnect just bumps the Arc, no re-recovery.
-        let key = shared::registry_key(handle, database_name, &table);
+        let key = shared::registry_key(handle, database_name, &table, instance_id);
         let shared_engine = shared::get_or_create(&key, move || {
             SpanBlockEngine::new(
                 Box::new(store),
@@ -250,6 +257,7 @@ impl TracesTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
                 table_name: table,
+                database_name: database,
                 shared: shared_engine,
                 key,
                 gate_held: false,
@@ -452,12 +460,13 @@ impl CreateVTab<'_> for TracesTab {
     }
 
     fn destroy(&self) -> Result<()> {
-        // Registry entry first: the key must never resolve to an
-        // engine whose shadow tables are gone (see metrics_vtab.rs).
-        shared::remove(&self.key);
+        shared::pin_for_drop(self.db, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
-        host.execute_batch(&shadow_span_store::drop_ddl(&self.table_name))
+        host.execute_batch(&shadow_span_store::drop_ddl(
+            &self.database_name,
+            &self.table_name,
+        ))
     }
 }
 
@@ -605,8 +614,8 @@ impl UpdateVTab<'_> for TracesTab {
 /// `_blocks`/`_terms`/`_trace_blocks` (the trace-index rows ride the
 /// same host transaction, so they vanish and reappear with their
 /// blocks — never-dangle holds through rollback too). Auto-flush
-/// inside a transaction is fully covered, as are all commands. Same
-/// savepoint limitation as the others (xSavepoint not wired).
+/// inside a transaction is fully covered, as are all commands.
+/// vtab_tx.rs supplies the savepoint callbacks missing from rusqlite.
 /// R4 ADDITION — writer gate brackets the journal exactly as in
 /// metrics_vtab.rs (read the comment there): acquire before
 /// txn_begin, holder-only commit/rollback, release after.
@@ -634,6 +643,29 @@ impl TransactionVTab<'_> for TracesTab {
             self.release_write_gate();
         }
         Ok(())
+    }
+}
+
+impl SavepointVTab for TracesTab {
+    fn savepoint(&mut self, id: c_int) {
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_savepoint(id);
+        }
+    }
+
+    fn release(&mut self, id: c_int) {
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_release(id);
+        }
+    }
+
+    fn rollback_to(&mut self, id: c_int) {
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            self.shared.engine.txn_rollback_to(id);
+        }
     }
 }
 
@@ -752,22 +784,22 @@ unsafe impl VTabCursor for TracesCursor<'_> {
                 Some(v) => v,
                 None => {
                     impossible = true; // ts >= NULL matches nothing
-                    i64::MIN + 1
+                    i64::MIN
                 }
             }
         } else {
-            i64::MIN + 1
+            i64::MIN
         };
         let ts_max: i64 = if idx_num & BIT_TS_HI != 0 {
             match args.get::<Option<i64>>(next())? {
                 Some(v) => v,
                 None => {
                     impossible = true;
-                    i64::MAX - 1
+                    i64::MAX
                 }
             }
         } else {
-            i64::MAX - 1
+            i64::MAX
         };
 
         let entries = if impossible {

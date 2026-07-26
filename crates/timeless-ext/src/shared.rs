@@ -14,13 +14,15 @@
 //!
 //! ── THE FIX, IN THREE PARTS (this module provides all three) ────────
 //! 1. A process-global ENGINE REGISTRY keyed by (canonical db file
-//!    path, table name). Extensions are one shared library per
+//!    path, connection-local schema alias, table name, instance id).
+//!    Extensions are one shared library per
 //!    process, so a `static` here is exactly one registry per process,
 //!    shared by every connection that loaded the .so. xCreate/xConnect
 //!    upgrade the registry's Weak or build the engine once; every vtab
 //!    instance holds an Arc to the same [`SharedEngine`]; xDisconnect
-//!    drops the Arc (last one out frees the engine); xDestroy removes
-//!    the registry entry (the shadow tables are being dropped).
+//!    drops the Arc (last one out frees the engine). xDestroy leaves
+//!    the Weak entry alone: DROP rollback reuses the restored instance
+//!    identity, while committed recreate cannot collide with it.
 //!
 //! 2. THREAD-LOCAL CONNECTION ROUTING. The engines call back into the
 //!    shadow stores for every byte at rest — but a shared engine can be
@@ -117,6 +119,8 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use rusqlite::{ffi, Connection, Error};
+
+use crate::shadow_meta::InstanceId;
 
 /// How long a second writer waits for the gate before failing with the
 /// busy-style error. Mirrors the spirit of SQLite's busy_timeout.
@@ -298,14 +302,94 @@ pub(crate) struct SharedEngine<E> {
     pub(crate) write_gate: WriterGate,
 }
 
-/// Registry key. File-backed databases share by (canonical path,
-/// table); :memory:/temp databases get a per-connection Private key —
-/// see the module docs for why sharing is meaningless (and harmful)
-/// there.
+/// Registry key. File-backed databases share when path, schema alias, table,
+/// and durable instance all match. The alias matters because store SQL is
+/// qualified with that connection-local name. :memory:/temp databases also
+/// include the connection pointer because their contents are connection-local.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum RegistryKey {
-    File { path: String, table: String },
-    Private { db: usize, table: String },
+    File {
+        path: String,
+        database: Vec<u8>,
+        table: String,
+        instance: InstanceId,
+    },
+    Private {
+        db: usize,
+        database: Vec<u8>,
+        table: String,
+        instance: InstanceId,
+    },
+}
+
+impl RegistryKey {
+    fn same_slot(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::File {
+                    path: left_path,
+                    database: left_database,
+                    table: left_table,
+                    ..
+                },
+                Self::File {
+                    path: right_path,
+                    database: right_database,
+                    table: right_table,
+                    ..
+                },
+            ) => {
+                left_path == right_path
+                    && left_database == right_database
+                    && left_table == right_table
+            }
+            (
+                Self::Private {
+                    db: left_db,
+                    database: left_database,
+                    table: left_table,
+                    ..
+                },
+                Self::Private {
+                    db: right_db,
+                    database: right_database,
+                    table: right_table,
+                    ..
+                },
+            ) => {
+                left_db == right_db && left_database == right_database && left_table == right_table
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Sole-owner engines destroyed inside an explicit transaction need one
+/// temporary strong reference: xDestroy frees the vtab object immediately,
+/// before SQLite knows whether DROP will commit or roll back.
+static DROP_PINS: LazyLock<Mutex<HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn drop_pins_lock() -> MutexGuard<'static, HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>> {
+    DROP_PINS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Pin a sole-owner engine across transactional xDestroy. Autocommit DROP
+/// cannot roll back after the statement returns, and an engine already owned
+/// by another vtab does not need an additional reference.
+pub(crate) fn pin_for_drop<E>(
+    db: *mut ffi::sqlite3,
+    key: &RegistryKey,
+    shared: &Arc<SharedEngine<E>>,
+) where
+    E: Send + Sync + 'static,
+{
+    let explicit_transaction = unsafe { ffi::sqlite3_get_autocommit(db) == 0 };
+    if !explicit_transaction || Arc::strong_count(shared) > 1 {
+        return;
+    }
+    let erased: Arc<dyn Any + Send + Sync> = shared.clone();
+    drop_pins_lock().insert(key.clone(), erased);
 }
 
 /// The process-global registry. Weak values: the registry must never
@@ -329,9 +413,9 @@ fn registry_lock() -> MutexGuard<'static, HashMap<RegistryKey, Weak<dyn Any + Se
 ///
 /// `database_name` is the second xCreate/xConnect argument ("main",
 /// "temp", or an ATTACH alias) — passing it to sqlite3_db_filename
-/// means an ATTACHed file resolves to ITS path, so the same file
-/// ATTACHed by two connections under different aliases still shares
-/// one engine (the alias is connection-local, the file is not).
+/// resolves the physical file. The alias remains in the key because
+/// each store's qualified SQL is connection-local; two different aliases
+/// therefore use separate process caches over the same durable file.
 ///
 /// The path is canonicalized so `db.sqlite` and `./db.sqlite` and a
 /// symlink all land on one key. sqlite3_db_filename already returns an
@@ -344,10 +428,13 @@ pub(crate) fn registry_key(
     db: *mut ffi::sqlite3,
     database_name: &[u8],
     table: &str,
+    instance: InstanceId,
 ) -> RegistryKey {
     let private = || RegistryKey::Private {
         db: db as usize,
+        database: database_name.to_vec(),
         table: table.to_owned(),
+        instance,
     };
     let Ok(dbname) = CString::new(database_name) else {
         return private(); // NUL in a database name: never shareable
@@ -375,7 +462,9 @@ pub(crate) fn registry_key(
         .unwrap_or_else(|| path.to_path_buf());
     RegistryKey::File {
         path: canonical.to_string_lossy().into_owned(),
+        database: database_name.to_vec(),
         table: table.to_owned(),
+        instance,
     }
 }
 
@@ -397,6 +486,13 @@ where
     F: FnOnce() -> rusqlite::Result<E>,
 {
     let mut map = registry_lock();
+    {
+        let mut pins = drop_pins_lock();
+        // A new durable instance in the same physical slot proves the old
+        // DROP committed. A matching instance is a rollback reconnect and is
+        // released after get_or_create clones its Arc below.
+        pins.retain(|pinned, _| !pinned.same_slot(key) || pinned == key);
+    }
     // Lazy sweep: drop entries whose engines are gone (all their vtab
     // instances disconnected). Keeps the map from accumulating one dead
     // Weak per dropped table forever.
@@ -404,13 +500,15 @@ where
 
     if let Some(weak) = map.get(key) {
         if let Some(alive) = weak.upgrade() {
-            return alive.downcast::<SharedEngine<E>>().map_err(|_| {
+            let shared = alive.downcast::<SharedEngine<E>>().map_err(|_| {
                 module_err(format!(
                     "registry entry for {key:?} holds a different engine type \
                      (was this table name reused across timeless modules \
                      without DROP TABLE?)"
                 ))
-            });
+            })?;
+            drop_pins_lock().remove(key);
+            return Ok(shared);
         }
     }
 
@@ -423,11 +521,9 @@ where
     Ok(shared)
 }
 
-/// xDestroy: the shadow tables are being dropped, so the key must not
-/// resolve to the (now table-less) engine ever again. Connections still
-/// holding the old Arc will fail their next store call with "no such
-/// table" and reconnect to a fresh engine after the table is recreated
-/// (SQLite's schema-cookie bump forces their re-prepare → xConnect).
+/// Test cleanup. Production entries are removed only by lazy Weak sweeping;
+/// eager removal in xDestroy breaks transactional DROP rollback.
+#[cfg(test)]
 pub(crate) fn remove(key: &RegistryKey) {
     let mut map = registry_lock();
     map.remove(key);
@@ -513,36 +609,73 @@ mod tests {
     fn registry_shares_same_key_and_isolates_different_keys() {
         let k1 = RegistryKey::File {
             path: "/tmp/r4-test.db".into(),
+            database: b"main".to_vec(),
             table: "m".into(),
+            instance: [1; 16],
         };
         let k2 = RegistryKey::File {
             path: "/tmp/r4-test.db".into(),
+            database: b"main".to_vec(),
             table: "other".into(),
+            instance: [1; 16],
+        };
+        let k3 = RegistryKey::File {
+            path: "/tmp/r4-test.db".into(),
+            database: b"main".to_vec(),
+            table: "m".into(),
+            instance: [2; 16],
+        };
+        let k4 = RegistryKey::File {
+            path: "/tmp/r4-test.db".into(),
+            database: b"aux".to_vec(),
+            table: "m".into(),
+            instance: [1; 16],
         };
         // A stand-in "engine": any Send+Sync 'static type works — the
         // registry is type-erased and generic over E.
-        let a: Arc<SharedEngine<String>> =
-            get_or_create(&k1, || Ok("engine".to_owned())).unwrap();
+        let a: Arc<SharedEngine<String>> = get_or_create(&k1, || Ok("engine".to_owned())).unwrap();
+        let erased: Arc<dyn Any + Send + Sync> = a.clone();
+        drop_pins_lock().insert(k1.clone(), erased);
         let b: Arc<SharedEngine<String>> =
             get_or_create(&k1, || panic!("must reuse, not rebuild")).unwrap();
         assert!(Arc::ptr_eq(&a, &b), "same key must share one engine");
-        let c: Arc<SharedEngine<String>> =
-            get_or_create(&k2, || Ok("engine2".to_owned())).unwrap();
+        assert!(
+            !drop_pins_lock().contains_key(&k1),
+            "rollback reconnect releases matching DROP pin"
+        );
+        let c: Arc<SharedEngine<String>> = get_or_create(&k2, || Ok("engine2".to_owned())).unwrap();
         assert!(!Arc::ptr_eq(&a, &c), "different table = different engine");
+        let erased: Arc<dyn Any + Send + Sync> = a.clone();
+        drop_pins_lock().insert(k1.clone(), erased);
+        let d: Arc<SharedEngine<String>> = get_or_create(&k3, || Ok("engine3".to_owned())).unwrap();
+        assert!(
+            !Arc::ptr_eq(&a, &d),
+            "different instance = different engine"
+        );
+        assert!(
+            !drop_pins_lock().contains_key(&k1),
+            "recreate releases prior-instance DROP pin"
+        );
+        let e: Arc<SharedEngine<String>> = get_or_create(&k4, || Ok("engine4".to_owned())).unwrap();
+        assert!(!Arc::ptr_eq(&a, &e), "different alias = different engine");
         remove(&k1);
         remove(&k2);
+        remove(&k3);
+        remove(&k4);
     }
 
     #[test]
     fn registry_weak_dies_with_last_arc_and_gets_swept() {
         let k = RegistryKey::Private {
             db: 0xdead,
+            database: b"main".to_vec(),
             table: "m".into(),
+            instance: [1; 16],
         };
         let a: Arc<SharedEngine<u64>> = get_or_create(&k, || Ok(7)).unwrap();
-        drop(a); // last vtab instance disconnects → engine dropped
-        // Next get_or_create must BUILD (the Weak is dead), proving no
-        // stale engine survives its last holder.
+        drop(a);
+        // Last vtab disconnected, so the next lookup must rebuild rather
+        // than return stale state through the dead Weak.
         let rebuilt = std::cell::Cell::new(false);
         let b: Arc<SharedEngine<u64>> = get_or_create(&k, || {
             rebuilt.set(true);
@@ -558,7 +691,9 @@ mod tests {
     fn registry_type_mismatch_is_a_loud_error() {
         let k = RegistryKey::Private {
             db: 0xbeef,
+            database: b"main".to_vec(),
             table: "m".into(),
+            instance: [1; 16],
         };
         let _keep: Arc<SharedEngine<u64>> = get_or_create(&k, || Ok(1)).unwrap();
         let err = match get_or_create::<String, _>(&k, || Ok("x".into())) {

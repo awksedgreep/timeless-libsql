@@ -18,11 +18,10 @@
 //!     storage on the store side of the seam.
 
 use rusqlite::types::Value;
-use rusqlite::vtab::escape_double_quote;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use timeless_core::{BlockLoc, BlockMeta, BlockStore, EncodedBlock};
 
-use crate::shared;
+use crate::{shared, sql_ident};
 
 /// Shadow-table DDL for a logs vtab named `table` (executed by xCreate;
 /// the store assumes the tables exist).
@@ -37,11 +36,15 @@ use crate::shared;
 ///   list wants.
 /// - the ts_min index serves both query_terms' range join and future
 ///   retention scans.
-pub(crate) fn ddl(table: &str) -> String {
-    let t = escape_double_quote(table);
+pub(crate) fn ddl(database: &str, table: &str) -> String {
+    let blocks = sql_ident::qualified_shadow(database, table, "blocks");
+    let blocks_local = sql_ident::quoted_shadow(table, "blocks");
+    let blocks_index = sql_ident::qualified_shadow(database, table, "blocks_ts");
+    let terms = sql_ident::qualified_shadow(database, table, "terms");
+    let meta = sql_ident::qualified_shadow(database, table, "meta");
     format!(
         r#"
-CREATE TABLE IF NOT EXISTS "{t}_blocks" (
+CREATE TABLE IF NOT EXISTS {blocks} (
   id          INTEGER PRIMARY KEY,
   ts_min      INTEGER NOT NULL,
   ts_max      INTEGER NOT NULL,
@@ -49,22 +52,24 @@ CREATE TABLE IF NOT EXISTS "{t}_blocks" (
   codec       INTEGER NOT NULL,
   data        BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "{t}_blocks_ts" ON "{t}_blocks"(ts_min);
-CREATE TABLE IF NOT EXISTS "{t}_terms" (
+CREATE INDEX IF NOT EXISTS {blocks_index} ON {blocks_local}(ts_min);
+CREATE TABLE IF NOT EXISTS {terms} (
   term     TEXT NOT NULL,
   block_id INTEGER NOT NULL,
   PRIMARY KEY(term, block_id)
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS "{t}_meta" (k TEXT PRIMARY KEY, v BLOB);
+CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
 "#
     )
 }
 
 /// Statements to remove the shadow tables again (vtab xDestroy).
-pub(crate) fn drop_ddl(table: &str) -> String {
-    let t = escape_double_quote(table);
+pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
+    let blocks = sql_ident::qualified_shadow(database, table, "blocks");
+    let terms = sql_ident::qualified_shadow(database, table, "terms");
+    let meta = sql_ident::qualified_shadow(database, table, "meta");
     format!(
-        r#"DROP TABLE IF EXISTS "{t}_blocks"; DROP TABLE IF EXISTS "{t}_terms"; DROP TABLE IF EXISTS "{t}_meta";"#
+        r#"DROP TABLE IF EXISTS {blocks}; DROP TABLE IF EXISTS {terms}; DROP TABLE IF EXISTS {meta};"#
     )
 }
 
@@ -88,11 +93,10 @@ pub(crate) struct ShadowBlockStore {
 }
 
 impl ShadowBlockStore {
-    pub(crate) fn new(table: &str) -> Self {
-        let t = escape_double_quote(table);
-        let blocks = format!("\"{t}_blocks\"");
-        let terms = format!("\"{t}_terms\"");
-        let meta = format!("\"{t}_meta\"");
+    pub(crate) fn new(database: &str, table: &str) -> Self {
+        let blocks = sql_ident::qualified_shadow(database, table, "blocks");
+        let terms = sql_ident::qualified_shadow(database, table, "terms");
+        let meta = sql_ident::qualified_shadow(database, table, "meta");
         ShadowBlockStore {
             insert_block_sql: format!(
                 "INSERT INTO {blocks} (ts_min, ts_max, entry_count, codec, data) \

@@ -9,7 +9,9 @@
 //! plus codec round-trips and validation edges.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Barrier, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use super::codec::{
     decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
@@ -33,8 +35,8 @@ fn entry(ts: i64, level: u8, message: &str, metadata: &[(&str, &str)]) -> LogEnt
 
 fn full_range_query() -> LogQuery {
     LogQuery {
-        ts_min: i64::MIN + 1,
-        ts_max: i64::MAX - 1,
+        ts_min: i64::MIN,
+        ts_max: i64::MAX,
         level: None,
         metadata_eq: Vec::new(),
         message_contains: None,
@@ -46,6 +48,116 @@ fn config(index_keys: &[&str]) -> BlockEngineConfig {
         index_keys: index_keys.iter().map(|s| s.to_string()).collect(),
         ..BlockEngineConfig::default()
     }
+}
+
+const LOCK_ORDER_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct PausingFlushStore {
+    inner: MemBlockStore,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl BlockStore for PausingFlushStore {
+    fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
+        self.inner.put_block(block)
+    }
+
+    fn put_blocks(&self, blocks: &[EncodedBlock]) -> Result<Vec<BlockLoc>, String> {
+        self.entered.wait();
+        self.release.wait();
+        self.inner.put_blocks(blocks)
+    }
+
+    fn replace_blocks(
+        &self,
+        add: &[EncodedBlock],
+        remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        self.inner.replace_blocks(add, remove, on_committed)
+    }
+
+    fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
+        self.inner.read_block(loc)
+    }
+
+    fn delete_blocks(&self, locs: &[BlockLoc]) -> Vec<String> {
+        self.inner.delete_blocks(locs)
+    }
+
+    fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+        self.inner.scan()
+    }
+
+    fn query_terms(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.inner.query_terms(terms, ts_min, ts_max)
+    }
+
+    fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
+        self.inner.save_meta(key, value)
+    }
+
+    fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner.load_meta(key)
+    }
+}
+
+#[test]
+fn stats_concurrent_with_flush_does_not_invert_index_and_buffer() {
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let engine = Arc::new(
+        BlockEngine::new(
+            Box::new(PausingFlushStore {
+                inner: MemBlockStore::new(),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            config(&[]),
+        )
+        .unwrap(),
+    );
+    engine.push(entry(1, 1, "buffered", &[])).unwrap();
+
+    let (flush_done_tx, flush_done_rx) = mpsc::channel();
+    let flush_engine = Arc::clone(&engine);
+    let flush_thread = thread::spawn(move || {
+        let _ = flush_done_tx.send(flush_engine.flush());
+    });
+    entered.wait();
+
+    let (index_read_tx, index_read_rx) = mpsc::channel();
+    let (stats_done_tx, stats_done_rx) = mpsc::channel();
+    let stats_engine = Arc::clone(&engine);
+    let stats_thread = thread::spawn(move || {
+        let stats = stats_engine.stats_after_index(|| {
+            let _ = index_read_tx.send(());
+        });
+        let _ = stats_done_tx.send(stats);
+    });
+    index_read_rx
+        .recv_timeout(LOCK_ORDER_TIMEOUT)
+        .expect("stats never reached its post-index observation point");
+
+    release.wait();
+    assert_eq!(
+        flush_done_rx
+            .recv_timeout(LOCK_ORDER_TIMEOUT)
+            .expect("flush deadlocked waiting for the stats index guard")
+            .unwrap(),
+        1
+    );
+    stats_done_rx
+        .recv_timeout(LOCK_ORDER_TIMEOUT)
+        .expect("stats deadlocked waiting for the flush buffer guard");
+    flush_thread.join().unwrap();
+    stats_thread.join().unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,4 +1229,40 @@ fn txn_add_then_remove_in_one_txn_cancels() {
 
     // Nothing left: no phantom raw entries, no merged entry, no buffer.
     assert_eq!(engine.stats(), (0, 0, 0));
+}
+
+#[test]
+fn savepoint_rollback_is_repeatable_and_unwinds_nested_frames() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    engine.txn_begin();
+    engine.push(entry(1, 1, "outer", &[])).unwrap();
+    engine.txn_savepoint(0);
+    engine.push(entry(2, 1, "inner-1", &[])).unwrap();
+    engine.txn_savepoint(1);
+    engine.push(entry(3, 1, "inner-2", &[])).unwrap();
+
+    engine.txn_rollback_to(0);
+    assert_eq!(engine.buffered_count(), 1);
+    engine.push(entry(4, 1, "inner-again", &[])).unwrap();
+    engine.txn_rollback_to(0);
+    engine.txn_release(0);
+    engine.txn_commit();
+
+    let got = engine.query(&full_range_query()).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].message, "outer");
+}
+
+#[test]
+fn released_flush_frame_still_rolls_back_with_outer_transaction() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    engine.push(entry(1, 1, "pre", &[])).unwrap();
+    engine.txn_begin();
+    engine.push(entry(2, 1, "outer", &[])).unwrap();
+    engine.txn_savepoint(0);
+    engine.flush().unwrap();
+    engine.txn_release(0);
+    engine.txn_rollback();
+
+    assert_eq!(engine.stats(), (0, 0, 1));
 }

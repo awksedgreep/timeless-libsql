@@ -25,7 +25,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn engine(dir: &std::path::Path) -> Engine {
     // flush_threshold 1000, min_flush_size 0, level 8, 64MiB budget,
     // no deferred compression — the roundtrip test parameters.
-    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false)
+    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap()
 }
 
 fn count(e: &Engine, sid: i64) -> usize {
@@ -135,5 +135,48 @@ fn txn_rollback_rebuilds_flush_queue() {
     e.flush_pending().unwrap();
     assert!(e.info().chunk_count >= 1);
     assert_eq!(count(&e, sid), 1201);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn savepoint_rollback_is_repeatable_and_unwinds_nested_frames() {
+    let dir = temp_dir("savepoint_nested");
+    let e = engine(&dir);
+    let sid = e.resolve_cached("cpu", &Default::default()).unwrap();
+
+    e.txn_begin();
+    e.write_point(sid, 100, 1.0);
+    e.txn_savepoint(0);
+    e.write_point(sid, 200, 2.0);
+    e.txn_savepoint(1);
+    e.write_point(sid, 300, 3.0);
+    e.txn_rollback_to(0);
+    assert_eq!(count(&e, sid), 1);
+
+    // ROLLBACK TO leaves the target savepoint active.
+    e.write_point(sid, 400, 4.0);
+    e.txn_rollback_to(0);
+    e.txn_release(0);
+    e.txn_commit();
+    assert_eq!(count(&e, sid), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn released_flush_frame_still_rolls_back_with_outer_transaction() {
+    let dir = temp_dir("savepoint_release");
+    let e = engine(&dir);
+    let sid = e.resolve_cached("cpu", &Default::default()).unwrap();
+    e.write_point(sid, 100, 1.0);
+
+    e.txn_begin();
+    e.write_point(sid, 200, 2.0);
+    e.txn_savepoint(0);
+    e.flush_all().unwrap();
+    e.txn_release(0);
+    e.txn_rollback();
+
+    assert_eq!(e.info().chunk_count, 0);
+    assert_eq!(e.info().buffered_points, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use timeless_core::{ChunkStore, Engine, FsStore};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("timeless_core_test_{name}_{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("timeless_core_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -16,15 +17,35 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn new_engine(dir: &std::path::Path) -> Engine {
     // (data_dir, flush_threshold, min_flush_size, compression_level,
     //  memory_budget, defer_compression)
-    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false)
+    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap()
+}
+
+#[test]
+fn engine_open_fails_closed_on_malformed_compaction_manifest() {
+    let dir = temp_dir("malformed_manifest");
+    let manifest = dir.join("compaction.manifest");
+    std::fs::write(&manifest, "P\tmissing-final-path\n").unwrap();
+
+    let err = match Engine::new(dir.clone(), 1000, 0, 8, 64 * 1024 * 1024, false) {
+        Ok(_) => panic!("engine opened with malformed recovery state"),
+        Err(err) => err,
+    };
+
+    assert!(err.contains("line 1"), "unexpected error: {err}");
+    assert!(
+        manifest.exists(),
+        "engine discarded malformed recovery state"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn with_store_recovers_fs_data() {
     let dir = temp_dir("store_seam");
 
-    let labels: HashMap<String, String> =
-        [("host".to_string(), "pvm1".to_string())].into_iter().collect();
+    let labels: HashMap<String, String> = [("host".to_string(), "pvm1".to_string())]
+        .into_iter()
+        .collect();
 
     let n_points: i64 = 5_000;
     {
@@ -40,16 +61,21 @@ fn with_store_recovers_fs_data() {
     // FsStore must recover the registry and chunk index identically.
     {
         let engine = Engine::with_store(
-            Box::new(FsStore::new(dir.clone())),
+            Box::new(FsStore::new(dir.clone()).unwrap()),
             1000,
             0,
             8,
             64 * 1024 * 1024,
             false,
-        );
+        )
+        .unwrap();
         let sid = engine.resolve_cached("cpu_usage", &labels).unwrap();
         let rows = engine.query_range_by_id(sid, 0, n_points).unwrap();
-        assert_eq!(rows.len(), n_points as usize, "seam recovery rebuilds index via store.scan()");
+        assert_eq!(
+            rows.len(),
+            n_points as usize,
+            "seam recovery rebuilds index via store.scan()"
+        );
         assert_eq!(rows[4_999], (4_999, 4_999.0 * 2.0));
 
         let info = engine.info();
@@ -78,7 +104,7 @@ fn fs_store_scan_reads_engine_output() {
 
     // A bare FsStore over the same dir must enumerate the chunks the
     // engine persisted, with intact metadata.
-    let store = FsStore::new(dir.clone());
+    let store = FsStore::new(dir.clone()).unwrap();
     let chunks = store.scan().unwrap();
     assert!(!chunks.is_empty(), "scan finds persisted chunks");
     let total_points: u64 = chunks
