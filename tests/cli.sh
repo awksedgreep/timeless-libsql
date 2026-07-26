@@ -45,6 +45,10 @@
 #       sqlite3) — flushed + buffered data visible across connections
 #       without reopen, writer-gate busy timeout, retry after commit,
 #       drop/recreate sanity
+#   22. Q2 reduction-kernel TVFs (timeless_grid / timeless_window):
+#       results identical to a plain-SQL evaluator over the raw vtab
+#       (recursive-CTE grid + correlated subqueries), buffered-point
+#       visibility, label filter, arg validation, TVF-first recovery
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
@@ -1119,6 +1123,117 @@ check_eq "(d) B's retry succeeds after A commits" \
   "$(grep '^d ' <<<"$py_out")" "d 4"
 check_eq "(e) drop + recreate: both connections sane on the new engine" \
   "$(grep '^e ' <<<"$py_out")" "e [('disk', 400, 7.0)] 1"
+
+# ---------------------------------------------------------------------------
+echo "== section 22: Q2 reduction-kernel TVFs (timeless_grid / timeless_window) =="
+# The kernels are only allowed to exist because a dumb evaluator over the
+# raw vtab must agree with them exactly (PLAN.md "Query interface tiers").
+# Here the dumb evaluator is plain SQL over the SAME vtab: a recursive-CTE
+# grid plus correlated subqueries. Values are dyadic (x.0/x.5/x.25) so
+# float sums are order-independent and text-compare exactly. The dataset
+# deliberately mixes flushed points with a buffered one (ts=131) — TVF
+# queries must see the buffer like vtab queries do.
+Q2DB="$TMP/q2_tvf.db"
+got=$(sqlite3 "$Q2DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics;
+INSERT INTO m(name, ts, value, labels) VALUES
+  ('cpu', 100, 1.0,  '{"host":"a"}'), ('cpu', 110, 2.0,  '{"host":"a"}'),
+  ('cpu', 125, 3.0,  '{"host":"a"}'),
+  ('cpu', 105, 10.5, '{"host":"b"}'), ('cpu', 122, 20.25,'{"host":"b"}'),
+  ('mem', 108, 7.0,  '{"host":"a"}');
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(name, ts, value, labels) VALUES ('cpu', 131, 4.0, '{"host":"a"}');
+
+.print -- grid vs SQL reference (start 100 stop 140 step 10 lookback 15)
+SELECT 'tvf', labels, ts, value
+  FROM timeless_grid('m', 'cpu', NULL, 100, 140, 10, 15) ORDER BY labels, ts;
+WITH RECURSIVE g(t) AS (SELECT 100 UNION ALL SELECT t+10 FROM g WHERE t+10 <= 140),
+  h(labels) AS (SELECT DISTINCT labels FROM m WHERE name='cpu')
+SELECT 'ref', h.labels, g.t,
+  (SELECT value FROM m WHERE name='cpu' AND labels=h.labels
+    AND ts <= g.t AND ts > g.t - 15 ORDER BY ts DESC LIMIT 1) AS v
+FROM h, g WHERE v IS NOT NULL ORDER BY h.labels, g.t;
+
+.print -- window aggs vs SQL reference (start 100 stop 140 step 20 window 30)
+SELECT 'tvf', 'sum', labels, ts, value
+  FROM timeless_window('m', 'cpu', NULL, 100, 140, 20, 30, 'sum') ORDER BY labels, ts;
+WITH RECURSIVE g(t) AS (SELECT 100 UNION ALL SELECT t+20 FROM g WHERE t+20 <= 140),
+  h(labels) AS (SELECT DISTINCT labels FROM m WHERE name='cpu')
+SELECT 'ref', 'sum', h.labels, g.t,
+  (SELECT SUM(value) FROM m WHERE name='cpu' AND labels=h.labels
+    AND ts <= g.t AND ts > g.t - 30) AS v
+FROM h, g WHERE v IS NOT NULL ORDER BY h.labels, g.t;
+SELECT 'tvf', 'count', labels, ts, value
+  FROM timeless_window('m', 'cpu', NULL, 100, 140, 20, 30, 'count') ORDER BY labels, ts;
+WITH RECURSIVE g(t) AS (SELECT 100 UNION ALL SELECT t+20 FROM g WHERE t+20 <= 140),
+  h(labels) AS (SELECT DISTINCT labels FROM m WHERE name='cpu')
+SELECT 'ref', 'count', h.labels, g.t,
+  (SELECT CAST(COUNT(value) AS REAL) FROM m WHERE name='cpu' AND labels=h.labels
+    AND ts <= g.t AND ts > g.t - 30) AS v
+FROM h, g WHERE v > 0 ORDER BY h.labels, g.t;
+SELECT 'tvf', 'min', labels, ts, value
+  FROM timeless_window('m', 'cpu', NULL, 100, 140, 20, 30, 'min') ORDER BY labels, ts;
+WITH RECURSIVE g(t) AS (SELECT 100 UNION ALL SELECT t+20 FROM g WHERE t+20 <= 140),
+  h(labels) AS (SELECT DISTINCT labels FROM m WHERE name='cpu')
+SELECT 'ref', 'min', h.labels, g.t,
+  (SELECT MIN(value) FROM m WHERE name='cpu' AND labels=h.labels
+    AND ts <= g.t AND ts > g.t - 30) AS v
+FROM h, g WHERE v IS NOT NULL ORDER BY h.labels, g.t;
+
+.print -- label filter + metric isolation
+SELECT 'filtered', labels, ts, value
+  FROM timeless_grid('m', 'cpu', '{"host":"b"}', 100, 140, 10, 15) ORDER BY ts;
+SELECT 'mem', labels, ts, value
+  FROM timeless_grid('m', 'mem', NULL, 100, 140, 10, 15) ORDER BY ts;
+SQL
+)
+# The TVF and reference halves must be identical modulo the tvf/ref tag.
+tvf_grid=$(grep '^tvf|{' <<<"$got" | sed 's/^tvf|//')
+ref_grid=$(grep '^ref|{' <<<"$got" | sed 's/^ref|//')
+check_eq "grid-last TVF == SQL reference over the raw vtab (incl. buffered ts=131)" \
+  "$tvf_grid" "$ref_grid"
+for agg in sum count min; do
+  tvf_w=$(grep "^tvf|$agg|" <<<"$got" | sed 's/^tvf|//')
+  ref_w=$(grep "^ref|$agg|" <<<"$got" | sed 's/^ref|//')
+  if [[ -z "$tvf_w" ]]; then
+    fail "window $agg TVF produced no rows"
+  else
+    check_eq "window $agg TVF == SQL reference" "$tvf_w" "$ref_w"
+  fi
+done
+check_eq "label filter restricts to host b" \
+  "$(grep '^filtered|' <<<"$got")" \
+'filtered|{"host":"b"}|110|10.5
+filtered|{"host":"b"}|130|20.25'
+check_eq "metric isolation (mem grid sees only mem's ts=108 sample: hits at t=110 and t=120)" \
+  "$(grep '^mem|' <<<"$got")" \
+'mem|{"host":"a"}|110|7.0
+mem|{"host":"a"}|120|7.0'
+
+# Error contract: helpful messages, not silent wrong answers.
+err=$(sqlite3 "$Q2DB" ".load $EXT" \
+  "SELECT * FROM timeless_grid('m', 'cpu', NULL, 0, 100, 10);" 2>&1 || true)
+check_eq "missing required arg names the argument" \
+  "$(grep -c 'missing required argument.*lookback' <<<"$err")" "1"
+err=$(sqlite3 "$Q2DB" ".load $EXT" \
+  "SELECT * FROM timeless_grid('m', 'cpu', NULL, 0, 100, 0, 10);" 2>&1 || true)
+check_eq "step 0 rejected by the kernel" \
+  "$(grep -c 'step must be positive' <<<"$err")" "1"
+err=$(sqlite3 "$Q2DB" ".load $EXT" \
+  "SELECT * FROM timeless_grid('nope', 'cpu', NULL, 0, 100, 10, 10);" 2>&1 || true)
+check_eq "unknown table fails with a no-such-table error" \
+  "$(grep -c 'no such table' <<<"$err")" "1"
+
+# Fresh-connection recovery: the TVF must build the engine itself (no
+# prior vtab query on this connection) and still see flushed data.
+got=$(sqlite3 "$Q2DB" ".load $EXT" \
+  "SELECT labels, ts, value FROM timeless_grid('m', 'cpu', '{\"host\":\"a\"}', 100, 130, 10, 15) ORDER BY ts;")
+check_eq "fresh connection: TVF-first access recovers the engine" "$got" \
+'{"host":"a"}|100|1.0
+{"host":"a"}|110|2.0
+{"host":"a"}|120|2.0
+{"host":"a"}|130|3.0'
 
 # ---------------------------------------------------------------------------
 echo

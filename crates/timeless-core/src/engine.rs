@@ -2328,6 +2328,269 @@ impl Engine {
         }))
     }
 
+    // ── Q2 reduction kernels (PLAN.md "Query interface tiers") ───────
+    //
+    // Semantics-free data reduction ONLY: a fixed arithmetic grid, a
+    // half-open (t - width, t] window, and mechanical folds. No lookback
+    // defaults, no staleness, no rate/reset math, no __name__ policy —
+    // everything a VM referee has ever corrected stays above the waist.
+    //
+    // Bit-exactness contract (what the property tests pin down):
+    //   - samples are consumed in the engine's sorted order
+    //     (query_range_by_id order; ties keep engine order, last wins),
+    //   - Sum/Avg fold left-to-right in ascending ts order,
+    //   - Min/Max use f64::min/f64::max seeded by the first sample.
+    // A naive evaluator over the same raw samples must agree on every
+    // bit, which is what makes these kernels safe to push down.
+
+    /// Largest number of grid points one kernel call may produce per
+    /// series. Purely a resource guard against `step` typos (e.g. step=1
+    /// over an epoch-wide range); well above any dashboard's resolution.
+    pub const MAX_GRID_POINTS: i64 = 1_000_000;
+
+    fn grid_len(start: i64, stop: i64, step: i64) -> EngineResult<i64> {
+        if step <= 0 {
+            return Err(format!("grid step must be positive, got {step}"));
+        }
+        if stop < start {
+            return Ok(0);
+        }
+        let count = ((stop as i128 - start as i128) / step as i128) + 1;
+        if count > Self::MAX_GRID_POINTS as i128 {
+            return Err(format!(
+                "grid of {count} points exceeds the {} point cap (start {start}, stop {stop}, step {step})",
+                Self::MAX_GRID_POINTS
+            ));
+        }
+        Ok(count as i64)
+    }
+
+    /// The grid-last walk over one series' ts-sorted samples. O(n + m).
+    fn grid_last_walk(
+        samples: &[(i64, f64)],
+        start: i64,
+        stop: i64,
+        step: i64,
+        lookback: i64,
+    ) -> Vec<(i64, f64)> {
+        let n = samples.len();
+        let mut points = Vec::new();
+        let mut k = 0usize; // one past the last sample with ts <= t
+        let mut t = start;
+        loop {
+            while k < n && samples[k].0 <= t {
+                k += 1;
+            }
+            if k > 0 {
+                let (ts, val) = samples[k - 1];
+                if (ts as i128) > (t as i128) - (lookback as i128) {
+                    points.push((t, val));
+                }
+            }
+            match t.checked_add(step) {
+                Some(next) if next <= stop => t = next,
+                _ => break,
+            }
+        }
+        points
+    }
+
+    /// The window-aggregate walk over one series' ts-sorted samples.
+    /// Folds each (t - window, t] window fresh, left-to-right — that IS
+    /// the bit-exactness contract, so no prefix-sum tricks.
+    fn window_agg_walk(
+        samples: &[(i64, f64)],
+        start: i64,
+        stop: i64,
+        step: i64,
+        window: i64,
+        agg: AggFn,
+    ) -> Vec<(i64, f64)> {
+        let n = samples.len();
+        let mut points = Vec::new();
+        let mut lo = 0usize; // first sample with ts > t - window
+        let mut hi = 0usize; // one past the last sample with ts <= t
+        let mut t = start;
+        loop {
+            while hi < n && samples[hi].0 <= t {
+                hi += 1;
+            }
+            while lo < n && (samples[lo].0 as i128) <= (t as i128) - (window as i128) {
+                lo += 1;
+            }
+            if lo < hi {
+                let win = &samples[lo..hi];
+                let value = match agg {
+                    AggFn::Count => win.len() as f64,
+                    AggFn::Sum => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v),
+                    AggFn::Avg => {
+                        win.iter().fold(0.0f64, |acc, &(_, v)| acc + v) / win.len() as f64
+                    }
+                    AggFn::Min => win[1..]
+                        .iter()
+                        .fold(win[0].1, |acc, &(_, v)| f64::min(acc, v)),
+                    AggFn::Max => win[1..]
+                        .iter()
+                        .fold(win[0].1, |acc, &(_, v)| f64::max(acc, v)),
+                };
+                points.push((t, value));
+            }
+            match t.checked_add(step) {
+                Some(next) if next <= stop => t = next,
+                _ => break,
+            }
+        }
+        points
+    }
+
+    fn validate_grid_last(start: i64, stop: i64, step: i64, lookback: i64) -> EngineResult<i64> {
+        if lookback < 0 {
+            return Err(format!("lookback must be >= 0, got {lookback}"));
+        }
+        Self::grid_len(start, stop, step)
+    }
+
+    fn validate_window(start: i64, stop: i64, step: i64, window: i64) -> EngineResult<i64> {
+        if window <= 0 {
+            return Err(format!("window must be positive, got {window}"));
+        }
+        Self::grid_len(start, stop, step)
+    }
+
+    /// Q2(a), single series, rayon-free — safe from vtab callbacks (the
+    /// same reason collect_metric loops query_range_by_id: worker
+    /// threads have no bound host connection).
+    pub fn query_grid_last_by_id(
+        &self,
+        series_id: i64,
+        start: i64,
+        stop: i64,
+        step: i64,
+        lookback: i64,
+    ) -> EngineResult<Vec<(i64, f64)>> {
+        if Self::validate_grid_last(start, stop, step, lookback)? == 0 {
+            return Ok(Vec::new());
+        }
+        let _transition = self.transition_read();
+        let samples =
+            self.query_range_by_id_inner(series_id, start.saturating_sub(lookback), stop)?;
+        Ok(Self::grid_last_walk(&samples, start, stop, step, lookback))
+    }
+
+    /// Q2(b), single series, rayon-free — safe from vtab callbacks.
+    pub fn query_window_agg_by_id(
+        &self,
+        series_id: i64,
+        start: i64,
+        stop: i64,
+        step: i64,
+        window: i64,
+        agg: AggFn,
+    ) -> EngineResult<Vec<(i64, f64)>> {
+        if Self::validate_window(start, stop, step, window)? == 0 {
+            return Ok(Vec::new());
+        }
+        let _transition = self.transition_read();
+        let samples =
+            self.query_range_by_id_inner(series_id, start.saturating_sub(window), stop)?;
+        Ok(Self::window_agg_walk(&samples, start, stop, step, window, agg))
+    }
+
+    /// Q2(a): last sample per grid point, all matching series, parallel.
+    /// For each t in start, start+step, ..= stop returns the newest
+    /// sample with ts in (t - lookback, t]; grid points with no sample
+    /// produce no row. Embedded callers only — NOT vtab-callback-safe
+    /// (rayon; see query_grid_last_by_id).
+    pub fn query_grid_last(
+        &self,
+        metric_name: &str,
+        label_filter: &Labels,
+        start: i64,
+        stop: i64,
+        step: i64,
+        lookback: i64,
+    ) -> EngineResult<Vec<(Labels, Vec<(i64, f64)>)>> {
+        if Self::validate_grid_last(start, stop, step, lookback)? == 0 {
+            return Ok(Vec::new());
+        }
+        let _transition = self.transition_read();
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = self.series_read();
+            reg.find_series(metric_name, label_filter)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .collect()
+        };
+
+        candidates
+            .into_par_iter()
+            .map(|(sid, labels)| {
+                let samples =
+                    self.query_range_by_id_inner(sid, start.saturating_sub(lookback), stop)?;
+                let points = Self::grid_last_walk(&samples, start, stop, step, lookback);
+                Ok(if points.is_empty() {
+                    None
+                } else {
+                    Some((labels, points))
+                })
+            })
+            .filter_map(
+                |result: EngineResult<Option<(Labels, Vec<(i64, f64)>)>>| match result {
+                    Ok(Some(value)) => Some(Ok(value)),
+                    Ok(None) => None,
+                    Err(err) => Some(Err(err)),
+                },
+            )
+            .collect()
+    }
+
+    /// Q2(b): sliding-window aggregate per grid point, all matching
+    /// series, parallel. Embedded callers only — NOT vtab-callback-safe
+    /// (rayon; see query_window_agg_by_id).
+    pub fn query_window_agg(
+        &self,
+        metric_name: &str,
+        label_filter: &Labels,
+        start: i64,
+        stop: i64,
+        step: i64,
+        window: i64,
+        agg: AggFn,
+    ) -> EngineResult<Vec<(Labels, Vec<(i64, f64)>)>> {
+        if Self::validate_window(start, stop, step, window)? == 0 {
+            return Ok(Vec::new());
+        }
+        let _transition = self.transition_read();
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = self.series_read();
+            reg.find_series(metric_name, label_filter)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .collect()
+        };
+
+        candidates
+            .into_par_iter()
+            .map(|(sid, labels)| {
+                let samples =
+                    self.query_range_by_id_inner(sid, start.saturating_sub(window), stop)?;
+                let points = Self::window_agg_walk(&samples, start, stop, step, window, agg);
+                Ok(if points.is_empty() {
+                    None
+                } else {
+                    Some((labels, points))
+                })
+            })
+            .filter_map(
+                |result: EngineResult<Option<(Labels, Vec<(i64, f64)>)>>| match result {
+                    Ok(Some(value)) => Some(Ok(value)),
+                    Ok(None) => None,
+                    Err(err) => Some(Err(err)),
+                },
+            )
+            .collect()
+    }
+
     // ── Chunk reading ────────────────────────────────────────────────
 
     /// Read one chunk through the store and decode the points in
@@ -2614,7 +2877,7 @@ pub struct EngineInfo {
     pub newest_ts: Option<i64>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggFn {
     Avg,
     Sum,

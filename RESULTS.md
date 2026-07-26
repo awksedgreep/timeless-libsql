@@ -176,6 +176,46 @@ Remaining honest cost of R1-R8: ~+1.3ms once per 1,000 brand-new series
 tables). Steady-state ingest and queries are at master parity on every
 tier; logs and traces were never affected.
 
+## Q2 reduction kernels (2026-07-26)
+
+The first two Q2 accelerators from PLAN.md "Query interface tiers" are
+shipped, strictly behind the waist:
+
+- `Engine::query_grid_last[_by_id]` — last sample per grid point,
+  half-open `(t - lookback, t]` (Q2a, the instant-selector shape), and
+  `Engine::query_window_agg[_by_id]` — sliding-window
+  sum/min/max/count/avg with a left-to-right ascending-ts fold (Q2b).
+  Rayon-free `_by_id` variants exist because vtab callbacks must never
+  enter the engine's parallel paths.
+- SQL surface: eponymous TVFs, purely additive to the Q1 raw-scan
+  contract —
+  `timeless_grid(tbl, metric, filter, start, stop, step, lookback)` and
+  `timeless_window(tbl, metric, filter, start, stop, step, window, agg)`.
+  The engine resolves through the same process registry as the vtab, so
+  TVF queries see buffered points and work TVF-first on fresh
+  connections.
+- Semantics-free by construction: no lookback defaults, no staleness or
+  rate math, errors on step<=0 / lookback<0 / window<=0, and a
+  1M-grid-point resource cap. Everything referee-sensitive stays above
+  the waist.
+
+Verification: `timeless-core/tests/q2_kernels.rs` compares both kernels
+bit-for-bit against independent naive evaluators across a randomized
+sweep (duplicate timestamps, buffered+flushed mix, all five aggs);
+cli.sh §22 compares the TVFs against plain-SQL evaluation (recursive-CTE
+grid + correlated subqueries) over the raw vtab in the same database;
+the bench asserts kernel results equal client-side evaluation before
+timing them.
+
+Numbers (M5 Pro, 1M-point bench dataset, second run): the dashboard
+shape — one value per minute per host over the whole range — costs
+**17.9ms** via the Q1 fallback (ship 99,900 raw samples, evaluate
+client-side) and **1.6ms** via `timeless_grid` (16,600 grid rows,
+verified equal); `timeless_window` 5-min avg over the same grid is also
+1.6ms. That is the in-process gap; over sqld/HTTP the shipped-bytes
+difference widens it. Ingest and Q1 query timings are unchanged by the
+addition.
+
 ## What it is
 
 A loadable SQLite/libSQL extension. `CREATE VIRTUAL TABLE metrics USING

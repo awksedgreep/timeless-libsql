@@ -34,6 +34,7 @@
 mod flatjson;
 mod logs_vtab;
 mod metrics_vtab;
+mod query_tvf;
 mod shadow_block_store;
 mod shadow_meta;
 mod shadow_span_store;
@@ -102,6 +103,7 @@ fn extension_init(db: Connection) -> Result<bool> {
     metrics_vtab::register(&db)?;
     logs_vtab::register(&db)?;
     traces_vtab::register(&db)?;
+    query_tvf::register(&db)?;
     // false = loaded per-connection (fine here; sqld preloads into every
     // connection anyway).
     Ok(false)

@@ -221,6 +221,40 @@ impl MetricsTab {
         ))
     }
 
+    /// Resolve the shared engine for an EXISTING timeless_metrics table
+    /// on this connection — the read-side entry point for the Q2 TVFs
+    /// (query_tvf.rs). Mirrors the xConnect tail exactly (legacy catalog
+    /// upgrade, durable instance identity, process registry with the
+    /// same builder), so a TVF query on a fresh connection constructs
+    /// the same engine xConnect would have. It never runs the CREATE
+    /// path: a table that was never a timeless_metrics vtab fails on the
+    /// `<table>_meta` read with SQLite's own "no such table" error.
+    ///
+    /// Caller must hold a DbGuard binding for `handle`.
+    pub(crate) fn shared_engine_for(
+        handle: *mut ffi::sqlite3,
+        database: &str,
+        table: &str,
+    ) -> Result<Arc<SharedEngine<Engine>>> {
+        let host = unsafe { Connection::from_handle(handle) }?;
+        let instance_id =
+            shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+        host.execute_batch(&shadow_store::series_ddl(database, table))?;
+        let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
+        shared::get_or_create(&key, || {
+            let store = ShadowTableStore::new(database, table);
+            Engine::with_store(
+                Box::new(store),
+                FLUSH_THRESHOLD,
+                MIN_FLUSH_SIZE,
+                COMPRESSION_LEVEL,
+                MEMORY_BUDGET,
+                DEFER_COMPRESSION,
+            )
+            .map_err(module_err)
+        })
+    }
+
     /// Take the shared engine's writer gate for THIS connection if we
     /// do not hold it already. Primary call site is begin() — SQLite
     /// fires xBegin before the first write statement of every

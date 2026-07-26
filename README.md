@@ -133,6 +133,34 @@ curl -s target:9100/metrics -o /tmp/scrape.prom && sqlite3 metrics.db \
 The scraping loop stays external by design (cron, curl, your app); the
 vtab is passive.
 
+**Query kernels** — two table-valued functions evaluate the dominant
+dashboard shapes inside the engine, so remote deployments (sqld, HTTP)
+ship grid points instead of every raw sample:
+
+```sql
+-- last sample per grid point, per series (instant-selector shape):
+--                 table      metric       label filter    start  stop   step lookback
+SELECT labels, ts, value
+  FROM timeless_grid('metrics', 'cpu_usage', '{"host":"pvm1"}', :t0, :t1, 60, 90);
+
+-- sliding-window aggregate per grid point: sum|min|max|count|avg
+SELECT labels, ts, value
+  FROM timeless_window('metrics', 'cpu_usage', NULL, :t0, :t1, 60, 300, 'avg');
+```
+
+Both windows are half-open `(t - width, t]`; grid points with no sample
+produce no row. The kernels are deliberately *semantics-free* — no
+lookback defaults, no staleness or rate math (that belongs to the query
+layer above) — which is what makes them safe: every result is verified
+bit-for-bit against naive evaluation, in the test suite and in the
+benchmarks. Callers that don't know about them lose nothing: the raw
+scan they replace still works everywhere.
+
+Measured on the 1M-point bench dataset (1-minute grid × 100 hosts over
+the whole range): the raw-scan fallback ships 99,900 samples and
+evaluates client-side in **17.9ms**; `timeless_grid` returns the same
+16,600 grid rows in **1.6ms** — 11x, before a network is even involved.
+
 ### Logs
 
 `index_keys` declares which metadata keys get inverted-index treatment —
@@ -270,6 +298,7 @@ Flush of 1M buffered points: ~110ms, paid at flush cadence, not per point.
 | logs `service+level+ts` range | 119.7ms | **4.2ms** | 28x |
 | traces `status='error'` count | 38.6ms | **2.8ms** | 13.8x |
 | metrics name+range (10k rows of 1M) | — | **2.0ms** | pushdown |
+| metrics 1-min dashboard grid (Q2 kernel) | 17.9ms raw + client eval | **1.6ms** | 11x |
 | logs `message LIKE '%timeout%'` | **73.9ms** | 344ms | scan: plain wins |
 | traces `trace_id` point lookup | **0.005ms** | 2.0ms | B-tree wins |
 

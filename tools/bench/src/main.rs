@@ -466,6 +466,88 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
         ts.elapsed().as_secs_f64() * 1e3
     );
 
+    // Q2 reduction kernels vs the Q1 fallback they replace (PLAN.md
+    // "Query interface tiers"). The dashboard shape: one value per
+    // minute per host across the whole range. Q1 ships every raw sample
+    // through SQLite and evaluates client-side; Q2 evaluates in the
+    // engine and ships only grid points.
+    let g_start = BASE_TS;
+    let g_stop = BASE_TS + (PTS_PER_SERIES as i64 - 1) * STEP_MS;
+    let g_step = 60_000i64; // 1-minute grid
+    let g_lookback = 20_000i64; // 2 scrape intervals
+
+    let tq1 = Instant::now();
+    let mut by_series: std::collections::HashMap<String, Vec<(i64, f64)>> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT labels, ts, value FROM metrics
+                 WHERE name = 'cpu.usage' AND ts >= ?1 AND ts <= ?2",
+            )
+            .expect("prepare raw fetch");
+        let rows = stmt
+            .query_map(params![g_start, g_stop], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?))
+            })
+            .expect("raw fetch");
+        for row in rows {
+            let (labels, ts, val) = row.expect("raw row");
+            by_series.entry(labels).or_default().push((ts, val));
+        }
+    }
+    let mut q1_rows = 0usize;
+    let mut raw_shipped = 0usize;
+    for samples in by_series.values_mut() {
+        samples.sort_by_key(|&(ts, _)| ts);
+        raw_shipped += samples.len();
+        // client-side grid-last walk (what the evaluator above the waist
+        // does when the engine only offers Q1 raw scans)
+        let mut k = 0usize;
+        let mut t = g_start;
+        while t <= g_stop {
+            while k < samples.len() && samples[k].0 <= t {
+                k += 1;
+            }
+            if k > 0 && (samples[k - 1].0 as i128) > (t as i128 - g_lookback as i128) {
+                q1_rows += 1;
+            }
+            t += g_step;
+        }
+    }
+    let q1_ms = tq1.elapsed().as_secs_f64() * 1e3;
+
+    let tq2 = Instant::now();
+    let q2_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM timeless_grid('metrics', 'cpu.usage', NULL, ?1, ?2, ?3, ?4)",
+            params![g_start, g_stop, g_step, g_lookback],
+            |r| r.get(0),
+        )
+        .expect("grid TVF");
+    let q2_ms = tq2.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(
+        q2_rows as usize, q1_rows,
+        "Q2 grid kernel and Q1 client-side evaluation disagree"
+    );
+
+    let tw = Instant::now();
+    let w_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM timeless_window('metrics', 'cpu.usage', NULL, ?1, ?2, ?3, 300000, 'avg')",
+            params![g_start, g_stop, g_step],
+            |r| r.get(0),
+        )
+        .expect("window TVF");
+    let w_ms = tw.elapsed().as_secs_f64() * 1e3;
+
+    println!("- Q2 kernels (1-min grid x 100 hosts, whole range; results verified equal):");
+    println!(
+        "    Q1 fallback (ship {raw_shipped} raw samples + client walk): {q1_rows} grid rows, {q1_ms:.1} ms"
+    );
+    println!("    timeless_grid TVF:   {q2_rows} grid rows, {q2_ms:.1} ms");
+    println!("    timeless_window TVF (5-min avg): {w_rows} rows, {w_ms:.1} ms");
+
     // Bit-exact spot check: 3 deterministic (series, offset) points. The
     // dataset is still in memory, so "expected" is the exact f64 we
     // generated; anything but to_bits() equality is a lossy pipeline.
