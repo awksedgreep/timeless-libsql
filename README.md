@@ -257,7 +257,7 @@ Flush of 1M buffered points: ~110ms, paid at flush cadence, not per point.
 
 | dataset | plain | vtab | ratio |
 |---|---|---|---|
-| metrics, hostile (1000 series, ms-jitter, noisy values) | 52.6 | **8.3** | **6.4x** |
+| metrics, hostile (1000 series, ms-jitter, noisy values) | 52.6 | **8.3** | **6.3x** |
 | metrics, friendly (regular interval, patterned values) | 46.7 | 0.23 | ~200x |
 | logs, 1M entries | 120.3 | **8.9** | **13.5x** |
 | traces, 960k spans (plain has a trace_id index) | 161.6 | **37.4** | **4.3x** |
