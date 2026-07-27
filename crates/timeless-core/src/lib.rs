@@ -20,6 +20,7 @@ pub use blocks::{
 pub use spans::{
     kind_from_name, kind_name, status_from_name, status_name, EncodedSpanBlock, MemSpanStore,
     SpanBlockEngine, SpanBlockStore, SpanEngineConfig, SpanEntry, SpanQuery,
+    TraceBucketStat,
 };
 pub use engine::*;
 pub use rollup::{

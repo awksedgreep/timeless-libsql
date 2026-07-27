@@ -251,6 +251,36 @@ fn query_bench(plain_path: &str, vtab_path: &str, ext: &str) {
         "SELECT COUNT(*) FROM logs WHERE message LIKE '%timeout%'",
         &[],
     );
+    // F4 bucket kernel: 1-minute log-volume histogram by level over the
+    // whole range — the dominant logs-dashboard shape — vs the Q1
+    // fallback (SQL GROUP BY over the raw vtab). Totals must agree.
+    let g_lo = BASE_TS;
+    let g_hi = BASE_TS + (N_ENTRIES as i64) * STEP_MS;
+    let tb = std::time::Instant::now();
+    let (kernel_rows, kernel_total): (i64, i64) = vtab
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(n), 0)
+             FROM timeless_log_buckets('logs', 'level', NULL, ?1, ?2, 60000)",
+            rusqlite::params![g_lo, g_hi],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("log bucket kernel");
+    let kernel_ms = tb.elapsed().as_secs_f64() * 1e3;
+    let tg = std::time::Instant::now();
+    let (group_rows, group_total): (i64, i64) = vtab
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(n), 0) FROM (
+               SELECT (ts / 60000) * 60000 AS b, level, COUNT(*) AS n
+               FROM logs WHERE ts >= ?1 AND ts <= ?2 GROUP BY b, level)",
+            rusqlite::params![g_lo, g_hi],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("group-by fallback");
+    let group_ms = tg.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(kernel_total, group_total, "bucket totals disagree");
+    println!("- F4 bucket kernel (1-min level histogram, whole range; totals verified equal):");
+    println!("    timeless_log_buckets: {kernel_rows} rows, {kernel_ms:.1} ms");
+    println!("    SQL GROUP BY over raw vtab: {group_rows} rows, {group_ms:.1} ms");
     drop(vtab);
 
     // Cross-check: both stores must agree on every count (the plain

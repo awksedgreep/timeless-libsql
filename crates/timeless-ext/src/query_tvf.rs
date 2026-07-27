@@ -64,7 +64,11 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     const STATS: Module<StatsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_stats", &STATS, None::<()>)?;
     const ROLLUP: Module<RollupTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_rollup", &ROLLUP, None::<()>)
+    db.create_module(c"timeless_rollup", &ROLLUP, None::<()>)?;
+    const LOG_BUCKETS: Module<LogBucketsTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_log_buckets", &LOG_BUCKETS, None::<()>)?;
+    const TRACE_BUCKETS: Module<TraceBucketsTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_trace_buckets", &TRACE_BUCKETS, None::<()>)
 }
 
 // Output columns (both modules).
@@ -197,23 +201,23 @@ fn decode_args(
 /// hidden arg columns into a bitmask, assign argv slots in canonical
 /// order, defer required-arg checking to filter (clearer errors than a
 /// bare "no query solution").
-fn best_index_args(info: &mut IndexInfo, n_args: c_int) -> Result<bool> {
+fn best_index_args(info: &mut IndexInfo, first_arg: c_int, n_args: c_int) -> Result<bool> {
     let mut idx_num: c_int = 0;
     let mut unusable: c_int = 0;
     let mut slots: Vec<Option<usize>> = vec![None; n_args as usize];
     for (i, constraint) in info.constraints().enumerate() {
         let col = constraint.column();
-        if col < COL_FIRST_ARG || col >= COL_FIRST_ARG + n_args {
+        if col < first_arg || col >= first_arg + n_args {
             continue;
         }
-        let bit = 1 << (col - COL_FIRST_ARG);
+        let bit = 1 << (col - first_arg);
         if !constraint.is_usable() {
             unusable |= bit;
         } else if constraint.operator() == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
-            && slots[(col - COL_FIRST_ARG) as usize].is_none()
+            && slots[(col - first_arg) as usize].is_none()
         {
             idx_num |= bit;
-            slots[(col - COL_FIRST_ARG) as usize] = Some(i);
+            slots[(col - first_arg) as usize] = Some(i);
         }
     }
     // An arg constrained only unusably: reject this plan so the planner
@@ -310,7 +314,7 @@ unsafe impl<'vtab> VTab<'vtab> for GridTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, GRID_ARGS.len() as c_int)
+        best_index_args(info, COL_FIRST_ARG, GRID_ARGS.len() as c_int)
     }
 
     fn open(&mut self) -> Result<KernelCursor<'vtab, GridTab>> {
@@ -374,7 +378,7 @@ unsafe impl<'vtab> VTab<'vtab> for WindowTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, WINDOW_ARGS.len() as c_int)
+        best_index_args(info, COL_FIRST_ARG, WINDOW_ARGS.len() as c_int)
     }
 
     fn open(&mut self) -> Result<KernelCursor<'vtab, WindowTab>> {
@@ -529,7 +533,7 @@ unsafe impl<'vtab> VTab<'vtab> for RollupTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, ROLLUP_ARGS.len() as c_int)
+        best_index_args(info, COL_FIRST_ARG, ROLLUP_ARGS.len() as c_int)
     }
 
     fn open(&mut self) -> Result<KernelCursor<'vtab, RollupTab>> {
@@ -588,6 +592,317 @@ impl KernelVTab for RollupTab {
                 })
                 .collect())
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F4: timeless_log_buckets / timeless_trace_buckets (FEATURE_PLAN.md)
+// ---------------------------------------------------------------------------
+//
+// Histograms bin FORWARD: buckets are closed-open [start + k*step,
+// start + k*step + step) aligned to `start` — deliberately different
+// from the metrics grid kernels, which sample BACKWARD over (t-w, t].
+// Both conventions are documented where they live.
+
+/// Map provided args (bitmask) back to argv slots by name, with the
+/// missing-required check. Shared by the F4 bucket TVFs.
+fn named_slots(
+    module: &str,
+    names: &[&str],
+    required_mask: c_int,
+    idx_num: c_int,
+) -> Result<Vec<Option<usize>>> {
+    let missing: Vec<&str> = names
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let bit = 1 << *i;
+            (required_mask & bit) != 0 && (idx_num & bit) == 0
+        })
+        .map(|(_, n)| *n)
+        .collect();
+    if !missing.is_empty() {
+        return Err(module_err(format!(
+            "{module}: missing required argument(s): {} — call as {module}({})",
+            missing.join(", "),
+            names.join(", ")
+        )));
+    }
+    let mut slot_of: Vec<Option<usize>> = vec![None; names.len()];
+    let mut slot = 0usize;
+    for (i, s_of) in slot_of.iter_mut().enumerate() {
+        if idx_num & (1 << i) != 0 {
+            *s_of = Some(slot);
+            slot += 1;
+        }
+    }
+    Ok(slot_of)
+}
+
+/// timeless_log_buckets('logs', 'level'|<index key>, filter_json, start,
+/// stop, step) → (bucket_ts, group_key, n). The filter JSON holds
+/// index-key equalities; a "level" key filters by level. Entries missing
+/// the group key land in group ''.
+const LOG_BUCKETS_ARGS: &[&str] = &["tbl", "group_by", "filter", "start", "stop", "step"];
+const LOG_BUCKETS_REQUIRED: c_int = 0b11_1011; // all but filter
+const LOG_BUCKETS_FIRST_ARG: c_int = 3;
+
+#[repr(C)]
+pub(crate) struct LogBucketsTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for LogBucketsTab {
+    type Aux = ();
+    type Cursor = LogBucketsCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(bucket_ts INTEGER, group_key TEXT, n INTEGER, \
+                            tbl HIDDEN, group_by HIDDEN, filter HIDDEN, start HIDDEN, \
+                            stop HIDDEN, step HIDDEN)"),
+            LogBucketsTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, LOG_BUCKETS_FIRST_ARG, LOG_BUCKETS_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<LogBucketsCursor<'vtab>> {
+        Ok(LogBucketsCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LogBucketsCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(i64, String, u64)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab LogBucketsTab>,
+}
+
+unsafe impl VTabCursor for LogBucketsCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_log_buckets";
+        let slots = named_slots(M, LOG_BUCKETS_ARGS, LOG_BUCKETS_REQUIRED, idx_num)?;
+        let text = |i: usize, what: &str| -> Result<String> {
+            let v: Option<String> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let int = |i: usize, what: &str| -> Result<i64> {
+            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let group_by = text(1, "group_by")?;
+        let filter_json: Option<String> = match slots[2] {
+            None => None,
+            Some(s) => args.get(s)?,
+        };
+        let (start, stop, step) = (int(3, "start")?, int(4, "stop")?, int(5, "step")?);
+
+        let mut level = None;
+        let mut metadata_eq: Vec<(String, String)> = Vec::new();
+        if let Some(txt) = filter_json.filter(|t| !t.is_empty()) {
+            for (k, v) in parse_labels_json(&txt)
+                .map_err(|e| module_err(format!("{M}: filter: {e}")))?
+            {
+                if k == "level" {
+                    level = Some(
+                        timeless_core::level_from_name(&v).map_err(module_err)?,
+                    );
+                } else {
+                    metadata_eq.push((k, v));
+                }
+            }
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
+        let q = timeless_core::LogQuery {
+            ts_min: start,
+            ts_max: stop,
+            level,
+            metadata_eq,
+            message_contains: None,
+        };
+        self.rows = shared
+            .engine
+            .bucket_counts(&q, &group_by, step)
+            .map_err(module_err)?;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (bucket_ts, group, n) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(bucket_ts),
+            1 => ctx.set_result(group),
+            2 => ctx.set_result(&(*n as i64)),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+/// timeless_trace_buckets('traces', service_filter, start, stop, step)
+/// → (bucket_ts, service, spans, errors, dur_sum, dur_min, dur_max).
+const TRACE_BUCKETS_ARGS: &[&str] = &["tbl", "service_filter", "start", "stop", "step"];
+const TRACE_BUCKETS_REQUIRED: c_int = 0b1_1101; // all but service_filter
+const TRACE_BUCKETS_FIRST_ARG: c_int = 7;
+
+#[repr(C)]
+pub(crate) struct TraceBucketsTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for TraceBucketsTab {
+    type Aux = ();
+    type Cursor = TraceBucketsCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(bucket_ts INTEGER, service TEXT, spans INTEGER, \
+                            errors INTEGER, dur_sum INTEGER, dur_min INTEGER, dur_max INTEGER, \
+                            tbl HIDDEN, service_filter HIDDEN, start HIDDEN, stop HIDDEN, \
+                            step HIDDEN)"),
+            TraceBucketsTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(
+            info,
+            TRACE_BUCKETS_FIRST_ARG,
+            TRACE_BUCKETS_ARGS.len() as c_int,
+        )
+    }
+
+    fn open(&mut self) -> Result<TraceBucketsCursor<'vtab>> {
+        Ok(TraceBucketsCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct TraceBucketsCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<timeless_core::TraceBucketStat>,
+    pos: usize,
+    phantom: PhantomData<&'vtab TraceBucketsTab>,
+}
+
+unsafe impl VTabCursor for TraceBucketsCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_trace_buckets";
+        let slots = named_slots(M, TRACE_BUCKETS_ARGS, TRACE_BUCKETS_REQUIRED, idx_num)?;
+        let int = |i: usize, what: &str| -> Result<i64> {
+            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let spec: Option<String> = args.get(slots[0].unwrap())?;
+        let spec = spec.ok_or_else(|| module_err(format!("{M}: tbl must not be NULL")))?;
+        let (database, table) = split_spec(&spec);
+        let service: Option<String> = match slots[1] {
+            None => None,
+            Some(s) => args.get::<Option<String>>(s)?.filter(|v| !v.is_empty()),
+        };
+        let (start, stop, step) = (int(2, "start")?, int(3, "stop")?, int(4, "step")?);
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = TracesTab::shared_engine_for(self.db, &database, &table)?;
+        let q = timeless_core::SpanQuery {
+            ts_min: start,
+            ts_max: stop,
+            trace_id: None,
+            service,
+            kind: None,
+            status: None,
+            name: None,
+        };
+        self.rows = shared.engine.bucket_stats(&q, step).map_err(module_err)?;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let b = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(&b.bucket_ts),
+            1 => ctx.set_result(&b.service),
+            2 => ctx.set_result(&(b.spans as i64)),
+            3 => ctx.set_result(&(b.errors as i64)),
+            4 => ctx.set_result(&b.dur_sum),
+            5 => ctx.set_result(&b.dur_min),
+            6 => ctx.set_result(&b.dur_max),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
     }
 }
 

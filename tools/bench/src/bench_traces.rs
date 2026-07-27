@@ -325,6 +325,36 @@ fn query_bench(data: &[Span], plain_path: &str, vtab_path: &str, ext: &str) {
         &[&lo, &hi],
     );
 
+    // F4 bucket kernel: per-service 1-minute span stats over the whole
+    // range vs the SQL GROUP BY fallback over the raw vtab.
+    let g_lo = BASE_TS;
+    let g_hi = BASE_TS + (N_TRACES as i64) * TRACE_STEP_NS;
+    let tb = std::time::Instant::now();
+    let (kernel_rows, kernel_spans): (i64, i64) = vtab
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(spans), 0)
+             FROM timeless_trace_buckets('spans', NULL, ?1, ?2, 60000000000)",
+            rusqlite::params![g_lo, g_hi],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("trace bucket kernel");
+    let kernel_ms = tb.elapsed().as_secs_f64() * 1e3;
+    let tg = std::time::Instant::now();
+    let (group_rows, group_spans): (i64, i64) = vtab
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(n), 0) FROM (
+               SELECT (start_ts / 60000000000) * 60000000000 AS b, service, COUNT(*) AS n
+               FROM spans WHERE start_ts >= ?1 AND start_ts <= ?2 GROUP BY b, service)",
+            rusqlite::params![g_lo, g_hi],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("group-by fallback");
+    let group_ms = tg.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(kernel_spans, group_spans, "bucket span totals disagree");
+    println!("- F4 bucket kernel (1-min per-service stats, whole range; totals verified equal):");
+    println!("    timeless_trace_buckets: {kernel_rows} rows, {kernel_ms:.1} ms");
+    println!("    SQL GROUP BY over raw vtab: {group_rows} rows, {group_ms:.1} ms");
+
     // Cross-checks: the plain table is the oracle.
     assert_eq!(p_rows, v_rows, "trace point-lookup span totals disagree");
     assert_eq!(p1, v1, "status='error' counts disagree");

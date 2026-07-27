@@ -51,7 +51,7 @@ pub mod mem;
 mod tests;
 
 pub use codec::{decode_span_block, encode_span_block};
-pub use engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery};
+pub use engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery, TraceBucketStat};
 pub use mem::MemSpanStore;
 
 // Shared with the logs block store on purpose: a BlockLoc is a BlockLoc

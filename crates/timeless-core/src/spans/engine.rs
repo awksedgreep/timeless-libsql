@@ -55,6 +55,18 @@ impl Default for SpanEngineConfig {
     }
 }
 
+/// One F4 bucket row from SpanBlockEngine::bucket_stats.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceBucketStat {
+    pub bucket_ts: i64,
+    pub service: String,
+    pub spans: u64,
+    pub errors: u64,
+    pub dur_sum: i64,
+    pub dur_min: i64,
+    pub dur_max: i64,
+}
+
 /// One query. ts range is always present (i64::MIN / i64::MAX for
 /// "unbounded", like the other vtabs). `trace_id` switches the plan:
 /// when set, candidate blocks come from the TRACE INDEX, not the term
@@ -814,6 +826,58 @@ impl SpanBlockEngine {
         }
         out.sort_by_key(|e| e.start_ts);
         Ok(out)
+    }
+
+    /// F4 bucket kernel (FEATURE_PLAN.md): per-service span stats per
+    /// CLOSED-OPEN `[start + k*step, +step)` bucket aligned to the
+    /// query's ts_min (histograms bin forward). Per (bucket, service):
+    /// span count, error count (status byte == error), and duration
+    /// sum/min/max (saturating i64 sums; ns fit comfortably). No
+    /// percentiles — quantile estimation is approximation policy and
+    /// stays above the waist. Rows sorted (bucket_ts, service).
+    pub fn bucket_stats(
+        &self,
+        filter: &SpanQuery,
+        step: i64,
+    ) -> Result<Vec<TraceBucketStat>, String> {
+        if step <= 0 {
+            return Err(format!("step must be positive, got {step}"));
+        }
+        let (start, stop) = (filter.ts_min, filter.ts_max);
+        if stop >= start {
+            let buckets = ((stop as i128 - start as i128) / step as i128) + 1;
+            if buckets > 1_000_000 {
+                return Err(format!(
+                    "grid of {buckets} buckets exceeds the 1000000 bucket cap"
+                ));
+            }
+        }
+        let spans = self.query(filter)?;
+        let mut stats: std::collections::BTreeMap<(i64, String), TraceBucketStat> =
+            std::collections::BTreeMap::new();
+        for s in &spans {
+            let k = (s.start_ts as i128 - start as i128) / step as i128;
+            let bucket_ts = (start as i128 + k * step as i128) as i64;
+            let entry = stats
+                .entry((bucket_ts, s.service.clone()))
+                .or_insert(TraceBucketStat {
+                    bucket_ts,
+                    service: s.service.clone(),
+                    spans: 0,
+                    errors: 0,
+                    dur_sum: 0,
+                    dur_min: i64::MAX,
+                    dur_max: i64::MIN,
+                });
+            entry.spans += 1;
+            if s.status == 2 {
+                entry.errors += 1;
+            }
+            entry.dur_sum = entry.dur_sum.saturating_add(s.duration_ns);
+            entry.dur_min = entry.dur_min.min(s.duration_ns);
+            entry.dur_max = entry.dur_max.max(s.duration_ns);
+        }
+        Ok(stats.into_values().collect())
     }
 
     /// (persisted blocks, raw blocks, buffered spans) — cheap and payload-free.

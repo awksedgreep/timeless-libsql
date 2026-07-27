@@ -1456,6 +1456,57 @@ err=$(sqlite3 "$TMP/f3_bad.db" ".load $EXT" \
 check_eq "descending ladder rejected at CREATE" "$(grep -c 'must ascend' <<<"$err")" "1"
 
 # ---------------------------------------------------------------------------
+echo "== section 26: F4 bucket kernels (timeless_log_buckets / timeless_trace_buckets) =="
+F4DB="$TMP/f4_buckets.db"
+got=$(sqlite3 "$F4DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE l USING timeless_logs(index_keys='service');
+CREATE VIRTUAL TABLE t USING timeless_traces;
+INSERT INTO l(ts, level, message, metadata)
+  SELECT 1000 + value * 37, CASE value % 4 WHEN 3 THEN 'error' ELSE 'info' END,
+         'e' || value, '{"service":"svc' || (value % 3) || '"}'
+  FROM generate_series(0, 199);
+INSERT INTO l(l) VALUES ('flush');
+INSERT INTO l(ts, level, message, metadata) VALUES (9000, 'error', 'buffered', '{"service":"svc0"}');
+.print -- kernel vs SQL GROUP BY over the raw vtab (incl. the buffered entry)
+SELECT 'k', bucket_ts, group_key, n
+  FROM timeless_log_buckets('l', 'level', NULL, 1000, 9999, 500) ORDER BY 2, 3;
+SELECT 'r', 1000 + ((ts - 1000) / 500) * 500, level, COUNT(*)
+  FROM l WHERE ts BETWEEN 1000 AND 9999 GROUP BY 2, 3 ORDER BY 2, 3;
+.print -- group_by index key + filter
+SELECT 'kf', bucket_ts, group_key, n
+  FROM timeless_log_buckets('l', 'service', '{"level":"error"}', 1000, 9999, 4000) ORDER BY 2, 3;
+SELECT 'rf', 1000 + ((ts - 1000) / 4000) * 4000, service, COUNT(*)
+  FROM l WHERE level = 'error' AND ts BETWEEN 1000 AND 9999 GROUP BY 2, 3 ORDER BY 2, 3;
+INSERT INTO t(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  SELECT printf('%032x', value + 1), printf('%016x', value + 1), 'op',
+         'svc' || (value % 2), 'server',
+         CASE value % 5 WHEN 0 THEN 'error' ELSE 'ok' END,
+         1000000 + value * 1000, 100 + value
+  FROM generate_series(0, 99);
+INSERT INTO t(t) VALUES ('flush');
+SELECT 'tk', bucket_ts, service, spans, errors, dur_sum
+  FROM timeless_trace_buckets('t', NULL, 1000000, 1099999, 50000) ORDER BY 2, 3;
+SELECT 'tr', 1000000 + ((start_ts - 1000000) / 50000) * 50000, service,
+       COUNT(*), SUM(status = 'error'), SUM(duration_ns)
+  FROM t WHERE start_ts BETWEEN 1000000 AND 1099999 GROUP BY 2, 3 ORDER BY 2, 3;
+SQL
+)
+k=$(grep '^k|' <<<"$got" | sed 's/^k|//'); r=$(grep '^r|' <<<"$got" | sed 's/^r|//')
+if [[ -z "$k" ]]; then fail "log bucket kernel returned no rows"; else
+  check_eq "log buckets by level == SQL GROUP BY (incl. buffered)" "$k" "$r"; fi
+kf=$(grep '^kf|' <<<"$got" | sed 's/^kf|//'); rf=$(grep '^rf|' <<<"$got" | sed 's/^rf|//')
+if [[ -z "$kf" ]]; then fail "filtered log bucket kernel returned no rows"; else
+  check_eq "log buckets by index key + level filter == SQL GROUP BY" "$kf" "$rf"; fi
+tk=$(grep '^tk|' <<<"$got" | sed 's/^tk|//'); tr_=$(grep '^tr|' <<<"$got" | sed 's/^tr|//')
+if [[ -z "$tk" ]]; then fail "trace bucket kernel returned no rows"; else
+  check_eq "trace buckets == SQL GROUP BY (spans/errors/dur_sum)" "$tk" "$tr_"; fi
+err=$(sqlite3 "$F4DB" ".load $EXT" \
+  "SELECT * FROM timeless_log_buckets('l', 'path', NULL, 0, 10, 1);" 2>&1 || true)
+check_eq "undeclared group key names the valid set" \
+  "$(grep -c "expected 'level' or a declared index key" <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

@@ -234,6 +234,19 @@ SELECT ts, level, message FROM logs
 - Index keys can also be used as INSERT shorthand: a non-NULL value in the
   hidden column merges into the metadata JSON.
 
+**Bucket kernel** — the dominant logs-dashboard shape (volume histogram
+by level or any index key) evaluated engine-side; level-pure blocks that
+fit inside one bucket are counted from metadata without decoding:
+
+```sql
+SELECT bucket_ts, group_key, n FROM timeless_log_buckets(
+  'logs', 'level', '{"service":"api"}', :t0, :t1, 60000);
+-- buckets are [t, t+step) aligned to :t0 — histograms bin forward
+```
+
+1M entries, whole range, 1-minute buckets: **95.9ms** vs 543.5ms for the
+GROUP BY over the raw vtab (5.7x, totals verified equal).
+
 ### Traces
 
 OTel-shaped spans; the hero query is trace reassembly by id, routed through
@@ -258,6 +271,18 @@ SELECT hex(trace_id), name, service, status, duration_ns FROM traces
   as BLOBs; use `hex()` for display.
 - `kind` (`internal|server|client|producer|consumer`) and `status`
   (`unset|ok|error`) are strict TEXT vocabularies mapped to storage bytes.
+
+**Bucket kernel** — per-service span stats per time bucket (count,
+errors, duration sum/min/max; percentiles stay above the waist):
+
+```sql
+SELECT bucket_ts, service, spans, errors, dur_sum, dur_min, dur_max
+  FROM timeless_trace_buckets('traces', NULL, :t0, :t1, 60000000000);
+```
+
+960k spans, whole range: **246ms** vs 582ms for the GROUP BY equivalent
+(2.4x — duration math requires decoding every span, so this one is
+decode-bound).
 
 ## How it works
 

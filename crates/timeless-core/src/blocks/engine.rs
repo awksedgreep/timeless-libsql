@@ -895,6 +895,126 @@ impl BlockEngine {
         Ok(out)
     }
 
+    /// F4 bucket kernel (FEATURE_PLAN.md): count entries per bucket,
+    /// grouped by `level` or a declared index key. Buckets are
+    /// CLOSED-OPEN `[start + k*step, start + k*step + step)` aligned to
+    /// the query's ts_min — histograms bin FORWARD (the metrics grid
+    /// kernels sample backward with (t-w, t]; both are documented).
+    /// Entries missing the group key land in group "". Semantics-free:
+    /// filtering is the existing LogQuery machinery (term-pruned),
+    /// counting is mechanical. Rows sorted (bucket_ts, group).
+    pub fn bucket_counts(
+        &self,
+        filter: &LogQuery,
+        group_by: &str,
+        step: i64,
+    ) -> Result<Vec<(i64, String, u64)>, String> {
+        if step <= 0 {
+            return Err(format!("step must be positive, got {step}"));
+        }
+        if group_by != "level" && !self.config.index_keys.iter().any(|k| k == group_by) {
+            return Err(format!(
+                "unknown group_by {group_by:?}; expected 'level' or a declared index key ({})",
+                self.config.index_keys.join(", ")
+            ));
+        }
+        let (start, stop) = (filter.ts_min, filter.ts_max);
+        if stop >= start {
+            let buckets = ((stop as i128 - start as i128) / step as i128) + 1;
+            if buckets > 1_000_000 {
+                return Err(format!(
+                    "grid of {buckets} buckets exceeds the 1000000 bucket cap"
+                ));
+            }
+        }
+        let bucket_of = |ts: i64| -> i64 {
+            let k = (ts as i128 - start as i128) / step as i128;
+            (start as i128 + k * step as i128) as i64
+        };
+
+        // FAST PATH (the whole reason this kernel beats GROUP BY): when
+        // grouping by level with no metadata/message filters, a
+        // LEVEL-PURE block (the Session 5 partition tag) that sits
+        // entirely inside the range AND inside one bucket contributes
+        // meta.entry_count WITHOUT decoding; pure blocks of a
+        // filtered-out level are skipped without decoding. Only mixed
+        // and bucket-straddling blocks decode. Same guard/lock order as
+        // query(): transition → index (scoped) → store reads → buffer.
+        if group_by == "level" && filter.metadata_eq.is_empty() && filter.message_contains.is_none()
+        {
+            let _transition = self.transition_read();
+            let mut counts: std::collections::BTreeMap<(i64, u8), u64> =
+                std::collections::BTreeMap::new();
+            let candidates: Vec<(BlockMeta, BlockLoc, Option<u8>)> = {
+                let index = self.index_lock();
+                index
+                    .iter()
+                    .filter(|e| e.meta.ts_min <= stop && e.meta.ts_max >= start)
+                    .map(|e| (e.meta, e.loc, e.partition))
+                    .collect()
+            };
+            let mut decode: Vec<BlockLoc> = Vec::new();
+            for (meta, loc, partition) in candidates {
+                match partition {
+                    Some(level) if filter.level.is_none() || filter.level == Some(level) => {
+                        let inside = meta.ts_min >= start && meta.ts_max <= stop;
+                        if inside && bucket_of(meta.ts_min) == bucket_of(meta.ts_max) {
+                            *counts.entry((bucket_of(meta.ts_min), level)).or_insert(0) +=
+                                meta.entry_count as u64;
+                        } else {
+                            decode.push(loc);
+                        }
+                    }
+                    Some(_) => {} // pure block of a filtered-out level: free skip
+                    None => decode.push(loc),
+                }
+            }
+            let mut bin = |e: &LogEntry| {
+                if e.ts < start || e.ts > stop {
+                    return;
+                }
+                if let Some(fl) = filter.level {
+                    if e.level != fl {
+                        return;
+                    }
+                }
+                *counts.entry((bucket_of(e.ts), e.level)).or_insert(0) += 1;
+            };
+            for loc in decode {
+                let bytes = self.store.read_block(&loc)?;
+                for entry in decode_block(&bytes)? {
+                    bin(&entry);
+                }
+            }
+            for entry in self.buffer_lock().iter() {
+                bin(entry);
+            }
+            let mut out: std::collections::BTreeMap<(i64, String), u64> =
+                std::collections::BTreeMap::new();
+            for ((b, level), n) in counts {
+                out.insert((b, level_name(level).to_string()), n);
+            }
+            return Ok(out.into_iter().map(|((b, g), n)| (b, g, n)).collect());
+        }
+
+        let entries = self.query(filter)?;
+        let mut counts: std::collections::BTreeMap<(i64, String), u64> =
+            std::collections::BTreeMap::new();
+        for e in &entries {
+            let bucket_ts = bucket_of(e.ts);
+            let group = if group_by == "level" {
+                level_name(e.level).to_string()
+            } else {
+                e.meta_value(group_by).unwrap_or("").to_string()
+            };
+            *counts.entry((bucket_ts, group)).or_insert(0) += 1;
+        }
+        Ok(counts
+            .into_iter()
+            .map(|((b, g), n)| (b, g, n))
+            .collect())
+    }
+
     /// (persisted blocks, raw blocks, buffered entries) — for stats or
     /// debugging; cheap and payload-free.
     pub fn stats(&self) -> (usize, usize, usize) {
