@@ -176,6 +176,38 @@ Remaining honest cost of R1-R8: ~+1.3ms once per 1,000 brand-new series
 tables). Steady-state ingest and queries are at master parity on every
 tier; logs and traces were never affected.
 
+## F1-F6 capstone (2026-07-26, Apple M5 Pro, second runs)
+
+All six FEATURE_PLAN.md features landed the same day, each behind the
+full gate (127 workspace tests, correctness r1-r8, 29 cli.sh sections
+incl. the 150k-op oracle, crash suite with rollups in the kill window).
+Final full-suite sweep, all values second-run, all in-bench
+cross-checks (vs plain-table oracles / naive evaluation) passing:
+
+| surface | number |
+|---|---|
+| metrics Tier 1 / Tier 2 ingest | 2.06M / 23.45M pts/s |
+| metrics name+range / grid TVF / rollup tier read | 2.6ms / 1.7ms / 4.9ms |
+| metrics storage (hostile) | 8.34 B/pt (6.3x) |
+| rollup ladder | build 80ms/1M pts; tier read 8.4x vs GROUP BY |
+| logs Tier 1 / Tier 2 ingest | 1.03M / 1.17M entries/s |
+| logs storage | 8.93 B/entry (13.5x) |
+| logs bucket kernel (1-min histogram) | 104ms vs ~540ms GROUP BY |
+| logs LIKE '%timeout%' (trigram) | 48-54ms across runs (unindexed 369ms, plain 84ms) |
+| traces Tier 1 / Tier 2 ingest | 0.72M / 1.00M spans/s |
+| traces storage | 37.36 B/span (4.3x) |
+| traces bucket kernel | 250ms vs ~580ms GROUP BY (decode-bound) |
+| catalog (timeless_series, 1000 series) | ~3ms warm |
+| codec 5 decision rule | PASS (unchanged) |
+
+Honest ledger: two acceptance bars were missed and documented with
+analysis instead of adjusted — F4 traces buckets (decode-bound, 2.4x
+vs the ≥5x bar; per-block duration aggregates are the v2 path) and F5
+batch ingest (+16-46%, flush-bound, vs a ≥5x bar extrapolated from
+metrics' dispatch-bound profile). The trigram LIKE acceptance (<50ms)
+measured 48.3ms on its acceptance run and jitters to ~54ms across
+sweeps — quote it as "~50ms, 7x over unindexed".
+
 ## Q2 reduction kernels (2026-07-26)
 
 The first two Q2 accelerators from PLAN.md "Query interface tiers" are
