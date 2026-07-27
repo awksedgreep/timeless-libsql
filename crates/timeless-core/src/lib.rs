@@ -9,6 +9,7 @@
 
 pub mod blocks;
 mod engine;
+pub mod rollup;
 pub mod spans;
 pub mod store;
 
@@ -21,9 +22,13 @@ pub use spans::{
     SpanBlockEngine, SpanBlockStore, SpanEngineConfig, SpanEntry, SpanQuery,
 };
 pub use engine::*;
+pub use rollup::{
+    decode_rollup_payload, encode_rollup_payload, parse_ladder, rollup_buckets, RollupBucket,
+    RollupTier, ENC_ROLLUP_V1,
+};
 pub use store::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, ResolvedSeries,
-    StoredChunk, StoredSeries,
+    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, FsStore,
+    ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

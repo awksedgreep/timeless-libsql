@@ -1396,6 +1396,66 @@ check_eq "steady state across 4 retention windows (only the newest epoch survive
   "$(grep '^steady|' <<<"$got")" "steady|50|1|2649"
 
 # ---------------------------------------------------------------------------
+echo "== section 25: F3 rollup ladder (timeless_rollup + 'rollup' command) =="
+F3DB="$TMP/f3_rollup.db"
+got=$(sqlite3 "$F3DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics(rollups='60s@0,300s@0');
+INSERT INTO m(name, ts, value, labels)
+  SELECT 'cpu', 1000 + value * 10, value * 1.0, '{"host":"a"}' FROM generate_series(0, 99);
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(m) VALUES ('rollup');
+.print -- 60s tier count-per-bucket vs SQL reference over raw (settled buckets only)
+SELECT 'tvf', ts, value FROM timeless_rollup('m', 'cpu', NULL, 60, 0, 99999, 'count') ORDER BY ts;
+WITH b(t) AS (SELECT DISTINCT (ts / 60) * 60 FROM m WHERE ts <= 1919)
+SELECT 'ref', b.t, CAST((SELECT COUNT(*) FROM m WHERE ts >= b.t AND ts < b.t + 60) AS REAL)
+FROM b WHERE b.t + 59 <= 1930 ORDER BY b.t;
+.print -- avg agg vs SQL for one whole bucket
+SELECT 'avg300', value FROM timeless_rollup('m', 'cpu', NULL, 300, 1200, 1200, 'avg');
+SELECT 'refavg', AVG(value) FROM m WHERE ts >= 1200 AND ts < 1500;
+.print -- rollback: 'rollup' inside a txn fully undone (rows AND index)
+BEGIN;
+INSERT INTO m(name, ts, value, labels)
+  SELECT 'cpu', 3000 + value * 10, 1.0, '{"host":"a"}' FROM generate_series(0, 49);
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(m) VALUES ('rollup');
+ROLLBACK;
+SELECT 'postrb', COUNT(*) FROM timeless_rollup('m', 'cpu', NULL, 60, 2000, 99999, 'count');
+SELECT 'postrb_rows', COUNT(*) FROM m_chunks WHERE resolution > 0 AND ts_min >= 2000;
+SELECT 'stats', key, value FROM timeless_stats('m') WHERE key IN ('rollup_tiers','rollup_chunks');
+SQL
+)
+tvf_rows=$(grep '^tvf|' <<<"$got" | sed 's/^tvf|//')
+ref_rows=$(grep '^ref|' <<<"$got" | sed 's/^ref|//')
+if [[ -z "$tvf_rows" ]]; then
+  fail "rollup TVF produced no rows"
+else
+  check_eq "60s rollup counts == SQL reference over raw (settled only)" "$tvf_rows" "$ref_rows"
+fi
+check_eq "300s avg bucket == SQL AVG over the same raw window" \
+  "$(grep -c '^avg300|34.5$' <<<"$got")$(grep -c '^refavg|34.5$' <<<"$got")" "11"
+check_eq "rolled-back 'rollup' leaves no index entries or rows" \
+  "$(grep -E '^postrb\|' <<<"$got")
+$(grep -E '^postrb_rows\|' <<<"$got")" \
+'postrb|0
+postrb_rows|0'
+check_eq "stats expose ladder + rollup chunk count" \
+  "$(grep '^stats|' <<<"$got")" \
+'stats|rollup_tiers|60:0,300:0
+stats|rollup_chunks|2'
+# Reopen recovery: fresh process sees the rolled buckets.
+got=$(sqlite3 "$F3DB" ".load $EXT" \
+  "SELECT COUNT(*) FROM timeless_rollup('m', 'cpu', NULL, 60, 0, 99999, 'count');")
+check_eq "reopen: rollup index recovered from shadow rows" "$got" "16"
+# Error paths.
+err=$(sqlite3 "$F3DB" ".load $EXT" \
+  "SELECT * FROM timeless_rollup('m', 'cpu', NULL, 60, 0, 1, 'median');" 2>&1 || true)
+check_eq "unknown rollup agg is named" "$(grep -c 'unknown agg' <<<"$err")" "1"
+err=$(sqlite3 "$TMP/f3_bad.db" ".load $EXT" \
+  "CREATE VIRTUAL TABLE b USING timeless_metrics(rollups='1h@0,5m@0');" 2>&1 || true)
+check_eq "descending ladder rejected at CREATE" "$(grep -c 'must ascend' <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

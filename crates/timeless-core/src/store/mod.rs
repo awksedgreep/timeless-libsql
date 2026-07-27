@@ -98,6 +98,28 @@ pub struct StoredChunk {
     pub meta: ChunkMeta,
 }
 
+/// F3: a rollup chunk ready to persist. Lives in the same chunk table
+/// with `resolution` > 0; payload goes in the ts-bytes slot (val slot
+/// empty), min/max/sum val columns are unused (0). meta semantics:
+/// min_ts = first bucket start, max_ts = last bucket's COVERAGE END
+/// (bucket_start + resolution - 1), point_count = bucket count.
+pub struct EncodedRollupChunk {
+    pub series_id: i64,
+    pub resolution: i64,
+    pub min_ts: i64,
+    pub max_ts: i64,
+    pub bucket_count: u32,
+    pub payload: Vec<u8>,
+}
+
+/// F3: one persisted rollup chunk's identity + metadata, from
+/// scan_rollups. meta.loc addresses it for read_chunk/delete_chunks.
+pub struct StoredRollupChunk {
+    pub series_id: i64,
+    pub resolution: i64,
+    pub meta: ChunkMeta,
+}
+
 /// One durable series identity. Stores with an authoritative catalog use
 /// these rows instead of replacing a process-local registry snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,6 +228,22 @@ pub trait ChunkStore: Send + Sync {
     /// two processes opening the same legacy database cannot corrupt it.
     fn migrate_series(&self, _series: &[StoredSeries]) -> Result<(), String> {
         Err("store does not support series migration".to_string())
+    }
+
+    /// F3: enumerate persisted ROLLUP chunk metadata (resolution > 0)
+    /// for the engine's rollup index. Default: none (FsStore has no
+    /// rollup support — rollups are a shadow-store feature; an engine
+    /// over a store without them simply never sees a ladder).
+    fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
+        Ok(Vec::new())
+    }
+
+    /// F3: persist encoded rollup chunks. Same transactional contract as
+    /// put_chunks — rows ride the caller's transaction. Deletion reuses
+    /// delete_chunks (rollup rows live in the same chunk table and are
+    /// addressed by the same locs).
+    fn put_rollup_chunks(&self, _chunks: &[EncodedRollupChunk]) -> Result<Vec<ChunkLoc>, String> {
+        Err("store does not support rollup chunks".to_string())
     }
 
     /// Cheap change-detection token for the authoritative catalog + chunk

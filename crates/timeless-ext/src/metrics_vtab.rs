@@ -101,6 +101,20 @@ fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
 }
 
+/// Load the persisted F3 ladder ("res:ret,..." native units) if any.
+fn load_rollups(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> std::result::Result<Option<Vec<timeless_core::RollupTier>>, String> {
+    match crate::shadow_meta::load_meta_text(conn, database, table, "rollups")? {
+        None => Ok(None),
+        Some(spec) => timeless_core::parse_ladder(&spec)
+            .map(Some)
+            .map_err(|e| format!("{table}: rollups in _meta is invalid: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The virtual table
 // ---------------------------------------------------------------------------
@@ -204,8 +218,9 @@ impl MetricsTab {
         // seconds here) and PERSISTED in _meta — a property of the data,
         // like logs' index_keys. xConnect loads it back and never trusts
         // the replayed args.
-        let retention = if is_create {
+        let (retention, rollups) = if is_create {
             let mut retention = None;
+            let mut rollups: Option<(Vec<timeless_core::RollupTier>, String)> = None;
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 match name.as_str() {
                     "retention" => {
@@ -214,9 +229,15 @@ impl MetricsTab {
                                 .map_err(module_err)?,
                         );
                     }
+                    "rollups" => {
+                        rollups = Some(
+                            table_args::parse_rollups(&value, NATIVE_PER_SECOND)
+                                .map_err(module_err)?,
+                        );
+                    }
                     other => {
                         return Err(module_err(format!(
-                            "unrecognized argument {other:?}; timeless_metrics supports: retention"
+                            "unrecognized argument {other:?}; timeless_metrics supports: retention, rollups"
                         )));
                     }
                 }
@@ -225,11 +246,19 @@ impl MetricsTab {
                 shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
                     .map_err(module_err)?;
             }
-            retention
+            if let Some((_, spec)) = &rollups {
+                shadow_meta::save_meta_text(&host, &database, &table, "rollups", spec)
+                    .map_err(module_err)?;
+            }
+            (retention, rollups.map(|(tiers, _)| tiers))
         } else {
-            shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?
+            (
+                shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?,
+                load_rollups(&host, &database, &table).map_err(module_err)?,
+            )
         };
         shared_engine.engine.set_retention(retention);
+        shared_engine.engine.set_rollups(rollups.unwrap_or_default());
 
         // Declared schema. The hidden 5th column is named after the table
         // itself so `INSERT INTO metrics(metrics) VALUES('flush')` works.
@@ -290,6 +319,11 @@ impl MetricsTab {
         shared
             .engine
             .set_retention(shadow_meta::load_retention(&host, database, table).map_err(module_err)?);
+        shared.engine.set_rollups(
+            load_rollups(&host, database, table)
+                .map_err(module_err)?
+                .unwrap_or_default(),
+        );
         Ok(shared)
     }
 
@@ -336,6 +370,13 @@ impl MetricsTab {
             self.shared.engine
                 .compact_partitions(i64::MAX)
                 .map_err(module_err)?;
+            // F3: compaction is the natural rollup moment (both are
+            // "reorganize storage" maintenance).
+            self.shared.engine.rollup().map_err(module_err)?;
+        } else if cmd == "rollup" {
+            // F3: produce settled buckets for every declared tier. A
+            // no-op (0 chunks) without a rollups= ladder.
+            self.shared.engine.rollup().map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             // Retention: drop whole chunks whose max_ts < the cutoff.
             // Block-granular deletes — one DELETE row removes a whole
@@ -349,7 +390,7 @@ impl MetricsTab {
             }
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'compact', 'prune:<unix_ts>'"
+                "unknown command {cmd:?}; supported: 'flush', 'compact', 'rollup', 'prune:<unix_ts>'"
             )));
         }
         Ok(0)

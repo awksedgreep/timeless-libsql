@@ -11,7 +11,7 @@ F3 and of each other — reorder freely if priorities shift.
 
 - [x] **F1** series catalog + stats TVFs
 - [x] **F2** automated retention (table argument)
-- [ ] **F3** rollup ladder (downsampling)
+- [x] **F3** rollup ladder (downsampling)
 - [ ] **F4** Q2 kernels for logs & traces
 - [ ] **F5** batch blob ingest for logs & traces
 - [ ] **F6** trigram index for log message search
@@ -260,31 +260,32 @@ INSERT INTO metrics(metrics) VALUES ('rollup');   -- manual trigger (maintenance
 
 **Implementation.**
 
-- [ ] schema/index migration: resolution through scan/StoredChunk/
+- [x] schema/index migration: resolution through scan/StoredChunk/
       ChunkMeta/index keys; recovery + refresh; dup-seq safety preserved
-- [ ] rollup payload encoding (new encoding id) behind the codec seam
-- [ ] bucket aggregation kernel (pure fn over sorted samples → buckets;
+- [x] rollup payload encoding (new encoding id) behind the codec seam
+- [x] bucket aggregation kernel (pure fn over sorted samples → buckets;
       property-test first, alone)
-- [ ] `rollups=` arg parsing/persistence; ladder validation
-- [ ] 'rollup' command + compact/optimize integration (settle margin,
+- [x] `rollups=` arg parsing/persistence; ladder validation
+- [x] 'rollup' command + compact/optimize integration (settle margin,
       idempotent replace)
-- [ ] per-tier retention wiring into F2's apply_retention
-- [ ] `timeless_rollup` TVF
-- [ ] `timeless_stats`/`timeless_series` awareness (per-tier chunk/byte
+- [x] per-tier retention wiring into F2's apply_retention
+- [x] `timeless_rollup` TVF
+- [x] `timeless_stats`/`timeless_series` awareness (per-tier chunk/byte
       counts)
 
 **Verification.**
 
-- [ ] property test: buckets bit-exact vs naive bucket math (dup ts,
+- [x] property test: buckets bit-exact vs naive bucket math (dup ts,
       buffered+flushed, negative ts, bucket-boundary samples)
-- [ ] lifecycle test: ingest 3 raw windows → rollup → raw pruned →
+- [x] lifecycle test: ingest 3 raw windows → rollup → raw pruned →
       rollup queries still answer; reopen + second process agree
-- [ ] rollback of a txn containing 'rollup' restores index + rows
+- [x] rollback of a txn containing 'rollup' restores index + rows
       (cli.sh 6-family addition)
-- [ ] crash round with rollup in the loop (tests/crash.sh variant)
-- [ ] oracle: teach the generator the 'rollup' command with a mirrored
-      naive bucket table, or explicitly document exclusion
-- [ ] bench: storage at ladder steady-state; rollup query vs raw-scan
+- [x] crash round with rollup in the loop (tests/crash.sh variant)
+- [x] oracle: DOCUMENTED EXCLUSION (oracle.rs header) — pre-aggregation
+      cannot be mirrored row-for-row; covered by the kernel property
+      suite, lifecycle tests, cli.sh §25, and the crash-suite tier decode
+- [x] bench: storage at ladder steady-state; rollup query vs raw-scan
       equivalent
 
 **Acceptance:** documented ladder demo — e.g. 30 days of 10s-scrape data
@@ -479,5 +480,6 @@ suites green.
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
 | 2026-07-26 | Plan | complete | This document; F1 next. |
+| 2026-07-26 | F3 | complete | Separate rollup index (raw scan now WHERE resolution=0 — zero risk to raw paths; deviation from the per-resolution-key sketch, allowed by "decide by read-path ergonomics"). Kernel bit-exact vs naive (200 rounds), ENC_ROLLUP_V1 zstd payload, rollups= arg, 'rollup' cmd (+auto at compact, 1-bucket settle, append-only watermark; late-past-settle data stays raw-only — documented v1 limit), per-tier retention, journaled rollup index (rollback test), timeless_rollup TVF, stats rows. 121+ workspace tests, cli.sh 26 sections incl. §25, crash suite WITH rollup in the kill window, oracle exclusion documented. Bench: tier read 4.1ms vs 34.5ms raw GROUP BY; build 80ms/1M pts; ingest+query unchanged (24.8M pts/s, 2.0ms). |
 | 2026-07-26 | F2 | complete | retention= on all three vtabs (native-unit persisted in _meta, data-time cutoff derived from index+buffer at maintenance, /16 advance guard). RED→GREEN: backfill test corrected to the chunk-granular contract. 114 workspace tests, cli.sh 25 sections incl. §24 (per-module prune, rollback-restores-pruned, 4-window steady state = exactly one epoch), oracle+crash via cli.sh, interleaved ingest A/B at parity. F3/F4 next. |
 | 2026-07-26 | F1 | complete | timeless_series + timeless_stats shipped with logs/traces shared_engine_for helpers and module probe. Acceptance: 1000-series catalog in 3.3ms warm (389ms first-call = one-time engine recovery), zero chunk reads. 108 workspace tests, cli.sh 24 sections incl. new §23 (9 checks: buffered/prune/DROP-recreate states, module routing errors). F2 next. |

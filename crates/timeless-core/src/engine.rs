@@ -2,6 +2,10 @@ use crate::store::{
     ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk, StoredSeries, ENC_PCO,
     ENC_RAW,
 };
+
+use crate::rollup::{rollup_buckets, RollupBucket, RollupTier};
+use crate::store::{EncodedRollupChunk, StoredRollupChunk};
+use crate::rollup::{decode_rollup_payload, encode_rollup_payload, ENC_ROLLUP_V1};
 use dashmap::DashMap;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -47,6 +51,9 @@ struct PartitionKey {
 /// (Ported from the donor fix in timeless_metrics — see
 /// the chunk-index shadowing fix (2026-07-22, see git history).)
 type ChunkKey = (PartitionKey, i64, u64);
+
+/// F3: rollup index key — (partition, resolution, first bucket ts, seq).
+type RollupKey = (PartitionKey, i64, i64, u64);
 
 /// Full identity of a series for reverse lookups and label queries.
 #[derive(Clone)]
@@ -575,6 +582,13 @@ pub struct Engine {
     /// the first refresh after a local flush/compact/prune/new-series
     /// does one (redundant but harmless) reload.
     catalog_gen: Mutex<Option<(i64, i64)>>,
+    /// F3 rollup index: (partition, resolution, min_ts, seq) → meta for
+    /// every persisted rollup chunk. Separate from the raw index ON
+    /// PURPOSE — every pre-F3 read path stays byte-identical. meta
+    /// semantics per StoredRollupChunk (max_ts = coverage END).
+    rollup_index: RwLock<BTreeMap<RollupKey, ChunkMeta>>,
+    /// The declared ladder (ascending resolutions). Empty = no rollups.
+    rollup_tiers: Mutex<Vec<RollupTier>>,
     /// F2 retention window in NATIVE ts units; 0 = disabled. Set from
     /// the persisted table argument after construction (idempotent —
     /// every connection loads the same _meta value).
@@ -668,6 +682,10 @@ struct TxnFrame {
     removed: Vec<(ChunkKey, ChunkMeta)>,
     /// Authoritative series rows first inserted inside this frame.
     series_added: HashSet<i64>,
+    /// F3: rollup index entries added / removed inside this frame (same
+    /// cancel rule as added/removed on the raw index).
+    rollup_added: HashSet<RollupKey>,
+    rollup_removed: Vec<(RollupKey, ChunkMeta)>,
 }
 
 #[derive(Default)]
@@ -724,6 +742,14 @@ impl Engine {
 
     fn index_write(&self) -> RwLockWriteGuard<'_, BTreeMap<ChunkKey, ChunkMeta>> {
         self.index.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn rollup_read(&self) -> RwLockReadGuard<'_, BTreeMap<RollupKey, ChunkMeta>> {
+        self.rollup_index.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn rollup_write(&self) -> RwLockWriteGuard<'_, BTreeMap<RollupKey, ChunkMeta>> {
+        self.rollup_index.write().unwrap_or_else(|e| e.into_inner())
     }
 
     fn next_chunk_seq(&self) -> u64 {
@@ -900,6 +926,8 @@ impl Engine {
         frame.added.clear();
         frame.removed.clear();
         frame.series_added.clear();
+        frame.rollup_added.clear();
+        frame.rollup_removed.clear();
         for entry in self.partitions.iter() {
             frame
                 .buffer_marks
@@ -957,6 +985,16 @@ impl Engine {
             }
         }
 
+        if !frame.rollup_added.is_empty() || !frame.rollup_removed.is_empty() {
+            let mut rollups = self.rollup_write();
+            for key in frame.rollup_added.drain() {
+                rollups.remove(&key);
+            }
+            for (key, meta) in frame.rollup_removed.drain(..) {
+                rollups.insert(key, meta);
+            }
+        }
+
         if !frame.series_added.is_empty() {
             let mut series = self.series_write();
             for id in frame.series_added.drain() {
@@ -999,6 +1037,12 @@ impl Engine {
             }
         }
         parent.added.extend(child.added.drain());
+        for (key, meta) in child.rollup_removed.drain(..) {
+            if !parent.rollup_added.remove(&key) {
+                parent.rollup_removed.push((key, meta));
+            }
+        }
+        parent.rollup_added.extend(child.rollup_added.drain());
         parent.series_added.extend(child.series_added.drain());
     }
 
@@ -1133,6 +1177,9 @@ impl Engine {
             }
         };
         Self::validate_chunk_series(&registry, &stored_chunks)?;
+        let stored_rollups = store
+            .scan_rollups()
+            .map_err(|err| format!("failed to scan rollup chunks: {err}"))?;
 
         let engine = Engine {
             store,
@@ -1155,10 +1202,13 @@ impl Engine {
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(None),
+            rollup_index: RwLock::new(BTreeMap::new()),
+            rollup_tiers: Mutex::new(Vec::new()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
         };
         engine.replace_index(stored_chunks);
+        engine.replace_rollup_index(stored_rollups);
         Ok(engine)
     }
 
@@ -2619,6 +2669,239 @@ impl Engine {
             .collect()
     }
 
+    // ── F3 rollup ladder (FEATURE_PLAN.md) ───────────────────────────
+
+    fn replace_rollup_index(&self, stored: Vec<StoredRollupChunk>) {
+        let mut rollups = self.rollup_write();
+        rollups.clear();
+        for chunk in stored {
+            let key = (
+                PartitionKey { series_id: chunk.series_id },
+                chunk.resolution,
+                chunk.meta.min_ts,
+                self.next_chunk_seq(),
+            );
+            rollups.insert(key, chunk.meta);
+        }
+    }
+
+    /// Configure the ladder (idempotent per connect, like set_retention).
+    pub fn set_rollups(&self, tiers: Vec<RollupTier>) {
+        *self.rollup_tiers.lock().unwrap_or_else(|e| e.into_inner()) = tiers;
+    }
+
+    pub fn rollup_tiers(&self) -> Vec<RollupTier> {
+        self.rollup_tiers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Max queryable RAW ts (chunk index + buffers) — the data-time
+    /// reference for retention and rollup settling.
+    fn raw_high_water(&self) -> Option<i64> {
+        let mut high_water = i64::MIN;
+        {
+            let index = self.index_read();
+            for meta in index.values() {
+                high_water = high_water.max(meta.max_ts);
+            }
+        }
+        for entry in self.partitions.iter() {
+            if let Some(&mx) = entry.value().timestamps.iter().max() {
+                high_water = high_water.max(mx);
+            }
+        }
+        (high_water != i64::MIN).then_some(high_water)
+    }
+
+    /// Produce rollup chunks for every tier: per series, buckets from
+    /// the per-(series, tier) watermark up to the SETTLE margin (one
+    /// full bucket width below the raw high-water mark). Append-only and
+    /// idempotent by construction — the watermark is the max coverage
+    /// end already persisted, so re-running produces nothing new.
+    /// DOCUMENTED v1 LIMIT: samples arriving later than the settle
+    /// margin are never re-rolled (they stay queryable in raw until raw
+    /// retention).
+    ///
+    /// Returns (chunks written, buckets written). Store writes happen
+    /// with NO engine locks held (invariant 1); index recording is
+    /// journaled for rollback.
+    pub fn rollup(&self) -> EngineResult<(usize, usize)> {
+        let tiers = self.rollup_tiers();
+        if tiers.is_empty() {
+            return Ok((0, 0));
+        }
+        let Some(high_water) = self.raw_high_water() else {
+            return Ok((0, 0));
+        };
+
+        let series_ids: Vec<i64> = {
+            let index = self.index_read();
+            let mut ids: Vec<i64> = index.keys().map(|(pk, _, _)| pk.series_id).collect();
+            ids.dedup();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+
+        let mut batch: Vec<EncodedRollupChunk> = Vec::new();
+        for tier in &tiers {
+            let r = tier.resolution;
+            // Eligible buckets: B + R - 1 <= high_water - R (one full
+            // bucket of settle). produce_to is that last coverage end.
+            let Some(limit) = high_water.checked_sub(r) else { continue };
+            let last_bucket = match limit.checked_sub(r - 1) {
+                Some(x) => x.div_euclid(r) * r,
+                None => continue,
+            };
+            let produce_to = last_bucket + r - 1;
+            for &sid in &series_ids {
+                let pk = PartitionKey { series_id: sid };
+                let watermark = {
+                    let rollups = self.rollup_read();
+                    rollups
+                        .range((pk, r, i64::MIN, u64::MIN)..=(pk, r, i64::MAX, u64::MAX))
+                        .map(|(_, meta)| meta.max_ts)
+                        .max()
+                };
+                let start = match watermark {
+                    Some(w) if w >= produce_to => continue,
+                    Some(w) => w.saturating_add(1),
+                    None => i64::MIN,
+                };
+                let samples = self.query_range_by_id(sid, start, produce_to)?;
+                if samples.is_empty() {
+                    continue;
+                }
+                let buckets = rollup_buckets(&samples, r);
+                let payload = encode_rollup_payload(&buckets)?;
+                batch.push(EncodedRollupChunk {
+                    series_id: sid,
+                    resolution: r,
+                    min_ts: buckets[0].bucket_ts,
+                    max_ts: buckets[buckets.len() - 1].bucket_ts + r - 1,
+                    bucket_count: buckets.len() as u32,
+                    payload,
+                });
+            }
+        }
+        if batch.is_empty() {
+            return Ok((0, 0));
+        }
+
+        // NO engine locks here: multi-row store DML can re-enter the
+        // vtab's savepoint hooks (invariant 1).
+        let locs = self
+            .store
+            .put_rollup_chunks(&batch)
+            .map_err(|err| format!("rollup chunk write failed: {err}"))?;
+        if locs.len() != batch.len() {
+            return Err(format!(
+                "rollup store wrote {} of {} chunks",
+                locs.len(),
+                batch.len()
+            ));
+        }
+
+        let buckets_total: usize = batch.iter().map(|c| c.bucket_count as usize).sum();
+        let mut journal = self.txn_guard();
+        let mut rollups = self.rollup_write();
+        for (chunk, loc) in batch.iter().zip(locs) {
+            let key = (
+                PartitionKey { series_id: chunk.series_id },
+                chunk.resolution,
+                chunk.min_ts,
+                self.next_chunk_seq(),
+            );
+            let meta = ChunkMeta {
+                min_ts: chunk.min_ts,
+                max_ts: chunk.max_ts,
+                point_count: chunk.bucket_count,
+                min_val: 0.0,
+                max_val: 0.0,
+                sum_val: 0.0,
+                loc,
+                encoding: ENC_ROLLUP_V1,
+            };
+            rollups.insert(key, meta);
+            if let Some(journal) = journal.as_deref_mut() {
+                journal.rollup_added.insert(key);
+            }
+        }
+        Ok((batch.len(), buckets_total))
+    }
+
+    /// Read rolled buckets for one series/tier overlapping [start, stop].
+    /// Sequential and rayon-free — vtab-callback safe. Only SETTLED
+    /// (rolled) buckets are returned; the raw tail is raw's job.
+    pub fn query_rollup_by_id(
+        &self,
+        series_id: i64,
+        resolution: i64,
+        start: i64,
+        stop: i64,
+    ) -> EngineResult<Vec<RollupBucket>> {
+        if resolution <= 0 {
+            return Err(format!("resolution must be positive, got {resolution}"));
+        }
+        let _transition = self.transition_read();
+        let pk = PartitionKey { series_id };
+        let metas: Vec<ChunkMeta> = {
+            let rollups = self.rollup_read();
+            rollups
+                .range((pk, resolution, i64::MIN, u64::MIN)..=(pk, resolution, i64::MAX, u64::MAX))
+                .filter(|(_, meta)| meta.min_ts <= stop && meta.max_ts >= start)
+                .map(|(_, meta)| meta.clone())
+                .collect()
+        };
+        let mut out = Vec::new();
+        for meta in metas {
+            let bytes = self
+                .store
+                .read_chunk(&meta.loc)
+                .map_err(|err| format!("rollup chunk read failed: {err}"))?;
+            let payload = &bytes.data[bytes.ts_range.clone()];
+            let buckets = decode_rollup_payload(payload)?;
+            out.extend(buckets.into_iter().filter(|b| {
+                b.bucket_ts <= stop && b.bucket_ts.saturating_add(resolution - 1) >= start
+            }));
+        }
+        Ok(out)
+    }
+
+    /// Per-tier retention: drop rollup chunks whose coverage ended
+    /// before `cutoff`. Mirrors delete_before's structure (transition
+    /// exclusive, journaled removals, rows deleted in the caller's
+    /// transaction).
+    fn delete_rollups_before(&self, resolution: i64, cutoff: i64) -> (usize, Vec<String>) {
+        let _transition = self.transition_write();
+        let mut journal = self.txn_guard();
+        let mut rollups = self.rollup_write();
+        let victims: Vec<(RollupKey, ChunkMeta)> = rollups
+            .iter()
+            .filter(|((_, res, _, _), meta)| *res == resolution && meta.max_ts < cutoff)
+            .map(|(k, m)| (*k, m.clone()))
+            .collect();
+        if victims.is_empty() {
+            return (0, Vec::new());
+        }
+        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, m)| m.loc.clone()).collect();
+        let errors = self.store.delete_chunks(&locs);
+        if !errors.is_empty() {
+            return (0, errors);
+        }
+        for (key, meta) in &victims {
+            rollups.remove(key);
+            if let Some(journal) = journal.as_deref_mut() {
+                if !journal.rollup_added.remove(key) {
+                    journal.rollup_removed.push((*key, meta.clone()));
+                }
+            }
+        }
+        (victims.len(), Vec::new())
+    }
+
     // ── Chunk reading ────────────────────────────────────────────────
 
     /// Read one chunk through the store and decode the points in
@@ -2692,36 +2975,52 @@ impl Engine {
     /// an engine lock. Manual 'prune:<ts>' is unaffected.
     pub fn apply_retention(&self) -> EngineResult<usize> {
         let retention = self.retention_native.load(Ordering::Relaxed);
-        if retention == 0 {
+        let tiers: Vec<RollupTier> = self
+            .rollup_tiers()
+            .into_iter()
+            .filter(|t| t.retention > 0)
+            .collect();
+        if retention == 0 && tiers.is_empty() {
             return Ok(0);
         }
-        let mut high_water = i64::MIN;
-        {
-            let index = self.index_read();
-            for meta in index.values() {
-                high_water = high_water.max(meta.max_ts);
-            }
-        }
-        for entry in self.partitions.iter() {
-            if let Some(&mx) = entry.value().timestamps.iter().max() {
-                high_water = high_water.max(mx);
-            }
-        }
-        if high_water == i64::MIN {
+        let Some(high_water) = self.raw_high_water() else {
             return Ok(0); // empty table
-        }
-        let cutoff = high_water.saturating_sub(retention);
-        let slice = (retention / 16).max(1);
+        };
+        // One advance guard for raw + all tiers, tracking the high-water
+        // mark itself; the slice is 1/16 of the SMALLEST active window.
+        let window_min = std::iter::once(retention)
+            .filter(|&r| r > 0)
+            .chain(tiers.iter().map(|t| t.retention))
+            .min()
+            .expect("at least one active window");
+        let slice = (window_min / 16).max(1);
         let floor = self.retention_floor.load(Ordering::Relaxed);
-        if floor != i64::MIN && cutoff < floor.saturating_add(slice) {
+        if floor != i64::MIN && high_water < floor.saturating_add(slice) {
             return Ok(0); // hasn't advanced meaningfully since last time
         }
-        let (chunks, _units, errors) = self.delete_before(cutoff);
-        if !errors.is_empty() {
-            return Err(format!("retention prune failed: {}", errors.join("; ")));
+        let mut pruned = 0usize;
+        if retention > 0 {
+            let cutoff = high_water.saturating_sub(retention);
+            let (chunks, _units, errors) = self.delete_before(cutoff);
+            if !errors.is_empty() {
+                return Err(format!("retention prune failed: {}", errors.join("; ")));
+            }
+            pruned += chunks;
         }
-        self.retention_floor.store(cutoff, Ordering::Relaxed);
-        Ok(chunks)
+        for tier in &tiers {
+            let cutoff = high_water.saturating_sub(tier.retention);
+            let (chunks, errors) = self.delete_rollups_before(tier.resolution, cutoff);
+            if !errors.is_empty() {
+                return Err(format!(
+                    "rollup tier {} retention prune failed: {}",
+                    tier.resolution,
+                    errors.join("; ")
+                ));
+            }
+            pruned += chunks;
+        }
+        self.retention_floor.store(high_water, Ordering::Relaxed);
+        Ok(pruned)
     }
 
     pub fn delete_before(&self, before_ts: i64) -> (usize, usize, Vec<String>) {
@@ -2851,6 +3150,10 @@ impl Engine {
             .scan()
             .map_err(|err| format!("failed to refresh chunk index: {err}"))?;
         Self::validate_chunk_series(&registry, &chunks)?;
+        let rollup_chunks = self
+            .store
+            .scan_rollups()
+            .map_err(|err| format!("failed to refresh rollup index: {err}"))?;
 
         let mut new_index = BTreeMap::new();
         for chunk in chunks {
@@ -2863,10 +3166,25 @@ impl Engine {
         // Lock order remains transition -> txn -> index -> series. Holding
         // both write locks prevents readers from pairing a newly visible
         // series with an old chunk snapshot.
+        let mut new_rollups = BTreeMap::new();
+        for chunk in rollup_chunks {
+            let key = (
+                PartitionKey { series_id: chunk.series_id },
+                chunk.resolution,
+                chunk.meta.min_ts,
+                self.next_chunk_seq(),
+            );
+            new_rollups.insert(key, chunk.meta);
+        }
+
+        // Lock order: transition → txn → index → series → rollup (other
+        // paths only ever hold ONE of these at a time).
         let mut index = self.index_write();
         let mut series = self.series_write();
+        let mut rollups = self.rollup_write();
         *index = new_index;
         *series = registry;
+        *rollups = new_rollups;
         self.resolve_cache.clear();
         *self.catalog_gen_lock() = observed;
         Ok(())

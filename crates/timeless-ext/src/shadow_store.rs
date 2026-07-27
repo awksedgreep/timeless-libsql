@@ -41,8 +41,8 @@ use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use timeless_core::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, ResolvedSeries, StoredChunk,
-    StoredSeries,
+    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk,
+    ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
 };
 
 use crate::{shared, sql_ident};
@@ -140,6 +140,9 @@ pub(crate) struct ShadowTableStore {
     /// with the actual rowid list (rowids are i64s we produced ourselves,
     /// so inlining them is injection-safe).
     delete_prefix: String,
+    /// F3 rollup persistence (same `_chunks` table, resolution > 0).
+    scan_rollups_sql: String,
+    insert_rollup_sql: String,
     /// Qualified `_series` identifier, kept for the bulk resolver whose
     /// multi-row VALUES statements are sized per call and so cannot be
     /// pre-formatted like the fixed-arity SQL above.
@@ -168,8 +171,20 @@ impl ShadowTableStore {
             // scan() deliberately does NOT select the blob columns: it runs
             // at every reopen and only needs metadata for the index.
             scan_sql: format!(
+                // resolution = 0: the RAW index only — rollup rows (F3)
+                // have their own scan and their own in-memory index.
                 "SELECT id, series_id, ts_min, ts_max, point_count, \
-                 min_val, max_val, sum_val, encoding FROM {chunks}"
+                 min_val, max_val, sum_val, encoding FROM {chunks} \
+                 WHERE resolution = 0"
+            ),
+            scan_rollups_sql: format!(
+                "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding \
+                 FROM {chunks} WHERE resolution > 0"
+            ),
+            insert_rollup_sql: format!(
+                "INSERT INTO {chunks} (series_id, ts_min, ts_max, point_count, \
+                 min_val, max_val, sum_val, encoding, resolution, ts_data, val_data) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 0, 0, ?5, ?6, ?7, x'')"
             ),
             // POC accounting: a full aggregate over the table. Fine while
             // tables are small; should become an incrementally-maintained
@@ -476,6 +491,66 @@ impl ChunkStore for ShadowTableStore {
             .map_err(|e| format!("chunk scan failed: {e}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("chunk scan row failed: {e}"))?;
+        Ok(rows)
+    }
+
+    /// F3: rollup rows live in the same `_chunks` table (resolution > 0,
+    /// payload in ts_data). One generation bump per call, same
+    /// transactional contract as put_chunks.
+    fn put_rollup_chunks(&self, chunks: &[EncodedRollupChunk]) -> Result<Vec<ChunkLoc>, String> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.insert_rollup_sql)
+            .map_err(|e| format!("prepare rollup insert failed: {e}"))?;
+        let mut locs = Vec::with_capacity(chunks.len());
+        for cp in chunks {
+            stmt.execute(params![
+                cp.series_id,
+                cp.min_ts,
+                cp.max_ts,
+                cp.bucket_count,
+                timeless_core::ENC_ROLLUP_V1,
+                cp.resolution,
+                &cp.payload,
+            ])
+            .map_err(|e| format!("rollup insert for series {} failed: {e}", cp.series_id))?;
+            locs.push(ChunkLoc::Row {
+                rowid: conn.last_insert_rowid(),
+            });
+        }
+        drop(stmt);
+        self.bump_chunk_generation(&conn)?;
+        Ok(locs)
+    }
+
+    fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.scan_rollups_sql)
+            .map_err(|e| format!("prepare rollup scan failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(StoredRollupChunk {
+                    series_id: r.get(1)?,
+                    resolution: r.get(2)?,
+                    meta: ChunkMeta {
+                        min_ts: r.get(3)?,
+                        max_ts: r.get(4)?,
+                        point_count: r.get::<_, i64>(5)? as u32,
+                        min_val: 0.0,
+                        max_val: 0.0,
+                        sum_val: 0.0,
+                        loc: ChunkLoc::Row { rowid: r.get(0)? },
+                        encoding: r.get::<_, i64>(6)? as u8,
+                    },
+                })
+            })
+            .map_err(|e| format!("rollup scan failed: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("rollup scan row failed: {e}"))?;
         Ok(rows)
     }
 

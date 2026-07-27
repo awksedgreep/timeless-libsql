@@ -108,6 +108,29 @@ The cutoff is *data time* (newest ingested timestamp minus the window),
 so it's deterministic, replay-safe, and inert for backfills; pruning is
 chunk/block-granular at flush/compact/optimize boundaries.
 
+**Rollup ladder (metrics)** — declare downsampling tiers and raw ages
+out while coarse aggregates survive, which is what makes "a year of
+metrics in one SQLite file" plausible:
+
+```sql
+CREATE VIRTUAL TABLE metrics USING timeless_metrics(
+  retention='14d',                  -- raw tier
+  rollups='5m@90d,1h@0');          -- resolution@retention, 0 = forever
+
+INSERT INTO metrics(metrics) VALUES ('rollup');  -- also runs at 'compact'
+
+SELECT labels, ts, value                         -- explicit tier reads
+  FROM timeless_rollup('metrics', 'cpu_usage', NULL, 300, :t0, :t1, 'avg');
+--                                           agg: avg|sum|min|max|count|last
+```
+
+Buckets are `[B, B+R)` with exactly-documented aggregate math
+(bit-verified against naive bucket computation); tiers fill as buckets
+settle (one bucket-width margin) and are append-only. Tier reads are
+explicit — no silent substitution for raw. On the 1M-point bench, the
+1-minute tier answers the per-bucket average in **4.1ms** vs 34.5ms for
+the GROUP BY over raw, and building the whole tier costs 80ms.
+
 ### Metrics
 
 ```sql

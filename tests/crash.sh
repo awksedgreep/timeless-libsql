@@ -63,7 +63,7 @@ import sys
 ext, rounds, m_n, l_n, t_n = sys.argv[1], *map(int, sys.argv[2:6])
 w = sys.stdout.write
 w(f".load {ext}\n")
-w("CREATE VIRTUAL TABLE metrics USING timeless_metrics;\n")
+w("CREATE VIRTUAL TABLE metrics USING timeless_metrics(rollups='60s@0');\n")
 w("CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');\n")
 w("CREATE VIRTUAL TABLE traces USING timeless_traces;\n")
 for r in range(1, rounds + 1):
@@ -85,6 +85,7 @@ for r in range(1, rounds + 1):
         w("INSERT INTO logs(logs) VALUES ('optimize');\n")
         w("INSERT INTO traces(traces) VALUES ('optimize');\n")
         w("INSERT INTO metrics(metrics) VALUES ('compact');\n")
+        w("INSERT INTO metrics(metrics) VALUES ('rollup');\n")
     w("COMMIT;\n")
     w(f"SELECT 'WM {r}';\n")
 PY
@@ -126,6 +127,16 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
   }
   IFS='|' read -r mc lc tc <<< "$counts"
   pass "reopen + full decode: metrics=$mc logs=$lc traces=$tc"
+
+  # 2b. F3: every surviving rollup chunk must decode (count forces a
+  #     full read of the 60s tier); errors here mean a torn rollup row
+  #     escaped the transaction, which must be impossible.
+  rc=$(sqlite3 "$DB" ".load $EXT" \
+    "SELECT COUNT(*) FROM timeless_rollup('metrics', 'm0', NULL, 60, 0, 9999999999, 'count');" 2>&1) || {
+    fail "rollup reopen/decode failed: $rc"
+    continue
+  }
+  pass "rollup tier readable post-crash ($rc buckets for m0)"
 
   # 3. Durability floor: everything flushed at the last watermark must
   #    be present (>=, see header). If WM=0 the kill landed before the

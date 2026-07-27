@@ -67,6 +67,41 @@ pub(crate) fn parse_retention(value: &str, native_per_second: i64) -> Result<i64
     Ok(native)
 }
 
+/// Parse the F3 `rollups=` ladder: comma-separated `RES@RET` pairs where
+/// RES/RET use the retention duration syntax (RET `0` = keep forever),
+/// e.g. `rollups='5m@90d,1h@0'`. Returns the validated tiers plus the
+/// native storage spec ("300:7776000,3600:0") that _meta persists and
+/// timeless_core::parse_ladder reads back.
+pub(crate) fn parse_rollups(
+    value: &str,
+    native_per_second: i64,
+) -> Result<(Vec<timeless_core::RollupTier>, String), String> {
+    let mut parts = Vec::new();
+    for tier in value.split(',') {
+        let tier = tier.trim();
+        if tier.is_empty() {
+            continue;
+        }
+        let (res, ret) = tier
+            .split_once('@')
+            .ok_or_else(|| format!("rollups: tier {tier:?} — expected RESOLUTION@RETENTION"))?;
+        let resolution = parse_retention(res, native_per_second)
+            .map_err(|e| format!("rollups: tier {tier:?} resolution: {e}"))?;
+        let retention = match ret.trim() {
+            "0" | "forever" => 0,
+            other => parse_retention(other, native_per_second)
+                .map_err(|e| format!("rollups: tier {tier:?} retention: {e}"))?,
+        };
+        parts.push(format!("{resolution}:{retention}"));
+    }
+    let spec = parts.join(",");
+    let tiers = timeless_core::parse_ladder(&spec).map_err(|e| format!("rollups: {e}"))?;
+    if tiers.is_empty() {
+        return Err("rollups: empty ladder".into());
+    }
+    Ok((tiers, spec))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +119,21 @@ mod tests {
             ]
         );
         assert!(parse_kv_args(&[b"noequals" as &[u8]]).is_err());
+    }
+
+    #[test]
+    fn rollups_parsing() {
+        // metrics units (seconds native)
+        let (tiers, spec) = parse_rollups("5m@90d,1h@0", 1).unwrap();
+        assert_eq!(spec, "300:7776000,3600:0");
+        assert_eq!(tiers.len(), 2);
+        assert_eq!((tiers[0].resolution, tiers[0].retention), (300, 7_776_000));
+        assert_eq!((tiers[1].resolution, tiers[1].retention), (3600, 0));
+        // validation flows through parse_ladder
+        assert!(parse_rollups("1h@0,5m@0", 1).is_err()); // not ascending
+        assert!(parse_rollups("5m@0,7m@0", 1).is_err()); // not a multiple
+        assert!(parse_rollups("", 1).is_err());
+        assert!(parse_rollups("5m", 1).is_err()); // missing @
     }
 
     #[test]

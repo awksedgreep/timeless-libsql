@@ -1,5 +1,13 @@
 //! oracle: plain-table oracle property test (hardening session, Job 2).
 //!
+//! F3 EXCLUSION (FEATURE_PLAN.md): the oracle does NOT exercise the
+//! 'rollup' command — rollup output is pre-aggregation, so a plain-table
+//! mirror cannot check it row-for-row the way it checks raw queries.
+//! Rollup correctness is pinned instead by the bit-exact kernel property
+//! suite (f3_rollup_kernel.rs), the engine lifecycle tests
+//! (f3_rollup_lifecycle.rs), cli.sh section 25's SQL cross-checks, and
+//! the crash suite's post-crash tier decode.
+//!
 //!   oracle <path-to-libtimeless_ext.so> [seed seed ...]
 //!
 //! One database, six tables: the three timeless vtabs (metrics, logs,

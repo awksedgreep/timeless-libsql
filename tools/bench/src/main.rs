@@ -548,6 +548,68 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
     println!("    timeless_grid TVF:   {q2_rows} grid rows, {q2_ms:.1} ms");
     println!("    timeless_window TVF (5-min avg): {w_rows} rows, {w_ms:.1} ms");
 
+    // F3 rollup ladder: the same 1M points into a laddered table
+    // (1-minute tier, ms units), then the dashboard aggregate served
+    // from the TIER vs computed from raw with GROUP BY.
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE metrics_r USING timeless_metrics(rollups='60000@0');",
+    )
+    .expect("create laddered vtab");
+    {
+        conn.execute_batch("BEGIN").unwrap();
+        let mut stmt = conn
+            .prepare("INSERT INTO metrics_r(metrics_r) VALUES (?1)")
+            .expect("prepare laddered ingest");
+        for b in 0..N_POINTS / BLOB_POINTS {
+            let steps = BLOB_POINTS / N_SERIES;
+            let blob = encode_blob(data, b * steps, (b + 1) * steps);
+            stmt.execute(params![blob]).expect("laddered ingest");
+        }
+        drop(stmt);
+        conn.execute_batch("COMMIT").unwrap();
+    }
+    conn.execute("INSERT INTO metrics_r(metrics_r) VALUES ('flush')", [])
+        .expect("laddered flush");
+    let tr = Instant::now();
+    conn.execute("INSERT INTO metrics_r(metrics_r) VALUES ('rollup')", [])
+        .expect("rollup");
+    let rollup_build_ms = tr.elapsed().as_secs_f64() * 1e3;
+
+    let tq = Instant::now();
+    let tier_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM timeless_rollup('metrics_r', 'cpu.usage', NULL, 60000, ?1, ?2, 'avg')",
+            params![g_start, g_stop],
+            |r| r.get(0),
+        )
+        .expect("rollup tier query");
+    let tier_ms = tq.elapsed().as_secs_f64() * 1e3;
+
+    let tg = Instant::now();
+    let raw_groups: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (SELECT labels, (ts / 60000) * 60000 AS b, AVG(value)
+              FROM metrics_r WHERE name = 'cpu.usage' GROUP BY labels, b)",
+            [],
+            |r| r.get(0),
+        )
+        .expect("raw group-by");
+    let groupby_ms = tg.elapsed().as_secs_f64() * 1e3;
+
+    let (rollup_bytes, rollup_chunks): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(length(ts_data)), 0), COUNT(*)
+             FROM metrics_r_chunks WHERE resolution > 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("rollup storage stats");
+
+    println!("- F3 rollup ladder (1-min tier over the same 1M points):");
+    println!("    'rollup' build: {rollup_build_ms:.1} ms; tier storage {rollup_bytes} bytes in {rollup_chunks} chunks");
+    println!("    tier read (avg/bucket, settled range): {tier_rows} rows, {tier_ms:.1} ms");
+    println!("    raw GROUP BY equivalent (all buckets): {raw_groups} groups, {groupby_ms:.1} ms");
+
     // Bit-exact spot check: 3 deterministic (series, offset) points. The
     // dataset is still in memory, so "expected" is the exact f64 we
     // generated; anything but to_bits() equality is a lossy pipeline.

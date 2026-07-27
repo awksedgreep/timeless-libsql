@@ -62,7 +62,9 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     const SERIES: Module<SeriesTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_series", &SERIES, None::<()>)?;
     const STATS: Module<StatsTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_stats", &STATS, None::<()>)
+    db.create_module(c"timeless_stats", &STATS, None::<()>)?;
+    const ROLLUP: Module<RollupTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_rollup", &ROLLUP, None::<()>)
 }
 
 // Output columns (both modules).
@@ -80,9 +82,10 @@ pub(crate) struct KernelArgs {
     start: i64,
     stop: i64,
     step: i64,
-    /// lookback (grid) or window (window).
+    /// lookback (grid) or window (window) or resolution (rollup).
     width: i64,
-    agg: Option<AggFn>,
+    /// Raw agg argument; each module parses its own vocabulary.
+    agg_name: Option<String>,
 }
 
 /// Decode the hidden-column EQ args per the best_index bitmask.
@@ -94,7 +97,6 @@ fn decode_args(
     required_mask: c_int,
     idx_num: c_int,
     args: &Filters<'_>,
-    has_agg: bool,
 ) -> Result<KernelArgs> {
     let missing: Vec<&str> = names
         .iter()
@@ -113,16 +115,19 @@ fn decode_args(
         )));
     }
 
-    // argv slots were assigned in canonical order over the provided args.
+    // argv slots were assigned in canonical (declaration) order over the
+    // provided args; map them back BY NAME so modules may declare any
+    // argument layout (grid/window/rollup differ).
+    let mut slot_of: Vec<Option<usize>> = vec![None; names.len()];
     let mut slot = 0usize;
-    let mut take = |i: usize| -> Option<usize> {
+    for (i, s_of) in slot_of.iter_mut().enumerate() {
         if idx_num & (1 << i) != 0 {
-            let s = slot;
+            *s_of = Some(slot);
             slot += 1;
-            Some(s)
-        } else {
-            None
         }
+    }
+    let find = |name: &str| -> Option<usize> {
+        names.iter().position(|n| *n == name).and_then(|i| slot_of[i])
     };
 
     let get_text = |s: usize, what: &str| -> Result<String> {
@@ -134,16 +139,19 @@ fn decode_args(
         v.ok_or_else(|| module_err(format!("{module}: {what} must not be NULL")))
     };
 
-    let tbl_slot = take(0).unwrap();
-    let metric_slot = take(1).unwrap();
-    let filter_slot = take(2);
-    let start_slot = take(3).unwrap();
-    let stop_slot = take(4).unwrap();
-    let step_slot = take(5).unwrap();
-    let width_slot = take(6).unwrap();
-    let agg_slot = if has_agg { take(7) } else { None };
+    let tbl_slot = find("tbl").expect("tbl is required by every module");
+    let metric_slot = find("metric").expect("metric is required by every module");
+    let filter_slot = find("filter");
+    let start_slot = find("start").expect("start is required by every module");
+    let stop_slot = find("stop").expect("stop is required by every module");
+    let step_slot = find("step");
+    let width_slot = find("lookback")
+        .or_else(|| find("window"))
+        .or_else(|| find("resolution"))
+        .expect("every module declares a width-family argument");
+    let agg_slot = find("agg");
 
-    let spec = get_text(tbl_slot, names[0])?;
+    let spec = get_text(tbl_slot, "tbl")?;
     // 'schema.table' selects an attached schema; plain 'table' = main.
     // (A MAIN-schema table name containing a literal dot needs the vtab
     // spelled 'main.<name>'.)
@@ -164,35 +172,24 @@ fn decode_args(
         },
     };
 
-    let agg = match agg_slot {
+    let agg_name = match agg_slot {
         None => None,
-        Some(s) => {
-            let name = get_text(s, "agg")?;
-            Some(match name.as_str() {
-                "sum" => AggFn::Sum,
-                "min" => AggFn::Min,
-                "max" => AggFn::Max,
-                "count" => AggFn::Count,
-                "avg" => AggFn::Avg,
-                other => {
-                    return Err(module_err(format!(
-                        "{module}: unknown agg {other:?}; expected one of: sum, min, max, count, avg"
-                    )))
-                }
-            })
-        }
+        Some(s) => Some(get_text(s, "agg")?),
     };
 
     Ok(KernelArgs {
         database,
         table,
-        metric: get_text(metric_slot, names[1])?,
+        metric: get_text(metric_slot, "metric")?,
         filter,
-        start: get_int(start_slot, names[3])?,
-        stop: get_int(stop_slot, names[4])?,
-        step: get_int(step_slot, names[5])?,
-        width: get_int(width_slot, names[6])?,
-        agg,
+        start: get_int(start_slot, "start")?,
+        stop: get_int(stop_slot, "stop")?,
+        step: match step_slot {
+            Some(slot) => get_int(slot, "step")?,
+            None => 0, // module has no step argument (rollup)
+        },
+        width: get_int(width_slot, "width")?,
+        agg_name,
     })
 }
 
@@ -325,7 +322,6 @@ impl KernelVTab for GridTab {
     const MODULE: &'static str = "timeless_grid";
     const ARGS: &'static [&'static str] = GRID_ARGS;
     const REQUIRED: c_int = GRID_REQUIRED;
-    const HAS_AGG: bool = false;
 
     fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>> {
         run_kernel(db, ka, |engine, sid| {
@@ -390,10 +386,21 @@ impl KernelVTab for WindowTab {
     const MODULE: &'static str = "timeless_window";
     const ARGS: &'static [&'static str] = WINDOW_ARGS;
     const REQUIRED: c_int = WINDOW_REQUIRED;
-    const HAS_AGG: bool = true;
 
     fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>> {
-        let agg = ka.agg.expect("agg is a required window argument");
+        let agg = match ka.agg_name.as_deref() {
+            Some("sum") => AggFn::Sum,
+            Some("min") => AggFn::Min,
+            Some("max") => AggFn::Max,
+            Some("count") => AggFn::Count,
+            Some("avg") => AggFn::Avg,
+            other => {
+                return Err(module_err(format!(
+                    "timeless_window: unknown agg {:?}; expected one of: sum, min, max, count, avg",
+                    other.unwrap_or("<missing>")
+                )))
+            }
+        };
         run_kernel(db, ka, |engine, sid| {
             engine
                 .query_window_agg_by_id(sid, ka.start, ka.stop, ka.step, ka.width, agg)
@@ -411,7 +418,6 @@ pub(crate) trait KernelVTab {
     const MODULE: &'static str;
     const ARGS: &'static [&'static str];
     const REQUIRED: c_int;
-    const HAS_AGG: bool;
     fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>>;
 }
 
@@ -440,7 +446,7 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         // A NULL in tbl/metric/int args is an error (decode_args); NULL
         // filter means "no filter" and is handled there too.
-        let ka = decode_args(T::MODULE, T::ARGS, T::REQUIRED, idx_num, args, T::HAS_AGG)?;
+        let ka = decode_args(T::MODULE, T::ARGS, T::REQUIRED, idx_num, args)?;
         self.rows = T::run(self.db, &ka)?;
         self.pos = 0;
         Ok(())
@@ -473,6 +479,115 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
 
     fn rowid(&self) -> Result<i64> {
         Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F3: timeless_rollup — read one explicit rollup tier
+// ---------------------------------------------------------------------------
+
+const ROLLUP_ARGS: &[&str] = &[
+    "tbl", "metric", "filter", "resolution", "start", "stop", "agg",
+];
+// All required except filter (bit 2).
+const ROLLUP_REQUIRED: c_int = 0b111_1011;
+
+/// timeless_rollup('metrics', 'cpu', NULL, 300, :t0, :t1, 'avg') — rows
+/// (labels, bucket_ts, value) from the SETTLED buckets of one declared
+/// tier. avg = sum/count at read; 'last' returns the bucket's last
+/// sample value. Explicitly-tier reads only: no silent substitution for
+/// raw, no raw tail merge (the raw table answers recent windows).
+#[repr(C)]
+pub(crate) struct RollupTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for RollupTab {
+    type Aux = ();
+    type Cursor = KernelCursor<'vtab, RollupTab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, resolution HIDDEN, \
+                            start HIDDEN, stop HIDDEN, agg HIDDEN)"),
+            RollupTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, ROLLUP_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<KernelCursor<'vtab, RollupTab>> {
+        Ok(KernelCursor::new(self.db))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RollupAgg {
+    Avg,
+    Sum,
+    Min,
+    Max,
+    Count,
+    Last,
+}
+
+impl KernelVTab for RollupTab {
+    const MODULE: &'static str = "timeless_rollup";
+    const ARGS: &'static [&'static str] = ROLLUP_ARGS;
+    const REQUIRED: c_int = ROLLUP_REQUIRED;
+
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>> {
+        // KernelArgs reuse: width carries `resolution`; agg arrives as a
+        // string in ka.agg_name (rollup vocabulary is larger than AggFn).
+        let agg = match ka.agg_name.as_deref() {
+            Some("avg") => RollupAgg::Avg,
+            Some("sum") => RollupAgg::Sum,
+            Some("min") => RollupAgg::Min,
+            Some("max") => RollupAgg::Max,
+            Some("count") => RollupAgg::Count,
+            Some("last") => RollupAgg::Last,
+            other => {
+                return Err(module_err(format!(
+                    "timeless_rollup: unknown agg {:?}; expected one of: avg, sum, min, max, count, last",
+                    other.unwrap_or("<missing>")
+                )))
+            }
+        };
+        run_kernel(db, ka, |engine, sid| {
+            let buckets = engine
+                .query_rollup_by_id(sid, ka.width, ka.start, ka.stop)
+                .map_err(module_err)?;
+            Ok(buckets
+                .into_iter()
+                .map(|b| {
+                    let value = match agg {
+                        RollupAgg::Avg => b.sum / b.count as f64,
+                        RollupAgg::Sum => b.sum,
+                        RollupAgg::Min => b.min,
+                        RollupAgg::Max => b.max,
+                        RollupAgg::Count => b.count as f64,
+                        RollupAgg::Last => b.last_val,
+                    };
+                    (b.bucket_ts, value)
+                })
+                .collect())
+        })
     }
 }
 
@@ -795,6 +910,23 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ("ts_min", opt_ts(info.oldest_ts)),
                     ("ts_max", opt_ts(info.newest_ts)),
                 ]);
+                // F3 ladder visibility: the declared tiers (native spec)
+                // and how many rollup chunks exist across them.
+                let conn = shared::current_conn().map_err(module_err)?;
+                let tiers = crate::shadow_meta::load_meta_text(&conn, &database, &table, "rollups")
+                    .map_err(module_err)?;
+                rows.push((
+                    "rollup_tiers",
+                    tiers.map_or(Value::Null, Value::Text),
+                ));
+                let sql = format!(
+                    "SELECT COUNT(*) FROM {} WHERE resolution > 0",
+                    crate::sql_ident::qualified_shadow(&database, &table, "chunks")
+                );
+                rows.push((
+                    "rollup_chunks",
+                    Value::Integer(conn.query_row(&sql, [], |r| r.get(0))?),
+                ));
             }
             TimelessModule::Logs => {
                 let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
