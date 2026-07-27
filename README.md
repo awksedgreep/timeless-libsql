@@ -25,6 +25,14 @@ SELECT * FROM traces WHERE trace_id = x'4bf92f3577b34da6a3ce929d0e0e4736';
 INSERT INTO metrics(metrics) VALUES (readfile('scrape.prom'));
 ```
 
+**New here and just want to use it?** Read the
+**[User's Guide](docs/GUIDE.md)** — plain-SQL recipes for compression and
+speed, no internals required. Prefer it networked? **[SQLD.md](docs/SQLD.md)**
+serves the same tables over HTTP via self-hosted sqld — any language that can
+POST JSON is a client — and the **[Livebook tour](docs/tour.livemd)** walks
+all of it interactively from Elixir, charts included. The rest of this README
+is for people who want to know how it works and how it's measured.
+
 Chunks and blocks are compressed ([pco](https://github.com/pcodec/pcodec) +
 adaptive columnar encoding) and stored in shadow tables **inside the same
 database file** — so transactions, backup, and libSQL replication come from
@@ -233,6 +241,10 @@ sqld --extensions-path ./ext-dir   # sha256 trusted.lst; loads into every connec
 # curl another (fresh pooled connection): rows come back, name pushdown, 0.19ms
 ```
 
+Setup, curl examples, and container notes in [docs/SQLD.md](docs/SQLD.md);
+an interactive walkthrough (Elixir + charts, zero native deps) in the
+[Livebook tour](docs/tour.livemd).
+
 ## Numbers
 
 Measured 2026-07-22 on an Apple M5 Pro (macOS, Rust 1.97), second run
@@ -330,6 +342,10 @@ limits, kept honestly ([full list](RESULTS.md#known-limits-documented-accepted-f
 ## Repository layout
 
 ```
+docs/GUIDE.md       user's guide — plain-SQL usage, no internals
+docs/SQLD.md        serving telemetry over HTTP with self-hosted sqld
+docs/tour.livemd    interactive Livebook tour (SQL over HTTP from Elixir)
+docs/DBHEALTH.md    design draft: dbhealth, SQLite self-monitoring vtab
 crates/
   timeless-core/    engines: pco chunk store (metrics), columnar block store
                     (logs), span block store (traces) — no SQLite dependency
