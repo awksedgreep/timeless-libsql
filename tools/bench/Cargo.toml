@@ -7,7 +7,7 @@
 
 [package]
 name = "bench"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # Five binaries, one crate: the Session 4 metrics bench (bench), the
