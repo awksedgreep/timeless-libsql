@@ -364,12 +364,43 @@ compressed telemetry SQL, zero client changes.
   cursor uses sequential reads).
 - ts-equality is re-checked by SQLite, only range/name are pruned.
 
+## dbhealth (timeless_health) v1 — 2026-07-27
+
+The SQLite-self-monitoring vtab (docs/DBHEALTH.md), measured on Linux
+x86_64 (Arch, Rust 1.97), 1000 `'sample'` commands, 16 v1 series:
+
+- **Sample cost:** 29 µs/sample buffered (`flush_every=100`);
+  2.9 ms/sample with per-sample durable flush (`flush_every=1`, the
+  default — dominated by the per-commit journal I/O, i.e. the price of
+  "every sample durable", invisible at cron cadences).
+- **Storage:** 15,993 points → 3,609 bytes after 'compact' —
+  **0.23 B/point**, the friendly-data compression class the design doc
+  predicted (≈ 2 MB/year at 1-minute sampling; a plain table stores the
+  same points at ~52 B/row). `flush_every=1` produces one-point chunk
+  confetti by design (15,993 chunks, 831 KB) — 'compact' collapses it
+  16 chunks; put it in the same cron as prune.
+- **Oracle checks (cli.sh section 22):** sampled `db_file_bytes` equals
+  a stat(2) taken before the sampling process started; forced cache
+  misses (`PRAGMA cache_size=2` + 3000-row churn) appear in
+  `cache_misses` deltas; hit ratio stays in [0,1].
+- **Contract checks:** first sample on a connection emits gauges only
+  (9 series — connection counters have no baseline); rolled-back
+  samples leave no rows; `flush_every` persists in `_meta` across
+  reopen; a buffered sample lost with its process is REALLY lost
+  (asserted, not hidden) and an explicit 'flush' keeps it.
+- **Default decision:** `flush_every=1`. The cron pattern
+  (`sqlite3 db "...('sample')"`, process exits) would silently lose
+  every sample at any higher default — the buffer dies with the
+  process and a fresh process never reaches sample N. Long-lived apps
+  raise it and get the 29 µs path.
+
 ## Reproduce
 
 ```sh
 cargo build --release -p timeless-ext
-./tests/cli.sh              # 21 sections, incl. oracle (19), crash (20),
-                            # multi-connection shared engine (21)
+./tests/cli.sh              # 22 sections, incl. oracle (19), crash (20),
+                            # multi-connection shared engine (21),
+                            # dbhealth (22)
 tests/crash.sh target/release/libtimeless_ext.so            # standalone
 cd tools/bench
 cargo run --release --bin oracle -- ../../target/release/libtimeless_ext.so [seed]

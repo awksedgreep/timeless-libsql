@@ -15,7 +15,8 @@ use this extension. No query DSL, no server, no config files.
 - [7. Querying: what's fast, what's slow](#7-querying-whats-fast-whats-slow)
 - [8. Housekeeping: optimize, compact, prune](#8-housekeeping-optimize-compact-prune)
 - [9. Common errors and what they mean](#9-common-errors-and-what-they-mean)
-- [10. Cheat sheet](#10-cheat-sheet)
+- [10. Monitor the database itself: dbhealth](#10-monitor-the-database-itself-dbhealth)
+- [11. Cheat sheet](#11-cheat-sheet)
 
 ---
 
@@ -403,15 +404,53 @@ Two behaviors that surprise people but are intentional:
   auto-flushed) is lost if the process dies. Never corrupted, just not yet
   durable. Flush at the cadence you can afford to lose.
 
-## 10. Cheat sheet
+## 10. Monitor the database itself: dbhealth
+
+The extension can also store SQLite's *own* health history — cache hit
+rates, bloat, WAL growth, memory — compressed, inside the same file:
+
+```sql
+CREATE VIRTUAL TABLE dbhealth USING timeless_health;
+
+-- Take a snapshot (put this in cron, or your app's timer loop):
+INSERT INTO dbhealth(dbhealth) VALUES ('sample');
+
+-- It reads like any metrics table:
+SELECT ts, value FROM dbhealth
+ WHERE name = 'cache_hit_ratio' AND ts > unixepoch() - 86400;
+
+-- Is the file bloating? Should you vacuum? Ask the data:
+SELECT max(value) FROM dbhealth
+ WHERE name = 'bloat_ratio' AND ts > unixepoch() - 7*86400;
+```
+
+Each `'sample'` records ~16 series (`cache_hits`, `cache_misses`,
+`cache_hit_ratio`, `cache_spills`, `db_pages`, `freelist_pages`,
+`bloat_ratio`, `db_file_bytes`, `wal_file_bytes`, memory gauges, …) and
+by default flushes immediately, so a cron-driven `sqlite3` one-liner is
+durable. Storage is negligible — health data compresses to ~0.23 bytes
+per point, about 2 MB for a *year* of 1-minute samples; run `'compact'`
+occasionally (same cron) to merge the small chunks.
+
+Two things to know: cache/counter *deltas* describe the connection that
+issued `'sample'`, so one-shot CLI sampling records the 9 database-level
+gauges while the full 16-series inventory (including `cache_hit_ratio`)
+needs a connection that samples more than once — an app timer, or several
+samples in one script. And if your app holds the connection open, create
+the table with `flush_every=20` to make sampling ~100x cheaper in
+exchange for a bounded loss window. Full details, design, and the metric
+inventory: [DBHEALTH.md](DBHEALTH.md).
+
+## 11. Cheat sheet
 
 ```sql
 .load ./libtimeless_ext
 
 -- CREATE
-CREATE VIRTUAL TABLE metrics USING timeless_metrics;
-CREATE VIRTUAL TABLE logs    USING timeless_logs(index_keys='service,host,status');
-CREATE VIRTUAL TABLE traces  USING timeless_traces;
+CREATE VIRTUAL TABLE metrics  USING timeless_metrics;
+CREATE VIRTUAL TABLE logs     USING timeless_logs(index_keys='service,host,status');
+CREATE VIRTUAL TABLE traces   USING timeless_traces;
+CREATE VIRTUAL TABLE dbhealth USING timeless_health;   -- the db monitors itself
 
 -- INSERT                         units:
 INSERT INTO metrics(name, ts, value, labels) VALUES (:n, :s,  :v, :json);      -- ts: seconds
@@ -421,8 +460,9 @@ INSERT INTO traces(trace_id, span_id, name, service, start_ts) VALUES (...);   -
 -- COMMANDS (INSERT INTO <table>(<table>) VALUES ...)
 'flush'        -- persist buffer; do this at your loss-tolerance cadence
 'optimize'     -- logs/traces: merge + recompress blocks (occasionally)
-'compact'      -- metrics: merge small chunks (occasionally)
+'compact'      -- metrics/dbhealth: merge small chunks (occasionally)
 'prune:<ts>'   -- retention; ts in the table's own unit (s / ms / ns)
+'sample'       -- dbhealth only: snapshot SQLite health counters now
 
 -- QUERY (accelerated predicates)
 ... WHERE name = 'cpu' AND ts BETWEEN :a AND :b                 -- metrics

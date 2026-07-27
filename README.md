@@ -87,6 +87,12 @@ sqlite3 demo.db \
 | `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column = |
 | `timeless_traces` | `(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes)` | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
 
+A fourth, meta module rides the metrics engine: **`timeless_health`**
+(**dbhealth**) samples SQLite's *own* health — cache hit rates, bloat, WAL
+growth — into the same compressed store, so the database monitors itself
+(`INSERT INTO dbhealth(dbhealth) VALUES ('sample')`; ~0.23 B/point,
+[docs/DBHEALTH.md](docs/DBHEALTH.md)).
+
 All three share the same lifecycle: inserts land in an in-memory buffer
 (queryable immediately, auto-flushed at a size threshold), `'flush'` encodes
 the buffer into compressed blocks riding the host transaction, and reads
@@ -345,7 +351,7 @@ limits, kept honestly ([full list](RESULTS.md#known-limits-documented-accepted-f
 docs/GUIDE.md       user's guide — plain-SQL usage, no internals
 docs/SQLD.md        serving telemetry over HTTP with self-hosted sqld
 docs/tour.livemd    interactive Livebook tour (SQL over HTTP from Elixir)
-docs/DBHEALTH.md    design draft: dbhealth, SQLite self-monitoring vtab
+docs/DBHEALTH.md    dbhealth: SQLite self-monitoring vtab (v1 + design)
 crates/
   timeless-core/    engines: pco chunk store (metrics), columnar block store
                     (logs), span block store (traces) — no SQLite dependency

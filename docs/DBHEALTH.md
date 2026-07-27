@@ -1,6 +1,10 @@
 # dbhealth — database health telemetry, stored in the database it measures
 
-**Status: design draft, 2026-07-27. No code yet.**
+**Status: v1 IMPLEMENTED, 2026-07-27** (`timeless_health` in
+`crates/timeless-ext/src/health_vtab.rs`; tests in cli.sh section 22;
+measured numbers in [RESULTS.md](../RESULTS.md#dbhealth-timeless_health-v1--2026-07-27)).
+v1.5 (meta-telemetry) and v2 (statement profiling — **explicitly deferred**)
+remain design-stage.
 
 ```sql
 .load ./libtimeless_ext
@@ -64,7 +68,7 @@ Two properties fall out for free by riding the existing engine:
 
 ```sql
 -- zero-config create; optional args shown with defaults
-CREATE VIRTUAL TABLE dbhealth USING timeless_health(flush_every=20);
+CREATE VIRTUAL TABLE dbhealth USING timeless_health(flush_every=1);
 
 INSERT INTO dbhealth(dbhealth) VALUES ('sample');      -- v1: counters + pragmas + file sizes
 INSERT INTO dbhealth(dbhealth) VALUES ('flush');       -- inherited lifecycle commands
@@ -172,20 +176,29 @@ The metrics engine's default auto-flush (4096 points/series) would hold ~68
 days of 1-minute samples in memory — useless for the crash-forensics case,
 where the samples *leading up to the crash* are the valuable ones. Options:
 
-- **(a) Flush every sample.** Max durability; produces 1-point chunks →
-  chunk-count bloat, leans on `compact`. Rejected as default.
-- **(b) `flush_every=N` samples (default 20).** Bounded loss window (20 min
-  at 1-min cadence), chunks of reasonable size, `compact` merges the rest.
-  **Recommended default.**
+- **(a) Flush every sample (`flush_every=1`).** Max durability; produces
+  1-point chunks → chunk-count bloat, leans on `compact`.
+  **CHOSEN AS DEFAULT during implementation** — see below.
+- **(b) `flush_every=N` samples.** Bounded loss window (N minutes at 1-min
+  cadence), fewer/larger chunks, 29 µs/sample measured. Recommended for
+  long-lived apps sampling on a timer.
 - **(c) Piggyback on host commits** (flush health buffer when the host app
   commits anyway). Requires the commit hook — singleton, conflict-prone,
   deferred to v2 as an opt-in.
 
-`flush_every=1` gives paranoid mode via the existing arg — no new machinery.
+**Why the default flipped from the draft's 20 to 1:** the cron pattern —
+`sqlite3 db ".load …" "INSERT …('sample')"`, process exits — is a headline
+use case, and with any N > 1 it loses *every* sample silently: the buffer
+dies with the process, and each fresh process restarts the count at 0,
+never reaching N. A default must not silently destroy data in a documented
+usage pattern. The cost is real but bounded: 2.9 ms/sample (commit I/O)
+and one-point chunk confetti that `'compact'` collapses to 0.23 B/point —
+both measured, both invisible at cron cadences. Long-lived apps opt into
+N > 1 and get the 29 µs path with a consciously chosen loss window.
+
 Observer effect stated honestly: each flush dirties pages and (in WAL mode)
-appends frames; at recommended cadence this is ~a few KB per 20 minutes,
-and it is itself visible in `cache_writes`/`wal_file_bytes` — dbhealth
-measures its own overhead.
+appends frames — and it is itself visible in `cache_writes` /
+`wal_file_bytes`, so dbhealth measures its own overhead.
 
 ## Multi-connection semantics
 
@@ -239,7 +252,7 @@ JSON-datasource panel away from being an actual PMM screen.
 
 | phase | scope | acceptance |
 |---|---|---|
-| **v1** | `timeless_health` vtab wrapping the metrics engine; `'sample'` with the v1 inventory; `flush_every`; lifecycle commands | cli.sh section: create→sample×N→flush→query→reopen→prune; sample cost < 1 ms measured; storage per sample measured in RESULTS.md; crash round keeps flushed samples |
+| **v1 ✅ (2026-07-27)** | `timeless_health` vtab wrapping the metrics engine; `'sample'` with the v1 inventory; `flush_every`; lifecycle commands | **DONE** — cli.sh section 22 (baseline/delta semantics, stat oracle, cache torture, rollback, prune, loss-window honesty); 29 µs/sample buffered, 2.9 ms durable; 0.23 B/point after compact ([RESULTS.md](../RESULTS.md#dbhealth-timeless_health-v1--2026-07-27)) |
 | **v1.5** | meta-telemetry via new `timeless-core` accessors | buffered-points series proven against a deliberate large buffer + crash |
 | **v2** | `'sample:statements'` (trace chaining, normalizer, cardinality cap), `dbstat` gauges, commit-piggyback flush | overhead benchmark published; host-tracer chaining test; cardinality cap test |
 | **v3** | cross-connection aggregation; ATTACH-ed db sampling; fleet patterns (replication rollup queries) | exploratory — needs design notes of its own |
@@ -251,9 +264,14 @@ mirror where it doesn't.
 
 ## Open questions
 
-1. **Delta state on reopen** — first sample after process restart has no
-   previous cumulative; emit gauges only, skip deltas that interval (probable
-   answer), or persist last-cumulative in `_meta`?
+1. ~~**Delta state on reopen**~~ **ANSWERED in v1:** first sample on a
+   connection emits gauges only and records the baseline; deltas start at
+   the second sample. Persisting cumulatives in `_meta` would be wrong,
+   not just unnecessary — `sqlite3_db_status` counters are per-connection
+   and reset to zero with each new connection, so cross-process deltas
+   are meaningless by construction. Consequence, now documented: the
+   cron/CLI pattern yields the 9 db-global gauges; connection-counter
+   deltas and `cache_hit_ratio` require a long-lived connection.
 2. **`sqld` WAL-hook interaction** — v1 takes no hooks, but verify the
    replication logger's counters aren't perturbed by our pragma reads
    (expected no; test anyway).
@@ -277,4 +295,17 @@ mirror where it doesn't.
   and the repo's no-daemons contract.
 - 2026-07-27 — Storage rides the existing metrics engine unchanged; no new
   codec work. Health data is the friendly-compression case the engine
-  already excels at.
+  already excels at. (Confirmed by measurement: 0.23 B/point after
+  compact.)
+- 2026-07-27 (implementation) — **Default `flush_every` is 1, not the
+  draft's 20.** Any higher default silently loses every sample in the
+  cron/CLI pattern (buffer dies with the process; a fresh process never
+  reaches sample N). Durability-by-default wins; long-lived apps opt into
+  N > 1 for the 29 µs path.
+- 2026-07-27 (implementation) — HealthTab WRAPS MetricsTab (repr(C),
+  wrapped vtab first) rather than duplicating it: reads, pushdown,
+  transactions, savepoints, Tier 1/2/Prometheus ingest, and DROP are all
+  inherited; dbhealth adds only 'sample' and the flush_every arg.
+- 2026-07-27 — **v2 statement profiling explicitly deferred** (author
+  decision): v1 ships hook-free; revisit only with the trace-chaining and
+  cardinality-cap design in hand.

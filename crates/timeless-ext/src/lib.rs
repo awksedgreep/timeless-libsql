@@ -32,6 +32,7 @@
 //!   SELECT * FROM metrics WHERE name = 'cpu' AND ts >= 1700000000;
 
 mod flatjson;
+mod health_vtab;
 mod logs_vtab;
 mod metrics_vtab;
 mod shadow_block_store;
@@ -102,6 +103,7 @@ fn extension_init(db: Connection) -> Result<bool> {
     metrics_vtab::register(&db)?;
     logs_vtab::register(&db)?;
     traces_vtab::register(&db)?;
+    health_vtab::register(&db)?;
     // false = loaded per-connection (fine here; sqld preloads into every
     // connection anyway).
     Ok(false)

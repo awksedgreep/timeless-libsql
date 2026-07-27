@@ -45,6 +45,11 @@
 #       sqlite3) — flushed + buffered data visible across connections
 #       without reopen, writer-gate busy timeout, retry after commit,
 #       drop/recreate sanity
+#   22. timeless_health (dbhealth, docs/DBHEALTH.md): gauges-only first
+#       sample, full inventory with deltas under cache torture,
+#       flush_every=1 default durability, flush_every persistence +
+#       honest loss window, sample rollback, db_file_bytes stat oracle,
+#       unknown-command message
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
@@ -1119,6 +1124,116 @@ check_eq "(d) B's retry succeeds after A commits" \
   "$(grep '^d ' <<<"$py_out")" "d 4"
 check_eq "(e) drop + recreate: both connections sane on the new engine" \
   "$(grep '^e ' <<<"$py_out")" "e [('disk', 400, 7.0)] 1"
+
+# ---------------------------------------------------------------------------
+echo "== section 22: timeless_health (dbhealth) =="
+# (a) First sample on a fresh connection emits GAUGES ONLY (9 series: no
+# baseline for connection-counter deltas yet), and the default
+# flush_every=1 makes it durable immediately (chunks > 0). A second
+# sample on the SAME connection — after PRAGMA cache_size=2 torture
+# forces real cache misses — emits the full inventory (16 series)
+# including per-interval deltas and a 0..1 hit ratio.
+DBH="$TMP/health_test.db"
+got=$(sqlite3 "$DBH" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE dbhealth USING timeless_health;
+INSERT INTO dbhealth(dbhealth) VALUES ('sample');
+SELECT 'first', count(DISTINCT name) FROM dbhealth;
+SELECT 'flushed', count(*) > 0 FROM dbhealth_chunks;
+PRAGMA cache_size=2;
+CREATE TABLE hjunk AS WITH RECURSIVE c(x) AS
+  (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 3000) SELECT x FROM c;
+SELECT count(*) > 0 FROM hjunk WHERE x % 7 = 0;
+INSERT INTO dbhealth(dbhealth) VALUES ('sample');
+SELECT 'second', count(DISTINCT name) FROM dbhealth;
+SELECT 'misses', value > 0 FROM dbhealth WHERE name = 'cache_misses';
+SELECT 'ratio', count(*) FROM dbhealth
+ WHERE name = 'cache_hit_ratio' AND value >= 0.0 AND value <= 1.0;
+SQL
+)
+expected="first|9
+flushed|1
+1
+second|16
+misses|1
+ratio|1"
+check_eq "(a) gauges-only baseline, then full inventory with deltas under cache torture" \
+  "$got" "$expected"
+
+# (b) db_file_bytes oracle: the file size recorded by a fresh-process
+# sample equals stat(2) taken BEFORE that process ran — the sample's own
+# uncommitted writes cannot have grown the main file yet. Dedicated db
+# with exactly ONE sample: sample ts has 1-second resolution, so a
+# shared table could tie on ts and make "the latest row" ambiguous.
+DBO="$TMP/health_oracle.db"
+sqlite3 "$DBO" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE ho USING timeless_health;
+SQL
+size_before=$(stat -c%s "$DBO" 2>/dev/null || stat -f%z "$DBO")
+got=$(sqlite3 "$DBO" <<SQL
+.load $EXT
+INSERT INTO ho(ho) VALUES ('sample');
+SELECT CAST(value AS INTEGER) FROM ho WHERE name = 'db_file_bytes';
+SQL
+)
+check_eq "(b) sampled db_file_bytes matches stat(2) oracle" "$got" "$size_before"
+
+# (c) flush_every=N is persisted in _meta and honored after reopen; the
+# loss window it buys is REAL: a sample buffered by a process that exits
+# without reaching sample N is gone (the documented trade). An explicit
+# 'flush' closes the window.
+DBH5="$TMP/health_fe.db"
+sqlite3 "$DBH5" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE h5 USING timeless_health(flush_every=5);
+INSERT INTO h5(h5) VALUES ('sample');
+SQL
+got=$(sqlite3 "$DBH5" <<SQL
+.load $EXT
+SELECT 'persisted', CAST(v AS TEXT) FROM h5_meta WHERE k = 'health_flush_every';
+SELECT 'lost', count(*) FROM h5;
+INSERT INTO h5(h5) VALUES ('sample');
+INSERT INTO h5(h5) VALUES ('flush');
+SELECT 'kept', count(*) > 0 FROM h5_chunks;
+SQL
+)
+expected="persisted|5
+lost|0
+kept|1"
+check_eq "(c) flush_every persisted; unflushed sample honestly lost; explicit flush keeps" \
+  "$got" "$expected"
+
+# (d) A rolled-back 'sample' leaves no trace, and prune empties the
+# table (whole-chunk deletes, same contract as metrics).
+got=$(sqlite3 "$DBH" <<SQL
+.load $EXT
+SELECT 'pre', count(*) FROM dbhealth;
+BEGIN;
+INSERT INTO dbhealth(dbhealth) VALUES ('sample');
+ROLLBACK;
+SELECT 'post_rollback', count(*) FROM dbhealth;
+INSERT INTO dbhealth(dbhealth) VALUES ('prune:' || (unixepoch() + 60));
+SELECT 'post_prune', count(*), (SELECT count(*) FROM dbhealth_chunks) FROM dbhealth;
+SQL
+)
+pre_count=$(head -1 <<<"$got" | cut -d'|' -f2)
+expected="pre|$pre_count
+post_rollback|$pre_count
+post_prune|0|0"
+check_eq "(d) sample rollback leaves no trace; prune empties table and chunks" \
+  "$got" "$expected"
+
+# (e) Unknown commands name 'sample' in the supported list.
+got=$(sqlite3 "$DBH" ".load $EXT" \
+  "INSERT INTO dbhealth(dbhealth) VALUES ('bogus');" 2>&1 || true)
+case "$got" in
+  *"'sample', 'flush', 'compact', 'prune:<unix_ts>'"*)
+    pass "(e) unknown command error lists 'sample'" ;;
+  *)
+    fail "(e) unknown command error lists 'sample'"
+    echo "--- got ---"; printf '%s\n' "$got" ;;
+esac
 
 # ---------------------------------------------------------------------------
 echo
