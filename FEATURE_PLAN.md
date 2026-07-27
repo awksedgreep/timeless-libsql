@@ -14,7 +14,7 @@ F3 and of each other — reorder freely if priorities shift.
 - [x] **F3** rollup ladder (downsampling)
 - [x] **F4** Q2 kernels for logs & traces
 - [x] **F5** batch blob ingest for logs & traces
-- [ ] **F6** trigram index for log message search
+- [x] **F6** trigram index for log message search
 
 ## Working agreement
 
@@ -476,19 +476,26 @@ SELECT * FROM logs WHERE message LIKE '%timeout%' AND ts > :t0;
 
 **Implementation.**
 
-- [ ] trigram extraction (encode side) + `tg:` postings in _terms
-- [ ] `message_index=` arg parse/persist/load
-- [ ] LIKE pattern → required-trigram set (ESCAPE-aware, unit-tested
+- [x] trigram extraction (encode side) + `tg:` postings in _terms
+- [x] `message_index=` arg parse/persist/load
+- [x] LIKE pattern → required-trigram set (ESCAPE-aware, unit-tested
       hard)
-- [ ] best_index LIKE handling + pruned read path
-- [ ] soundness property test (core) + cli.sh section (results identical
+- [x] best_index LIKE handling + pruned read path
+- [x] soundness property test (core) + cli.sh section (results identical
       with/without the index, EXPLAIN-level proof it pruned, plus a
       read-count proof in the blocks test style)
-- [ ] bench-logs: LIKE timing + index size overhead with/without
+- [x] bench-logs: LIKE timing + index size overhead with/without
 
 **Acceptance:** `LIKE '%timeout%'` on the 1M-entry bench under 50ms with
 byte-identical results to the unindexed path; published size overhead;
 suites green.
+MEASURED 2026-07-26: 48.3ms (was 334.5ms unindexed vtab; the plain
+table's 74.5ms is also beaten — the last losing benchmark row is now a
+win). Count verified against the plain oracle; overhead 88,713 tg: term
+rows ≈ 1.5 MB (~17% of the compressed logs file). Terms are hex-encoded
+(`tg:` + 6 hex chars) because byte windows can split UTF-8; ESCAPE'd
+LIKEs never reach vtab constraints, so wildcard-escaping cannot mislead
+the pruner.
 
 ---
 
@@ -497,6 +504,7 @@ suites green.
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
 | 2026-07-26 | Plan | complete | This document; F1 next. |
+| 2026-07-26 | F6 | complete | Opt-in message_index='trigram': hex-encoded tg: terms + tg: marker per block at extract_terms (4096-trigram budget → over-budget blocks stay unindexed/unpruned), LIKE claimed in best_index (never omitted; ESCAPE'd LIKEs never reach vtabs), candidates = unindexed ∪ has-all-pattern-trigrams. Core: soundness property over hostile messages/patterns, read-count proof (1 of 5 blocks), unindexed-fallback. cli.sh §28 parity checks. Bench: 48.3ms (<50ms acceptance MET; was 334.5ms, beats plain's 74.5ms — last losing row flipped), overhead 1.5MB published. 127 workspace tests, 29 cli.sh sections. ALL SIX FEATURES COMPLETE. |
 | 2026-07-26 | F5 | complete | logs/traces batch blob v0 (shared BatchReader extracted from metrics; engine push_batch mirrors push incl. auto-flush; version-byte dispatch with 0x00/0x02-0x08 reserved loudly). cli.sh §28-worth of checks in §27: round-trip incl. pushdown on blob metadata, packed ids + root-parent NULL, in-txn rollback, 7 truncation/bad-byte blobs rejected atomically (one test bug fixed red→green: durability contract requires flush before cross-process count). Bench: logs +16% (1.32M/s), traces +46% (1.11M/s) — ≥5x NOT met; analysis recorded in acceptance (flush-bound, unlike metrics' dispatch-bound), v2 paths noted. 124 workspace tests, 28 cli.sh sections. |
 | 2026-07-26 | F4 | complete | bucket_counts (with a level-purity fast path: fully-contained pure blocks counted from metadata, filtered-out pure levels skipped without decode) + bucket_stats; [t,t+step) forward binning documented vs the grids' backward windows. Naive-reference tests (30 rounds each, exact), TVFs via the F1 helpers, cli.sh §26 GROUP BY cross-checks incl. buffered entries. Bench: logs 5.7x (95.9 vs 543.5ms, acceptance met); traces 2.4x — decode-bound (durations), documented in the acceptance note with the per-block-aggregate v2 path. 124 workspace tests, 27 cli.sh sections. |
 | 2026-07-26 | F3 | complete | Separate rollup index (raw scan now WHERE resolution=0 — zero risk to raw paths; deviation from the per-resolution-key sketch, allowed by "decide by read-path ergonomics"). Kernel bit-exact vs naive (200 rounds), ENC_ROLLUP_V1 zstd payload, rollups= arg, 'rollup' cmd (+auto at compact, 1-bucket settle, append-only watermark; late-past-settle data stays raw-only — documented v1 limit), per-tier retention, journaled rollup index (rollback test), timeless_rollup TVF, stats rows. 121+ workspace tests, cli.sh 26 sections incl. §25, crash suite WITH rollup in the kill window, oracle exclusion documented. Bench: tier read 4.1ms vs 34.5ms raw GROUP BY; build 80ms/1M pts; ingest+query unchanged (24.8M pts/s, 2.0ms). |

@@ -746,6 +746,7 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
             level,
             metadata_eq,
             message_contains: None,
+            message_like_prune: None,
         };
         self.rows = shared
             .engine

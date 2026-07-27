@@ -1589,6 +1589,53 @@ count=$(sqlite3 "$F5DB" ".load $EXT" "SELECT COUNT(*) FROM l;")
 check_eq "rejections were atomic (count unchanged)" "$count" "3"
 
 # ---------------------------------------------------------------------------
+echo "== section 28: F6 trigram message index =="
+F6DB="$TMP/f6_trigram.db"
+got=$(sqlite3 "$F6DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE lt USING timeless_logs(index_keys='service', message_index='trigram');
+CREATE VIRTUAL TABLE ln USING timeless_logs(index_keys='service');
+INSERT INTO lt(ts, level, message)
+  SELECT value, 'info', CASE value % 7 WHEN 0 THEN 'connection timeout to db ' || value
+                                       WHEN 3 THEN 'TIMEOUT waiting ' || value
+                                       ELSE 'ordinary message ' || value END
+  FROM generate_series(1, 500);
+INSERT INTO ln(ts, level, message)
+  SELECT value, 'info', CASE value % 7 WHEN 0 THEN 'connection timeout to db ' || value
+                                       WHEN 3 THEN 'TIMEOUT waiting ' || value
+                                       ELSE 'ordinary message ' || value END
+  FROM generate_series(1, 500);
+INSERT INTO lt(lt) VALUES ('flush');
+INSERT INTO ln(ln) VALUES ('flush');
+INSERT INTO lt(ts, level, message) VALUES (600, 'info', 'buffered timeout tail');
+INSERT INTO ln(ts, level, message) VALUES (600, 'info', 'buffered timeout tail');
+.print -- identical results with and without the index, several patterns
+SELECT 'p1', (SELECT COUNT(*) FROM lt WHERE message LIKE '%timeout%') =
+             (SELECT COUNT(*) FROM ln WHERE message LIKE '%timeout%'),
+             (SELECT COUNT(*) FROM lt WHERE message LIKE '%timeout%');
+SELECT 'p2', (SELECT COUNT(*) FROM lt WHERE message LIKE '%time%out%') =
+             (SELECT COUNT(*) FROM ln WHERE message LIKE '%time%out%');
+SELECT 'p3', (SELECT COUNT(*) FROM lt WHERE message LIKE 'TIMEOUT_wait%') =
+             (SELECT COUNT(*) FROM ln WHERE message LIKE 'TIMEOUT_wait%');
+SELECT 'p4', (SELECT COUNT(*) FROM lt WHERE message LIKE '%zzznope%') =
+             (SELECT COUNT(*) FROM ln WHERE message LIKE '%zzznope%');
+.print -- index artifacts: tg terms present only on the indexed table
+SELECT 'tg', (SELECT COUNT(*) FROM lt_terms WHERE term >= 'tg:' AND term < 'tg;') > 0,
+             (SELECT COUNT(*) FROM ln_terms WHERE term >= 'tg:' AND term < 'tg;');
+SELECT 'meta', (SELECT v FROM lt_meta WHERE k='message_index'),
+               (SELECT COUNT(*) FROM ln_meta WHERE k='message_index');
+SQL
+)
+check_eq "trigram vs unindexed: identical LIKE results (incl. buffered + case fold)"   "$(grep -E '^p[0-9]\|' <<<"$got")" 'p1|1|144
+p2|1
+p3|1
+p4|1'
+check_eq "tg terms only where declared; setting persisted"   "$(grep -E '^(tg|meta)\|' <<<"$got")" 'tg|1|0
+meta|trigram|0'
+err=$(sqlite3 "$F6DB" ".load $EXT"   "CREATE VIRTUAL TABLE bad USING timeless_logs(message_index='btree');" 2>&1 || true)
+check_eq "invalid message_index value rejected"   "$(grep -c "expected 'trigram' or 'none'" <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

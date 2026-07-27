@@ -229,8 +229,13 @@ SELECT ts, level, message FROM logs
 - `level` is a strict vocabulary: `debug | info | warning | error`.
 - Index-key equality intersects posting lists in the `_terms` shadow table;
   only matching blocks are decompressed.
-- `message LIKE '%…%'` works but scans (decompresses every block) — that's
-  the honest trade, see [Numbers](#numbers).
+- `message LIKE '%…%'` scans by default — or declare
+  `message_index='trigram'` and substring search becomes a block-pruning
+  problem: every 3-byte window of the pattern's literal runs must appear
+  in a block for it to decode, and SQLite still rechecks rows exactly.
+  1M entries: `LIKE '%timeout%'` in **48.3ms** vs 334.5ms unindexed —
+  and vs 74.5ms for the plain table, flipping the one benchmark row this
+  extension used to lose (index overhead ~1.5 MB, opt-in).
 - Index keys can also be used as INSERT shorthand: a non-NULL value in the
   hidden column merges into the metadata JSON.
 - **Batch ingest**: a columnar blob (v0 spec in the vtab docs) into the
@@ -377,7 +382,8 @@ Flush of 1M buffered points: ~110ms, paid at flush cadence, not per point.
 | traces `status='error'` count | 38.6ms | **2.8ms** | 13.8x |
 | metrics name+range (10k rows of 1M) | — | **2.0ms** | pushdown |
 | metrics 1-min dashboard grid (Q2 kernel) | 17.9ms raw + client eval | **1.6ms** | 11x |
-| logs `message LIKE '%timeout%'` | **73.9ms** | 344ms | scan: plain wins |
+| logs `message LIKE '%timeout%'` (default) | **73.9ms** | 344ms | scan: plain wins |
+| logs `LIKE` with `message_index='trigram'` | 74.5ms | **48.3ms** | 1.5x |
 | traces `trace_id` point lookup | **0.005ms** | 2.0ms | B-tree wins |
 
 The last two rows are the honest ones: a compressed store decompresses to

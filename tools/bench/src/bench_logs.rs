@@ -274,7 +274,7 @@ fn time_count(conn: &Connection, label: &str, sql: &str, params: &[&dyn rusqlite
     n
 }
 
-fn query_bench(plain_path: &str, vtab_path: &str, ext: &str) {
+fn query_bench(data: &[Entry], plain_path: &str, vtab_path: &str, ext: &str) {
     // Middle-third ts window for the range query.
     let lo = BASE_TS + (N_ENTRIES as i64) * STEP_MS / 3;
     let hi = BASE_TS + 2 * (N_ENTRIES as i64) * STEP_MS / 3;
@@ -348,6 +348,58 @@ fn query_bench(plain_path: &str, vtab_path: &str, ext: &str) {
     println!("    timeless_log_buckets: {kernel_rows} rows, {kernel_ms:.1} ms");
     println!("    SQL GROUP BY over raw vtab: {group_rows} rows, {group_ms:.1} ms");
     drop(vtab);
+
+    // F6 trigram index: the same entries into a trigram-indexed table
+    // (blob ingest), then the LIKE benchmark that used to be our one
+    // losing row. The plain-table count is the oracle.
+    {
+        let tg_path = "/tmp/tl_bench_logs_tg.db";
+        scrub(tg_path);
+        let tg = open_with_ext(tg_path, ext);
+        tg.execute_batch(
+            "CREATE VIRTUAL TABLE logs USING timeless_logs(             index_keys='service,path,status', message_index='trigram');",
+        )
+        .expect("create trigram vtab");
+        tg.execute_batch("BEGIN").unwrap();
+        {
+            let mut stmt = tg
+                .prepare("INSERT INTO logs(logs) VALUES (?1)")
+                .expect("prepare tg ingest");
+            for chunk in data.chunks(50_000) {
+                stmt.execute(params![encode_log_blob(chunk)]).expect("tg ingest");
+            }
+        }
+        tg.execute_batch("COMMIT").unwrap();
+        tg.execute("INSERT INTO logs(logs) VALUES ('flush')", []).unwrap();
+        let topt = Instant::now();
+        tg.execute("INSERT INTO logs(logs) VALUES ('optimize')", []).unwrap();
+        let opt_ms = topt.elapsed().as_secs_f64() * 1e3;
+        let tq = Instant::now();
+        let n: i64 = tg
+            .query_row(
+                "SELECT COUNT(*) FROM logs WHERE message LIKE '%timeout%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("trigram LIKE");
+        let like_ms = tq.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(n, p3, "trigram LIKE count disagrees with the plain oracle");
+        let (tg_terms, tg_bytes): (i64, i64) = tg
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(length(term) + 8), 0)                  FROM logs_terms WHERE term >= 'tg:' AND term < 'tg;'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("tg term stats");
+        println!("- F6 trigram index (message_index='trigram'; count verified vs plain oracle):");
+        println!(
+            "    LIKE '%timeout%': {n} rows, {like_ms:.1} ms (unindexed vtab above; optimize {opt_ms:.1} ms)"
+        );
+        println!(
+            "    index overhead: {tg_terms} tg: term rows, ~{:.1} MB",
+            tg_bytes as f64 / 1e6
+        );
+    }
 
     // Cross-check: both stores must agree on every count (the plain
     // table is the oracle).
@@ -427,7 +479,7 @@ fn main() {
         vtab.optimize_ms.unwrap_or(0.0)
     );
 
-    query_bench("/tmp/tl_bench_logs_plain.db", "/tmp/tl_bench_logs_vtab.db", &ext);
+    query_bench(&data, "/tmp/tl_bench_logs_plain.db", "/tmp/tl_bench_logs_vtab.db", &ext);
 
     println!("\ndone. dbs left in /tmp/tl_bench_logs_{{plain,vtab}}.db for inspection.");
 }

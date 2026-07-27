@@ -83,8 +83,11 @@ const NATIVE_PER_SECOND: i64 = 1_000;
 const BIT_LEVEL: c_int = 1;
 const BIT_TS_LO: c_int = 2;
 const BIT_TS_HI: c_int = 4;
+/// F6: message LIKE pattern claimed for trigram block pruning (top
+/// usable bit; index keys occupy 3..=29, capping MAX_INDEX_KEYS at 27).
+const BIT_MSG_LIKE: c_int = 1 << 30;
 const FIRST_KEY_BIT_SHIFT: usize = 3;
-const MAX_INDEX_KEYS: usize = 28;
+const MAX_INDEX_KEYS: usize = 27;
 
 /// Number of fixed (non-hidden) columns before the index-key columns:
 /// 0=ts 1=level 2=message 3=metadata.
@@ -92,6 +95,17 @@ const FIXED_COLS: usize = 4;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
+}
+
+/// Load the persisted F6 message_index setting ('trigram' => true).
+fn load_message_index(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> std::result::Result<bool, String> {
+    Ok(shadow_meta::load_meta_text(conn, database, table, "message_index")?
+        .as_deref()
+        == Some("trigram"))
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +163,7 @@ impl LogsTab {
             }
             None => Vec::new(),
         };
+        let message_trigrams = load_message_index(&host, database, table).map_err(module_err)?;
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
         let shared = shared::get_or_create(&key, move || {
             BlockEngine::new(
@@ -158,6 +173,7 @@ impl LogsTab {
                     zstd_level: ZSTD_LEVEL,
                     merge_target_entries: MERGE_TARGET_ENTRIES,
                     merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    message_trigrams,
                     index_keys,
                 },
             )
@@ -206,6 +222,7 @@ impl LogsTab {
             // the same convention (unit-resolved to ms, persisted).
             let mut keys_value: Option<String> = None;
             let mut retention: Option<i64> = None;
+            let mut message_index: Option<bool> = None;
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 match name.as_str() {
                     "index_keys" => keys_value = Some(value),
@@ -215,10 +232,21 @@ impl LogsTab {
                                 .map_err(module_err)?,
                         );
                     }
+                    "message_index" => {
+                        message_index = Some(match value.as_str() {
+                            "trigram" => true,
+                            "none" => false,
+                            other => {
+                                return Err(module_err(format!(
+                                    "message_index={other:?}; expected 'trigram' or 'none'"
+                                )));
+                            }
+                        });
+                    }
                     other => {
                         return Err(module_err(format!(
                             "unrecognized argument {other:?}; timeless_logs supports: \
-                             index_keys, retention"
+                             index_keys, retention, message_index"
                         )));
                     }
                 }
@@ -231,6 +259,10 @@ impl LogsTab {
                 .map_err(module_err)?;
             if let Some(native) = retention {
                 shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
+                    .map_err(module_err)?;
+            }
+            if message_index == Some(true) {
+                shadow_meta::save_meta_text(&host, &database, &table, "message_index", "trigram")
                     .map_err(module_err)?;
             }
             (keys, retention)
@@ -262,6 +294,8 @@ impl LogsTab {
         // calling connection by the DbGuard above, safe because THIS
         // thread already holds the connection mutex recursively) —
         // every later xConnect just bumps the Arc, no re-recovery.
+        let message_trigrams =
+            load_message_index(&host, &database, &table).map_err(module_err)?;
         let key = shared::registry_key(handle, database_name, &table, instance_id);
         let index_keys_for_engine = index_keys.clone();
         let shared_engine = shared::get_or_create(&key, move || {
@@ -272,6 +306,7 @@ impl LogsTab {
                     zstd_level: ZSTD_LEVEL,
                     merge_target_entries: MERGE_TARGET_ENTRIES,
                     merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    message_trigrams,
                     index_keys: index_keys_for_engine,
                 },
             )
@@ -495,6 +530,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         let mut level_c: Option<usize> = None;
         let mut lo_c: Option<usize> = None;
         let mut hi_c: Option<usize> = None;
+        let mut like_c: Option<usize> = None;
         let mut key_c: Vec<Option<usize>> = vec![None; self.index_keys.len()];
         for (i, c) in info.constraints().enumerate() {
             if !c.is_usable() {
@@ -502,6 +538,10 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             }
             match (c.column(), c.operator()) {
                 (1, SQLITE_INDEX_CONSTRAINT_EQ) if level_c.is_none() => level_c = Some(i),
+                // F6: message LIKE — claimed for trigram PRUNING only.
+                // omit is never set, so SQLite still rechecks the LIKE
+                // row-exactly (and ESCAPE'd LIKEs never reach vtabs).
+                (2, SQLITE_INDEX_CONSTRAINT_LIKE) if like_c.is_none() => like_c = Some(i),
                 (0, SQLITE_INDEX_CONSTRAINT_GE) | (0, SQLITE_INDEX_CONSTRAINT_GT)
                     if lo_c.is_none() =>
                 {
@@ -538,6 +578,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         claim(info, level_c, BIT_LEVEL);
         claim(info, lo_c, BIT_TS_LO);
         claim(info, hi_c, BIT_TS_HI);
+        claim(info, like_c, BIT_MSG_LIKE);
         for (k, c) in key_c.iter().enumerate() {
             claim(info, *c, 1 << (FIRST_KEY_BIT_SHIFT + k));
         }
@@ -857,6 +898,14 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         } else {
             i64::MAX
         };
+        // F6: the LIKE pattern, for trigram block pruning only (SQLite
+        // rechecks rows — omit was never set). NULL pattern: LIKE NULL
+        // matches nothing, but leave that to SQLite's recheck.
+        let message_like_prune: Option<String> = if idx_num & BIT_MSG_LIKE != 0 {
+            args.get(next())?
+        } else {
+            None
+        };
         let mut metadata_eq: Vec<(String, String)> = Vec::new();
         for (k, key_name) in self.index_keys.iter().enumerate() {
             if idx_num & (1 << (FIRST_KEY_BIT_SHIFT + k)) != 0 {
@@ -877,9 +926,8 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                     ts_max,
                     level,
                     metadata_eq,
-                    // message LIKE stays above us in SQLite for now
-                    // (see best_index).
                     message_contains: None,
+                    message_like_prune,
                 })
                 .map_err(module_err)?
         };

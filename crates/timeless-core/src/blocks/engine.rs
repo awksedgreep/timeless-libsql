@@ -38,6 +38,10 @@ pub struct BlockEngineConfig {
     /// keeps prune effective. Default i64::MAX = uncapped (unit-agnostic
     /// engine can't pick a sane default); the logs vtab passes 1h in ms.
     pub merge_max_ts_span: i64,
+    /// F6: index message TRIGRAMS per block (`tg:<hex>` terms + the
+    /// `tg:` marker), enabling sound block pruning for substring LIKE.
+    /// Opt-in — the index costs term-table space.
+    pub message_trigrams: bool,
     /// Metadata keys whose values become index terms ("key:value").
     /// SELECTIVE on purpose (the timeless_logs lesson): only stable,
     /// low-cardinality keys belong here — indexing identifier-like
@@ -52,6 +56,7 @@ impl Default for BlockEngineConfig {
             zstd_level: 7,
             merge_target_entries: 8192,
             merge_max_ts_span: i64::MAX,
+            message_trigrams: false,
             index_keys: Vec::new(),
         }
     }
@@ -70,6 +75,13 @@ pub struct LogQuery {
     pub metadata_eq: Vec<(String, String)>,
     /// Case-sensitive substring match on the message.
     pub message_contains: Option<String>,
+    /// F6: a LIKE pattern used ONLY for trigram block PRUNING — no
+    /// entries are filtered by it (the SQL layer rechecks LIKE exactly;
+    /// the vtab never sets omit on the constraint). Sound by
+    /// construction: only blocks that provably cannot contain a match
+    /// are skipped, and blocks without the `tg:` marker (pre-F6 data,
+    /// trigram-capped blocks, disabled index) are never skipped.
+    pub message_like_prune: Option<String>,
 }
 
 /// One entry in the engine's in-memory block index: the store-persisted
@@ -595,6 +607,54 @@ impl BlockEngine {
         Ok(n)
     }
 
+    /// F6 trigram machinery. Terms are `tg:` + lowercase hex of THREE
+    /// lowercased message BYTES (hex because a byte window can split a
+    /// UTF-8 sequence, and terms are TEXT). ASCII-only case folding —
+    /// exactly the folding SQLite's default LIKE performs, so the index
+    /// is a sound superset filter under both default and
+    /// case_sensitive_like. The bare `tg:` MARKER term declares "this
+    /// block is trigram-indexed"; blocks without it are never pruned.
+    fn tg_term(w: [u8; 3]) -> String {
+        format!("tg:{:02x}{:02x}{:02x}", w[0], w[1], w[2])
+    }
+
+    fn fold_byte(b: u8) -> u8 {
+        if b.is_ascii_uppercase() {
+            b + 32
+        } else {
+            b
+        }
+    }
+
+    fn message_trigrams_of(text: &str, out: &mut BTreeSet<[u8; 3]>) {
+        let bytes = text.as_bytes();
+        for w in bytes.windows(3) {
+            out.insert([
+                Self::fold_byte(w[0]),
+                Self::fold_byte(w[1]),
+                Self::fold_byte(w[2]),
+            ]);
+        }
+    }
+
+    /// Required trigram terms for a LIKE pattern: every 3-byte window of
+    /// every literal run (split on `%`/`_`) must appear in a matching
+    /// message. Empty = the pattern yields no pruning power (all blocks
+    /// stay candidates). NOTE: SQLite never forwards `LIKE ... ESCAPE`
+    /// as a vtab LIKE constraint, so wildcard-escaping cannot reach us.
+    pub fn like_pattern_trigrams(pattern: &str) -> Vec<String> {
+        let mut set = BTreeSet::new();
+        for run in pattern.split(|c| c == '%' || c == '_') {
+            Self::message_trigrams_of(run, &mut set);
+        }
+        set.into_iter().map(Self::tg_term).collect()
+    }
+
+    /// Per-block trigram budget: a block whose messages exceed this many
+    /// DISTINCT trigrams is left unindexed (no marker → never pruned)
+    /// rather than bloating `_terms` past the data.
+    const MAX_BLOCK_TRIGRAMS: usize = 4096;
+
     /// Terms for a batch of entries: `level:<name>` always, plus
     /// `<key>:<value>` for every metadata pair whose key is in the
     /// index_keys allowlist. Deduplicated + sorted (a block-level index
@@ -608,6 +668,20 @@ impl BlockEngine {
                     set.insert(format!("{k}:{v}"));
                 }
             }
+        }
+        if self.config.message_trigrams {
+            let mut trigrams = BTreeSet::new();
+            for e in entries {
+                Self::message_trigrams_of(&e.message, &mut trigrams);
+                if trigrams.len() > Self::MAX_BLOCK_TRIGRAMS {
+                    break;
+                }
+            }
+            if trigrams.len() <= Self::MAX_BLOCK_TRIGRAMS {
+                set.insert("tg:".to_string()); // the indexed marker
+                set.extend(trigrams.into_iter().map(Self::tg_term));
+            }
+            // over budget: no marker, block stays always-decoded
         }
         set.into_iter().collect()
     }
@@ -905,7 +979,33 @@ impl BlockEngine {
             // filtered per entry in step 3 (scan-only, by design).
         }
 
-        let locs = self.store.query_terms(&terms, q.ts_min, q.ts_max)?;
+        let mut locs = self.store.query_terms(&terms, q.ts_min, q.ts_max)?;
+        // F6 trigram pruning: candidates = (unindexed blocks) ∪ (indexed
+        // blocks carrying ALL of the pattern's required trigrams). Blocks
+        // without the `tg:` marker are never pruned, so pre-F6 data,
+        // budget-capped blocks, and disabled-index tables are all safe.
+        if let Some(pattern) = &q.message_like_prune {
+            let required = Self::like_pattern_trigrams(pattern);
+            if !required.is_empty() {
+                let mut marker_terms = terms.clone();
+                marker_terms.push("tg:".to_string());
+                let indexed: std::collections::HashSet<i64> = self
+                    .store
+                    .query_terms(&marker_terms, q.ts_min, q.ts_max)?
+                    .into_iter()
+                    .map(|(loc, _)| loc.id)
+                    .collect();
+                let mut match_terms = marker_terms;
+                match_terms.extend(required);
+                let matching: std::collections::HashSet<i64> = self
+                    .store
+                    .query_terms(&match_terms, q.ts_min, q.ts_max)?
+                    .into_iter()
+                    .map(|(loc, _)| loc.id)
+                    .collect();
+                locs.retain(|(loc, _)| !indexed.contains(&loc.id) || matching.contains(&loc.id));
+            }
+        }
         let mut out: Vec<LogEntry> = Vec::new();
         for (loc, _meta) in &locs {
             let bytes = self.store.read_block(loc)?;

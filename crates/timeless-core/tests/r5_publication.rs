@@ -266,6 +266,7 @@ fn log_query() -> LogQuery {
         level: None,
         metadata_eq: Vec::new(),
         message_contains: None,
+            message_like_prune: None,
     }
 }
 

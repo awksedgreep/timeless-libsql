@@ -40,6 +40,7 @@ fn full_range_query() -> LogQuery {
         level: None,
         metadata_eq: Vec::new(),
         message_contains: None,
+            message_like_prune: None,
     }
 }
 
@@ -381,6 +382,7 @@ fn raw_optimize_query_round_trip_is_exact() {
     // Substring filter (scan-only path).
     let q = LogQuery {
         message_contains: Some("number 42".into()),
+            message_like_prune: None,
         ..full_range_query()
     };
     assert_eq!(engine.query(&q).unwrap(), vec![expect[42].clone()]);

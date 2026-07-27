@@ -167,6 +167,7 @@ fn block_engine_retention() {
         level: None,
         metadata_eq: vec![],
         message_contains: None,
+            message_like_prune: None,
     };
     let rows = engine.query(&q).unwrap();
     assert_eq!(

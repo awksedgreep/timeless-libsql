@@ -68,6 +68,7 @@ fn log_bucket_counts_match_naive() {
                 level: None,
                 metadata_eq: vec![],
                 message_contains: None,
+            message_like_prune: None,
             };
             let kernel = engine.bucket_counts(&q, group_by, step).unwrap();
             // Naive: filter + bin independently.
@@ -97,6 +98,7 @@ fn log_bucket_counts_match_naive() {
         level: None,
         metadata_eq: vec![],
         message_contains: None,
+            message_like_prune: None,
     };
     let one = engine.bucket_counts(&q, "level", 1_000_000).unwrap();
     assert!(one.iter().all(|(b, _, _)| *b == 10_000), "single bucket");
@@ -112,6 +114,7 @@ fn log_bucket_counts_match_naive() {
         level: None,
         metadata_eq: vec![],
         message_contains: None,
+            message_like_prune: None,
     };
     assert!(engine.bucket_counts(&wide, "level", 1).is_err(), "bucket cap");
 }
