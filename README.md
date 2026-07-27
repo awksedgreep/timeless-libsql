@@ -161,6 +161,17 @@ the whole range): the raw-scan fallback ships 99,900 samples and
 evaluates client-side in **17.9ms**; `timeless_grid` returns the same
 16,600 grid rows in **1.6ms** — 11x, before a network is even involved.
 
+**Introspection** — two more table-valued functions answer "what's in
+here?" without decompressing anything:
+
+```sql
+SELECT * FROM timeless_series('metrics');  -- one row per series: name, labels,
+                                           -- min/max ts (incl. buffered), points,
+                                           -- chunks, buffered  (~3ms for 1000 series)
+SELECT * FROM timeless_stats('metrics');   -- key/value health rows; works for
+                                           -- logs and traces tables too
+```
+
 ### Logs
 
 `index_keys` declares which metadata keys get inverted-index treatment —

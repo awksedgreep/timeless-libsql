@@ -9,7 +9,7 @@ engine-resolution helpers every later TVF needs. F3 (rollups) is the long
 pole and consumes F2's retention machinery. F4/F5/F6 are independent of
 F3 and of each other — reorder freely if priorities shift.
 
-- [ ] **F1** series catalog + stats TVFs
+- [x] **F1** series catalog + stats TVFs
 - [ ] **F2** automated retention (table argument)
 - [ ] **F3** rollup ladder (downsampling)
 - [ ] **F4** Q2 kernels for logs & traces
@@ -114,22 +114,22 @@ SELECT * FROM timeless_stats('metrics');   -- also logs/traces tables
 
 **Implementation.**
 
-- [ ] `Engine::series_overview()` under `transition_read` (+ unit test)
-- [ ] stats k/v surface for all three engines (existing info/stats
+- [x] `Engine::series_overview()` under `transition_read` (+ unit test)
+- [x] stats k/v surface for all three engines (existing info/stats
       methods; add whatever is missing, keeping the R7 lock order)
-- [ ] `logs_vtab::shared_engine_for` / `traces_vtab::shared_engine_for`
-- [ ] module-type detection by shadow-table probe (one `sqlite_schema`
+- [x] `logs_vtab::shared_engine_for` / `traces_vtab::shared_engine_for`
+- [x] module-type detection by shadow-table probe (one `sqlite_schema`
       query on the caller's connection)
-- [ ] `timeless_series` + `timeless_stats` TVFs in query_tvf.rs
-- [ ] refresh before reads (generation check makes this cheap)
+- [x] `timeless_series` + `timeless_stats` TVFs in query_tvf.rs
+- [x] refresh before reads (generation check makes this cheap)
 
 **Verification.**
 
-- [ ] cli.sh section: catalog matches inserted series (incl. buffered
+- [x] cli.sh section: catalog matches inserted series (incl. buffered
       only, flushed-only, and post-prune states); stats keys sane for all
       three modules; unknown table errors cleanly
-- [ ] core test: overview vs naive registry+index walk
-- [ ] R4 interplay: catalog correct after DROP/recreate on same name
+- [x] core test: overview vs naive registry+index walk
+- [x] R4 interplay: catalog correct after DROP/recreate on same name
 
 **Acceptance:** `timeless_series` on the 1M-point bench db returns 1000
 rows in low single-digit ms with zero chunk reads. All suites green.
@@ -479,3 +479,4 @@ suites green.
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
 | 2026-07-26 | Plan | complete | This document; F1 next. |
+| 2026-07-26 | F1 | complete | timeless_series + timeless_stats shipped with logs/traces shared_engine_for helpers and module probe. Acceptance: 1000-series catalog in 3.3ms warm (389ms first-call = one-time engine recovery), zero chunk reads. 108 workspace tests, cli.sh 24 sections incl. new §23 (9 checks: buffered/prune/DROP-recreate states, module routing errors). F2 next. |

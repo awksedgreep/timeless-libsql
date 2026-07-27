@@ -114,6 +114,53 @@ pub struct LogsTab {
 }
 
 impl LogsTab {
+    /// Resolve the shared engine for an EXISTING timeless_logs table on
+    /// this connection — the read-side entry point for stats/kernel TVFs
+    /// (query_tvf.rs). Mirrors the xConnect tail: index_keys come from
+    /// `_meta` (a property of the data, never of the caller), instance
+    /// identity from shadow_meta, engine from the process registry with
+    /// the same builder. A table that was never a timeless_logs vtab
+    /// fails on the `_meta` read with SQLite's own "no such table".
+    ///
+    /// Caller must hold a DbGuard binding for `handle`.
+    pub(crate) fn shared_engine_for(
+        handle: *mut ffi::sqlite3,
+        database: &str,
+        table: &str,
+    ) -> Result<Arc<SharedEngine<BlockEngine>>> {
+        let host = unsafe { Connection::from_handle(handle) }?;
+        let instance_id =
+            shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+        let store = ShadowBlockStore::new(database, table);
+        let index_keys = match store.load_meta("index_keys").map_err(module_err)? {
+            Some(bytes) => {
+                let joined = String::from_utf8(bytes).map_err(|_| {
+                    module_err(format!("{table}: index_keys in _meta is not UTF-8"))
+                })?;
+                if joined.is_empty() {
+                    Vec::new()
+                } else {
+                    joined.split(',').map(str::to_owned).collect()
+                }
+            }
+            None => Vec::new(),
+        };
+        let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
+        shared::get_or_create(&key, move || {
+            BlockEngine::new(
+                Box::new(store),
+                BlockEngineConfig {
+                    flush_threshold: FLUSH_THRESHOLD,
+                    zstd_level: ZSTD_LEVEL,
+                    merge_target_entries: MERGE_TARGET_ENTRIES,
+                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    index_keys,
+                },
+            )
+            .map_err(module_err)
+        })
+    }
+
     fn connect_create(
         db: &mut VTabConnection,
         _aux: Option<&()>,

@@ -176,6 +176,35 @@ pub struct TracesTab {
 }
 
 impl TracesTab {
+    /// Resolve the shared engine for an EXISTING timeless_traces table on
+    /// this connection — the read-side entry point for stats/kernel TVFs
+    /// (query_tvf.rs). Mirrors the xConnect tail. A table that was never
+    /// a timeless_traces vtab fails on the `_meta` read with SQLite's
+    /// own "no such table". Caller must hold a DbGuard binding.
+    pub(crate) fn shared_engine_for(
+        handle: *mut ffi::sqlite3,
+        database: &str,
+        table: &str,
+    ) -> Result<Arc<SharedEngine<SpanBlockEngine>>> {
+        let host = unsafe { Connection::from_handle(handle) }?;
+        let instance_id =
+            shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+        let store = ShadowSpanStore::new(database, table);
+        let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
+        shared::get_or_create(&key, move || {
+            SpanBlockEngine::new(
+                Box::new(store),
+                SpanEngineConfig {
+                    flush_threshold: FLUSH_THRESHOLD,
+                    zstd_level: ZSTD_LEVEL,
+                    merge_target_entries: MERGE_TARGET_ENTRIES,
+                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                },
+            )
+            .map_err(module_err)
+        })
+    }
+
     fn connect_create(
         db: &mut VTabConnection,
         _aux: Option<&()>,

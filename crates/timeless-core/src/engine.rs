@@ -2793,6 +2793,71 @@ impl Engine {
         Ok(())
     }
 
+    /// F1 catalog: one row per known series with chunk-index aggregates
+    /// and buffered-state — NO chunk decompression, so it stays cheap at
+    /// any table size. Locks are taken strictly one at a time (index,
+    /// then partitions, then registry) so no ordering hazard can exist.
+    /// min/max ts include buffered points: the catalog describes what a
+    /// query would see, not just what is durable.
+    pub fn series_overview(&self) -> Vec<SeriesOverview> {
+        let _transition = self.transition_read();
+
+        let mut chunk_agg: HashMap<i64, (i64, i64, u64, usize)> = HashMap::new();
+        {
+            let index = self.index_read();
+            for ((pk, _, _), meta) in index.iter() {
+                let entry = chunk_agg
+                    .entry(pk.series_id)
+                    .or_insert((meta.min_ts, meta.max_ts, 0, 0));
+                entry.0 = entry.0.min(meta.min_ts);
+                entry.1 = entry.1.max(meta.max_ts);
+                entry.2 += meta.point_count as u64;
+                entry.3 += 1;
+            }
+        }
+
+        let mut buf_agg: HashMap<i64, (usize, i64, i64)> = HashMap::new();
+        for entry in self.partitions.iter() {
+            let buf = entry.value();
+            let (Some(&mn), Some(&mx)) =
+                (buf.timestamps.iter().min(), buf.timestamps.iter().max())
+            else {
+                continue;
+            };
+            buf_agg.insert(entry.key().series_id, (buf.timestamps.len(), mn, mx));
+        }
+
+        let reg = self.series_read();
+        let mut out: Vec<SeriesOverview> = reg
+            .series_map
+            .iter()
+            .map(|((name, labels), &series_id)| {
+                let chunks = chunk_agg.get(&series_id);
+                let buffered = buf_agg.get(&series_id);
+                let min_ts = match (chunks.map(|c| c.0), buffered.map(|b| b.1)) {
+                    (Some(c), Some(b)) => Some(c.min(b)),
+                    (c, b) => c.or(b),
+                };
+                let max_ts = match (chunks.map(|c| c.1), buffered.map(|b| b.2)) {
+                    (Some(c), Some(b)) => Some(c.max(b)),
+                    (c, b) => c.or(b),
+                };
+                SeriesOverview {
+                    series_id,
+                    name: name.clone(),
+                    labels: labels.clone(),
+                    min_ts,
+                    max_ts,
+                    disk_points: chunks.map_or(0, |c| c.2),
+                    chunks: chunks.map_or(0, |c| c.3),
+                    buffered: buffered.map_or(0, |b| b.0),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.name, a.series_id).cmp(&(&b.name, b.series_id)));
+        out
+    }
+
     pub fn info(&self) -> EngineInfo {
         let index = self.index_read();
         let series_reg = self.series_read();
@@ -2860,6 +2925,20 @@ impl Engine {
             newest_ts,
         }
     }
+}
+
+/// One catalog row from Engine::series_overview.
+#[derive(Clone, Debug)]
+pub struct SeriesOverview {
+    pub series_id: i64,
+    pub name: String,
+    pub labels: Labels,
+    /// Include buffered points — the queryable range, not the durable one.
+    pub min_ts: Option<i64>,
+    pub max_ts: Option<i64>,
+    pub disk_points: u64,
+    pub chunks: usize,
+    pub buffered: usize,
 }
 
 pub struct EngineInfo {

@@ -773,6 +773,26 @@ impl SpanBlockEngine {
         self.stats_with_after_index(|| {})
     }
 
+    /// Queryable start_ts range (blocks + buffer), payload-free. Same
+    /// lock discipline as stats(): index scope dropped before the buffer
+    /// is read (R7 — flush acquires buffer then index).
+    pub fn ts_range(&self) -> (Option<i64>, Option<i64>) {
+        let (mut mn, mut mx) = {
+            let index = self.index_lock();
+            index.iter().fold((None, None), |(mn, mx): (Option<i64>, Option<i64>), e| {
+                (
+                    Some(mn.map_or(e.meta.ts_min, |m: i64| m.min(e.meta.ts_min))),
+                    Some(mx.map_or(e.meta.ts_max, |m: i64| m.max(e.meta.ts_max))),
+                )
+            })
+        };
+        for e in self.buffer_lock().iter() {
+            mn = Some(mn.map_or(e.start_ts, |m| m.min(e.start_ts)));
+            mx = Some(mx.map_or(e.start_ts, |m| m.max(e.start_ts)));
+        }
+        (mn, mx)
+    }
+
     fn stats_with_after_index(&self, after_index: impl FnOnce()) -> (usize, usize, usize) {
         // Flush holds buffer through persistence and then takes index.
         // Never retain index while reading the buffered count.

@@ -1236,6 +1236,85 @@ check_eq "fresh connection: TVF-first access recovers the engine" "$got" \
 {"host":"a"}|130|3.0'
 
 # ---------------------------------------------------------------------------
+echo "== section 23: F1 catalog + stats TVFs (timeless_series / timeless_stats) =="
+F1DB="$TMP/f1_tvf.db"
+got=$(sqlite3 "$F1DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics;
+CREATE VIRTUAL TABLE l USING timeless_logs(index_keys='service');
+CREATE VIRTUAL TABLE t USING timeless_traces;
+INSERT INTO m(name, ts, value, labels) VALUES
+  ('cpu', 100, 1.0, '{"host":"a"}'), ('cpu', 200, 2.0, '{"host":"a"}'),
+  ('cpu', 150, 9.0, '{"host":"b"}');
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(name, ts, value, labels) VALUES ('cpu', 250, 3.0, '{"host":"a"}');
+INSERT INTO l(ts, level, message, metadata) VALUES (1000, 'error', 'boom', '{"service":"api"}');
+INSERT INTO t(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES ('4bf92f3577b34da6a3ce929d0e0e4736', '00f067aa0ba902b7', 'op', 'api', 'server', 'ok', 5000, 10);
+.print -- catalog: buffered ts=250 must extend max_ts, points/buffered split correct
+SELECT 'cat', name, labels, min_ts, max_ts, points, chunks, buffered FROM timeless_series('m');
+.print -- catalog count matches DISTINCT over the raw vtab
+SELECT 'catcount', (SELECT COUNT(*) FROM timeless_series('m')) =
+                   (SELECT COUNT(DISTINCT name || labels) FROM m);
+.print -- stats: module row + a few load-bearing keys per module type
+SELECT 'sm', key, value FROM timeless_stats('m')
+ WHERE key IN ('module','series','buffered_points','disk_points');
+SELECT 'sl', key, value FROM timeless_stats('l')
+ WHERE key IN ('module','blocks','buffered_entries','terms');
+SELECT 'st', key, value FROM timeless_stats('t')
+ WHERE key IN ('module','buffered_spans','ts_min');
+.print -- prune reflected in catalog
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(m) VALUES ('prune:160');
+SELECT 'postprune', name, labels, min_ts, max_ts FROM timeless_series('m') ORDER BY labels;
+SQL
+)
+check_eq "catalog rows (buffered extends max_ts; per-series split)" \
+  "$(grep '^cat|' <<<"$got")" \
+'cat|cpu|{"host":"a"}|100|250|3|1|1
+cat|cpu|{"host":"b"}|150|150|1|1|0'
+check_eq "catalog count == DISTINCT series over raw vtab" \
+  "$(grep '^catcount|' <<<"$got")" "catcount|1"
+check_eq "metrics stats keys" "$(grep '^sm|' <<<"$got")" \
+'sm|module|timeless_metrics
+sm|series|2
+sm|disk_points|3
+sm|buffered_points|1'
+check_eq "logs stats keys" "$(grep '^sl|' <<<"$got")" \
+'sl|module|timeless_logs
+sl|blocks|0
+sl|buffered_entries|1
+sl|terms|0'
+check_eq "traces stats keys" "$(grep '^st|' <<<"$got")" \
+'st|module|timeless_traces
+st|buffered_spans|1
+st|ts_min|5000'
+# prune is CHUNK-granular: cpu-a's {100,200} chunk straddles the cutoff
+# and survives whole; cpu-b's chunk dies, leaving an empty cataloged
+# series (empty series persist — documented limit).
+check_eq "prune reflected in catalog (chunk-granular; emptied series has NULL range)" \
+  "$(grep '^postprune|' <<<"$got")" \
+'postprune|cpu|{"host":"a"}|100|250
+postprune|cpu|{"host":"b"}||'
+err=$(sqlite3 "$F1DB" ".load $EXT" "SELECT * FROM timeless_series('l');" 2>&1 || true)
+check_eq "timeless_series on a logs table names the right module" \
+  "$(grep -c 'timeless_logs table' <<<"$err")" "1"
+err=$(sqlite3 "$F1DB" ".load $EXT" "SELECT * FROM timeless_stats('nope');" 2>&1 || true)
+check_eq "stats on unknown table: clean error" \
+  "$(grep -c 'not a timeless virtual table' <<<"$err")" "1"
+# R4 interplay: committed DROP + recreate must show a FRESH catalog.
+got=$(sqlite3 "$F1DB" <<SQL
+.load $EXT
+DROP TABLE m;
+CREATE VIRTUAL TABLE m USING timeless_metrics;
+INSERT INTO m(name, ts, value) VALUES ('disk', 999, 7.0);
+SELECT 'fresh', name, min_ts, max_ts, points, buffered FROM timeless_series('m');
+SQL
+)
+check_eq "catalog after committed DROP/recreate is fresh (R4)" \
+  "$(grep '^fresh|' <<<"$got")" "fresh|disk|999|999|1|1"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

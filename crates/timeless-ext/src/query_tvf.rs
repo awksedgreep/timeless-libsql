@@ -44,19 +44,25 @@ use rusqlite::{Connection, Error, Result};
 use timeless_core::{AggFn, Engine, Labels};
 
 use crate::flatjson::{labels_to_json, parse_labels_json};
+use crate::logs_vtab::LogsTab;
 use crate::metrics_vtab::MetricsTab;
-use crate::shared::{DbGuard, SharedEngine};
+use crate::traces_vtab::TracesTab;
+use crate::shared::{self, DbGuard, SharedEngine};
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
 }
 
-/// Register both TVF modules on a freshly-loaded connection.
+/// Register the TVF modules on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection) -> Result<()> {
     const GRID: Module<GridTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_grid", &GRID, None::<()>)?;
     const WINDOW: Module<WindowTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_window", &WINDOW, None::<()>)
+    db.create_module(c"timeless_window", &WINDOW, None::<()>)?;
+    const SERIES: Module<SeriesTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_series", &SERIES, None::<()>)?;
+    const STATS: Module<StatsTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_stats", &STATS, None::<()>)
 }
 
 // Output columns (both modules).
@@ -462,6 +468,386 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
                 ctx.set_result(&rusqlite::types::Null)?;
                 Ok(())
             }
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F1: timeless_series / timeless_stats (FEATURE_PLAN.md)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimelessModule {
+    Metrics,
+    Logs,
+    Traces,
+}
+
+impl TimelessModule {
+    fn name(self) -> &'static str {
+        match self {
+            TimelessModule::Metrics => "timeless_metrics",
+            TimelessModule::Logs => "timeless_logs",
+            TimelessModule::Traces => "timeless_traces",
+        }
+    }
+}
+
+/// Which timeless module owns `table`, by shadow-table probe:
+/// `_chunks` → metrics, `_trace_blocks` → traces, `_blocks` without
+/// `_trace_blocks` → logs. One sqlite_schema query on the caller's
+/// connection (DbGuard must be bound).
+fn detect_module(database: &str, table: &str) -> Result<TimelessModule> {
+    let conn = shared::current_conn().map_err(module_err)?;
+    let sql = format!(
+        "SELECT name FROM {} WHERE type = 'table' AND name IN (?1, ?2, ?3)",
+        crate::sql_ident::qualified(database, "sqlite_schema")
+    );
+    let chunks = format!("{table}_chunks");
+    let trace_blocks = format!("{table}_trace_blocks");
+    let blocks = format!("{table}_blocks");
+    let mut stmt = conn.prepare(&sql)?;
+    let found: Vec<String> = stmt
+        .query_map(rusqlite::params![chunks, trace_blocks, blocks], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    if found.iter().any(|n| n == &chunks) {
+        Ok(TimelessModule::Metrics)
+    } else if found.iter().any(|n| n == &trace_blocks) {
+        Ok(TimelessModule::Traces)
+    } else if found.iter().any(|n| n == &blocks) {
+        Ok(TimelessModule::Logs)
+    } else {
+        Err(module_err(format!(
+            "no such table: {table} is not a timeless virtual table in schema {database:?} \
+             (no shadow tables found)"
+        )))
+    }
+}
+
+fn split_spec(spec: &str) -> (String, String) {
+    match spec.split_once('.') {
+        Some((schema, tbl)) => (schema.to_owned(), tbl.to_owned()),
+        None => ("main".to_owned(), spec.to_owned()),
+    }
+}
+
+/// Shared single-arg (tbl) best_index for the catalog/stats TVFs.
+fn best_index_tbl(info: &mut IndexInfo, tbl_col: c_int) -> Result<bool> {
+    let mut idx_num = 0;
+    let mut slot = None;
+    let mut unusable = false;
+    for (i, constraint) in info.constraints().enumerate() {
+        if constraint.column() != tbl_col {
+            continue;
+        }
+        if !constraint.is_usable() {
+            unusable = true;
+        } else if constraint.operator() == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
+            && slot.is_none()
+        {
+            idx_num = 1;
+            slot = Some(i);
+        }
+    }
+    if unusable && idx_num == 0 {
+        return Ok(false);
+    }
+    if let Some(i) = slot {
+        let mut usage = info.constraint_usage(i);
+        usage.set_argv_index(1);
+        usage.set_omit(true);
+    }
+    info.set_estimated_cost(100.0);
+    info.set_estimated_rows(100);
+    info.set_idx_num(idx_num);
+    Ok(true)
+}
+
+fn require_tbl(module: &str, idx_num: c_int, args: &Filters<'_>) -> Result<(String, String)> {
+    if idx_num != 1 {
+        return Err(module_err(format!(
+            "{module}: missing required argument tbl — call as {module}('<table>' | '<schema>.<table>')"
+        )));
+    }
+    let spec: Option<String> = args.get(0)?;
+    let spec = spec.ok_or_else(|| module_err(format!("{module}: tbl must not be NULL")))?;
+    Ok(split_spec(&spec))
+}
+
+/// timeless_series('metrics') — the series catalog, from the in-memory
+/// registry + chunk index only (no chunk decompression).
+#[repr(C)]
+pub(crate) struct SeriesTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+const SERIES_COL_TBL: c_int = 8;
+
+unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
+    type Aux = ();
+    type Cursor = SeriesCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(name TEXT, labels TEXT, series_id INTEGER, \
+                            min_ts INTEGER, max_ts INTEGER, points INTEGER, \
+                            chunks INTEGER, buffered INTEGER, tbl HIDDEN)"),
+            SeriesTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_tbl(info, SERIES_COL_TBL)
+    }
+
+    fn open(&mut self) -> Result<SeriesCursor<'vtab>> {
+        Ok(SeriesCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct SeriesCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<timeless_core::SeriesOverview>,
+    pos: usize,
+    phantom: PhantomData<&'vtab SeriesTab>,
+}
+
+unsafe impl VTabCursor for SeriesCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        let (database, table) = require_tbl("timeless_series", idx_num, args)?;
+        let _bind = DbGuard::bind(self.db);
+        let module = detect_module(&database, &table)?;
+        if module != TimelessModule::Metrics {
+            return Err(module_err(format!(
+                "timeless_series: {table} is a {} table; the series catalog exists for \
+                 timeless_metrics only (timeless_stats works for every module)",
+                module.name()
+            )));
+        }
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        shared.engine.refresh_authoritative_state().map_err(module_err)?;
+        self.rows = shared.engine.series_overview();
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let row = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(&row.name),
+            1 => ctx.set_result(&labels_to_json(&row.labels)),
+            2 => ctx.set_result(&row.series_id),
+            3 => ctx.set_result(&row.min_ts),
+            4 => ctx.set_result(&row.max_ts),
+            5 => ctx.set_result(&(row.disk_points as i64 + row.buffered as i64)),
+            6 => ctx.set_result(&(row.chunks as i64)),
+            7 => ctx.set_result(&(row.buffered as i64)),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+/// timeless_stats('t') — k/v health rows for any timeless table.
+/// Engine-view counters come from the shared in-process engine; byte
+/// sizes come from SQL over the shadow tables on the calling connection
+/// (always-current, works before any engine exists elsewhere).
+#[repr(C)]
+pub(crate) struct StatsTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+const STATS_COL_TBL: c_int = 2;
+
+unsafe impl<'vtab> VTab<'vtab> for StatsTab {
+    type Aux = ();
+    type Cursor = StatsCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(key TEXT, value, tbl HIDDEN)"),
+            StatsTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_tbl(info, STATS_COL_TBL)
+    }
+
+    fn open(&mut self) -> Result<StatsCursor<'vtab>> {
+        Ok(StatsCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct StatsCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(&'static str, rusqlite::types::Value)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab StatsTab>,
+}
+
+fn sum_blob_bytes(database: &str, table: &str, suffix: &str, column: &str) -> Result<i64> {
+    let conn = shared::current_conn().map_err(module_err)?;
+    let sql = format!(
+        "SELECT COALESCE(SUM(length({column})), 0) FROM {}",
+        crate::sql_ident::qualified_shadow(database, table, suffix)
+    );
+    Ok(conn.query_row(&sql, [], |r| r.get(0))?)
+}
+
+fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
+    let conn = shared::current_conn().map_err(module_err)?;
+    let sql = format!(
+        "SELECT COUNT(*) FROM {}",
+        crate::sql_ident::qualified_shadow(database, table, suffix)
+    );
+    Ok(conn.query_row(&sql, [], |r| r.get(0))?)
+}
+
+unsafe impl VTabCursor for StatsCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        use rusqlite::types::Value;
+        let (database, table) = require_tbl("timeless_stats", idx_num, args)?;
+        let _bind = DbGuard::bind(self.db);
+        let module = detect_module(&database, &table)?;
+
+        let opt_ts = |v: Option<i64>| v.map_or(Value::Null, Value::Integer);
+        let mut rows: Vec<(&'static str, Value)> =
+            vec![("module", Value::Text(module.name().to_owned()))];
+        match module {
+            TimelessModule::Metrics => {
+                let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+                shared.engine.refresh_authoritative_state().map_err(module_err)?;
+                let info = shared.engine.info();
+                rows.extend([
+                    ("series", Value::Integer(info.series_count as i64)),
+                    ("chunks", Value::Integer(info.chunk_count as i64)),
+                    ("disk_points", Value::Integer(info.disk_points as i64)),
+                    ("buffered_points", Value::Integer(info.buffered_points as i64)),
+                    ("bytes_on_disk", Value::Integer(info.total_bytes as i64)),
+                    ("bytes_per_point", Value::Real(info.bytes_per_point)),
+                    ("buffer_memory", Value::Integer(info.buffer_memory as i64)),
+                    ("ts_min", opt_ts(info.oldest_ts)),
+                    ("ts_max", opt_ts(info.newest_ts)),
+                ]);
+            }
+            TimelessModule::Logs => {
+                let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
+                let (blocks, raw_blocks, buffered) = shared.engine.stats();
+                let (ts_min, ts_max) = shared.engine.ts_range();
+                rows.extend([
+                    ("blocks", Value::Integer(blocks as i64)),
+                    ("raw_blocks", Value::Integer(raw_blocks as i64)),
+                    ("buffered_entries", Value::Integer(buffered as i64)),
+                    (
+                        "bytes_on_disk",
+                        Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
+                    ),
+                    ("terms", Value::Integer(count_rows(&database, &table, "terms")?)),
+                    ("ts_min", opt_ts(ts_min)),
+                    ("ts_max", opt_ts(ts_max)),
+                ]);
+            }
+            TimelessModule::Traces => {
+                let shared = TracesTab::shared_engine_for(self.db, &database, &table)?;
+                let (blocks, raw_blocks, buffered) = shared.engine.stats();
+                let (ts_min, ts_max) = shared.engine.ts_range();
+                rows.extend([
+                    ("blocks", Value::Integer(blocks as i64)),
+                    ("raw_blocks", Value::Integer(raw_blocks as i64)),
+                    ("buffered_spans", Value::Integer(buffered as i64)),
+                    (
+                        "bytes_on_disk",
+                        Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
+                    ),
+                    ("terms", Value::Integer(count_rows(&database, &table, "terms")?)),
+                    (
+                        "trace_index_rows",
+                        Value::Integer(count_rows(&database, &table, "trace_blocks")?),
+                    ),
+                    ("ts_min", opt_ts(ts_min)),
+                    ("ts_max", opt_ts(ts_max)),
+                ]);
+            }
+        }
+        self.rows = rows;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (key, value) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(key),
+            1 => ctx.set_result(value),
+            _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
 
