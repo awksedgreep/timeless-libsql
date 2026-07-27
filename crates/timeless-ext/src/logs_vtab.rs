@@ -125,6 +125,10 @@ impl LogsTab {
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let database = String::from_utf8_lossy(database_name).into_owned();
+        // Innocuous (FTS5 precedent, same rationale as metrics_vtab):
+        // lets users reference this vtab from their own views under
+        // trusted_schema=off.
+        db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
         // Bind the calling connection for every store operation below
         // (DDL, _meta reads/writes, recovery scans). RAII unbind.

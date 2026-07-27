@@ -146,6 +146,12 @@ impl MetricsTab {
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let database = String::from_utf8_lossy(database_name).into_owned();
+        // Innocuous (the FTS5 precedent): reads have no side effects, so
+        // the vtab may be referenced from views even under the CLI's
+        // default trusted_schema=off — required by dbhealth's companion
+        // views, and it lets users build their own views over any of the
+        // timeless tables.
+        db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
         // Bind the calling connection for the store operations below
         // (DDL, and the recovery SELECTs Engine::with_store performs

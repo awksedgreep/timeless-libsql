@@ -83,6 +83,35 @@ value REAL, labels TEXT)`. Shadow tables follow the same pattern
 `'sample'` appends one point per metric below, timestamped now, then flushes
 opportunistically every `flush_every` samples (see Durability).
 
+### Companion views (v1, shipped with the table)
+
+`CREATE VIRTUAL TABLE` also creates three ordinary SQL views (and `DROP
+TABLE` removes them), so evaluating health requires no DBA knowledge:
+
+- **`<t>_report`** — the headline: one row per health check with
+  `status` (`ok | warn | attention | no data`), a human-readable value,
+  and one concrete piece of advice; sorted worst-first. Seven checks in
+  v1: sampling freshness, `cache_hit_ratio_24h`, `bloat`, `wal_size`,
+  `cache_spills_24h`, `stmt_memory`, `db_growth_7d`. Thresholds are
+  deliberately visible in the view SQL (`.schema <t>_report`):
+  opinionated but inspectable, and users can define their own variants.
+  A fresh table renders a complete report — every check degrades to a
+  `no data` row with onboarding advice, never a missing row or a NULL.
+- **`<t>_now`** — latest value per series plus its age in seconds.
+- **`<t>_trends`** — per-series daily min/avg/max over the last 7 days.
+
+The vtabs are marked `SQLITE_VTAB_INNOCUOUS` (the FTS5 precedent) so the
+views work under the CLI's default `trusted_schema=off` — this applies to
+all four timeless modules, so users can build their own views over
+metrics/logs/traces too.
+
+Implementation notes that cost a debugging round, recorded so they aren't
+relearned: SQLite's `printf()` renders NULL arguments as `0`, so every
+formatted value needs a `CASE ... IS NULL` guard, and a `FROM (SELECT ...
+WHERE ...)` subquery over an empty table yields *zero rows* (dropping the
+whole UNION ALL branch), so single-value checks must use scalar
+subqueries (`SELECT (SELECT ...) AS v`) to guarantee one row.
+
 ## Metric inventory — v1
 
 Everything below is available from inside a loadable extension on the host
@@ -309,3 +338,9 @@ mirror where it doesn't.
 - 2026-07-27 — **v2 statement profiling explicitly deferred** (author
   decision): v1 ships hook-free; revisit only with the trace-chaining and
   cardinality-cap design in hand.
+- 2026-07-27 — **Companion views ship with the table** (`_now`,
+  `_report`, `_trends`): the raw series are the truth, the views are the
+  judgment — "is my database healthy?" must not require DBA knowledge.
+  In-extension (not a docs snippet) so they're zero-config, version with
+  the metric inventory, and work over sqld. Required marking all
+  timeless vtabs INNOCUOUS (FTS5 precedent) for trusted_schema=off.

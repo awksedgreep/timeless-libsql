@@ -28,6 +28,21 @@
 //! the reset flag is never passed to sqlite3_db_status, so co-resident
 //! readers of the same counters are undisturbed.
 //!
+//! COMPANION VIEWS — xCreate also creates three ordinary SQL views next
+//! to the vtab (dropped with it), so evaluating db health needs no DBA
+//! knowledge, just SELECT *:
+//!
+//!   <t>_now     latest value per series + its age
+//!   <t>_report  one row per health CHECK: status ok|warn|attention|
+//!               'no data', a human-readable value, and one concrete
+//!               piece of advice — worst rows first. The thresholds are
+//!               deliberately visible in the view SQL: opinionated but
+//!               inspectable, and users can define their own variants.
+//!   <t>_trends  per-series daily min/avg/max over the last 7 days
+//!
+//! The views are plain SQL over the vtab — they version with the
+//! extension, work identically over sqld, and cost nothing at rest.
+//!
 //! COUNTER SCOPE (documented limit): sqlite3_db_status counters are per
 //! CONNECTION, so delta series describe the connection that issued
 //! 'sample'. Delta state therefore lives in the per-connection vtab
@@ -125,6 +140,8 @@ impl HealthTab {
                 &format!("INSERT OR REPLACE INTO {meta}(k, v) VALUES(?1, ?2)"),
                 rusqlite::params![META_KEY, n.to_string().as_bytes()],
             )?;
+            // Companion views ride the same (transactional) create.
+            host.execute_batch(&views_ddl(&inner.database_name, &inner.table_name))?;
             n
         } else {
             use rusqlite::OptionalExtension;
@@ -280,7 +297,169 @@ impl HealthTab {
     }
 }
 
-/// `flush_every=N` (N ≥ 1) is the only supported argument; absent → 20.
+/// DDL for the three companion views. All SQL is resolved lazily by
+/// SQLite (views never validate their FROM at CREATE time), and every
+/// check in _report degrades to a 'no data' row instead of NULLs — a
+/// fresh table renders a sane report immediately.
+///
+/// Threshold cheat-sheet (the opinions, kept in one place):
+///   sampling freshness   ok ≤ 2h,   warn ≤ 2d,      else attention
+///   cache_hit_ratio_24h  ok ≥ 0.90, warn ≥ 0.60,    else attention
+///   bloat (free pages)   ok < 10%,  warn < 25%,     else attention
+///   wal_size             ok ≤ max(4MB, db size), warn ≤ 4x db, else attention
+///   cache_spills_24h     ok = 0,    warn ≤ 100,     else attention
+///   stmt_memory          ok < 4MB,  warn < 32MB,    else attention
+///   db_growth_7d         ok < 10MB or ≤ 1.5x, warn ≤ 3x, else attention
+fn views_ddl(database: &str, table: &str) -> String {
+    let t = sql_ident::quote(table);
+    let now = sql_ident::qualified(database, &format!("{table}_now"));
+    let now_ref = sql_ident::quote(&format!("{table}_now"));
+    let report = sql_ident::qualified(database, &format!("{table}_report"));
+    let trends = sql_ident::qualified(database, &format!("{table}_trends"));
+
+    format!(
+        r#"
+CREATE VIEW IF NOT EXISTS {now} AS
+SELECT a.name, a.value, a.ts, unixepoch() - a.ts AS age_seconds
+  FROM {t} a
+  JOIN (SELECT name, max(ts) AS ts FROM {t} GROUP BY name) m
+    ON a.name = m.name AND a.ts = m.ts
+ GROUP BY a.name;
+
+CREATE VIEW IF NOT EXISTS {trends} AS
+SELECT name,
+       date(ts, 'unixepoch') AS day,
+       count(*)              AS samples,
+       round(min(value), 3)  AS min_value,
+       round(avg(value), 3)  AS avg_value,
+       round(max(value), 3)  AS max_value
+  FROM {t}
+ WHERE ts > unixepoch() - 7 * 86400
+ GROUP BY name, day
+ ORDER BY name, day;
+
+CREATE VIEW IF NOT EXISTS {report} AS
+SELECT "check", status, value, advice FROM (
+
+SELECT 'sampling' AS "check",
+  CASE WHEN t IS NULL THEN 'no data'
+       WHEN age <= 7200 THEN 'ok'
+       WHEN age <= 172800 THEN 'warn'
+       ELSE 'attention' END AS status,
+  CASE WHEN t IS NULL THEN '—'
+       WHEN age < 120 THEN CAST(age AS TEXT) || 's ago'
+       WHEN age < 7200 THEN CAST(age / 60 AS TEXT) || 'm ago'
+       ELSE CAST(age / 3600 AS TEXT) || 'h ago' END AS value,
+  CASE WHEN t IS NULL THEN
+         'no samples yet — run the ''sample'' command from cron or an app timer'
+       WHEN age <= 7200 THEN '—'
+       ELSE 'sampling has stopped; check the cron job or timer that issues ''sample''' END AS advice
+FROM (SELECT max(ts) AS t, unixepoch() - max(ts) AS age FROM {t})
+
+UNION ALL
+SELECT 'cache_hit_ratio_24h',
+  CASE WHEN v IS NULL THEN 'no data'
+       WHEN v >= 0.90 THEN 'ok'
+       WHEN v >= 0.60 THEN 'warn'
+       ELSE 'attention' END,
+  CASE WHEN v IS NULL THEN '—' ELSE printf('%.3f', v) END,
+  CASE WHEN v IS NULL THEN
+         'ratio deltas need a connection that samples more than once (docs/DBHEALTH.md)'
+       WHEN v >= 0.90 THEN '—'
+       ELSE 'page cache misses are high; raise PRAGMA cache_size' END
+FROM (SELECT avg(value) AS v FROM {t}
+       WHERE name = 'cache_hit_ratio' AND ts > unixepoch() - 86400)
+
+UNION ALL
+SELECT 'bloat',
+  CASE WHEN v IS NULL THEN 'no data'
+       WHEN v < 0.10 THEN 'ok'
+       WHEN v < 0.25 THEN 'warn'
+       ELSE 'attention' END,
+  CASE WHEN v IS NULL THEN '—'
+       ELSE printf('%d%% free pages', CAST(round(v * 100) AS INTEGER)) END,
+  CASE WHEN v IS NULL THEN 'needs at least one sample'
+       WHEN v < 0.10 THEN '—'
+       ELSE 'free pages accumulate after deletes; PRAGMA incremental_vacuum(1000) returns them to the OS in slices' END
+FROM (SELECT (SELECT value FROM {now_ref} WHERE name = 'bloat_ratio') AS v)
+
+UNION ALL
+SELECT 'wal_size',
+  CASE WHEN wal IS NULL OR db IS NULL THEN 'no data'
+       WHEN wal <= 4194304 OR wal <= db THEN 'ok'
+       WHEN wal <= 4 * db THEN 'warn'
+       ELSE 'attention' END,
+  CASE WHEN wal IS NULL OR db IS NULL THEN '—'
+       ELSE printf('%.1f MB (db %.1f MB)', wal / 1048576.0, db / 1048576.0) END,
+  CASE WHEN wal IS NULL OR db IS NULL THEN 'needs at least one sample'
+       WHEN wal <= 4194304 OR wal <= db THEN '—'
+       ELSE 'the WAL outgrows the database between checkpoints; look for long-lived read transactions, or run PRAGMA wal_checkpoint(TRUNCATE)' END
+FROM (SELECT (SELECT value FROM {now_ref} WHERE name = 'wal_file_bytes') AS wal,
+             (SELECT value FROM {now_ref} WHERE name = 'db_file_bytes')  AS db)
+
+UNION ALL
+SELECT 'cache_spills_24h',
+  CASE WHEN s IS NULL THEN 'no data'
+       WHEN s = 0 THEN 'ok'
+       WHEN s <= 100 THEN 'warn'
+       ELSE 'attention' END,
+  COALESCE(CAST(CAST(s AS INTEGER) AS TEXT), '—'),
+  CASE WHEN s IS NULL THEN
+         'spill deltas need a connection that samples more than once (docs/DBHEALTH.md)'
+       WHEN s = 0 THEN '—'
+       ELSE 'transactions overflow the page cache mid-write; raise PRAGMA cache_size' END
+FROM (SELECT sum(value) AS s FROM {t}
+       WHERE name = 'cache_spills' AND ts > unixepoch() - 86400)
+
+UNION ALL
+SELECT 'stmt_memory',
+  CASE WHEN v IS NULL THEN 'no data'
+       WHEN v < 4194304 THEN 'ok'
+       WHEN v < 33554432 THEN 'warn'
+       ELSE 'attention' END,
+  CASE WHEN v IS NULL THEN '—' ELSE printf('%.1f MB', v / 1048576.0) END,
+  CASE WHEN v IS NULL THEN 'needs at least one sample'
+       WHEN v < 4194304 THEN '—'
+       ELSE 'prepared-statement memory keeps growing; look for statements prepared but never finalized' END
+FROM (SELECT (SELECT value FROM {now_ref} WHERE name = 'stmt_used_bytes') AS v)
+
+UNION ALL
+SELECT 'db_growth_7d',
+  CASE WHEN o IS NULL OR l IS NULL THEN 'no data'
+       WHEN l < 10485760 OR o <= 0 THEN 'ok'
+       WHEN l <= 1.5 * o THEN 'ok'
+       WHEN l <= 3 * o THEN 'warn'
+       ELSE 'attention' END,
+  CASE WHEN o IS NULL OR l IS NULL THEN '—'
+       WHEN o <= 0 THEN printf('%.1f MB', l / 1048576.0)
+       ELSE printf('%.1fx in 7d (now %.1f MB)', l * 1.0 / o, l / 1048576.0) END,
+  CASE WHEN o IS NULL OR l IS NULL THEN 'needs at least one sample'
+       WHEN l < 10485760 OR o <= 0 OR l <= 1.5 * o THEN '—'
+       ELSE 'the file is growing fast; check that ''prune'' retention runs for your telemetry tables' END
+FROM (SELECT (SELECT value FROM {t}
+               WHERE name = 'db_file_bytes' AND ts > unixepoch() - 604800
+               ORDER BY ts LIMIT 1) AS o,
+             (SELECT value FROM {now_ref} WHERE name = 'db_file_bytes') AS l)
+)
+ORDER BY CASE status WHEN 'attention' THEN 0 WHEN 'warn' THEN 1
+                     WHEN 'no data' THEN 2 ELSE 3 END, "check";
+"#
+    )
+}
+
+/// DROP DDL for the companion views (xDestroy, before the shadow drop).
+fn drop_views_ddl(database: &str, table: &str) -> String {
+    let now = sql_ident::qualified(database, &format!("{table}_now"));
+    let report = sql_ident::qualified(database, &format!("{table}_report"));
+    let trends = sql_ident::qualified(database, &format!("{table}_trends"));
+    format!(
+        "DROP VIEW IF EXISTS {report};\n\
+         DROP VIEW IF EXISTS {trends};\n\
+         DROP VIEW IF EXISTS {now};"
+    )
+}
+
+/// `flush_every=N` (N ≥ 1) is the only supported argument; absent → 1.
 fn parse_flush_every_args(args: &[&[u8]]) -> std::result::Result<u32, String> {
     let mut result = DEFAULT_FLUSH_EVERY;
     for raw in args {
@@ -383,6 +562,11 @@ impl CreateVTab<'_> for HealthTab {
     }
 
     fn destroy(&self) -> Result<()> {
+        // Views first (they reference the vtab), then the inherited
+        // shadow-table drop. DbGuard nests safely under inner.destroy()'s.
+        let _bind = DbGuard::bind(self.inner.db);
+        let host = unsafe { Connection::from_handle(self.inner.db) }?;
+        host.execute_batch(&drop_views_ddl(&self.inner.database_name, &self.inner.table_name))?;
         self.inner.destroy()
     }
 }

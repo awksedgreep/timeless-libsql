@@ -49,7 +49,9 @@
 #       sample, full inventory with deltas under cache torture,
 #       flush_every=1 default durability, flush_every persistence +
 #       honest loss window, sample rollback, db_file_bytes stat oracle,
-#       unknown-command message
+#       unknown-command message; companion views (_now/_report/_trends):
+#       complete no-data report on a fresh table, report diagnoses
+#       induced cache pressure, severity ordering, DROP cleanup
 #
 # NOTE on durability semantics being tested: points buffered but NOT
 # flushed before the process exits are lost — that is the accepted POC
@@ -1234,6 +1236,69 @@ case "$got" in
     fail "(e) unknown command error lists 'sample'"
     echo "--- got ---"; printf '%s\n' "$got" ;;
 esac
+
+# (f) Companion views: a FRESH table renders a complete report — all 7
+# checks present, every one 'no data', no NULLs anywhere (the printf-
+# NULL and zero-row-subquery traps this guards against are real: both
+# happened during development).
+DBV="$TMP/health_views.db"
+got=$(sqlite3 "$DBV" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE hv USING timeless_health;
+SELECT 'views', count(*) FROM sqlite_master
+ WHERE type = 'view' AND name IN ('hv_now', 'hv_report', 'hv_trends');
+SELECT 'fresh', count(*),
+       sum(status = 'no data'),
+       sum("check" IS NULL OR status IS NULL OR value IS NULL OR advice IS NULL)
+  FROM hv_report;
+SQL
+)
+expected="views|3
+fresh|7|7|0"
+check_eq "(f) three views created; fresh report = 7 complete 'no data' rows" \
+  "$got" "$expected"
+
+# (g) After samples under cache torture (cache_size=2 + churn), the
+# report diagnoses the induced disease: hit ratio and spills leave 'ok',
+# their advice names cache_size, and severity sorting puts a non-ok row
+# first. _now serves 16 series; _trends aggregates them for today.
+got=$(sqlite3 "$DBV" <<SQL
+.load $EXT
+PRAGMA cache_size=2;
+INSERT INTO hv(hv) VALUES ('sample');
+CREATE TABLE vjunk AS WITH RECURSIVE c(x) AS
+  (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 3000) SELECT x FROM c;
+SELECT count(*) > 0 FROM vjunk WHERE x % 7 = 0;
+INSERT INTO hv(hv) VALUES ('sample');
+SELECT 'ratio_flagged', count(*) FROM hv_report
+ WHERE "check" = 'cache_hit_ratio_24h' AND status != 'no data';
+SELECT 'advice', count(*) FROM hv_report
+ WHERE status IN ('warn', 'attention') AND advice LIKE '%cache_size%';
+SELECT 'first_row_not_ok', (SELECT status != 'ok' FROM hv_report LIMIT 1);
+SELECT 'now', count(*) FROM hv_now;
+SELECT 'trends', count(DISTINCT name), min(samples) >= 1 FROM hv_trends;
+SQL
+)
+ratio_ok=$(grep '^ratio_flagged' <<<"$got")
+advice_n=$(grep -c '^advice|0$' <<<"$got" || true)
+if [[ "$ratio_ok" == "ratio_flagged|1" && "$advice_n" == "0" ]] \
+   && grep -q '^first_row_not_ok|1$' <<<"$got" \
+   && grep -q '^now|16$' <<<"$got" \
+   && grep -q '^trends|16|1$' <<<"$got"; then
+  pass "(g) report diagnoses induced cache pressure; now/trends serve all series"
+else
+  fail "(g) report diagnoses induced cache pressure; now/trends serve all series"
+  echo "--- got ---"; printf '%s\n' "$got"
+fi
+
+# (h) DROP TABLE removes the companion views with the shadow tables.
+got=$(sqlite3 "$DBV" <<SQL
+.load $EXT
+DROP TABLE hv;
+SELECT count(*) FROM sqlite_master WHERE name LIKE 'hv%';
+SQL
+)
+check_eq "(h) DROP TABLE removes companion views and all shadow objects" "$got" "0"
 
 # ---------------------------------------------------------------------------
 echo

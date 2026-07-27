@@ -424,6 +424,30 @@ SELECT max(value) FROM dbhealth
  WHERE name = 'bloat_ratio' AND ts > unixepoch() - 7*86400;
 ```
 
+And you don't have to know what any of the numbers *mean* — creating the
+table also creates three views, and **`dbhealth_report`** is the one to
+remember. One row per health check, worst first, with a concrete action:
+
+```
+sqlite> SELECT * FROM dbhealth_report;
+check                 status   value       advice
+--------------------  -------  ----------  ------------------------------------
+cache_hit_ratio_24h   warn     0.835       page cache misses are high; raise
+                                           PRAGMA cache_size
+cache_spills_24h      warn     5           transactions overflow the page cache
+                                           mid-write; raise PRAGMA cache_size
+bloat                 ok       0% free pages   —
+sampling              ok       0s ago          —
+wal_size              ok       0.0 MB (db 0.0 MB)  —
+...
+```
+
+The thresholds live in plain view SQL (inspect them with `.schema
+dbhealth_report`), so if you disagree with an opinion you can define your
+own variant. `dbhealth_now` gives the latest value per series with its
+age, and `dbhealth_trends` gives daily min/avg/max per series over the
+last week — "is this getting worse?" as a `SELECT`.
+
 Each `'sample'` records ~16 series (`cache_hits`, `cache_misses`,
 `cache_hit_ratio`, `cache_spills`, `db_pages`, `freelist_pages`,
 `bloat_ratio`, `db_file_bytes`, `wal_file_bytes`, memory gauges, …) and

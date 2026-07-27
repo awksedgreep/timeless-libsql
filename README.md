@@ -90,8 +90,10 @@ sqlite3 demo.db \
 A fourth, meta module rides the metrics engine: **`timeless_health`**
 (**dbhealth**) samples SQLite's *own* health — cache hit rates, bloat, WAL
 growth — into the same compressed store, so the database monitors itself
-(`INSERT INTO dbhealth(dbhealth) VALUES ('sample')`; ~0.23 B/point,
-[docs/DBHEALTH.md](docs/DBHEALTH.md)).
+(`INSERT INTO dbhealth(dbhealth) VALUES ('sample')`; ~0.23 B/point). It
+ships with an opinionated `SELECT * FROM dbhealth_report` view — status +
+plain-language advice per check, no DBA required
+([docs/DBHEALTH.md](docs/DBHEALTH.md)).
 
 All three share the same lifecycle: inserts land in an in-memory buffer
 (queryable immediately, auto-flushed at a size threshold), `'flush'` encodes
