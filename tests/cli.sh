@@ -1315,6 +1315,87 @@ check_eq "catalog after committed DROP/recreate is fresh (R4)" \
   "$(grep '^fresh|' <<<"$got")" "fresh|disk|999|999|1|1"
 
 # ---------------------------------------------------------------------------
+echo "== section 24: F2 automated retention (table argument) =="
+F2DB="$TMP/f2_retention.db"
+got=$(sqlite3 "$F2DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics(retention='100s');
+CREATE VIRTUAL TABLE l USING timeless_logs(index_keys='service', retention=1000);
+CREATE VIRTUAL TABLE t USING timeless_traces(retention='1m');
+SELECT 'ret', 'm', value FROM timeless_stats('m') WHERE key='retention';
+SELECT 'ret', 'l', value FROM timeless_stats('l') WHERE key='retention';
+SELECT 'ret', 't', value FROM timeless_stats('t') WHERE key='retention';
+.print -- metrics: epoch 2 flush prunes epoch 1 (cutoff 1210-100=1110)
+INSERT INTO m(name, ts, value) VALUES ('cpu', 1000, 1.0), ('cpu', 1010, 2.0);
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(name, ts, value) VALUES ('cpu', 1200, 3.0), ('cpu', 1210, 4.0);
+INSERT INTO m(m) VALUES ('flush');
+SELECT 'mrows', ts FROM m ORDER BY ts;
+.print -- logs: same shape in ms (retention 1000 native)
+INSERT INTO l(ts, level, message) VALUES (5000, 'info', 'old');
+INSERT INTO l(l) VALUES ('flush');
+INSERT INTO l(ts, level, message) VALUES (7000, 'info', 'new');
+INSERT INTO l(l) VALUES ('flush');
+SELECT 'lrows', ts, message FROM l ORDER BY ts;
+.print -- traces: retention 1m = 60e9 ns
+INSERT INTO t(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES ('00000000000000000000000000000001', '0000000000000001', 'old', 's', 'server', 'ok', 1000000000, 5);
+INSERT INTO t(t) VALUES ('flush');
+INSERT INTO t(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES ('00000000000000000000000000000002', '0000000000000002', 'new', 's', 'server', 'ok', 200000000000, 5);
+INSERT INTO t(t) VALUES ('flush');
+SELECT 'trows', name FROM t ORDER BY start_ts;
+.print -- rollback: a flush whose retention pruned must restore the pruned chunk
+INSERT INTO m(name, ts, value) VALUES ('cpu', 1400, 5.0);
+BEGIN;
+INSERT INTO m(name, ts, value) VALUES ('cpu', 1600, 6.0);
+INSERT INTO m(m) VALUES ('flush');
+ROLLBACK;
+SELECT 'postrb', ts FROM m ORDER BY ts;
+SQL
+)
+check_eq "retention persisted per module (native units: 100s, 1000ms, 60e9ns)" \
+  "$(grep '^ret|' <<<"$got")" \
+'ret|m|100
+ret|l|1000
+ret|t|60000000000'
+check_eq "metrics: epoch-2 flush auto-prunes epoch 1" \
+  "$(grep '^mrows|' <<<"$got")" \
+'mrows|1200
+mrows|1210'
+check_eq "logs: epoch-2 flush auto-prunes epoch 1" \
+  "$(grep '^lrows|' <<<"$got")" "lrows|7000|new"
+check_eq "traces: epoch-2 flush auto-prunes epoch 1" \
+  "$(grep '^trows|' <<<"$got")" "trows|new"
+# The rolled-back txn's flush pruned nothing new (guard) but drained the
+# 1400 buffer point; rollback must restore it as buffered, and 1600 must
+# vanish. Chunks 1200/1210 remain.
+check_eq "rollback restores buffered point drained by the rolled-back flush" \
+  "$(grep '^postrb|' <<<"$got")" \
+'postrb|1200
+postrb|1210
+postrb|1400'
+# Steady state (acceptance): 4 retention windows of continuous ingest —
+# point count must not grow past ~2 epochs' worth.
+got=$(sqlite3 "$F2DB" <<SQL
+.load $EXT
+INSERT INTO m(name, ts, value) SELECT 'cpu', 2000 + value, 1.0 FROM generate_series(0, 49);
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(name, ts, value) SELECT 'cpu', 2200 + value, 1.0 FROM generate_series(0, 49);
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(name, ts, value) SELECT 'cpu', 2400 + value, 1.0 FROM generate_series(0, 49);
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(name, ts, value) SELECT 'cpu', 2600 + value, 1.0 FROM generate_series(0, 49);
+INSERT INTO m(m) VALUES ('flush');
+SELECT 'steady', COUNT(*), MIN(ts) >= 2400, MAX(ts) FROM m;
+SQL
+)
+# Epochs are 200 apart with retention 100: each flush's cutoff excludes
+# every prior epoch, so steady state is exactly one epoch (50 points).
+check_eq "steady state across 4 retention windows (only the newest epoch survives)" \
+  "$(grep '^steady|' <<<"$got")" "steady|50|1|2649"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

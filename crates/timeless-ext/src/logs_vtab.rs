@@ -53,6 +53,7 @@ use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_block_store::{self, ShadowBlockStore};
 use crate::shadow_meta;
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
+use crate::table_args;
 use crate::sql_ident;
 use crate::vtab_tx::{self, SavepointVTab};
 
@@ -73,6 +74,8 @@ const MERGE_TARGET_ENTRIES: usize = 8192;
 /// block ages out. 1h granules keep 'prune:<ts>' effective at typical
 /// (hours-to-days) log retention windows.
 const MERGE_MAX_TS_SPAN: i64 = 3_600_000;
+/// F2 retention unit conversion: logs ts is epoch MILLISECONDS.
+const NATIVE_PER_SECOND: i64 = 1_000;
 
 /// best_index bitmask layout (fixed bits first, then one bit per index
 /// key). c_int gives 31 usable bits → 3 fixed + up to 28 index keys.
@@ -146,7 +149,7 @@ impl LogsTab {
             None => Vec::new(),
         };
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
-        shared::get_or_create(&key, move || {
+        let shared = shared::get_or_create(&key, move || {
             BlockEngine::new(
                 Box::new(store),
                 BlockEngineConfig {
@@ -158,7 +161,11 @@ impl LogsTab {
                 },
             )
             .map_err(module_err)
-        })
+        })?;
+        shared
+            .engine
+            .set_retention(shadow_meta::load_retention(&host, database, table).map_err(module_err)?);
+        Ok(shared)
     }
 
     fn connect_create(
@@ -189,19 +196,45 @@ impl LogsTab {
         let instance_id =
             shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
 
-        let index_keys = if is_create {
+        let (index_keys, retention) = if is_create {
             // index_keys comes from the CREATE args and is PERSISTED in
             // _meta: the key set is baked into the terms already written
             // to `_terms`, so it is a property of the DATA, not of
             // whoever reconnects. xConnect reads it back from _meta and
-            // never trusts (or receives) fresh args.
-            let keys = parse_index_keys_args(&table, args).map_err(module_err)?;
+            // never trusts (or receives) fresh args. F2 retention rides
+            // the same convention (unit-resolved to ms, persisted).
+            let mut keys_value: Option<String> = None;
+            let mut retention: Option<i64> = None;
+            for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
+                match name.as_str() {
+                    "index_keys" => keys_value = Some(value),
+                    "retention" => {
+                        retention = Some(
+                            table_args::parse_retention(&value, NATIVE_PER_SECOND)
+                                .map_err(module_err)?,
+                        );
+                    }
+                    other => {
+                        return Err(module_err(format!(
+                            "unrecognized argument {other:?}; timeless_logs supports: \
+                             index_keys, retention"
+                        )));
+                    }
+                }
+            }
+            let keys =
+                parse_index_keys_value(&table, keys_value.as_deref().unwrap_or(""))
+                    .map_err(module_err)?;
             store
                 .save_meta("index_keys", keys.join(",").as_bytes())
                 .map_err(module_err)?;
-            keys
+            if let Some(native) = retention {
+                shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
+                    .map_err(module_err)?;
+            }
+            (keys, retention)
         } else {
-            match store.load_meta("index_keys").map_err(module_err)? {
+            let keys = match store.load_meta("index_keys").map_err(module_err)? {
                 Some(bytes) => {
                     let joined = String::from_utf8(bytes).map_err(|_| {
                         module_err(format!("{table}: index_keys in _meta is not UTF-8"))
@@ -213,9 +246,13 @@ impl LogsTab {
                     }
                 }
                 // _meta row missing (shouldn't happen — xCreate always
-                // writes it). Fall back to the args SQLite replays.
-                None => parse_index_keys_args(&table, args).map_err(module_err)?,
-            }
+                // writes it). Treat as "no index keys".
+                None => Vec::new(),
+            };
+            (
+                keys,
+                shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?,
+            )
         };
 
         // R4: one engine per (db file, schema alias, table, instance). First
@@ -239,6 +276,7 @@ impl LogsTab {
             )
             .map_err(module_err)
         })?;
+        shared_engine.engine.set_retention(retention);
 
         // Declared schema, built at runtime: fixed columns + one HIDDEN
         // TEXT column per index key + the hidden command column named
@@ -317,29 +355,9 @@ impl LogsTab {
 /// Parse `index_keys='a,b,c'` from the CREATE VIRTUAL TABLE args.
 /// No args (or an empty list) is allowed: level + ts + message-scan
 /// queries still work, there are just no metadata posting lists.
-fn parse_index_keys_args(table: &str, args: &[&[u8]]) -> std::result::Result<Vec<String>, String> {
+fn parse_index_keys_value(table: &str, value: &str) -> std::result::Result<Vec<String>, String> {
     let mut keys: Vec<String> = Vec::new();
-    for raw in args {
-        let arg = String::from_utf8_lossy(raw);
-        let arg = arg.trim();
-        let Some((name, value)) = arg.split_once('=') else {
-            return Err(format!(
-                "unrecognized argument {arg:?}; expected index_keys='k1,k2,...'"
-            ));
-        };
-        if name.trim() != "index_keys" {
-            return Err(format!(
-                "unrecognized argument {:?}; the only supported argument is index_keys",
-                name.trim()
-            ));
-        }
-        // Accept 'a,b', "a,b", or bare a,b.
-        let value = value.trim();
-        let value = value
-            .strip_prefix('\'')
-            .and_then(|v| v.strip_suffix('\''))
-            .or_else(|| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
-            .unwrap_or(value);
+    {
         for k in value.split(',') {
             let k = k.trim();
             if k.is_empty() {

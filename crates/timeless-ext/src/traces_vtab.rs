@@ -59,6 +59,7 @@ use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_meta;
 use crate::shadow_span_store::{self, ShadowSpanStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
+use crate::table_args;
 use crate::sql_ident;
 use crate::vtab_tx::{self, SavepointVTab};
 
@@ -77,6 +78,8 @@ const MERGE_TARGET_ENTRIES: usize = 8192;
 /// logs vtab (which passes 1h in ms) — the engine is unit-agnostic, the
 /// vtab supplies the unit.
 const MERGE_MAX_TS_SPAN: i64 = 3_600_000_000_000;
+/// F2 retention unit conversion: traces start_ts is epoch NANOSECONDS.
+const NATIVE_PER_SECOND: i64 = 1_000_000_000;
 
 /// best_index bitmask. BIT_TRACE is the star: trace_id equality routes
 /// the cursor through the `_trace_blocks` index, so it gets a
@@ -191,7 +194,7 @@ impl TracesTab {
             shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
         let store = ShadowSpanStore::new(database, table);
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
-        shared::get_or_create(&key, move || {
+        let shared = shared::get_or_create(&key, move || {
             SpanBlockEngine::new(
                 Box::new(store),
                 SpanEngineConfig {
@@ -202,7 +205,11 @@ impl TracesTab {
                 },
             )
             .map_err(module_err)
-        })
+        })?;
+        shared
+            .engine
+            .set_retention(shadow_meta::load_retention(&host, database, table).map_err(module_err)?);
+        Ok(shared)
     }
 
     fn connect_create(
@@ -221,18 +228,10 @@ impl TracesTab {
         // (DDL, _meta writes, recovery scans). RAII unbind.
         let _bind = DbGuard::bind(handle);
 
-        // No creation args: unlike logs there is no index_keys knob
-        // (spans/mod.rs explains why the four span dimensions are
-        // indexed unconditionally). Reject anything passed so a typo'd
-        // arg fails loudly instead of silently doing nothing.
-        if !args.is_empty() {
-            return Err(module_err(format!(
-                "timeless_traces takes no arguments; got {:?}",
-                args.iter()
-                    .map(|a| String::from_utf8_lossy(a).into_owned())
-                    .collect::<Vec<_>>()
-            )));
-        }
+        // Unlike logs there is no index_keys knob (spans/mod.rs explains
+        // why the four span dimensions are indexed unconditionally); the
+        // only supported argument is F2's retention, parsed after the
+        // engine exists below. Typo'd args still fail loudly there.
 
         let host = unsafe { Connection::from_handle(handle) }?;
         let store = ShadowSpanStore::new(&database, &table);
@@ -269,6 +268,35 @@ impl TracesTab {
             )
             .map_err(module_err)
         })?;
+
+        // F2 retention: unit-resolved (ns) at create, persisted in
+        // _meta; xConnect loads it back and ignores replayed args.
+        let retention = if is_create {
+            let mut retention = None;
+            for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
+                match name.as_str() {
+                    "retention" => {
+                        retention = Some(
+                            table_args::parse_retention(&value, NATIVE_PER_SECOND)
+                                .map_err(module_err)?,
+                        );
+                    }
+                    other => {
+                        return Err(module_err(format!(
+                            "unrecognized argument {other:?}; timeless_traces supports: retention"
+                        )));
+                    }
+                }
+            }
+            if let Some(native) = retention {
+                shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
+                    .map_err(module_err)?;
+            }
+            retention
+        } else {
+            shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?
+        };
+        shared_engine.engine.set_retention(retention);
 
         let schema = format!(
             "CREATE TABLE x(trace_id BLOB, span_id BLOB, parent_span_id BLOB, \

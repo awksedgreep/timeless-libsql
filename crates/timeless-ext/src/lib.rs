@@ -42,6 +42,7 @@ mod shadow_store;
 mod shared;
 mod sql_ident;
 mod spike;
+mod table_args;
 mod traces_vtab;
 mod vtab_tx;
 

@@ -575,6 +575,14 @@ pub struct Engine {
     /// the first refresh after a local flush/compact/prune/new-series
     /// does one (redundant but harmless) reload.
     catalog_gen: Mutex<Option<(i64, i64)>>,
+    /// F2 retention window in NATIVE ts units; 0 = disabled. Set from
+    /// the persisted table argument after construction (idempotent —
+    /// every connection loads the same _meta value).
+    retention_native: AtomicI64,
+    /// Advance guard: the last retention cutoff actually applied, so
+    /// per-maintenance application skips until the cutoff has moved by
+    /// a meaningful slice (retention/16). i64::MIN = never applied.
+    retention_floor: AtomicI64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1147,6 +1155,8 @@ impl Engine {
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(None),
+            retention_native: AtomicI64::new(0),
+            retention_floor: AtomicI64::new(i64::MIN),
         };
         engine.replace_index(stored_chunks);
         Ok(engine)
@@ -1584,6 +1594,12 @@ impl Engine {
     // ── Flush ────────────────────────────────────────────────────────
 
     pub fn flush_pending(&self) -> EngineResult<usize> {
+        let count = self.flush_pending_inner()?;
+        self.apply_retention()?;
+        Ok(count)
+    }
+
+    fn flush_pending_inner(&self) -> EngineResult<usize> {
         let _transition = self.transition_write();
         let keys: Vec<PartitionKey> = {
             let mut queue = self.flush_queue_lock();
@@ -1736,6 +1752,12 @@ impl Engine {
     }
 
     pub fn flush_all(&self) -> EngineResult<()> {
+        self.flush_all_inner()?;
+        self.apply_retention()?;
+        Ok(())
+    }
+
+    fn flush_all_inner(&self) -> EngineResult<()> {
         let _transition = self.transition_write();
         let keys: Vec<(PartitionKey, usize)> = self
             .partitions
@@ -1935,6 +1957,12 @@ impl Engine {
     /// when no surviving index entry references them (batch files are
     /// shared across series).
     pub fn compact_partitions(&self, cutoff_ts: i64) -> EngineResult<(usize, usize)> {
+        let out = self.compact_partitions_inner(cutoff_ts)?;
+        self.apply_retention()?;
+        Ok(out)
+    }
+
+    fn compact_partitions_inner(&self, cutoff_ts: i64) -> EngineResult<(usize, usize)> {
         const SMALL_CHUNK_POINTS: u32 = 16 * 1024;
         const MAX_OUTPUT_POINTS: usize = 32 * 1024;
         const COMPACTION_LEVEL: usize = 12;
@@ -2644,6 +2672,57 @@ impl Engine {
     }
 
     // ── Retention ────────────────────────────────────────────────────
+
+    /// F2: configure the automatic retention window (NATIVE ts units;
+    /// None disables). Idempotent — called at every connect with the
+    /// persisted table setting.
+    pub fn set_retention(&self, native: Option<i64>) {
+        self.retention_native
+            .store(native.unwrap_or(0).max(0), Ordering::Relaxed);
+    }
+
+    /// Apply the configured retention window, if any. Cutoff is DATA
+    /// time: (max queryable ts) - retention — deterministic, replay-safe,
+    /// and inert for pure backfills (invariant 5 in FEATURE_PLAN.md).
+    /// The high-water mark is derived on demand from the chunk index +
+    /// buffers, so the write hot path pays nothing.
+    ///
+    /// Called by the maintenance wrappers AFTER their transition guard
+    /// is released (delete_before takes it again); must never run under
+    /// an engine lock. Manual 'prune:<ts>' is unaffected.
+    pub fn apply_retention(&self) -> EngineResult<usize> {
+        let retention = self.retention_native.load(Ordering::Relaxed);
+        if retention == 0 {
+            return Ok(0);
+        }
+        let mut high_water = i64::MIN;
+        {
+            let index = self.index_read();
+            for meta in index.values() {
+                high_water = high_water.max(meta.max_ts);
+            }
+        }
+        for entry in self.partitions.iter() {
+            if let Some(&mx) = entry.value().timestamps.iter().max() {
+                high_water = high_water.max(mx);
+            }
+        }
+        if high_water == i64::MIN {
+            return Ok(0); // empty table
+        }
+        let cutoff = high_water.saturating_sub(retention);
+        let slice = (retention / 16).max(1);
+        let floor = self.retention_floor.load(Ordering::Relaxed);
+        if floor != i64::MIN && cutoff < floor.saturating_add(slice) {
+            return Ok(0); // hasn't advanced meaningfully since last time
+        }
+        let (chunks, _units, errors) = self.delete_before(cutoff);
+        if !errors.is_empty() {
+            return Err(format!("retention prune failed: {}", errors.join("; ")));
+        }
+        self.retention_floor.store(cutoff, Ordering::Relaxed);
+        Ok(chunks)
+    }
 
     pub fn delete_before(&self, before_ts: i64) -> (usize, usize, Vec<String>) {
         let _transition = self.transition_write();

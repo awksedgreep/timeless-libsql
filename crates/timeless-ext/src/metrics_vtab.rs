@@ -74,6 +74,7 @@ use timeless_core::{Engine, Labels};
 
 use crate::flatjson::{labels_to_json, parse_labels_json};
 use crate::shadow_meta;
+use crate::table_args;
 use crate::shadow_store::{self, ShadowTableStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
 use crate::sql_ident;
@@ -91,6 +92,8 @@ const MIN_FLUSH_SIZE: usize = 0; // flush everything, however small
 const COMPRESSION_LEVEL: usize = 8; // pco level
 const MEMORY_BUDGET: usize = 256 * 1024 * 1024; // 256 MiB of buffers
 const DEFER_COMPRESSION: bool = false; // compress at flush, not later
+/// F2 retention unit conversion: metrics ts is epoch SECONDS.
+const NATIVE_PER_SECOND: i64 = 1;
 
 /// Map an engine error String into the vtab error type SQLite surfaces
 /// to the user (rusqlite renders ModuleError's message verbatim).
@@ -140,7 +143,7 @@ impl MetricsTab {
         _module_name: &[u8],
         database_name: &[u8],
         table_name: &[u8],
-        _args: &[&[u8]],
+        args: &[&[u8]],
         is_create: bool,
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
@@ -197,6 +200,37 @@ impl MetricsTab {
             .map_err(module_err)
         })?;
 
+        // F2 retention: the CREATE argument is unit-resolved (epoch
+        // seconds here) and PERSISTED in _meta — a property of the data,
+        // like logs' index_keys. xConnect loads it back and never trusts
+        // the replayed args.
+        let retention = if is_create {
+            let mut retention = None;
+            for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
+                match name.as_str() {
+                    "retention" => {
+                        retention = Some(
+                            table_args::parse_retention(&value, NATIVE_PER_SECOND)
+                                .map_err(module_err)?,
+                        );
+                    }
+                    other => {
+                        return Err(module_err(format!(
+                            "unrecognized argument {other:?}; timeless_metrics supports: retention"
+                        )));
+                    }
+                }
+            }
+            if let Some(native) = retention {
+                shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
+                    .map_err(module_err)?;
+            }
+            retention
+        } else {
+            shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?
+        };
+        shared_engine.engine.set_retention(retention);
+
         // Declared schema. The hidden 5th column is named after the table
         // itself so `INSERT INTO metrics(metrics) VALUES('flush')` works.
         let schema = format!(
@@ -241,7 +275,7 @@ impl MetricsTab {
             shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
         host.execute_batch(&shadow_store::series_ddl(database, table))?;
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
-        shared::get_or_create(&key, || {
+        let shared = shared::get_or_create(&key, || {
             let store = ShadowTableStore::new(database, table);
             Engine::with_store(
                 Box::new(store),
@@ -252,7 +286,11 @@ impl MetricsTab {
                 DEFER_COMPRESSION,
             )
             .map_err(module_err)
-        })
+        })?;
+        shared
+            .engine
+            .set_retention(shadow_meta::load_retention(&host, database, table).map_err(module_err)?);
+        Ok(shared)
     }
 
     /// Take the shared engine's writer gate for THIS connection if we

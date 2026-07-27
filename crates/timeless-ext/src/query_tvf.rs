@@ -772,6 +772,13 @@ unsafe impl VTabCursor for StatsCursor<'_> {
         let opt_ts = |v: Option<i64>| v.map_or(Value::Null, Value::Integer);
         let mut rows: Vec<(&'static str, Value)> =
             vec![("module", Value::Text(module.name().to_owned()))];
+        {
+            // F2 retention (native ts units), NULL when unset.
+            let conn = shared::current_conn().map_err(module_err)?;
+            let retention = crate::shadow_meta::load_retention(&conn, &database, &table)
+                .map_err(module_err)?;
+            rows.push(("retention", opt_ts(retention)));
+        }
         match module {
             TimelessModule::Metrics => {
                 let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;

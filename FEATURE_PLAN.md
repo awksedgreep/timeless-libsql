@@ -10,7 +10,7 @@ pole and consumes F2's retention machinery. F4/F5/F6 are independent of
 F3 and of each other — reorder freely if priorities shift.
 
 - [x] **F1** series catalog + stats TVFs
-- [ ] **F2** automated retention (table argument)
+- [x] **F2** automated retention (table argument)
 - [ ] **F3** rollup ladder (downsampling)
 - [ ] **F4** Q2 kernels for logs & traces
 - [ ] **F5** batch blob ingest for logs & traces
@@ -172,24 +172,24 @@ traces ns). Stored in `_meta['retention']` at create, loaded at connect
 
 **Implementation.**
 
-- [ ] duration parser + per-module unit conversion (one shared fn,
+- [x] duration parser + per-module unit conversion (one shared fn,
       unit-tested; rejects nonsense loudly)
-- [ ] persist/load `_meta['retention']`; expose in `timeless_stats`
-- [ ] engine: high-water-mark tracking + `apply_retention()` called from
+- [x] persist/load `_meta['retention']`; expose in `timeless_stats`
+- [x] engine: high-water-mark tracking + `apply_retention()` called from
       flush/optimize/compact tails, with the advance guard
-- [ ] wire the table-arg parsing in all three vtabs' create paths
+- [x] wire the table-arg parsing in all three vtabs' create paths
       (reject unknown args as today)
 
 **Verification.**
 
-- [ ] core test: retention prunes exactly `< cutoff` chunks/blocks;
+- [x] core test: retention prunes exactly `< cutoff` chunks/blocks;
       high-water mark recovery after reopen; backfill (old ts after new)
       does not re-prune the present
-- [ ] cli.sh section: create with retention, ingest two epochs, flush →
+- [x] cli.sh section: create with retention, ingest two epochs, flush →
       old epoch gone, new epoch intact, `_meta` shows the setting;
       rollback of a flush that pruned restores both (journal coverage —
       invariant 4)
-- [ ] oracle run unaffected (it uses tables without retention)
+- [x] oracle run unaffected (it uses tables without retention)
 
 **Acceptance:** a retention'd table under continuous ingest holds
 steady-state size across 3+ retention windows (scripted check), with no
@@ -479,4 +479,5 @@ suites green.
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
 | 2026-07-26 | Plan | complete | This document; F1 next. |
+| 2026-07-26 | F2 | complete | retention= on all three vtabs (native-unit persisted in _meta, data-time cutoff derived from index+buffer at maintenance, /16 advance guard). RED→GREEN: backfill test corrected to the chunk-granular contract. 114 workspace tests, cli.sh 25 sections incl. §24 (per-module prune, rollback-restores-pruned, 4-window steady state = exactly one epoch), oracle+crash via cli.sh, interleaved ingest A/B at parity. F3/F4 next. |
 | 2026-07-26 | F1 | complete | timeless_series + timeless_stats shipped with logs/traces shared_engine_for helpers and module probe. Acceptance: 1000-series catalog in 3.3ms warm (389ms first-call = one-time engine recovery), zero chunk reads. 108 workspace tests, cli.sh 24 sections incl. new §23 (9 checks: buffered/prune/DROP-recreate states, module routing errors). F2 next. |

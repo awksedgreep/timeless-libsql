@@ -94,6 +94,20 @@ INSERT INTO traces(traces)   VALUES ('prune:<ns>');  -- drop everything older th
 
 (`prune:` takes the table's own ts unit: seconds / ms / ns.)
 
+Retention can also be automatic — declared at CREATE, applied during the
+maintenance the engine already performs (no background threads; the vtab
+stays passive):
+
+```sql
+CREATE VIRTUAL TABLE metrics USING timeless_metrics(retention='30d');
+CREATE VIRTUAL TABLE logs    USING timeless_logs(index_keys='service', retention='7d');
+CREATE VIRTUAL TABLE traces  USING timeless_traces(retention='72h');
+```
+
+The cutoff is *data time* (newest ingested timestamp minus the window),
+so it's deterministic, replay-safe, and inert for backfills; pruning is
+chunk/block-granular at flush/compact/optimize boundaries.
+
 ### Metrics
 
 ```sql

@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR_V2, CODEC_RAW};
@@ -149,6 +149,10 @@ pub struct SpanBlockEngine {
     /// so the no-transaction fast path costs one load.
     txn_active: AtomicBool,
     txn: Mutex<TxnJournal>,
+    /// F2 retention window in NATIVE ts units; 0 = disabled.
+    retention_native: AtomicI64,
+    /// Last retention cutoff applied (advance guard); i64::MIN = never.
+    retention_floor: AtomicI64,
 }
 
 impl SpanBlockEngine {
@@ -194,6 +198,8 @@ impl SpanBlockEngine {
             index: Mutex::new(index),
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
+            retention_native: AtomicI64::new(0),
+            retention_floor: AtomicI64::new(i64::MIN),
         })
     }
 
@@ -423,6 +429,12 @@ impl SpanBlockEngine {
     /// put_blocks operation as the block rows (never dangles). Returns
     /// the number of spans flushed.
     pub fn flush(&self) -> Result<usize, String> {
+        let out = self.flush_inner()?;
+        self.apply_retention()?;
+        Ok(out)
+    }
+
+    fn flush_inner(&self) -> Result<usize, String> {
         let _transition = self.transition_write();
         // Transition is already exclusive; journal before buffer/index, then hold
         // the buffer lock for the whole flush (single-threaded in
@@ -505,6 +517,12 @@ impl SpanBlockEngine {
     /// atomically). Merged blocks recompute BOTH index row sets from
     /// the merged spans. Returns (blocks_removed, blocks_written).
     pub fn optimize(&self) -> Result<(usize, usize), String> {
+        let out = self.optimize_inner()?;
+        self.apply_retention()?;
+        Ok(out)
+    }
+
+    fn optimize_inner(&self) -> Result<(usize, usize), String> {
         let _transition = self.transition_write();
         let candidates: Vec<IndexEntry> = self
             .index_lock()
@@ -654,6 +672,36 @@ impl SpanBlockEngine {
     /// buffered spans older than the cutoff. The store removes term AND
     /// trace-index rows in the same operation (never-dangle rule).
     /// Returns the number of blocks deleted.
+    /// F2: configure the automatic retention window (NATIVE ts units;
+    /// None disables). Idempotent per connect.
+    pub fn set_retention(&self, native: Option<i64>) {
+        self.retention_native
+            .store(native.unwrap_or(0).max(0), Ordering::Relaxed);
+    }
+
+    /// Apply the configured retention window at a maintenance boundary.
+    /// Cutoff is DATA time: max queryable ts (ts_range) - retention.
+    /// Called by the flush/optimize wrappers AFTER their transition
+    /// guard is released (prune takes it again); never under a lock.
+    pub fn apply_retention(&self) -> Result<usize, String> {
+        let retention = self.retention_native.load(Ordering::Relaxed);
+        if retention == 0 {
+            return Ok(0);
+        }
+        let Some(high_water) = self.ts_range().1 else {
+            return Ok(0); // empty
+        };
+        let cutoff = high_water.saturating_sub(retention);
+        let slice = (retention / 16).max(1);
+        let floor = self.retention_floor.load(Ordering::Relaxed);
+        if floor != i64::MIN && cutoff < floor.saturating_add(slice) {
+            return Ok(0);
+        }
+        let pruned = self.prune(cutoff)?;
+        self.retention_floor.store(cutoff, Ordering::Relaxed);
+        Ok(pruned)
+    }
+
     pub fn prune(&self, cutoff: i64) -> Result<usize, String> {
         let _transition = self.transition_write();
         // Transition is already exclusive; journal before buffer/index. Same
