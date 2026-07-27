@@ -428,6 +428,41 @@ impl SpanBlockEngine {
         Ok(())
     }
 
+    /// F5 bulk append — the spans twin of BlockEngine::push_batch: same
+    /// validation/normalization and auto-flush contract as push(), one
+    /// buffer lock for the batch, invariants re-checked BEFORE anything
+    /// is appended (all-or-nothing).
+    pub fn push_batch(&self, mut entries: Vec<SpanEntry>) -> Result<usize, String> {
+        for entry in &mut entries {
+            if entry.kind > 4 {
+                return Err(format!(
+                    "invalid span kind {} (0=internal 1=server 2=client 3=producer 4=consumer)",
+                    entry.kind
+                ));
+            }
+            if entry.status > 2 {
+                return Err(format!(
+                    "invalid span status {} (0=unset 1=ok 2=error)",
+                    entry.status
+                ));
+            }
+            entry.attributes.sort_by(|a, b| a.0.cmp(&b.0));
+            entry.attributes.reverse();
+            entry.attributes.dedup_by(|a, b| a.0 == b.0);
+            entry.attributes.reverse();
+        }
+        let n = entries.len();
+        let should_flush = {
+            let mut buf = self.buffer_lock();
+            buf.extend(entries);
+            buf.len() >= self.config.flush_threshold
+        };
+        if should_flush {
+            self.flush()?;
+        }
+        Ok(n)
+    }
+
     pub fn buffered_count(&self) -> usize {
         self.buffer_lock().len()
     }

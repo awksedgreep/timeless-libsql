@@ -467,6 +467,37 @@ impl BlockEngine {
         Ok(())
     }
 
+    /// F5 bulk append: same validation/normalization and auto-flush
+    /// contract as push(), one buffer lock for the whole batch. The
+    /// CALLER validates the batch wholesale before this runs (all-or-
+    /// nothing at the wire layer); level bytes are re-checked here
+    /// because they are engine invariants, and a bad one mid-batch
+    /// aborts BEFORE anything is appended.
+    pub fn push_batch(&self, mut entries: Vec<LogEntry>) -> Result<usize, String> {
+        for entry in &mut entries {
+            if entry.level > 3 {
+                return Err(format!(
+                    "invalid level {} (0=debug 1=info 2=warning 3=error)",
+                    entry.level
+                ));
+            }
+            entry.metadata.sort_by(|a, b| a.0.cmp(&b.0));
+            entry.metadata.reverse();
+            entry.metadata.dedup_by(|a, b| a.0 == b.0);
+            entry.metadata.reverse();
+        }
+        let n = entries.len();
+        let should_flush = {
+            let mut buf = self.buffer_lock();
+            buf.extend(entries);
+            buf.len() >= self.config.flush_threshold
+        };
+        if should_flush {
+            self.flush()?;
+        }
+        Ok(n)
+    }
+
     pub fn buffered_count(&self) -> usize {
         self.buffer_lock().len()
     }

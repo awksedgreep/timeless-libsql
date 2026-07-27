@@ -233,6 +233,11 @@ SELECT ts, level, message FROM logs
   the honest trade, see [Numbers](#numbers).
 - Index keys can also be used as INSERT shorthand: a non-NULL value in the
   hidden column merges into the metadata JSON.
+- **Batch ingest**: a columnar blob (v0 spec in the vtab docs) into the
+  hidden column ingests a whole batch in one statement, validated
+  all-or-nothing — one round trip per batch for remote writers, +16-46%
+  throughput in-process (logs/traces ingest is flush-bound, unlike
+  metrics where the blob path is 10x).
 
 **Bucket kernel** — the dominant logs-dashboard shape (volume histogram
 by level or any index key) evaluated engine-side; level-pure blocks that

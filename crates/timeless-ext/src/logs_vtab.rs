@@ -49,6 +49,7 @@ use timeless_core::{
     level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockStore, LogEntry, LogQuery,
 };
 
+use crate::batch::BatchReader;
 use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_block_store::{self, ShadowBlockStore};
 use crate::shadow_meta;
@@ -326,6 +327,75 @@ impl LogsTab {
         }
     }
 
+    /// F5 Tier 2 batch ingest (logs blob v0). Layout, little-endian:
+    ///   0    u8   version = 0x01
+    ///   1    u8   flags = 0
+    ///   2    u16  reserved
+    ///   4    u32  n_entries
+    ///   —    ts[]       n × i64 (ms)
+    ///   —    level[]    n × u8 (0..=3, strict vocabulary)
+    ///   —    message[]  n × { u32 len, utf8 }
+    ///   —    metadata[] n × { u32 len, flat-JSON; '' = {} }
+    ///
+    /// All-or-nothing: the whole blob is parsed and validated before a
+    /// single entry reaches the engine buffer; durability is identical
+    /// to row inserts (buffered until 'flush', auto-flush included).
+    fn ingest_batch(&self, blob: &[u8]) -> Result<i64> {
+        let mut r = BatchReader::new(blob);
+        let version = r.u8("version")?;
+        if version != 0x01 {
+            return Err(module_err(format!(
+                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01)"
+            )));
+        }
+        let flags = r.u8("flags")?;
+        if flags != 0 {
+            return Err(module_err(format!(
+                "batch blob: unknown flags 0x{flags:02x} (v0 defines none; must be 0)"
+            )));
+        }
+        r.skip(2, "reserved header bytes")?;
+        let n = r.u32("n_entries")? as usize;
+
+        let ts_bytes = r.take(n * 8, "timestamp column")?;
+        let level_bytes = r.take(n, "level column")?;
+        if let Some(bad) = level_bytes.iter().find(|&&l| l > 3) {
+            return Err(module_err(format!(
+                "batch blob: invalid level byte {bad} (0=debug 1=info 2=warning 3=error); batch rejected"
+            )));
+        }
+        let mut entries = Vec::with_capacity(n);
+        let mut messages = Vec::with_capacity(n);
+        for i in 0..n {
+            messages.push(r.str(&format!("message {i}"))?.to_owned());
+        }
+        for (i, message) in messages.into_iter().enumerate() {
+            let meta_txt = r.str(&format!("metadata {i}"))?;
+            let metadata: Vec<(String, String)> = if meta_txt.is_empty() {
+                Vec::new()
+            } else {
+                parse_labels_json(meta_txt)
+                    .map_err(|e| module_err(format!("batch blob: entry {i} metadata: {e}")))?
+                    .into_iter()
+                    .collect()
+            };
+            entries.push(LogEntry {
+                ts: i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
+                level: level_bytes[i],
+                message,
+                metadata,
+            });
+        }
+        if r.remaining() != 0 {
+            return Err(module_err(format!(
+                "batch blob: {} trailing byte(s) (corrupt or wrong n_entries)",
+                r.remaining()
+            )));
+        }
+        let count = self.shared.engine.push_batch(entries).map_err(module_err)?;
+        Ok(count as i64)
+    }
+
     /// Hidden-column command insert ('flush' | 'optimize' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "flush" {
@@ -541,12 +611,20 @@ impl UpdateVTab<'_> for LogsTab {
         // BLOB reserved for a future Tier 2 batch format, NULL = data.
         match args.iter().nth(cmd_idx) {
             Some(ValueRef::Null) | None => {} // plain data row
-            Some(ValueRef::Blob(_)) => {
-                return Err(module_err(
-                    "timeless_logs batch-blob ingest is not implemented yet \
-                     (Tier 2 for logs is future work; use row INSERTs)"
-                        .into(),
-                ));
+            Some(ValueRef::Blob(blob)) => {
+                // F5 Tier 2: dispatch by version byte; 0x00 and
+                // 0x02-0x08 are RESERVED so a future format fed to an
+                // old build fails loudly instead of being mis-parsed.
+                return match blob.first() {
+                    Some(0x01) => self.ingest_batch(blob),
+                    Some(b @ (0x00 | 0x02..=0x08)) => Err(module_err(format!(
+                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01)"
+                    ))),
+                    Some(b) => Err(module_err(format!(
+                        "unknown blob format (first byte 0x{b:02x}; logs batch v0 starts with 0x01)"
+                    ))),
+                    None => Err(module_err("empty blob".into())),
+                };
             }
             Some(_) => {
                 let cmd: String = args.get(cmd_idx)?;

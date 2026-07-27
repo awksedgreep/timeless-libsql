@@ -31,6 +31,7 @@
 //!   INSERT INTO metrics(metrics) VALUES ('flush');   -- FTS5-style command
 //!   SELECT * FROM metrics WHERE name = 'cpu' AND ts >= 1700000000;
 
+mod batch;
 mod flatjson;
 mod logs_vtab;
 mod metrics_vtab;

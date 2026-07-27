@@ -214,6 +214,83 @@ fn bench_vtab(data: &[Span], path: &str, ext: &str) -> IngestResult {
 // Queries (cold reopen; same logical question to both stores)
 // ---------------------------------------------------------------------------
 
+/// F5 Tier 2: spans as columnar batch blobs (traces blob v0, 50k spans
+/// per blob). Auto-flush included, same as Tier 1.
+fn encode_span_blob(data: &[Span]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + data.len() * 80);
+    out.push(0x01);
+    out.push(0x00);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    for e in data {
+        out.extend_from_slice(&e.trace_id);
+    }
+    for e in data {
+        out.extend_from_slice(&e.span_id);
+    }
+    for e in data {
+        out.extend_from_slice(&e.parent_span_id.unwrap_or([0u8; 8]));
+    }
+    for e in data {
+        out.extend_from_slice(&(e.name.len() as u32).to_le_bytes());
+        out.extend_from_slice(e.name.as_bytes());
+    }
+    for e in data {
+        out.extend_from_slice(&(e.service.len() as u32).to_le_bytes());
+        out.extend_from_slice(e.service.as_bytes());
+    }
+    for e in data {
+        out.push(e.kind_num);
+    }
+    for e in data {
+        out.push(e.status_num);
+    }
+    for e in data {
+        out.extend_from_slice(&e.start_ts.to_le_bytes());
+    }
+    for e in data {
+        out.extend_from_slice(&e.duration_ns.to_le_bytes());
+    }
+    for e in data {
+        out.extend_from_slice(&(e.attributes.len() as u32).to_le_bytes());
+        out.extend_from_slice(e.attributes.as_bytes());
+    }
+    out
+}
+
+fn bench_vtab_tier2(data: &[Span], path: &str, ext: &str) -> f64 {
+    scrub(path);
+    let conn = open_with_ext(path, ext);
+    conn.execute_batch("CREATE VIRTUAL TABLE spans USING timeless_traces;")
+        .expect("create traces vtab");
+    const BLOB_SPANS: usize = 50_000;
+    let blobs: Vec<Vec<u8>> = data.chunks(BLOB_SPANS).map(encode_span_blob).collect();
+    let t0 = Instant::now();
+    conn.execute_batch("BEGIN").unwrap();
+    {
+        let mut stmt = conn
+            .prepare("INSERT INTO spans(spans) VALUES (?1)")
+            .expect("prepare tier2");
+        for blob in &blobs {
+            stmt.execute(params![blob]).expect("tier2 ingest");
+        }
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    let insert_secs = t0.elapsed().as_secs_f64();
+    conn.execute("INSERT INTO spans(spans) VALUES ('flush')", [])
+        .expect("flush");
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM spans", [], |r| r.get(0))
+        .expect("tier2 count");
+    assert_eq!(n as usize, data.len(), "tier2 lost spans");
+    let errs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM spans WHERE status='error'", [], |r| r.get(0))
+        .expect("tier2 status count");
+    let expect = data.iter().filter(|e| e.status == "error").count() as i64;
+    assert_eq!(errs, expect, "tier2 status counts disagree with the dataset");
+    insert_secs
+}
+
 fn time_count(conn: &Connection, label: &str, sql: &str, params: &[&dyn rusqlite::ToSql]) -> i64 {
     let t = Instant::now();
     let n: i64 = conn.query_row(sql, params, |r| r.get(0)).expect(label);
@@ -432,6 +509,12 @@ fn main() {
     println!("- plain baseline done ({:.2}s insert)", plain.insert_secs);
     let vtab = bench_vtab(&data, "/tmp/tl_bench_traces_vtab.db", &ext);
     println!("- vtab done ({:.2}s insert)", vtab.insert_secs);
+    let t2_secs = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2.db", &ext);
+    println!(
+        "- vtab tier2 done ({t2_secs:.2}s ingest): {} (vs tier1 {}; count + status=error verified equal)",
+        fmt_rate(data.len(), t2_secs),
+        fmt_rate(data.len(), vtab.insert_secs)
+    );
     println!();
 
     println!("| path  | ingest rate | file bytes | bytes/span | size vs plain |");

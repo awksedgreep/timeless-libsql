@@ -201,6 +201,72 @@ fn bench_vtab(data: &[Entry], path: &str, ext: &str) -> IngestResult {
 // Queries (cold reopen on both dbs; same logical question each time)
 // ---------------------------------------------------------------------------
 
+/// F5 Tier 2: the same entries as columnar batch blobs (logs blob v0,
+/// 50k entries per blob). Auto-flush fires inside ingest exactly like
+/// Tier 1, so the rates are apples-to-apples.
+fn encode_log_blob(data: &[Entry]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + data.len() * 40);
+    out.push(0x01);
+    out.push(0x00);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    for e in data {
+        out.extend_from_slice(&e.ts.to_le_bytes());
+    }
+    for e in data {
+        out.push(e.level_num);
+    }
+    for e in data {
+        out.extend_from_slice(&(e.message.len() as u32).to_le_bytes());
+        out.extend_from_slice(e.message.as_bytes());
+    }
+    for e in data {
+        out.extend_from_slice(&(e.metadata.len() as u32).to_le_bytes());
+        out.extend_from_slice(e.metadata.as_bytes());
+    }
+    out
+}
+
+fn bench_vtab_tier2(data: &[Entry], path: &str, ext: &str) -> IngestResult {
+    scrub(path);
+    let conn = open_with_ext(path, ext);
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .expect("set auto_vacuum");
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,path,status');",
+    )
+    .expect("create logs vtab");
+
+    const BLOB_ENTRIES: usize = 50_000;
+    let blobs: Vec<Vec<u8>> = data.chunks(BLOB_ENTRIES).map(encode_log_blob).collect();
+
+    let t0 = Instant::now();
+    conn.execute_batch("BEGIN").unwrap();
+    {
+        let mut stmt = conn
+            .prepare("INSERT INTO logs(logs) VALUES (?1)")
+            .expect("prepare tier2");
+        for blob in &blobs {
+            stmt.execute(params![blob]).expect("tier2 ingest");
+        }
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    let insert_secs = t0.elapsed().as_secs_f64();
+
+    let tf = Instant::now();
+    conn.execute("INSERT INTO logs(logs) VALUES ('flush')", [])
+        .expect("flush");
+    let flush_ms = tf.elapsed().as_secs_f64() * 1e3;
+    drop(conn);
+    IngestResult {
+        label: "vtab tier2",
+        insert_secs,
+        flush_ms: Some(flush_ms),
+        optimize_ms: None,
+        file_bytes: 0,
+    }
+}
+
 fn time_count(conn: &Connection, label: &str, sql: &str, params: &[&dyn rusqlite::ToSql]) -> i64 {
     let t = Instant::now();
     let n: i64 = conn.query_row(sql, params, |r| r.get(0)).expect(label);
@@ -320,6 +386,26 @@ fn main() {
     println!("- plain baseline done ({:.2}s insert)", plain.insert_secs);
     let vtab = bench_vtab(&data, "/tmp/tl_bench_logs_vtab.db", &ext);
     println!("- vtab done ({:.2}s insert)", vtab.insert_secs);
+    let tier2 = bench_vtab_tier2(&data, "/tmp/tl_bench_logs_t2.db", &ext);
+    println!("- vtab tier2 done ({:.2}s ingest)", tier2.insert_secs);
+    // Cross-check: the blob path must land the identical dataset.
+    {
+        let conn = open_with_ext("/tmp/tl_bench_logs_t2.db", &ext);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0))
+            .expect("tier2 count");
+        assert_eq!(n as usize, N_ENTRIES, "tier2 lost entries");
+        let errs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM logs WHERE level='error'", [], |r| r.get(0))
+            .expect("tier2 level count");
+        let expect = data.iter().filter(|e| e.level == "error").count() as i64;
+        assert_eq!(errs, expect, "tier2 level counts disagree with the dataset");
+    }
+    println!(
+        "- tier2 ingest rate: {} (vs tier1 {}; count + level=error verified equal)",
+        fmt_rate(N_ENTRIES, tier2.insert_secs),
+        fmt_rate(N_ENTRIES, vtab.insert_secs)
+    );
     println!();
 
     println!("| path  | ingest rate | file bytes | bytes/entry | size vs plain |");

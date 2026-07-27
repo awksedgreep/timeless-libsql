@@ -55,6 +55,7 @@ use timeless_core::{
     SpanEngineConfig, SpanEntry, SpanQuery,
 };
 
+use crate::batch::BatchReader;
 use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_meta;
 use crate::shadow_span_store::{self, ShadowSpanStore};
@@ -344,6 +345,101 @@ impl TracesTab {
         }
     }
 
+    /// F5 Tier 2 batch ingest (traces blob v0). Layout, little-endian:
+    ///   0    u8   version = 0x01
+    ///   1    u8   flags = 0
+    ///   2    u16  reserved
+    ///   4    u32  n_spans
+    ///   —    trace_id[]  n × 16 bytes (packed)
+    ///   —    span_id[]   n × 8 bytes
+    ///   —    parent_id[] n × 8 bytes (all-zero = root/None)
+    ///   —    name[]      n × { u32 len, utf8 }
+    ///   —    service[]   n × { u32 len, utf8 }
+    ///   —    kind[]      n × u8 (0..=4)
+    ///   —    status[]    n × u8 (0..=2)
+    ///   —    start_ts[]  n × i64 (ns)
+    ///   —    duration[]  n × i64 (ns)
+    ///   —    attributes[] n × { u32 len, flat-JSON; '' = {} }
+    ///
+    /// All-or-nothing, same durability contract as row inserts.
+    fn ingest_batch(&self, blob: &[u8]) -> Result<i64> {
+        let mut r = BatchReader::new(blob);
+        let version = r.u8("version")?;
+        if version != 0x01 {
+            return Err(module_err(format!(
+                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01)"
+            )));
+        }
+        let flags = r.u8("flags")?;
+        if flags != 0 {
+            return Err(module_err(format!(
+                "batch blob: unknown flags 0x{flags:02x} (v0 defines none; must be 0)"
+            )));
+        }
+        r.skip(2, "reserved header bytes")?;
+        let n = r.u32("n_spans")? as usize;
+
+        let trace_ids = r.take(n * 16, "trace_id column")?;
+        let span_ids = r.take(n * 8, "span_id column")?;
+        let parent_ids = r.take(n * 8, "parent_id column")?;
+        let mut names = Vec::with_capacity(n);
+        for i in 0..n {
+            names.push(r.str(&format!("name {i}"))?.to_owned());
+        }
+        let mut services = Vec::with_capacity(n);
+        for i in 0..n {
+            services.push(r.str(&format!("service {i}"))?.to_owned());
+        }
+        let kinds = r.take(n, "kind column")?;
+        if let Some(bad) = kinds.iter().find(|&&k| k > 4) {
+            return Err(module_err(format!(
+                "batch blob: invalid kind byte {bad} (0..=4); batch rejected"
+            )));
+        }
+        let statuses = r.take(n, "status column")?;
+        if let Some(bad) = statuses.iter().find(|&&st| st > 2) {
+            return Err(module_err(format!(
+                "batch blob: invalid status byte {bad} (0..=2); batch rejected"
+            )));
+        }
+        let start_bytes = r.take(n * 8, "start_ts column")?;
+        let dur_bytes = r.take(n * 8, "duration column")?;
+
+        let mut entries = Vec::with_capacity(n);
+        for i in 0..n {
+            let attrs_txt = r.str(&format!("attributes {i}"))?;
+            let attributes: Vec<(String, String)> = if attrs_txt.is_empty() {
+                Vec::new()
+            } else {
+                parse_labels_json(attrs_txt)
+                    .map_err(|e| module_err(format!("batch blob: span {i} attributes: {e}")))?
+                    .into_iter()
+                    .collect()
+            };
+            let parent: [u8; 8] = parent_ids[i * 8..i * 8 + 8].try_into().unwrap();
+            entries.push(SpanEntry {
+                trace_id: trace_ids[i * 16..i * 16 + 16].try_into().unwrap(),
+                span_id: span_ids[i * 8..i * 8 + 8].try_into().unwrap(),
+                parent_span_id: (parent != [0u8; 8]).then_some(parent),
+                name: std::mem::take(&mut names[i]),
+                service: std::mem::take(&mut services[i]),
+                kind: kinds[i],
+                status: statuses[i],
+                start_ts: i64::from_le_bytes(start_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
+                duration_ns: i64::from_le_bytes(dur_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
+                attributes,
+            });
+        }
+        if r.remaining() != 0 {
+            return Err(module_err(format!(
+                "batch blob: {} trailing byte(s) (corrupt or wrong n_spans)",
+                r.remaining()
+            )));
+        }
+        let count = self.shared.engine.push_batch(entries).map_err(module_err)?;
+        Ok(count as i64)
+    }
+
     /// Hidden-column command insert ('flush' | 'optimize' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "flush" {
@@ -543,12 +639,20 @@ impl UpdateVTab<'_> for TracesTab {
         // command, BLOB reserved for a future Tier 2 batch, NULL = data.
         match args.iter().nth(cmd_idx) {
             Some(ValueRef::Null) | None => {} // plain data row
-            Some(ValueRef::Blob(_)) => {
-                return Err(module_err(
-                    "timeless_traces batch-blob ingest is not implemented yet \
-                     (Tier 2 for traces is future work; use row INSERTs)"
-                        .into(),
-                ));
+            Some(ValueRef::Blob(blob)) => {
+                // F5 Tier 2: dispatch by version byte; 0x00 and
+                // 0x02-0x08 are RESERVED so a future format fed to an
+                // old build fails loudly instead of being mis-parsed.
+                return match blob.first() {
+                    Some(0x01) => self.ingest_batch(blob),
+                    Some(b @ (0x00 | 0x02..=0x08)) => Err(module_err(format!(
+                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01)"
+                    ))),
+                    Some(b) => Err(module_err(format!(
+                        "unknown blob format (first byte 0x{b:02x}; traces batch v0 starts with 0x01)"
+                    ))),
+                    None => Err(module_err("empty blob".into())),
+                };
             }
             Some(_) => {
                 let cmd: String = args.get(cmd_idx)?;

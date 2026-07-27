@@ -1507,6 +1507,88 @@ check_eq "undeclared group key names the valid set" \
   "$(grep -c "expected 'level' or a declared index key" <<<"$err")" "1"
 
 # ---------------------------------------------------------------------------
+echo "== section 27: F5 batch blob ingest (logs + traces v0) =="
+F5DB="$TMP/f5_batch.db"
+LBLOB="$TMP/f5_logs.blob"; TBLOB="$TMP/f5_traces.blob"
+python3 - "$LBLOB" "$TBLOB" <<'PY'
+import struct, sys
+lp, tp = sys.argv[1], sys.argv[2]
+# logs v0: 3 entries
+blob = struct.pack('<BBHI', 1, 0, 0, 3)
+blob += b''.join(struct.pack('<q', t) for t in [1000, 1050, 2000])
+blob += bytes([1, 3, 1])
+for m in [b'hello', b'boom', b'world']:
+    blob += struct.pack('<I', len(m)) + m
+for m in [b'{"service":"api"}', b'', b'{"service":"web"}']:
+    blob += struct.pack('<I', len(m)) + m
+open(lp, 'wb').write(blob)
+# traces v0: 2 spans (one root, one child; ok + error)
+b = struct.pack('<BBHI', 1, 0, 0, 2)
+b += bytes([1]*16) + bytes([2]*16)
+b += bytes([3]*8) + bytes([4]*8)
+b += bytes(8) + bytes([5]*8)
+for n in [b'op1', b'op2']: b += struct.pack('<I', len(n)) + n
+for s in [b'api', b'web']: b += struct.pack('<I', len(s)) + s
+b += bytes([1, 2]) + bytes([1, 2])
+b += struct.pack('<qq', 5000, 6000) + struct.pack('<qq', 100, 200)
+for a in [b'{"k":"v"}', b'']: b += struct.pack('<I', len(a)) + a
+open(tp, 'wb').write(b)
+PY
+got=$(sqlite3 "$F5DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE l USING timeless_logs(index_keys='service');
+CREATE VIRTUAL TABLE t USING timeless_traces;
+INSERT INTO l(l) VALUES (readfile('$LBLOB'));
+SELECT 'lrid', last_insert_rowid();
+SELECT 'l', ts, level, message, metadata FROM l ORDER BY ts;
+SELECT 'lpush', COUNT(*) FROM l WHERE service = 'api';
+INSERT INTO t(t) VALUES (readfile('$TBLOB'));
+SELECT 't', hex(trace_id), name, service, kind, status, start_ts, duration_ns,
+       parent_span_id IS NULL FROM t ORDER BY start_ts;
+.print -- rollback: a batch inside a txn fully undone
+BEGIN;
+INSERT INTO l(l) VALUES (readfile('$LBLOB'));
+ROLLBACK;
+SELECT 'postrb', COUNT(*) FROM l;
+INSERT INTO l(l) VALUES ('flush');
+SQL
+)
+check_eq "logs blob round-trip (rowid = count, pushdown works on blob metadata)" \
+  "$(grep -E '^(lrid|lpush)\|' <<<"$got")" \
+'lrid|3
+lpush|1'
+check_eq "logs blob rows decode exactly" "$(grep '^l|' <<<"$got")" \
+'l|1000|info|hello|{"service":"api"}
+l|1050|error|boom|{}
+l|2000|info|world|{"service":"web"}'
+check_eq "traces blob rows decode exactly (packed ids, root parent NULL)" \
+  "$(grep '^t|' <<<"$got")" \
+'t|01010101010101010101010101010101|op1|api|server|ok|5000|100|1
+t|02020202020202020202020202020202|op2|web|client|error|6000|200|0'
+check_eq "rolled-back batch leaves nothing" "$(grep '^postrb|' <<<"$got")" "postrb|3"
+# Malformed rejection: truncate at every section boundary + bad bytes.
+python3 - "$LBLOB" "$TMP" <<'PY'
+import sys
+blob = open(sys.argv[1], 'rb').read()
+tmp = sys.argv[2]
+for i, cut in enumerate([3, 7, 20, 33, 40, len(blob) - 1]):
+    open(f"{tmp}/f5_cut{i}.blob", 'wb').write(blob[:cut])
+bad = bytearray(blob); bad[8 + 24] = 9  # level byte -> 9
+open(f"{tmp}/f5_badlevel.blob", 'wb').write(bytes(bad))
+PY
+rejected=0
+for f in "$TMP"/f5_cut*.blob "$TMP/f5_badlevel.blob"; do
+  if sqlite3 "$F5DB" ".load $EXT" "INSERT INTO l(l) VALUES (readfile('$f'));" 2>/dev/null; then
+    fail "malformed blob $(basename "$f") was ACCEPTED"
+  else
+    rejected=$((rejected + 1))
+  fi
+done
+check_eq "all 7 malformed blobs rejected" "$rejected" "7"
+count=$(sqlite3 "$F5DB" ".load $EXT" "SELECT COUNT(*) FROM l;")
+check_eq "rejections were atomic (count unchanged)" "$count" "3"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

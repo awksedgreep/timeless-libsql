@@ -72,6 +72,7 @@ use rusqlite::vtab::{
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{Engine, Labels};
 
+use crate::batch::BatchReader;
 use crate::flatjson::{labels_to_json, parse_labels_json};
 use crate::shadow_meta;
 use crate::table_args;
@@ -568,58 +569,6 @@ impl MetricsTab {
 // ---------------------------------------------------------------------------
 // Batch blob format v0 reader (PLAN.md "Batch blob format v0")
 // ---------------------------------------------------------------------------
-
-/// A bounds-checked cursor over the raw batch blob. Every read names what
-/// it was reading, so truncation errors point at the exact field — this
-/// is a public wire format and its error messages are part of the API.
-struct BatchReader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> BatchReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        BatchReader { buf, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-
-    /// Take exactly `n` bytes or fail with a message naming `what`.
-    /// checked_add guards against a hostile length that would overflow
-    /// usize arithmetic (u32 lengths can't overflow on 64-bit, but the
-    /// habit is free and the compiler removes it when provably safe).
-    fn take(&mut self, n: usize, what: &str) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or_else(|| {
-            module_err(format!("batch blob: length overflow reading {what}"))
-        })?;
-        if end > self.buf.len() {
-            return Err(module_err(format!(
-                "batch blob truncated: need {n} byte(s) for {what} at offset {}, \
-                 but only {} remain",
-                self.pos,
-                self.remaining()
-            )));
-        }
-        let s = &self.buf[self.pos..end];
-        self.pos = end;
-        Ok(s)
-    }
-
-    fn skip(&mut self, n: usize, what: &str) -> Result<()> {
-        self.take(n, what).map(|_| ())
-    }
-
-    fn u8(&mut self, what: &str) -> Result<u8> {
-        Ok(self.take(1, what)?[0])
-    }
-
-    fn u32(&mut self, what: &str) -> Result<u32> {
-        let b = self.take(4, what)?;
-        Ok(u32::from_le_bytes(b.try_into().unwrap()))
-    }
-}
 
 unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
     type Aux = ();
