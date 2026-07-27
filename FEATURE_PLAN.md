@@ -499,11 +499,47 @@ the pruner.
 
 ---
 
+---
+
+## M1 — Migration enablers for the timeless_metrics engine swap
+
+Agreed 2026-07-26 after F6: the two remaining THIS-SIDE pieces so the
+timeless repo only needs the NIF rebind + vm_diff run.
+
+**M1a — the pinned waist.** A `waist` module in timeless-core exposing
+the layering contract's exact surface: `query_multi(metric, matchers,
+from, to) → Vec<(Labels, Vec<(ts, value)>)>` and `list_metrics()` (+
+`list_series` for above-waist matcher evaluation). Matcher policy per
+the contract: `=` pushes down (find_series), `!=` is mechanical string
+inequality evaluated in the adapter; `=~`/`!~` are NOT implemented here
+— regex dialect is caller semantics, evaluated above the waist via
+list_series + query_multi_ids. Sequential per-series reads (NIF/vtab
+safe); the rayon labeled path remains for callers that want it.
+
+- [x] waist module + docs stating the contract verbatim
+- [x] Eq/Neq evaluation + query_multi_ids escape hatch
+- [x] shape/equivalence tests vs naive matcher evaluation
+
+**M1b — FsStore → shadow-store importer.** `import` binary
+(tools/bench): reads an existing timeless data directory through the
+recovered fs engine, replays every series into a timeless_metrics vtab
+via Tier 2 blobs (the proven write path — catalog, validation,
+generation all for free), then verifies EVERY point bit-exact through
+the vtab before reporting success. `--selftest` generates a hostile
+deterministic fixture (quoted/escaped labels, NaN payload bits,
+negative ts) and runs the full cycle.
+
+- [x] generic metrics blob v0 encoder + JSON label escaping
+- [x] import flow (transactions, flush, per-series verify, report)
+- [x] --selftest fixture incl. hostile labels + weird floats
+- [x] cli.sh section: selftest + imported db queried via sqlite3
+
 ## Session log
 
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
 | 2026-07-26 | Plan | complete | This document; F1 next. |
+| 2026-07-26 | M1 | complete | Waist pinned (timeless_core::waist: query_multi/list_metrics + Eq/Neq matchers in-waist, regex documented above-waist with list_series/query_multi_ids escape hatch; equivalence tests vs naive). Importer shipped (Tier 2 replay + mandatory bit-exact verification; --selftest with hostile fixture). THE FIXTURE FOUND A REAL BUG: NaN samples (Prometheus staleness markers) crashed flush — SQLite binds NaN as NULL, violating the chunk-stat NOT NULL columns. Fixed at the store seam (non-finite stats round-trip as 8-byte bit blobs); NaN VALUES are preserved in storage, surface as SQL NULL (inherent REAL limitation, documented; engine/waist reads return true NaN bits). 129 workspace tests, 30 cli.sh sections incl. §29, 8 consecutive crash-suite runs green (one unreproduced check failure before the reruns, output not captured — watch item). |
 | 2026-07-26 | F6 | complete | Opt-in message_index='trigram': hex-encoded tg: terms + tg: marker per block at extract_terms (4096-trigram budget → over-budget blocks stay unindexed/unpruned), LIKE claimed in best_index (never omitted; ESCAPE'd LIKEs never reach vtabs), candidates = unindexed ∪ has-all-pattern-trigrams. Core: soundness property over hostile messages/patterns, read-count proof (1 of 5 blocks), unindexed-fallback. cli.sh §28 parity checks. Bench: 48.3ms (<50ms acceptance MET; was 334.5ms, beats plain's 74.5ms — last losing row flipped), overhead 1.5MB published. 127 workspace tests, 29 cli.sh sections. ALL SIX FEATURES COMPLETE. |
 | 2026-07-26 | F5 | complete | logs/traces batch blob v0 (shared BatchReader extracted from metrics; engine push_batch mirrors push incl. auto-flush; version-byte dispatch with 0x00/0x02-0x08 reserved loudly). cli.sh §28-worth of checks in §27: round-trip incl. pushdown on blob metadata, packed ids + root-parent NULL, in-txn rollback, 7 truncation/bad-byte blobs rejected atomically (one test bug fixed red→green: durability contract requires flush before cross-process count). Bench: logs +16% (1.32M/s), traces +46% (1.11M/s) — ≥5x NOT met; analysis recorded in acceptance (flush-bound, unlike metrics' dispatch-bound), v2 paths noted. 124 workspace tests, 28 cli.sh sections. |
 | 2026-07-26 | F4 | complete | bucket_counts (with a level-purity fast path: fully-contained pure blocks counted from metadata, filtered-out pure levels skipped without decode) + bucket_stats; [t,t+step) forward binning documented vs the grids' backward windows. Naive-reference tests (30 rounds each, exact), TVFs via the F1 helpers, cli.sh §26 GROUP BY cross-checks incl. buffered entries. Bench: logs 5.7x (95.9 vs 543.5ms, acceptance met); traces 2.4x — decode-bound (durations), documented in the acceptance note with the per-block-aggregate v2 path. 124 workspace tests, 27 cli.sh sections. |

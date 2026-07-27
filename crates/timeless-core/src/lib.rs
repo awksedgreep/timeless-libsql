@@ -12,6 +12,7 @@ mod engine;
 pub mod rollup;
 pub mod spans;
 pub mod store;
+pub mod waist;
 
 pub use blocks::{
     level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta,

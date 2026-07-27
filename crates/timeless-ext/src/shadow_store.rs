@@ -326,6 +326,31 @@ impl ShadowTableStore {
         Ok(labels)
     }
 
+    /// SQLite has no NaN: binding a non-finite f64 stores NULL, which
+    /// the chunk stat columns forbid — and real metrics data contains
+    /// NaN (Prometheus staleness markers). Non-finite stats round-trip
+    /// as their 8-byte IEEE bit pattern in a BLOB (dynamic typing keeps
+    /// it verbatim in a REAL column); finite stats stay REAL.
+    fn stat_to_sql(v: f64) -> rusqlite::types::Value {
+        if v.is_finite() {
+            rusqlite::types::Value::Real(v)
+        } else {
+            rusqlite::types::Value::Blob(v.to_bits().to_le_bytes().to_vec())
+        }
+    }
+
+    fn stat_from_sql(v: rusqlite::types::ValueRef<'_>, what: &str) -> Result<f64, String> {
+        use rusqlite::types::ValueRef;
+        match v {
+            ValueRef::Real(f) => Ok(f),
+            ValueRef::Integer(i) => Ok(i as f64),
+            ValueRef::Blob(b) if b.len() == 8 => {
+                Ok(f64::from_bits(u64::from_le_bytes(b.try_into().unwrap())))
+            }
+            other => Err(format!("chunk stat {what} has unexpected type {other:?}")),
+        }
+    }
+
     /// INSERT one row per chunk; shared by put_chunks and replace_chunks.
     fn insert_chunks(
         &self,
@@ -342,9 +367,9 @@ impl ShadowTableStore {
                 cp.min_ts,
                 cp.max_ts,
                 cp.point_count,
-                cp.min_val,
-                cp.max_val,
-                cp.sum_val,
+                Self::stat_to_sql(cp.min_val),
+                Self::stat_to_sql(cp.max_val),
+                Self::stat_to_sql(cp.sum_val),
                 cp.encoding,
                 &cp.ts_bytes,
                 &cp.val_bytes,
@@ -472,25 +497,36 @@ impl ChunkStore for ShadowTableStore {
         let mut stmt = conn
             .prepare_cached(&self.scan_sql)
             .map_err(|e| format!("prepare chunk scan failed: {e}"))?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(StoredChunk {
-                    series_id: r.get(1)?,
-                    meta: ChunkMeta {
-                        min_ts: r.get(2)?,
-                        max_ts: r.get(3)?,
-                        point_count: r.get::<_, i64>(4)? as u32,
-                        min_val: r.get(5)?,
-                        max_val: r.get(6)?,
-                        sum_val: r.get(7)?,
-                        loc: ChunkLoc::Row { rowid: r.get(0)? },
-                        encoding: r.get::<_, i64>(8)? as u8,
+        let mut rows_iter = stmt
+            .query([])
+            .map_err(|e| format!("chunk scan failed: {e}"))?;
+        let mut rows = Vec::new();
+        while let Some(r) = rows_iter
+            .next()
+            .map_err(|e| format!("chunk scan row failed: {e}"))?
+        {
+            let get_stat = |i: usize, what: &str| -> Result<f64, String> {
+                Self::stat_from_sql(
+                    r.get_ref(i).map_err(|e| format!("chunk scan {what}: {e}"))?,
+                    what,
+                )
+            };
+            rows.push(StoredChunk {
+                series_id: r.get(1).map_err(|e| format!("chunk scan series: {e}"))?,
+                meta: ChunkMeta {
+                    min_ts: r.get(2).map_err(|e| e.to_string())?,
+                    max_ts: r.get(3).map_err(|e| e.to_string())?,
+                    point_count: r.get::<_, i64>(4).map_err(|e| e.to_string())? as u32,
+                    min_val: get_stat(5, "min_val")?,
+                    max_val: get_stat(6, "max_val")?,
+                    sum_val: get_stat(7, "sum_val")?,
+                    loc: ChunkLoc::Row {
+                        rowid: r.get(0).map_err(|e| e.to_string())?,
                     },
-                })
-            })
-            .map_err(|e| format!("chunk scan failed: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("chunk scan row failed: {e}"))?;
+                    encoding: r.get::<_, i64>(8).map_err(|e| e.to_string())? as u8,
+                },
+            });
+        }
         Ok(rows)
     }
 

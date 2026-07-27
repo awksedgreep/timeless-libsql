@@ -394,6 +394,25 @@ Codec decode throughput on this machine: 1.0–1.2 GB/s (logs/traces,
 `bench-codec`). Every query result in the benchmarks is checked against a
 plain-table oracle in the same database.
 
+## Migrating from timeless FsStore data
+
+`tools/bench`'s `import` binary replays an existing timeless data
+directory into a `timeless_metrics` vtab through the Tier 2 blob path,
+then verifies **every point** before reporting success (bit-exact for
+finite values; NaN samples — e.g. Prometheus staleness markers — are
+preserved in storage and surface as SQL `NULL`, an inherent SQLite
+REAL limitation; engine-level reads return the true NaN bits):
+
+```sh
+cargo run --release --bin import -- /var/lib/timeless/data \
+  ./libtimeless_ext.dylib metrics.db metrics
+```
+
+For the query side of the swap, `timeless_core::waist` pins the two-call
+contract (`query_multi` + `list_metrics`) the PromQL evaluator binds
+against, with `=`/`!=` matchers in-waist and regex matchers evaluated
+above it via `list_series` + `query_multi_ids`.
+
 ## Trust but verify
 
 The test harness is the most serious part of this repo:
