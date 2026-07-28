@@ -1,0 +1,516 @@
+# timeless-libsql: a Livebook tour over sqld
+
+```elixir
+Mix.install([
+  {:req, "~> 0.5"},
+  {:kino, "~> 0.14"},
+  {:kino_vega_lite, "~> 0.1"}
+])
+```
+
+## What this is
+
+**Compressed metrics, logs, and traces in a SQLite database, queried over
+plain HTTP — from a language the extension has never heard of.**
+
+[timeless-libsql](https://github.com/awksedgreep/timeless-libsql) is a Rust
+loadable extension for SQLite/libSQL. This notebook never loads it, links it,
+or FFIs into it. Instead, [sqld](https://github.com/tursodatabase/libsql)
+(the self-hosted libSQL server) loads the extension into every pooled
+connection, and we speak to it with nothing but `Req` and JSON. If you can
+POST, you have a compressed telemetry store.
+
+Every request in this notebook lands on a **fresh pooled connection** — no
+session state, no client library. That's the point being demonstrated.
+
+**Before you run this**, start sqld with the extension
+(full instructions in [docs/SQLD.md](SQLD.md)):
+
+```sh
+cargo build --release -p timeless-ext
+mkdir ext-dir && cp target/release/libtimeless_ext.so ext-dir/
+(cd ext-dir && sha256sum libtimeless_ext.so > trusted.lst)
+sqld --db-path tour.sqld --extensions-path ./ext-dir --http-listen-addr 127.0.0.1:8880
+```
+
+Then point the notebook at it. `localhost` works when Livebook runs on the
+same host; if your Livebook runs in a container (podman/docker), use
+`http://host.containers.internal:8880` (podman) or
+`http://host.docker.internal:8880` (docker).
+
+```elixir
+url_input = Kino.Input.text("sqld URL", default: "http://localhost:8880")
+```
+
+```elixir
+sqld_url = Kino.Input.read(url_input)
+Req.get!(sqld_url <> "/health").status
+# 200 means we're in business
+```
+
+## A 30-line SQL-over-HTTP client
+
+sqld speaks the [Hrana protocol](https://github.com/tursodatabase/libsql/blob/main/docs/HRANA_3_SPEC.md)
+over HTTP: POST a pipeline of statements to `/v3/pipeline`, get results back
+as JSON. This module is the entire client:
+
+```elixir
+defmodule Sqld do
+  @moduledoc "Minimal Hrana-over-HTTP client. This is ALL the client code."
+
+  def query(url, sql, args \\ []) do
+    [result] = pipeline(url, [{sql, args}])
+    result
+  end
+
+  def pipeline(url, stmts) do
+    requests =
+      Enum.map(stmts, fn
+        {sql, args} -> %{type: "execute", stmt: %{sql: sql, args: Enum.map(args, &encode/1)}}
+        sql when is_binary(sql) -> %{type: "execute", stmt: %{sql: sql}}
+      end) ++ [%{type: "close"}]
+
+    %{"results" => results} =
+      Req.post!(url <> "/v3/pipeline", json: %{requests: requests}).body
+
+    for %{"type" => type} = r <- results, reduce: [] do
+      acc ->
+        case {type, r} do
+          {"ok", %{"response" => %{"type" => "execute", "result" => res}}} ->
+            acc ++ [decode_result(res)]
+
+          {"ok", _close} ->
+            acc
+
+          {"error", %{"error" => %{"message" => msg}}} ->
+            raise "sqld error: #{msg}"
+        end
+    end
+  end
+
+  defp decode_result(%{"cols" => cols, "rows" => rows} = res) do
+    names = Enum.map(cols, & &1["name"])
+
+    %{
+      cols: names,
+      rows: Enum.map(rows, fn row -> Enum.map(row, &decode/1) end),
+      maps: Enum.map(rows, fn row -> names |> Enum.zip(Enum.map(row, &decode/1)) |> Map.new() end),
+      affected: res["affected_row_count"]
+    }
+  end
+
+  defp encode(v) when is_integer(v), do: %{type: "integer", value: Integer.to_string(v)}
+  defp encode(v) when is_float(v), do: %{type: "float", value: v}
+  defp encode(v) when is_binary(v), do: %{type: "text", value: v}
+  defp encode(nil), do: %{type: "null"}
+  defp encode({:blob, bin}), do: %{type: "blob", base64: Base.encode64(bin)}
+
+  defp decode(%{"type" => "integer", "value" => v}), do: String.to_integer(v)
+  defp decode(%{"type" => "float", "value" => v}), do: v
+  defp decode(%{"type" => "text", "value" => v}), do: v
+  defp decode(%{"type" => "null"}), do: nil
+
+  defp decode(%{"type" => "blob", "base64" => b}) do
+    case Base.decode64(b) do
+      {:ok, bin} -> bin
+      :error -> Base.decode64!(b, padding: false)
+    end
+  end
+end
+```
+
+Sanity check — one round trip:
+
+```elixir
+Sqld.query(sqld_url, "SELECT sqlite_version() AS v, 1 + 1 AS math").maps
+```
+
+## Metrics: create, ingest, flush
+
+Three statements, one HTTP request. `CREATE VIRTUAL TABLE` builds the
+compressed store (and its shadow tables) inside the server's database file.
+
+```elixir
+Sqld.pipeline(sqld_url, [
+  "CREATE VIRTUAL TABLE IF NOT EXISTS metrics USING timeless_metrics"
+])
+
+:ok
+```
+
+Now some data worth charting: two hosts, one hour of `cpu_usage` at 15-second
+resolution — a sine wave with noise, and a load spike on `web2` halfway
+through.
+
+```elixir
+now = DateTime.utc_now() |> DateTime.to_unix()
+t0 = now - 3600
+
+points =
+  for host <- ["web1", "web2"], i <- 0..239 do
+    ts = t0 + i * 15
+    base = 35 + 15 * :math.sin(i / 20)
+    spike = if host == "web2" and i in 120..160, do: 30, else: 0
+    noise = (:rand.uniform() - 0.5) * 6
+    %{name: "cpu_usage", ts: ts, value: Float.round(base + spike + noise, 2), host: host}
+  end
+
+length(points)
+```
+
+Insert them as ordinary multi-row `INSERT`s (chunked so no single statement
+gets huge), then `'flush'` — the command that compresses the in-memory
+buffer into blocks. Commands ride the same idiom SQLite's FTS5 uses: an
+INSERT into the hidden column named after the table.
+
+```elixir
+insert_batches =
+  points
+  |> Enum.chunk_every(200)
+  |> Enum.map(fn chunk ->
+    values =
+      Enum.map_join(chunk, ",", fn p ->
+        ~s[('#{p.name}', #{p.ts}, #{p.value}, '{"host":"#{p.host}"}')]
+      end)
+
+    "INSERT INTO metrics(name, ts, value, labels) VALUES " <> values
+  end)
+
+Sqld.pipeline(sqld_url, insert_batches ++ ["INSERT INTO metrics(metrics) VALUES ('flush')"])
+:ok
+```
+
+## Query and chart
+
+This is a **separate HTTP request** — a different pooled connection than the
+one that wrote. The data comes back anyway: query pushdown (`name` equality,
+`ts` range) prunes compressed chunks server-side, and parameters bind with
+`?` like any SQL API.
+
+```elixir
+result =
+  Sqld.query(
+    sqld_url,
+    """
+    SELECT ts, value, json_extract(labels, '$.host') AS host
+      FROM metrics
+     WHERE name = ? AND ts >= ?
+    """,
+    ["cpu_usage", t0]
+  )
+
+length(result.rows)
+```
+
+```elixir
+alias VegaLite, as: Vl
+
+chart_data =
+  Enum.map(result.maps, fn m ->
+    %{
+      "time" => m["ts"] |> DateTime.from_unix!() |> DateTime.to_iso8601(),
+      "cpu" => m["value"],
+      "host" => m["host"]
+    }
+  end)
+
+Vl.new(width: 680, height: 280, title: "cpu_usage — read back over HTTP from compressed chunks")
+|> Vl.data_from_values(chart_data)
+|> Vl.mark(:line, interpolate: "monotone")
+|> Vl.encode_field(:x, "time", type: :temporal, title: nil)
+|> Vl.encode_field(:y, "cpu", type: :quantitative, title: "cpu %")
+|> Vl.encode_field(:color, "host", type: :nominal)
+```
+
+Aggregation is plain SQL — no query DSL to learn. Five-minute averages,
+computed server-side:
+
+```elixir
+Sqld.query(
+  sqld_url,
+  """
+  SELECT (ts / 300) * 300 AS bucket,
+         json_extract(labels, '$.host') AS host,
+         round(avg(value), 1) AS avg_cpu,
+         round(max(value), 1) AS max_cpu
+    FROM metrics
+   WHERE name = 'cpu_usage' AND ts >= ?
+   GROUP BY bucket, host
+   ORDER BY bucket
+  """,
+  [t0]
+).maps
+|> Kino.DataTable.new(name: "5-minute rollups")
+```
+
+## The compression receipt
+
+The compressed blocks live in ordinary shadow tables right next to the
+virtual table — so we can audit the compression claim with a SQL query
+against the store itself. Raw storage for a metric point is ~16 bytes
+(8-byte timestamp + 8-byte float) before you even count row overhead:
+
+```elixir
+%{maps: [receipt]} =
+  Sqld.query(sqld_url, """
+  SELECT count(*)                                   AS chunks,
+         sum(point_count)                           AS points,
+         sum(length(ts_data) + length(val_data))    AS compressed_bytes,
+         sum(point_count) * 16                      AS raw_bytes
+    FROM metrics_chunks
+  """)
+
+ratio = Float.round(receipt["raw_bytes"] / receipt["compressed_bytes"], 1)
+
+Kino.Markdown.new("""
+| points | chunks | raw (ts+value) | compressed | ratio |
+|---:|---:|---:|---:|---:|
+| #{receipt["points"]} | #{receipt["chunks"]} | #{receipt["raw_bytes"]} B | **#{receipt["compressed_bytes"]} B** | **#{ratio}x** |
+
+*(Synthetic sine-with-noise data at 15s intervals. Hostile data lands ~6x
+including all overhead; regular real-world data reaches ~200x — see the
+[benchmarks](https://github.com/awksedgreep/timeless-libsql#numbers).)*
+""")
+```
+
+## Logs: indexed dimensions
+
+For logs you make one decision at creation time: which metadata keys deserve
+inverted-index treatment. Each becomes a real (hidden) column you can filter
+on, and equality filters only decompress blocks that can match.
+
+```elixir
+Sqld.pipeline(sqld_url, [
+  "CREATE VIRTUAL TABLE IF NOT EXISTS logs USING timeless_logs(index_keys='service,path,status')"
+])
+
+:ok
+```
+
+Simulate an hour of request logs across three services (log timestamps are
+**milliseconds**):
+
+```elixir
+services = [
+  {"payments", ["/api/charge", "/api/refund"]},
+  {"checkout", ["/api/cart", "/api/order"]},
+  {"catalog", ["/api/search", "/api/item"]}
+]
+
+log_entries =
+  for i <- 1..600 do
+    {service, paths} = Enum.random(services)
+    path = Enum.random(paths)
+    error? = :rand.uniform() < 0.08
+
+    {level, status, message} =
+      if error? do
+        {"error", "500", "upstream timeout after 3000ms"}
+      else
+        {"info", "200", "request completed in #{:rand.uniform(180)}ms"}
+      end
+
+    ts_ms = (t0 + :rand.uniform(3600)) * 1000
+    {ts_ms, level, message, service, path, status}
+  end
+
+log_batches =
+  log_entries
+  |> Enum.chunk_every(200)
+  |> Enum.map(fn chunk ->
+    values =
+      Enum.map_join(chunk, ",", fn {ts, lvl, msg, svc, path, status} ->
+        ~s[(#{ts}, '#{lvl}', '#{msg}', '#{svc}', '#{path}', '#{status}')]
+      end)
+
+    # index_keys double as INSERT shorthand — they merge into metadata JSON
+    "INSERT INTO logs(ts, level, message, service, path, status) VALUES " <> values
+  end)
+
+Sqld.pipeline(sqld_url, log_batches ++ ["INSERT INTO logs(logs) VALUES ('flush')"])
+:ok
+```
+
+Now the query this table exists for — every predicate below is
+index-accelerated (`service` and `status` via the term index, `ts` via block
+pruning):
+
+```elixir
+Sqld.query(
+  sqld_url,
+  """
+  SELECT ts, level, service, path, message
+    FROM logs
+   WHERE service = 'payments' AND level = 'error' AND ts >= ?
+   ORDER BY ts DESC
+  """,
+  [t0 * 1000]
+).maps
+|> Enum.map(fn m ->
+  %{m | "ts" => m["ts"] |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()}
+end)
+|> Kino.DataTable.new(name: "payments errors, newest first")
+```
+
+Error rate by service — again, just SQL:
+
+```elixir
+Sqld.query(sqld_url, """
+SELECT service,
+       count(*) AS requests,
+       sum(level = 'error') AS errors,
+       round(100.0 * sum(level = 'error') / count(*), 1) AS error_pct
+  FROM logs
+ GROUP BY service ORDER BY error_pct DESC
+""").maps
+|> Kino.DataTable.new(name: "error rate by service")
+```
+
+## Traces: reassembly by trace id
+
+OpenTelemetry-shaped spans. Ids go in as hex text (what OTel tooling gives
+you), get stored packed, and come back as BLOBs — `hex()` for display.
+Timestamps are **nanoseconds**.
+
+```elixir
+Sqld.pipeline(sqld_url, [
+  "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces"
+])
+
+hex = fn n -> :crypto.strong_rand_bytes(n) |> Base.encode16(case: :lower) end
+
+# One interesting checkout request: gateway → checkout → payments → db
+trace_id = hex.(16)
+t_ns = (now - 60) * 1_000_000_000
+
+spans = [
+  {"POST /api/order", "gateway", "server", "ok", 0, 48_000_000, nil},
+  {"create_order", "checkout", "internal", "ok", 2_000_000, 44_000_000, 0},
+  {"POST /api/charge", "payments", "client", "error", 6_000_000, 31_000_000, 1},
+  {"SELECT orders", "db", "client", "ok", 38_000_000, 6_000_000, 1}
+]
+
+span_ids = Enum.map(spans, fn _ -> hex.(8) end)
+
+span_rows =
+  spans
+  |> Enum.zip(span_ids)
+  |> Enum.map(fn {{name, service, kind, status, offset, dur, parent_idx}, span_id} ->
+    parent = if parent_idx, do: "'#{Enum.at(span_ids, parent_idx)}'", else: "NULL"
+
+    ~s[('#{trace_id}', '#{span_id}', #{parent}, '#{name}', '#{service}',
+       '#{kind}', '#{status}', #{t_ns + offset}, #{dur})]
+  end)
+  |> Enum.join(",")
+
+Sqld.pipeline(sqld_url, [
+  """
+  INSERT INTO traces(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns)
+  VALUES #{span_rows}
+  """,
+  "INSERT INTO traces(traces) VALUES ('flush')"
+])
+
+trace_id
+```
+
+Reassemble the whole trace by id — routed through a dedicated trace-id index,
+so only blocks containing this trace are decompressed:
+
+```elixir
+trace = Sqld.query(
+  sqld_url,
+  """
+  SELECT hex(span_id) AS span,
+         nullif(hex(parent_span_id), '') AS parent,  -- hex(NULL) is '', not NULL
+         name, service, status, start_ts, duration_ns
+    FROM traces
+   WHERE trace_id = ?
+   ORDER BY start_ts
+  """,
+  [trace_id]
+)
+
+trace.maps |> Kino.DataTable.new(name: "trace #{String.slice(trace_id, 0, 8)}…")
+```
+
+And because it's rows, a waterfall is just a ranged bar chart:
+
+```elixir
+trace_start = trace.maps |> Enum.map(& &1["start_ts"]) |> Enum.min()
+
+waterfall =
+  Enum.map(trace.maps, fn m ->
+    start_ms = (m["start_ts"] - trace_start) / 1_000_000
+
+    %{
+      "span" => "#{m["service"]}: #{m["name"]}",
+      "start_ms" => start_ms,
+      "end_ms" => start_ms + m["duration_ns"] / 1_000_000,
+      "status" => m["status"]
+    }
+  end)
+
+Vl.new(width: 680, height: 160, title: "trace waterfall (ms)")
+|> Vl.data_from_values(waterfall)
+|> Vl.mark(:bar, height: 18, cornerRadius: 3)
+|> Vl.encode_field(:x, "start_ms", type: :quantitative, title: "ms")
+|> Vl.encode_field(:x2, "end_ms")
+|> Vl.encode_field(:y, "span", type: :nominal, sort: nil, title: nil)
+|> Vl.encode_field(:color, "status", type: :nominal,
+     scale: [domain: ["ok", "error"], range: ["#4c78a8", "#e45756"]])
+```
+
+## Retention: prune
+
+The store is append-only — no `UPDATE`/`DELETE`. Retention is one explicit
+command, in the table's own timestamp unit. To see it work, plant some
+two-hour-old data in its own flushed chunk, then age out everything older
+than 30 minutes:
+
+```elixir
+old_ts = now - 7200
+
+Sqld.pipeline(sqld_url, [
+  "INSERT INTO metrics(name, ts, value) VALUES ('old_metric', #{old_ts}, 1.0), ('old_metric', #{old_ts + 10}, 2.0)",
+  "INSERT INTO metrics(metrics) VALUES ('flush')"
+])
+
+count = fn sql ->
+  %{rows: [[n]]} = Sqld.query(sqld_url, sql)
+  n
+end
+
+before_chunks = count.("SELECT count(*) FROM metrics_chunks")
+
+# metrics ts unit is seconds; logs would take ms here, traces ns
+Sqld.query(sqld_url, "INSERT INTO metrics(metrics) VALUES ('prune:#{now - 1800}')")
+
+Kino.Markdown.new("""
+chunks: **#{before_chunks} → #{count.("SELECT count(*) FROM metrics_chunks")}**,
+`old_metric` rows left: **#{count.("SELECT count(*) FROM metrics WHERE name = 'old_metric'")}** —
+the hour of `cpu_usage` survives because its chunks straddle the cutoff:
+prune only drops chunks *entirely* older, so retention means "at least this much".
+""")
+```
+
+## What you just saw
+
+- A Rust SQLite extension serving **compressed metrics, logs, and traces
+  over HTTP** to an Elixir notebook with zero native dependencies — the
+  client was ~30 lines of JSON handling.
+- Every request on a **fresh pooled connection**; sqld loads the extension
+  into all of them, and a process-global registry hands them the same
+  engine.
+- **It's all SQL**: pushdown-accelerated filters, `GROUP BY` rollups, trace
+  reassembly, retention — plus an auditable compression receipt read from
+  the store's own shadow tables.
+
+Where to go next:
+
+- [docs/SQLD.md](SQLD.md) — running sqld with the extension (including
+  containers and libSQL replication)
+- [docs/GUIDE.md](GUIDE.md) — the plain-SQL user's guide (units,
+  vocabularies, `optimize`, error messages)
+- [README](../README.md) — how it works inside, honest benchmarks, and the
+  test harness that keeps them honest
