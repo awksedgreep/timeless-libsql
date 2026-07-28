@@ -70,6 +70,9 @@ const DEFAULT_FLUSH_EVERY: u32 = 1;
 const DEFAULT_EVERY_SECS: u64 = 60;
 const META_FLUSH_EVERY: &str = "health_flush_every";
 const META_EVERY: &str = "health_every";
+const META_VIEWS_VER: &str = "health_views_version";
+/// Bump when views_ddl changes; connect refreshes older databases.
+const VIEWS_VERSION: &str = "2";
 /// The scheduler's first sample lands shortly after open, not a full
 /// interval later — "collection begins" should be observable.
 const SCHEDULER_INITIAL_DELAY: Duration = Duration::from_secs(2);
@@ -466,21 +469,30 @@ SELECT 'stmt_memory',
 FROM (SELECT (SELECT value FROM {now_ref} WHERE name = 'stmt_used_bytes') AS v)
 
 UNION ALL
-SELECT 'db_growth_7d',
+SELECT 'db_growth',
   CASE WHEN o IS NULL OR l IS NULL THEN 'no data'
        WHEN l < 10485760 OR o <= 0 THEN 'ok'
        WHEN l <= 1.5 * o THEN 'ok'
        WHEN l <= 3 * o THEN 'warn'
        ELSE 'attention' END,
+  -- The window is whatever data actually exists (up to 7d): saying
+  -- "in 7d" on a four-minute-old database was a lie with decimals.
   CASE WHEN o IS NULL OR l IS NULL THEN '—'
        WHEN o <= 0 THEN printf('%.1f MB', l / 1048576.0)
-       ELSE printf('%.1fx in 7d (now %.1f MB)', l * 1.0 / o, l / 1048576.0) END,
+       ELSE printf('%.1fx over ', l * 1.0 / o)
+            || CASE WHEN age < 5400 THEN CAST(age / 60 AS TEXT) || 'm'
+                    WHEN age < 172800 THEN CAST(age / 3600 AS TEXT) || 'h'
+                    ELSE CAST(age / 86400 AS TEXT) || 'd' END
+            || printf(' (now %.1f MB)', l / 1048576.0) END,
   CASE WHEN o IS NULL OR l IS NULL THEN 'needs at least one sample'
        WHEN l < 10485760 OR o <= 0 OR l <= 1.5 * o THEN '—'
        ELSE 'the file is growing fast; check that ''prune''/retention runs for your telemetry tables' END
 FROM (SELECT (SELECT value FROM {t}
                WHERE name = 'db_file_bytes' AND ts > unixepoch() - 604800
                ORDER BY ts LIMIT 1) AS o,
+             unixepoch() - (SELECT ts FROM {t}
+               WHERE name = 'db_file_bytes' AND ts > unixepoch() - 604800
+               ORDER BY ts LIMIT 1) AS age,
              (SELECT value FROM {now_ref} WHERE name = 'db_file_bytes') AS l)
 )
 ORDER BY CASE status WHEN 'attention' THEN 0 WHEN 'warn' THEN 1
@@ -582,6 +594,14 @@ impl HealthTab {
             )
             .map_err(module_err)?;
             host.execute_batch(&views_ddl(&inner.database_name, &inner.table_name))?;
+            shadow_meta::save_meta_text(
+                &host,
+                &inner.database_name,
+                &inner.table_name,
+                META_VIEWS_VER,
+                VIEWS_VERSION,
+            )
+            .map_err(module_err)?;
         } else {
             let fe = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_FLUSH_EVERY)?;
             let ev = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_EVERY)?;
@@ -593,6 +613,28 @@ impl HealthTab {
                 .as_deref()
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(DEFAULT_EVERY_SECS);
+            // Best-effort view refresh: databases created by older
+            // builds get the current report/trends definitions on open
+            // (ignored on read-only connections; old views keep working).
+            let ver = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_VIEWS_VER)?;
+            if ver.as_deref() != Some(VIEWS_VERSION) {
+                let refreshed = host
+                    .execute_batch(&format!(
+                        "{}\n{}",
+                        drop_views_ddl(&inner.database_name, &inner.table_name),
+                        views_ddl(&inner.database_name, &inner.table_name)
+                    ))
+                    .is_ok();
+                if refreshed {
+                    let _ = shadow_meta::save_meta_text(
+                        &host,
+                        &inner.database_name,
+                        &inner.table_name,
+                        META_VIEWS_VER,
+                        VIEWS_VERSION,
+                    );
+                }
+            }
             // Best-effort migration: rewrite v1 BLOB values as TEXT so
             // standard readers work next time. Ignore failures (the
             // connection may be read-only; relaxed reads cover us).
