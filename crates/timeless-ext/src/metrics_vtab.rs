@@ -127,18 +127,19 @@ fn load_rollups(
 pub struct MetricsTab {
     base: ffi::sqlite3_vtab,
     /// Raw handle to the HOST connection, kept for xDestroy's DDL.
-    db: *mut ffi::sqlite3,
+    /// pub(crate): health_vtab wraps MetricsTab and samples through it.
+    pub(crate) db: *mut ffi::sqlite3,
     /// The vtab's own name — needed to drop its shadow tables.
-    table_name: String,
+    pub(crate) table_name: String,
     /// Owning SQLite schema ("main", "temp", or an ATTACH alias).
-    database_name: String,
+    pub(crate) database_name: String,
     /// The whole timeless-core engine, chunk-persisting into shadow
     /// tables via ShadowTableStore — SHARED process-wide with every
     /// other connection's vtab instance over the same (db file, table)
     /// via the R4 registry (see shared.rs). Arc so cursors can hold a
     /// reference without lifetime gymnastics, and so instances across
     /// connections co-own one engine.
-    shared: Arc<SharedEngine<Engine>>,
+    pub(crate) shared: Arc<SharedEngine<Engine>>,
     /// Durable instance key used to bridge transactional xDestroy rollback.
     key: RegistryKey,
     /// True while THIS connection's write transaction holds the shared
@@ -152,7 +153,7 @@ pub struct MetricsTab {
 }
 
 impl MetricsTab {
-    fn connect_create(
+    pub(crate) fn connect_create(
         db: &mut VTabConnection,
         _aux: Option<&()>,
         _module_name: &[u8],
@@ -163,6 +164,10 @@ impl MetricsTab {
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let database = String::from_utf8_lossy(database_name).into_owned();
+        // Innocuous (the FTS5 precedent): reads have no side effects, so
+        // the vtab may be referenced from VIEWS under trusted_schema=off
+        // — dbhealth's companion report views require this.
+        db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
         // Bind the calling connection for the store operations below
         // (DDL, and the recovery SELECTs Engine::with_store performs
@@ -332,7 +337,7 @@ impl MetricsTab {
     /// do not hold it already. Primary call site is begin() — SQLite
     /// fires xBegin before the first write statement of every
     /// transaction — with a defensive re-check in insert().
-    fn acquire_write_gate(&mut self) -> Result<()> {
+    pub(crate) fn acquire_write_gate(&mut self) -> Result<()> {
         if self.gate_held {
             return Ok(());
         }
@@ -355,7 +360,7 @@ impl MetricsTab {
 
     /// Handle a hidden-column command insert. Returns the (synthetic,
     /// meaningless) rowid 0 — commands do not create rows.
-    fn run_command(&self, cmd: &str) -> Result<i64> {
+    pub(crate) fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "flush" {
             // Drain every partition buffer into pco chunks in _chunks and
             // persist the series registry into _meta. After this the data

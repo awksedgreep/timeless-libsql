@@ -7,8 +7,17 @@ license.workspace = true
 [lib]
 # cdylib = "C dynamic library": a plain .so with a C ABI, which is what
 # sqlite3's `.load` / load_extension() dlopen()s. No Rust runtime assumed.
-crate-type = ["cdylib"]
+# lib as well: the dbhealth-ext crate links this code to build
+# its own, separate loadable extension.
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 rusqlite = { version = "0.40.1", features = ["vtab", "loadable_extension"] }
 timeless-core = { path = "../timeless-core" }
+
+[features]
+default = ["entrypoints"]
+# The sqlite3_*_init entry points. dbhealth-ext disables this so its
+# .so exports ONLY its own entry points (SQLite falls back to
+# sqlite3_extension_init first — two extensions must not share it).
+entrypoints = []

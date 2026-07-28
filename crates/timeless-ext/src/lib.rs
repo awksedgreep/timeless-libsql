@@ -31,8 +31,14 @@
 //!   INSERT INTO metrics(metrics) VALUES ('flush');   -- FTS5-style command
 //!   SELECT * FROM metrics WHERE name = 'cpu' AND ts >= 1700000000;
 
+// The dbhealth shell build (default-features = false) compiles this
+// crate without the entry points, leaving the telemetry registers
+// unused by design — silence dead-code for that config wholesale.
+#![cfg_attr(not(feature = "entrypoints"), allow(dead_code))]
+
 mod batch;
 mod flatjson;
+mod health_vtab;
 mod logs_vtab;
 mod metrics_vtab;
 mod query_tvf;
@@ -47,8 +53,10 @@ mod table_args;
 mod traces_vtab;
 mod vtab_tx;
 
+#[cfg(feature = "entrypoints")]
 use std::ffi::{c_char, c_int};
 
+#[cfg(feature = "entrypoints")]
 use rusqlite::ffi;
 use rusqlite::{Connection, Result};
 
@@ -64,6 +72,14 @@ use rusqlite::{Connection, Result};
 // mangles names). `extern "C"` uses the C calling convention. `unsafe`
 // because we're trusting raw pointers handed to us by SQLite.
 
+/// Register ONLY the dbhealth module family on a connection — the
+/// public API the separate `dbhealth-ext` cdylib builds its extension
+/// entry points from (its .so registers health and nothing else).
+pub fn register_dbhealth(db: &Connection) -> Result<()> {
+    health_vtab::register(db)
+}
+
+#[cfg(feature = "entrypoints")]
 unsafe extern "C" fn init_common(
     db: *mut ffi::sqlite3,
     pz_err_msg: *mut *mut c_char,
@@ -72,6 +88,7 @@ unsafe extern "C" fn init_common(
     Connection::extension_init2(db, pz_err_msg, p_api, extension_init)
 }
 
+#[cfg(feature = "entrypoints")]
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_extension_init(
     db: *mut ffi::sqlite3,
@@ -81,6 +98,7 @@ pub unsafe extern "C" fn sqlite3_extension_init(
     init_common(db, pz_err_msg, p_api)
 }
 
+#[cfg(feature = "entrypoints")]
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_timelessext_init(
     db: *mut ffi::sqlite3,
@@ -90,6 +108,7 @@ pub unsafe extern "C" fn sqlite3_timelessext_init(
     init_common(db, pz_err_msg, p_api)
 }
 
+#[cfg(feature = "entrypoints")]
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_timeless_ext_init(
     db: *mut ffi::sqlite3,
@@ -100,6 +119,7 @@ pub unsafe extern "C" fn sqlite3_timeless_ext_init(
 }
 
 /// Runs once per connection when the extension loads: register both modules.
+#[cfg(feature = "entrypoints")]
 fn extension_init(db: Connection) -> Result<bool> {
     spike::register(&db)?;
     metrics_vtab::register(&db)?;

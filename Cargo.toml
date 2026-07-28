@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/timeless-codec", "crates/timeless-core", "crates/timeless-ext"]
+members = ["crates/timeless-codec", "crates/timeless-core", "crates/timeless-ext", "crates/dbhealth-ext"]
+# dbhealth-ext is built EXPLICITLY (cargo build -p dbhealth-ext): in a
+# combined invocation cargo unifies features and timeless-ext's
+# entrypoints would collide with dbhealth's own sqlite3_extension_init.
+default-members = ["crates/timeless-codec", "crates/timeless-core", "crates/timeless-ext"]
 resolver = "2"
 
 [workspace.package]

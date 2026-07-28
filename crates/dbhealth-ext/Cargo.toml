@@ -1,0 +1,17 @@
+[package]
+name = "dbhealth-ext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# The standalone dbhealth extension: one .so, health only. Load it into
+# any SQLite/libSQL and `CREATE VIRTUAL TABLE dbhealth USING dbhealth`
+# starts collecting. No telemetry modules included — that is
+# libtimeless_ext's job; the two .so files are separate products that
+# share engine code at the source level, not at load time.
+crate-type = ["cdylib"]
+
+[dependencies]
+rusqlite = { version = "0.40.1", features = ["vtab", "loadable_extension"] }
+timeless-ext = { path = "../timeless-ext", default-features = false }
