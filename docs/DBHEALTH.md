@@ -14,6 +14,8 @@ CREATE VIRTUAL TABLE dbhealth USING dbhealth;
 SELECT * FROM dbhealth_report;
 ```
 
+![the DBHEALTH console in phosphor: auto-collection + live sparklines](https://raw.githubusercontent.com/awksedgreep/phosphor/master/docs/demo/health.gif)
+
 **v2 changes (2026-07-28), after real-user feedback:**
 
 - **Collection is automatic.** Creating a dbhealth table — or simply
