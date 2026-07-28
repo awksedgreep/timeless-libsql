@@ -87,5 +87,21 @@ kinds = dict(c4.execute("SELECT k, typeof(v) FROM legacy_meta WHERE k LIKE 'heal
 assert kinds.get("health_flush_every") == "text", kinds
 c4.execute("DROP TABLE legacy")
 c4.close()
+
+# ── sqld-managed layouts get NO embedded scheduler ───────────────────
+import pathlib
+sqld_dir = pathlib.Path(DB).parent / "demo.sqld"
+sqld_dir.mkdir()
+c5 = sqlite3.connect(str(sqld_dir / "data"))
+c5.enable_load_extension(True)
+c5.load_extension(EXT)
+c5.execute("CREATE VIRTUAL TABLE dbhealth USING dbhealth(every=1)")
+c5.commit()
+time.sleep(2.8)
+n6 = c5.execute("SELECT count(*) FROM dbhealth").fetchone()[0]
+assert n6 == 0, f"scheduler must not run under a .sqld/ layout (got {n6})"
+c5.execute("INSERT INTO dbhealth(dbhealth) VALUES ('sample')")  # front door works
+assert c5.execute("SELECT count(*) FROM dbhealth").fetchone()[0] > 0
+c5.close()
 print("ALL DBHEALTH CHECKS PASSED")
 PYEOF

@@ -238,6 +238,16 @@ fn ensure_scheduler(
     if every_secs == 0 {
         return;
     }
+    // Under sqld the server VIRTUALIZES the WAL for replication; an
+    // out-of-band connection writing to the managed file could desync
+    // the replication log. sqld's conventional layout keeps databases
+    // under a `<name>.sqld/` directory — skip the embedded scheduler
+    // there and let collection flow through the front door instead
+    // (an HTTP 'sample' on a timer measures REAL pooled connections,
+    // which is better data anyway; see docs/DBHEALTH.md).
+    if file.contains(".sqld/") {
+        return;
+    }
     let key = scheduler_key(&file, table);
     let mut map = schedulers().lock().unwrap();
     if map.contains_key(&key) {

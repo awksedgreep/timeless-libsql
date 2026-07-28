@@ -41,6 +41,17 @@ SELECT * FROM dbhealth_report;
   missing.
 - The F2/F3 arguments pass through: `USING dbhealth(retention='30d')`
   works.
+- **Under sqld, collection goes through the front door.** sqld holds
+  databases open in a long-lived process, but it also virtualizes the
+  WAL for replication — an out-of-band sampler connection writing to a
+  managed file could desync the replication log. The scheduler
+  therefore refuses files living under a `*.sqld/` directory. Sample
+  through the interface instead — one timer POSTing
+  `INSERT INTO dbhealth(dbhealth) VALUES ('sample')` to `/v3/pipeline`
+  is the whole collector, and it measures REAL pooled worker
+  connections (better ratio data than any background thread), while
+  the health history replicates to every replica with the rest of the
+  database.
 
 ## Why this doesn't already exist
 
