@@ -71,5 +71,21 @@ left = c2.execute(
 ).fetchone()[0]
 assert left == 0, f"{left} dbhealth objects left after DROP"
 c2.close()
+
+# ── v1 compatibility: meta stored as BLOB must not break connect ─────
+c3 = connect()
+c3.execute("CREATE VIRTUAL TABLE legacy USING dbhealth(every=0)")
+c3.execute("UPDATE legacy_meta SET v = CAST(v AS BLOB) WHERE k IN ('health_flush_every', 'health_every')")
+c3.commit()
+c3.close()
+c4 = connect()
+n5 = c4.execute("SELECT count(*) FROM legacy").fetchone()[0]  # connect must not error
+c4.execute("INSERT INTO legacy(legacy) VALUES ('sample')")
+assert c4.execute("SELECT count(*) FROM legacy").fetchone()[0] > n5
+# and connect migrated the values back to TEXT
+kinds = dict(c4.execute("SELECT k, typeof(v) FROM legacy_meta WHERE k LIKE 'health%'").fetchall())
+assert kinds.get("health_flush_every") == "text", kinds
+c4.execute("DROP TABLE legacy")
+c4.close()
 print("ALL DBHEALTH CHECKS PASSED")
 PYEOF

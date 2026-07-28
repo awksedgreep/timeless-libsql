@@ -179,6 +179,34 @@ fn gauge_points(
     Ok(points)
 }
 
+/// Read a _meta value written by ANY dbhealth version: v1 stored these
+/// keys as BLOBs (raw bytes of the decimal string), v2/master stores
+/// TEXT. Never let an old database fail to open over an encoding.
+fn load_meta_relaxed(
+    host: &Connection,
+    database: &str,
+    table: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let meta = sql_ident::qualified_shadow(database, table, "meta");
+    host.query_row(
+        &format!("SELECT v FROM {meta} WHERE k = ?1"),
+        [key],
+        |row| {
+            Ok(match row.get_ref(0)? {
+                ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+                ValueRef::Blob(b) => Some(String::from_utf8_lossy(b).into_owned()),
+                ValueRef::Integer(i) => Some(i.to_string()),
+                ValueRef::Real(f) => Some(f.to_string()),
+                ValueRef::Null => None,
+            })
+        },
+    )
+    .optional()
+    .map(Option::flatten)
+}
+
 // ---------------------------------------------------------------------------
 // The scheduler — collection begins when the table exists
 // ---------------------------------------------------------------------------
@@ -545,17 +573,27 @@ impl HealthTab {
             .map_err(module_err)?;
             host.execute_batch(&views_ddl(&inner.database_name, &inner.table_name))?;
         } else {
-            let load = |key: &str| {
-                shadow_meta::load_meta_text(&host, &inner.database_name, &inner.table_name, key)
-            };
-            flush_every = load(META_FLUSH_EVERY)
-                .map_err(module_err)?
-                .and_then(|s| s.parse().ok())
+            let fe = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_FLUSH_EVERY)?;
+            let ev = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_EVERY)?;
+            flush_every = fe
+                .as_deref()
+                .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(DEFAULT_FLUSH_EVERY);
-            every_secs = load(META_EVERY)
-                .map_err(module_err)?
-                .and_then(|s| s.parse().ok())
+            every_secs = ev
+                .as_deref()
+                .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(DEFAULT_EVERY_SECS);
+            // Best-effort migration: rewrite v1 BLOB values as TEXT so
+            // standard readers work next time. Ignore failures (the
+            // connection may be read-only; relaxed reads cover us).
+            let _ = shadow_meta::save_meta_text(
+                &host, &inner.database_name, &inner.table_name,
+                META_FLUSH_EVERY, &flush_every.to_string(),
+            );
+            let _ = shadow_meta::save_meta_text(
+                &host, &inner.database_name, &inner.table_name,
+                META_EVERY, &every_secs.to_string(),
+            );
         }
 
         // Collection begins: create AND every later re-open (re)arm the
