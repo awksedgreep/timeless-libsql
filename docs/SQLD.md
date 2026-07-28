@@ -177,6 +177,14 @@ replication needs nothing from this extension. Run the container/binary as a
 replicates with everything else — the replica reads it with the same
 extension loaded locally.
 
+The bandwidth consequence deserves its own sentence: SQLite's WAL is
+page-level, and points only touch pages *after* compression at flush, so
+whatever replication transport you use — replica sync, S3-compatible
+bottomless storage, a periodic file ship — carries 6–200x fewer bytes
+than row-level telemetry would. Compress at the edge, pay for the
+compressed bytes upstream; on cellular backhaul that's the difference
+between gigabytes and megabytes a month (see the README's edge table).
+
 ---
 
 *Everything on this page and every cell in the [Livebook tour](tour.livemd)

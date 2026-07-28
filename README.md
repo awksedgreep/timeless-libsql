@@ -49,6 +49,26 @@ extension keeps telemetry *in the database you already have*:
 - **Append-only with honest retention.** DELETE/UPDATE are rejected;
   retention is an explicit `'prune:<ts>'` command.
 
+**Born for the edge.** Compression happens at the point of collection —
+points buffer in memory and land in the WAL only as compressed blocks —
+so libSQL replication (to a hub, to S3-compatible storage via bottomless,
+to an embedded replica) ships the *compressed* bytes, never the raw
+points. On a metered uplink that is the whole story. One device recording
+100 metrics at 1 Hz for a month:
+
+| storage | wire format | monthly upstream |
+|---|---|---:|
+| plain SQLite table | raw rows (~52.6 B/pt) | **~13.6 GB** |
+| timeless, hostile data | pco blocks (8.3 B/pt) | **~2.2 GB** |
+| timeless, friendly data | pco blocks (0.23 B/pt) | **~60 MB** |
+
+For IoT on cellular backhaul the flush cadence doubles as radio
+discipline — one batched, compressed write per interval instead of a
+row-trickle keeping the modem awake — and with [dbhealth](docs/DBHEALTH.md)
+on the same device, every unit self-monitors and its health history rides
+the same replication stream home. Sensors at the edge, pennies on the
+uplink, one file to sync.
+
 ## Quick start
 
 ```sh
