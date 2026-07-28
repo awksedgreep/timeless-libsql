@@ -41,17 +41,56 @@ SELECT * FROM dbhealth_report;
   missing.
 - The F2/F3 arguments pass through: `USING dbhealth(retention='30d')`
   works.
-- **Under sqld, collection goes through the front door.** sqld holds
-  databases open in a long-lived process, but it also virtualizes the
-  WAL for replication — an out-of-band sampler connection writing to a
-  managed file could desync the replication log. The scheduler
-  therefore refuses files living under a `*.sqld/` directory. Sample
-  through the interface instead — one timer POSTing
-  `INSERT INTO dbhealth(dbhealth) VALUES ('sample')` to `/v3/pipeline`
-  is the whole collector, and it measures REAL pooled worker
-  connections (better ratio data than any background thread), while
-  the health history replicates to every replica with the rest of the
-  database.
+- **Under sqld, collection goes through the front door — cron is
+  REQUIRED.** sqld holds databases open in a long-lived process, but it
+  also virtualizes the WAL for replication, so an out-of-band sampler
+  connection could desync the replication log. The embedded scheduler
+  therefore refuses files under a `*.sqld/` directory: with sqld,
+  nothing collects unless you sample through the interface. The whole
+  collector is one crontab line (see below).
+
+## Collecting under sqld: the exact cron line
+
+Put the dbhealth extension in sqld's trusted extensions directory and
+restart:
+
+```sh
+cp libdbhealth_ext.so ext-dir/
+(cd ext-dir && sha256sum *.so > trusted.lst)   # regenerate, both .so if
+                                               # you also load timeless
+sqld --db-path your.sqld --extensions-path ./ext-dir ...
+```
+
+Create the table once (any client): `CREATE VIRTUAL TABLE dbhealth
+USING dbhealth;` — then install the collector. This exact line is
+tested against a real sqld; copy it verbatim, adjusting only host:port:
+
+```cron
+# m h dom mon dow  command
+* * * * * /usr/bin/curl -sS -m 10 -o /dev/null http://127.0.0.1:8880/v3/pipeline -d '{"requests":[{"type":"execute","stmt":{"sql":"INSERT INTO dbhealth(dbhealth) VALUES (?1)","args":[{"type":"text","value":"sample"}]}},{"type":"close"}]}'
+```
+
+Why it looks the way it does — each choice avoids a classic cron trap:
+
+- **`?1` bind instead of `'sample'` in the SQL** — no nested single
+  quotes, so the shell quoting is trivial and un-breakable.
+- **No `%` anywhere** — cron treats `%` as a newline; this line has
+  none to escape.
+- **Full `/usr/bin/curl` path** — cron's PATH is minimal.
+- **`-m 10`** — a hung server can't pile up curl processes.
+- **`-sS -o /dev/null`** — silent on success, real errors still reach
+  cron's mail/log.
+
+Authenticated servers (Turso-style): add
+`-H "Authorization: Bearer $TOKEN"` before `-d`.
+
+One behavior to expect: each tick lands on one of sqld's pooled worker
+connections. The FIRST sample on any given connection records the
+db-level gauges (no delta baseline yet); repeat ticks on warmed
+connections add the cache-counter deltas and hit ratio. With a small
+pool and a one-minute cadence, full coverage arrives within minutes —
+and those ratios describe REAL workers serving real traffic, which is
+better data than any background thread could produce.
 
 ## Why this doesn't already exist
 

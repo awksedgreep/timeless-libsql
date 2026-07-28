@@ -419,6 +419,9 @@ CREATE VIRTUAL TABLE dbhealth USING dbhealth;
 -- Your app's heartbeat adds the connection-level series (cache hit
 -- ratio and friends) that a background sampler cannot see:
 INSERT INTO dbhealth(dbhealth) VALUES ('sample');
+-- NOTE: under sqld the built-in sampler stays off (replication
+-- safety) — collection is one cron line; copy it from DBHEALTH.md
+-- ("Collecting under sqld: the exact cron line").
 
 -- It reads like any metrics table:
 SELECT ts, value FROM dbhealth

@@ -122,6 +122,22 @@ Notes for client authors:
 - The interactive walkthrough of all three tables over this API — with
   charts — is the [Livebook tour](tour.livemd).
 
+## 4½. dbhealth under sqld needs cron — here is the line
+
+The dbhealth extension's built-in sampler deliberately stays OFF for
+sqld-managed databases (out-of-band writes vs. the replication log —
+see docs/DBHEALTH.md). Under sqld, collection is this one crontab
+entry, tested verbatim against a real server:
+
+```cron
+# m h dom mon dow  command
+* * * * * /usr/bin/curl -sS -m 10 -o /dev/null http://127.0.0.1:8880/v3/pipeline -d '{"requests":[{"type":"execute","stmt":{"sql":"INSERT INTO dbhealth(dbhealth) VALUES (?1)","args":[{"type":"text","value":"sample"}]}},{"type":"close"}]}'
+```
+
+`?1` binding avoids quote-escaping, there is no `%` for cron to eat,
+`-m 10` bounds a hung request. Prerequisite: `libdbhealth_ext.so`
+listed in `trusted.lst` and the dbhealth table created once.
+
 ## 5. Running sqld in a container
 
 The official image is `ghcr.io/tursodatabase/libsql-server`. Two things to
