@@ -15,6 +15,9 @@ F3 and of each other — reorder freely if priorities shift.
 - [x] **F4** Q2 kernels for logs & traces
 - [x] **F5** batch blob ingest for logs & traces
 - [x] **F6** trigram index for log message search
+- [ ] **F7** SQL query tier: counter kernels, percentiles, trimmed folds
+- [ ] **F8** label matchers + discovery TVF
+- [ ] **F9** gap-fill + the query cookbook
 
 ## Working agreement
 
@@ -533,6 +536,172 @@ negative ts) and runs the full cycle.
 - [x] import flow (transactions, flush, per-series verify, report)
 - [x] --selftest fixture incl. hostile labels + weird floats
 - [x] cli.sh section: selftest + imported db queried via sqlite3
+
+---
+
+## The SQL query tier (F7-F9), agreed 2026-07-30
+
+Scope decision: make the SQL surface USABLE for sqlite/libsql-native
+users — not elegant, not PromQL, never a web service. The Elixir layer
+stays the semantics authority (conformance-certified); everything below
+follows the waist rule — mechanical, parameter-explicit, bit-verifiable
+folds only. Estimated one session per feature; check off as we go.
+
+## F7 — Window vocabulary: counters, percentiles, trimmed folds
+
+**Goal.** The raw-sample advantage, cashed in: exact time-series math
+PromQL can only estimate, because we kept the samples. New agg names on
+`timeless_window` plus duration percentiles on `timeless_trace_buckets`
+("p95 latency per service per minute" — THE trace dashboard query).
+
+**SQL surface.**
+
+```sql
+SELECT labels, ts, value FROM timeless_window(
+  'metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
+-- new aggs: delta | increase | rate | pNN (p50, p95, p99.9…) | tavg:N
+
+SELECT bucket_ts, service, spans, errors, dur_sum, dur_min, dur_max,
+       dur_p50, dur_p95, dur_p99
+  FROM timeless_trace_buckets('traces', NULL, :t0, :t1, :step);
+```
+
+**THE SEMANTIC LINE — definitions pinned verbatim (these ARE the
+contract; the property tests quote them):**
+
+- Samples per window: ascending engine ts order, half-open
+  `(t - window, t]`, exactly as the existing aggs.
+- `delta` = last − first (engine-order ties, same rule as grid-last).
+- `increase` = Σ over consecutive pairs of
+  `(v[i] − v[i−1]) if v[i] ≥ v[i−1] else v[i]` — the stable
+  reset-adjustment rule (counter restarted near zero). The window's
+  first sample contributes nothing. NO extrapolation, NO lookback
+  beyond the window, NO staleness inference — this is NOT PromQL
+  `increase` and the docs say so in bold.
+- `rate` = increase ÷ window, per NATIVE ts unit (per second for
+  metrics; document the unit dependence).
+- `pNN` (N a decimal in (0, 100]): NEAREST-RANK — exclude NaNs, sort
+  remaining values by `f64::total_cmp`, take index
+  `ceil(N/100 × n) − 1`. No interpolation (that is what keeps the
+  bit-exact tests trivial and the estimator arguments out). Empty
+  after NaN exclusion → no row.
+- `tavg:N` (N in [0, 50)): after the same NaN-excluded sort, drop
+  `floor(n × N/100)` from EACH tail, average the remainder
+  left-to-right. The user supplies N — the database NEVER decides what
+  an outlier is (auto-detection like 3σ/IQR is refused as a default;
+  the cookbook shows those as explicit SQL recipes).
+- Trace buckets: `dur_p50/dur_p95/dur_p99` fixed columns, exact
+  nearest-rank over the bucket's i64 durations (no float subtlety).
+  Requires collecting per-(bucket, service) duration vectors instead of
+  streaming folds — same memory order as the spans already materialized
+  by query(); measure and note.
+
+**Implementation.**
+
+- [ ] window kernel: new agg vocabulary (parser for pNN/tavg:N; the
+      free-form agg string was built for this) + the five definitions
+      above as folds
+- [ ] trace bucket_stats: per-group duration collection + p50/p95/p99;
+      TVF schema gains the three columns
+- [ ] naive-reference property tests quoting the pinned definitions
+      (dup ts, resets mid-window, NaN exclusion, even/odd n, p99.9 on
+      tiny windows, tavg boundary fractions, empty-after-exclusion)
+- [ ] cli.sh section vs SQL reference (increase/rate need recursive-CTE
+      or window-function references; percentiles vs an exact SQL rank
+      recipe)
+- [ ] bench: p95 window + trace dur_p95 timings published; docs updated
+      (README + the NOT-PromQL warning)
+
+**Acceptance:** window p95 and trace dur_p95 produce property-verified
+exact results at dashboard latencies (target: same order as existing
+aggs; publish the sort overhead honestly); all suites green.
+
+## F8 — Label matchers + discovery
+
+**Goal.** Kill stringly label filtering. Matcher support in every
+metrics TVF filter argument, plus label discovery for building UIs.
+
+**SQL surface.**
+
+```sql
+-- filter JSON values grow operators (plain string stays equality):
+SELECT * FROM timeless_grid('metrics', 'cpu',
+  '{"host": {"re": "web-.*"}, "env": {"neq": "dev"}}',
+  :t0, :t1, 60, 90);
+-- operators: plain "v" (eq) | {"neq": v} | {"re": pattern} | {"nre": pattern}
+
+SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
+```
+
+**Design notes.**
+
+- Equality still pushes into `find_series`; the other operators filter
+  the enumerated candidates (the M1 list_series path, done for the
+  user) BEFORE any chunk reads. Absent label = "" for neq (the pinned
+  waist rule), and `re`/`nre` match against "" for absent — document.
+- Regex dialect: the Rust `regex` crate (new dependency, ~RE2 family),
+  DOCUMENTED as such. This is SQL-user convenience; the waist module
+  and the Elixir layer are untouched and keep their own matcher
+  semantics above the waist. Invalid pattern = loud error naming it.
+- One shared filter-parse upgrade in query_tvf.rs serves
+  grid/window/rollup identically.
+- `timeless_label_values`: the registry's label_values() exposed as a
+  TVF (the timeless_series pattern; ~an hour).
+
+**Implementation.**
+
+- [ ] matcher JSON parsing (back-compatible: plain strings = eq) +
+      shared candidate filtering in the kernel TVFs
+- [ ] regex dep + error surfacing; absent-label semantics per the
+      pinned rules
+- [ ] timeless_label_values TVF
+- [ ] tests: matcher equivalence vs naive filtering (incl. absent-label
+      edges, anchoring gotchas, invalid patterns); cli.sh section
+- [ ] docs (README filter syntax table)
+
+**Acceptance:** a `{"re": …}` dashboard query over the 1M-point bench
+returns verified-identical results to client-side filtering with no
+measurable overhead beyond the per-series regex test; suites green.
+
+## F9 — Gap-fill + the query cookbook
+
+**Goal.** Chart-readiness and leverage: dense grids for plotting
+libraries, and a cookbook that may make further features unnecessary.
+
+**SQL surface.**
+
+```sql
+-- optional trailing arg on timeless_grid / timeless_window:
+--   fill = 'none' (default) | 'null'  → every grid point emitted,
+--   value NULL where the window/lookback is empty
+SELECT labels, ts, value FROM timeless_grid(
+  'metrics', 'cpu', NULL, :t0, :t1, 60, 90, 'null');
+```
+
+**Design notes.**
+
+- Gap-fill is presentation mechanics, zero semantics: the kernels
+  already know every grid point; 'null' just stops omitting the empty
+  ones (per series — a series with NO points in range stays absent,
+  matching query_multi's omission rule; document).
+- `docs/QUERIES.md` cookbook, every recipe smoke-tested in a cli.sh
+  section so it can never rot: reset-corrected rate in pure SQL window
+  functions (and when to prefer the F7 kernel), topk-per-bucket,
+  cross-metric joins, σ/IQR outlier exclusion as explicit SQL,
+  dashboard patterns per TVF, the LEFT-JOIN-generate_series alternative
+  to gap-fill.
+
+**Implementation.**
+
+- [ ] fill argument on grid/window (decode + cursor emission of NULL
+      rows; KernelCursor value becomes Option)
+- [ ] cli.sh checks: dense grid row counts, NULL placement, per-series
+      absence rule
+- [ ] docs/QUERIES.md with every recipe executed by a cli.sh section
+- [ ] README pointer
+
+**Acceptance:** a charting query needs no client-side gap handling;
+every cookbook recipe is machine-verified; suites green.
 
 ## Session log
 
