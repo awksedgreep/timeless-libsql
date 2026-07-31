@@ -1770,6 +1770,170 @@ check_eq "label_values missing arg lists the call shape" \
   "$(grep -c 'tbl, metric, key' <<<"$err")" "1"
 
 # ---------------------------------------------------------------------------
+echo "== section 32: F9 gap-fill (fill='null' on grid/window) =="
+# Series a: points @10, @30; b: @10 only; c: @1000 (outside range).
+# Grid 10..50 step 10 lookback 10 -> 5 grid points; windows (t-10, t].
+#   a: 10=1.0, 20=NULL, 30=3.0, 40=NULL, 50=NULL
+#   b: 10=5.0, rest NULL       c: NO rows (per-series absence rule)
+F9DB="$TMP/f9_fill.db"
+got=$(sqlite3 "$F9DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m9 USING timeless_metrics;
+INSERT INTO m9(name, labels, ts, value) VALUES
+  ('cpu', '{"host":"a"}', 10, 1.0), ('cpu', '{"host":"a"}', 30, 3.0),
+  ('cpu', '{"host":"b"}', 10, 5.0),
+  ('cpu', '{"host":"c"}', 1000, 9.0);
+INSERT INTO m9(m9) VALUES ('flush');
+SELECT 'cnt', COUNT(*), SUM(value IS NULL) FROM timeless_grid('m9','cpu',NULL,10,50,10,10,'null');
+SELECT 'a', ts, COALESCE(value, '-') FROM timeless_grid('m9','cpu','{"host":"a"}',10,50,10,10,'null') ORDER BY ts;
+SELECT 'absent', COUNT(*) FROM timeless_grid('m9','cpu','{"host":"c"}',10,50,10,10,'null');
+SELECT 'sparse', COUNT(*) FROM timeless_grid('m9','cpu',NULL,10,50,10,10);
+SELECT 'w', ts, COALESCE(value, '-') FROM timeless_window('m9','cpu','{"host":"a"}',10,50,10,10,'avg','null') ORDER BY ts;
+SQL
+)
+check_eq "dense grid: 2 series x 5 points, 7 NULLs; series c absent; sparse default unchanged" \
+  "$(grep -E '^(cnt|absent|sparse)\|' <<<"$got")" \
+'cnt|10|7
+absent|0
+sparse|3'
+check_eq "NULL placement per grid point (grid + window agree)" \
+  "$(grep -E '^(a|w)\|' <<<"$got")" \
+'a|10|1.0
+a|20|-
+a|30|3.0
+a|40|-
+a|50|-
+w|10|1.0
+w|20|-
+w|30|3.0
+w|40|-
+w|50|-'
+err=$(sqlite3 "$F9DB" ".load $EXT" \
+  "SELECT * FROM timeless_grid('m9','cpu',NULL,10,50,10,10,'zero');" 2>&1 || true)
+check_eq "unknown fill value rejected loudly" \
+  "$(grep -c "fill must be 'none' or 'null'" <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
+echo "== section 33: docs/QUERIES.md cookbook (every recipe executed) =="
+# The cookbook's fixed dataset; expectations computed by hand in
+# docs/QUERIES.md terms. If a recipe in the doc drifts from what the
+# extension does, this section fails.
+CKDB="$TMP/cookbook.db"
+got=$(sqlite3 "$CKDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE ck USING timeless_metrics;
+INSERT INTO ck(name, labels, ts, value) VALUES
+  ('req', '{"host":"a"}', 0, 0.0), ('req', '{"host":"a"}', 10, 10.0),
+  ('req', '{"host":"a"}', 20, 30.0), ('req', '{"host":"a"}', 30, 5.0),
+  ('req', '{"host":"a"}', 40, 25.0),
+  ('cpu', '{"host":"a"}', 0, 1.0),  ('cpu', '{"host":"a"}', 60, 10.0),
+  ('cpu', '{"host":"b"}', 0, 2.0),  ('cpu', '{"host":"b"}', 60, 20.0),
+  ('cpu', '{"host":"c"}', 0, 3.0),  ('cpu', '{"host":"c"}', 60, 15.0),
+  ('errors',   '{"host":"a"}', 60, 5.0),
+  ('requests', '{"host":"a"}', 60, 50.0),
+  ('lat', '{}', 0, 10.0), ('lat', '{}', 10, 11.0), ('lat', '{}', 20, 12.0),
+  ('lat', '{}', 30, 13.0), ('lat', '{}', 40, 10.0), ('lat', '{}', 50, 11.0),
+  ('lat', '{}', 60, 12.0), ('lat', '{}', 70, 13.0), ('lat', '{}', 80, 10.0),
+  ('lat', '{}', 90, 11.0), ('lat', '{}', 100, 1000.0);
+INSERT INTO ck(ck) VALUES ('flush');
+
+-- recipe: reset-corrected increase in pure SQL over (0, 40] ...
+WITH s AS (
+  SELECT ts, value,
+         LAG(value) OVER (PARTITION BY labels ORDER BY ts) AS prev
+    FROM ck WHERE name = 'req' AND ts > 0 AND ts <= 40
+)
+SELECT 'sql_incr', SUM(CASE WHEN prev IS NULL THEN 0
+                            WHEN value >= prev THEN value - prev
+                            ELSE value END) FROM s;
+-- ... must equal the F7 kernel over the same window
+SELECT 'kern_incr', value FROM timeless_window('ck','req',NULL,40,40,10,40,'increase');
+
+-- recipe: top-k per bucket (top 2 hosts by avg cpu per minute)
+WITH b AS (
+  SELECT labels, (ts / 60) * 60 AS bucket_ts, AVG(value) AS v
+    FROM ck WHERE name = 'cpu' AND ts >= 0 AND ts <= 60
+   GROUP BY labels, bucket_ts
+),
+r AS (
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY bucket_ts ORDER BY v DESC) AS rn
+    FROM b
+)
+SELECT 'topk', bucket_ts, labels, v FROM r WHERE rn <= 2 ORDER BY bucket_ts, rn;
+
+-- recipe: cross-metric join (error ratio on shared grid points)
+SELECT 'ratio', e.ts, e.value / r.value
+  FROM timeless_grid('ck','errors',NULL,0,60,60,60) e
+  JOIN timeless_grid('ck','requests',NULL,0,60,60,60) r
+    ON r.labels = e.labels AND r.ts = e.ts;
+
+-- recipe: IQR fences from the exact-percentile kernel
+WITH fences AS (
+  SELECT (SELECT value FROM timeless_window('ck','lat',NULL,100,100,1,101,'p25')) AS q1,
+         (SELECT value FROM timeless_window('ck','lat',NULL,100,100,1,101,'p75')) AS q3
+)
+SELECT 'iqr', ROUND(AVG(value), 4)
+  FROM ck, fences
+ WHERE name = 'lat' AND ts > -1 AND ts <= 100
+   AND value BETWEEN q1 - 1.5 * (q3 - q1) AND q3 + 1.5 * (q3 - q1);
+
+-- recipe: 2-sigma exclusion in plain SQL
+WITH stats AS (
+  SELECT AVG(value) AS mu,
+         sqrt(AVG(value * value) - AVG(value) * AVG(value)) AS sigma
+    FROM ck WHERE name = 'lat' AND ts > -1 AND ts <= 100
+)
+SELECT 'sigma', ROUND(AVG(value), 4)
+  FROM ck, stats
+ WHERE name = 'lat' AND ts > -1 AND ts <= 100
+   AND ABS(value - mu) <= 2 * sigma;
+
+-- recipe: portable gap-fill (generate_series LEFT JOIN) ...
+SELECT 'gs', gs.value, COALESCE(g.value, '-')
+  FROM generate_series(0, 120, 30) gs
+  LEFT JOIN timeless_grid('ck','cpu','{"host":"a"}',0,120,30,30) g
+    ON g.ts = gs.value ORDER BY gs.value;
+-- ... must equal the native fill='null' emission
+SELECT 'nf', ts, COALESCE(value, '-')
+  FROM timeless_grid('ck','cpu','{"host":"a"}',0,120,30,30,'null') ORDER BY ts;
+
+-- recipe: discovery
+SELECT 'lv', value FROM timeless_label_values('ck','cpu','host');
+SQL
+)
+check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
+  "$(grep -E '^(sql_incr|kern_incr)\|' <<<"$got")" \
+'sql_incr|45.0
+kern_incr|45.0'
+check_eq "top-2 hosts per bucket" \
+  "$(grep '^topk|' <<<"$got")" \
+'topk|0|{"host":"c"}|3.0
+topk|0|{"host":"b"}|2.0
+topk|60|{"host":"b"}|20.0
+topk|60|{"host":"c"}|15.0'
+check_eq "cross-metric error ratio on shared grid" \
+  "$(grep '^ratio|' <<<"$got")" "ratio|60|0.1"
+check_eq "IQR fences and 2-sigma both exclude the outlier (robust avg 11.3)" \
+  "$(grep -E '^(iqr|sigma)\|' <<<"$got")" \
+'iqr|11.3
+sigma|11.3'
+check_eq "generate_series LEFT JOIN == native fill='null'" \
+  "$(grep '^gs|' <<<"$got" | sed 's/^gs|//')" \
+  "$(grep '^nf|' <<<"$got" | sed 's/^nf|//')"
+check_eq "gap-fill shape itself (0=1.0, 60=10.0, rest NULL)" \
+  "$(grep '^nf|' <<<"$got")" \
+'nf|0|1.0
+nf|30|-
+nf|60|10.0
+nf|90|-
+nf|120|-'
+check_eq "label discovery (cookbook)" \
+  "$(grep '^lv|' <<<"$got")" \
+'lv|a
+lv|b
+lv|c'
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

@@ -17,7 +17,7 @@ F3 and of each other — reorder freely if priorities shift.
 - [x] **F6** trigram index for log message search
 - [x] **F7** SQL query tier: counter kernels, percentiles, trimmed folds
 - [x] **F8** label matchers + discovery TVF
-- [ ] **F9** gap-fill + the query cookbook
+- [x] **F9** gap-fill + the query cookbook
 
 ## Working agreement
 
@@ -693,12 +693,12 @@ SELECT labels, ts, value FROM timeless_grid(
 
 **Implementation.**
 
-- [ ] fill argument on grid/window (decode + cursor emission of NULL
+- [x] fill argument on grid/window (decode + cursor emission of NULL
       rows; KernelCursor value becomes Option)
-- [ ] cli.sh checks: dense grid row counts, NULL placement, per-series
+- [x] cli.sh checks: dense grid row counts, NULL placement, per-series
       absence rule
-- [ ] docs/QUERIES.md with every recipe executed by a cli.sh section
-- [ ] README pointer
+- [x] docs/QUERIES.md with every recipe executed by a cli.sh section
+- [x] README pointer
 
 **Acceptance:** a charting query needs no client-side gap handling;
 every cookbook recipe is machine-verified; suites green.
@@ -708,6 +708,7 @@ every cookbook recipe is machine-verified; suites green.
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
 | 2026-07-26 | Plan | complete | This document; F1 next. |
+| 2026-07-30 | F9 | complete | fill='none'\|'null' trailing arg on grid+window (KernelArgs.fill; cursor value now Option<f64>; dense walk bounded by the engine's step>0 + grid-cap validation, checked_add guarded; rollup untouched — no fill arg declared). Per-series absence rule preserved and asserted (series with points outside the range emits nothing even filled). docs/QUERIES.md cookbook: dashboard patterns per TVF, native + generate_series gap-fill, pure-SQL reset-corrected increase (asserted EQUAL to the F7 kernel over the same half-open window), top-k per bucket, cross-metric error-ratio join on shared grid points, IQR fences via exact-percentile kernel + 2-sigma SQL (both robust avgs = 11.3 on the outlier fixture; sigma-masking caveat documented). cli.sh §32 (3 checks: 2x5 dense rows with 7 NULLs, NULL placement grid+window agree, unknown fill loud) + §33 (7 checks — every cookbook recipe executed). README: fill + cookbook pointer. 140 workspace tests, 34 cli.sh sections. F1-F9 ALL COMPLETE. |
 | 2026-07-30 | F8 | complete | Matcher operators in every kernel-TVF filter (plain=eq pushed into the label index; {"neq"}/{"re"}/{"nre"} compiled and applied to the candidate series list BEFORE chunk reads). Regexes: Rust `regex` crate (std+perf only), FULLY ANCHORED (PromQL-style — pinned decision), absent label = "" for all three ops per the waist rule. timeless_label_values TVF (registry-only, sorted distinct). 9 new ext unit tests (anchoring incl. substring must-NOT-match, absent-label semantics for neq/re/nre, eq-vs-matcher split, loud invalid-regex/unknown-operator errors) + cli.sh §31 (7 checks incl. the missing-env series and error paths). Bench acceptance MET: selective regex grid verified vs independent client-side filter (8300 rows exact); all-hosts regex 1.5ms vs 1.7ms NULL filter = no measurable overhead. 140 workspace tests, 32 cli.sh sections. F9 next. |
 | 2026-07-30 | F7 | complete | WindowOp vocabulary (delta/increase/rate with the pinned reset rule; exact nearest-rank pNN, NaN-excluded; tavg:N both-tails trim) + trace dur_p50/p95/p99 (exact i64 nearest-rank). Property suites quote the pinned definitions verbatim (25 rounds, resets + NaN staleness + dup ts, bit-exact vs naive; "NaN poisons increase" asserted honestly — staleness stays above the waist; trace percentiles vs naive across 3 step sizes). DEVIATION from the checklist item: cli.sh §30 uses hand-verified literals on a fixed dataset instead of recursive-CTE SQL references — simpler and equally binding; three error paths named (p0, tavg:50, unknown-agg lists vocabulary). Bench: exact p95 5.6ms vs avg 1.5ms over 16,600 5-min windows (sort cost published, acceptance "same order" MET); trace buckets with percentiles 245ms vs 246ms pre-F7 (free — durations already materialized); tier2 21.71M pts/s (noise band). 132 workspace tests, 31 cli.sh sections. Committed 5a71e29. F8 next. |
 | 2026-07-26 | M1 | complete | Waist pinned (timeless_core::waist: query_multi/list_metrics + Eq/Neq matchers in-waist, regex documented above-waist with list_series/query_multi_ids escape hatch; equivalence tests vs naive). Importer shipped (Tier 2 replay + mandatory bit-exact verification; --selftest with hostile fixture). THE FIXTURE FOUND A REAL BUG: NaN samples (Prometheus staleness markers) crashed flush — SQLite binds NaN as NULL, violating the chunk-stat NOT NULL columns. Fixed at the store seam (non-finite stats round-trip as 8-byte bit blobs); NaN VALUES are preserved in storage, surface as SQL NULL (inherent REAL limitation, documented; engine/waist reads return true NaN bits). 129 workspace tests, 30 cli.sh sections incl. §29, 8 consecutive crash-suite runs green (one unreproduced check failure before the reruns, output not captured — watch item). |

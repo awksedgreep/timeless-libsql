@@ -221,7 +221,17 @@ service per bucket. Outlier handling is always parameter-explicit
 (`tavg:5`) — the database never decides what an outlier is.
 
 Both windows are half-open `(t - width, t]`; grid points with no sample
-produce no row. The kernels are deliberately *semantics-free* — no
+produce no row — unless you ask for a dense grid with the optional
+trailing **fill** argument (`'none'` default, `'null'` = every grid
+point emitted per matched series, value `NULL` where the window is
+empty; a series with no points in range stays absent either way):
+
+```sql
+SELECT labels, ts, value
+  FROM timeless_grid('metrics', 'cpu_usage', NULL, :t0, :t1, 60, 90, 'null');
+```
+
+The kernels are deliberately *semantics-free* — no
 lookback defaults, no staleness or rate math (that belongs to the query
 layer above) — which is what makes them safe: every result is verified
 bit-for-bit against naive evaluation, in the test suite and in the
@@ -270,6 +280,11 @@ SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
                                            -- sorted distinct label values —
                                            -- the dropdown-population query
 ```
+
+For worked recipes — reset-corrected counter math in pure SQL, top-k
+per bucket, cross-metric joins, IQR/σ outlier exclusion, gap-fill
+patterns — see **[docs/QUERIES.md](docs/QUERIES.md)**; every recipe in
+it is executed by the test suite, so the cookbook can't rot.
 
 ### Logs
 

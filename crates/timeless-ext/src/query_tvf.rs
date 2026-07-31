@@ -32,6 +32,12 @@
 //!
 //!   SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
 //!
+//! F9 — both kernel TVFs take an optional trailing fill argument:
+//! 'none' (default, sparse) or 'null' (dense: every grid point emitted
+//! per matched series, value NULL where the window/lookback is empty).
+//! Presentation mechanics only — a series with NO points on the grid
+//! stays entirely absent either way (query_multi's omission rule).
+//!
 //!   -- Q2(b): sliding-window aggregate, window (t-window, t]
 //!   SELECT labels, ts, value FROM timeless_window(
 //!     'metrics', 'cpu_usage', NULL,
@@ -282,6 +288,10 @@ pub(crate) struct KernelArgs {
     width: i64,
     /// Raw agg argument; each module parses its own vocabulary.
     agg_name: Option<String>,
+    /// F9: fill='null' — emit EVERY grid point per matched series, value
+    /// NULL where the window is empty. Presentation only, zero
+    /// semantics: the kernels still decide which points have values.
+    fill: bool,
 }
 
 /// Decode the hidden-column EQ args per the best_index bitmask.
@@ -370,6 +380,20 @@ fn decode_args(
         Some(s) => Some(get_text(s, "agg")?),
     };
 
+    // fill is optional everywhere it exists; NULL = default = 'none'.
+    let fill = match find("fill") {
+        None => false,
+        Some(s) => match args.get::<Option<String>>(s)?.as_deref() {
+            None | Some("none") => false,
+            Some("null") => true,
+            Some(other) => {
+                return Err(module_err(format!(
+                    "{module}: fill must be 'none' or 'null', got {other:?}"
+                )))
+            }
+        },
+    };
+
     Ok(KernelArgs {
         database,
         table,
@@ -384,6 +408,7 @@ fn decode_args(
         },
         width: get_int(width_slot, "width")?,
         agg_name,
+        fill,
     })
 }
 
@@ -433,7 +458,7 @@ fn run_kernel(
     db: *mut ffi::sqlite3,
     ka: &KernelArgs,
     kernel: impl Fn(&Engine, i64) -> Result<Vec<(i64, f64)>>,
-) -> Result<Vec<(String, i64, f64)>> {
+) -> Result<Vec<(String, i64, Option<f64>)>> {
     let _bind = DbGuard::bind(db);
     let shared: Arc<SharedEngine<Engine>> =
         MetricsTab::shared_engine_for(db, &ka.database, &ka.table)?;
@@ -457,12 +482,36 @@ fn run_kernel(
     let mut rows = Vec::new();
     for (sid, labels) in candidates {
         let points = kernel(&shared.engine, sid)?;
+        // Per-series absence rule (matches query_multi's omission): a
+        // series with NO points on the grid emits nothing, fill or not.
         if points.is_empty() {
             continue;
         }
         let labels_json = labels_to_json(&labels);
-        for (ts, value) in points {
-            rows.push((labels_json.clone(), ts, value));
+        if ka.fill {
+            // Dense emission: every grid point, NULL where the kernel
+            // had no row. The kernel already validated step > 0 and the
+            // grid-length cap, so this walk is bounded.
+            let mut it = points.iter().peekable();
+            let mut t = ka.start;
+            while t <= ka.stop {
+                let v = match it.peek() {
+                    Some(&&(pts, pv)) if pts == t => {
+                        it.next();
+                        Some(pv)
+                    }
+                    _ => None,
+                };
+                rows.push((labels_json.clone(), t, v));
+                match t.checked_add(ka.step) {
+                    Some(next) => t = next,
+                    None => break,
+                }
+            }
+        } else {
+            for (ts, value) in points {
+                rows.push((labels_json.clone(), ts, Some(value)));
+            }
         }
     }
     Ok(rows)
@@ -472,9 +521,10 @@ fn run_kernel(
 // timeless_grid
 // ---------------------------------------------------------------------------
 
-const GRID_ARGS: &[&str] = &["tbl", "metric", "filter", "start", "stop", "step", "lookback"];
-// All required except filter (bit 2).
-const GRID_REQUIRED: c_int = 0b111_1011;
+const GRID_ARGS: &[&str] =
+    &["tbl", "metric", "filter", "start", "stop", "step", "lookback", "fill"];
+// All required except filter (bit 2) and fill (bit 7).
+const GRID_REQUIRED: c_int = 0b0111_1011;
 
 #[repr(C)]
 pub(crate) struct GridTab {
@@ -499,7 +549,7 @@ unsafe impl<'vtab> VTab<'vtab> for GridTab {
         Ok((
             Cow::Borrowed(c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
-                            stop HIDDEN, step HIDDEN, lookback HIDDEN)"),
+                            stop HIDDEN, step HIDDEN, lookback HIDDEN, fill HIDDEN)"),
             GridTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -521,7 +571,7 @@ impl KernelVTab for GridTab {
     const ARGS: &'static [&'static str] = GRID_ARGS;
     const REQUIRED: c_int = GRID_REQUIRED;
 
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>> {
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>> {
         run_kernel(db, ka, |engine, sid| {
             engine
                 .query_grid_last_by_id(sid, ka.start, ka.stop, ka.step, ka.width)
@@ -535,10 +585,10 @@ impl KernelVTab for GridTab {
 // ---------------------------------------------------------------------------
 
 const WINDOW_ARGS: &[&str] = &[
-    "tbl", "metric", "filter", "start", "stop", "step", "window", "agg",
+    "tbl", "metric", "filter", "start", "stop", "step", "window", "agg", "fill",
 ];
-// All required except filter (bit 2).
-const WINDOW_REQUIRED: c_int = 0b1111_1011;
+// All required except filter (bit 2) and fill (bit 8).
+const WINDOW_REQUIRED: c_int = 0b0_1111_1011;
 
 #[repr(C)]
 pub(crate) struct WindowTab {
@@ -563,7 +613,8 @@ unsafe impl<'vtab> VTab<'vtab> for WindowTab {
         Ok((
             Cow::Borrowed(c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
-                            stop HIDDEN, step HIDDEN, window HIDDEN, agg HIDDEN)"),
+                            stop HIDDEN, step HIDDEN, window HIDDEN, agg HIDDEN, \
+                            fill HIDDEN)"),
             WindowTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -585,7 +636,7 @@ impl KernelVTab for WindowTab {
     const ARGS: &'static [&'static str] = WINDOW_ARGS;
     const REQUIRED: c_int = WINDOW_REQUIRED;
 
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>> {
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>> {
         let op = parse_window_op(ka.agg_name.as_deref())?;
         run_kernel(db, ka, |engine, sid| {
             engine
@@ -604,14 +655,14 @@ pub(crate) trait KernelVTab {
     const MODULE: &'static str;
     const ARGS: &'static [&'static str];
     const REQUIRED: c_int;
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>>;
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>>;
 }
 
 #[repr(C)]
 pub(crate) struct KernelCursor<'vtab, T: KernelVTab> {
     base: ffi::sqlite3_vtab_cursor,
     db: *mut ffi::sqlite3,
-    rows: Vec<(String, i64, f64)>,
+    rows: Vec<(String, i64, Option<f64>)>,
     pos: usize,
     phantom: PhantomData<&'vtab T>,
 }
@@ -652,7 +703,10 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
         match col {
             COL_LABELS => ctx.set_result(labels),
             1 => ctx.set_result(ts),
-            2 => ctx.set_result(value),
+            2 => match value {
+                Some(v) => ctx.set_result(v),
+                None => ctx.set_result(&rusqlite::types::Null),
+            },
             // Hidden arg columns are omitted from output by set_omit;
             // selecting them explicitly yields NULL (args are echoed in
             // the query text anyway).
@@ -738,7 +792,7 @@ impl KernelVTab for RollupTab {
     const ARGS: &'static [&'static str] = ROLLUP_ARGS;
     const REQUIRED: c_int = ROLLUP_REQUIRED;
 
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>> {
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>> {
         // KernelArgs reuse: width carries `resolution`; agg arrives as a
         // string in ka.agg_name (rollup vocabulary is larger than AggFn).
         let agg = match ka.agg_name.as_deref() {
