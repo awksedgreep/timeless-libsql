@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
+# No test harness: this crate is a 57-line registration shim over
+# timeless-ext, and its lib-test target cannot build anyway — linking a
+# cdylib-only crate's test harness against the dual-crate-type
+# timeless-ext under fat LTO trips rustc's "failed to load bitcode"
+# issue and breaks `cargo test --workspace`. All behavior is tested
+# end-to-end by tests/dbhealth.sh against the built .so.
+test = false
+doctest = false
 # The standalone dbhealth extension: one .so, health only. Load it into
 # any SQLite/libSQL and `CREATE VIRTUAL TABLE dbhealth USING dbhealth`
 # starts collecting. No telemetry modules included — that is

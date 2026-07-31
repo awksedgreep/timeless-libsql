@@ -135,6 +135,18 @@ data every run, on every machine, so numbers are comparable across hosts.
 Reference numbers from the original dev machine (Linux x86, i7-class) are in
 [RESULTS.md](RESULTS.md) — compare yours against those tables.
 
+## Two extensions, one build caveat
+
+`libtimeless_ext` and `libdbhealth_ext` share source but are separate
+products with disjoint entry points (dbhealth builds timeless-ext with
+`default-features = false`). Build them in separate invocations — or
+just `cargo build --release`, which is fine. The one spelling to avoid
+is selecting both with `-p` in a single command
+(`cargo build -p timeless-ext -p dbhealth-ext`): the two feature
+variants of the dual-crate-type timeless-ext under fat LTO trip rustc's
+"failed to load bitcode" issue. `tests/dbhealth.sh` builds its .so the
+right way.
+
 ## macOS / Apple Silicon notes
 
 - **Apple's system `/usr/bin/sqlite3` disables extension loading** — `.load`

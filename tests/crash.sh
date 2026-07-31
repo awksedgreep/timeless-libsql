@@ -120,8 +120,19 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
   # 2. The vtabs must reopen (xConnect recovery from shadow metadata)
   #    and full counts must succeed — count(*) decodes every chunk and
   #    block, so this doubles as "every stored payload is readable".
+  #
+  #    RACE, OBSERVED TWICE (2026-07-26 uncaptured, 2026-07-30 captured):
+  #    a kill in the first ~100ms can land BETWEEN the three autocommit
+  #    CREATE VIRTUAL TABLE statements, so a later table legitimately
+  #    does not exist at reopen. That is correct durability behavior
+  #    (the CREATE never committed), not a failure — it only ever
+  #    happens with WM=0, when nothing is owed. Detect it and pass.
   counts=$(sqlite3 "$DB" ".load $EXT" \
     "SELECT (SELECT COUNT(*) FROM metrics) || '|' || (SELECT COUNT(*) FROM logs) || '|' || (SELECT COUNT(*) FROM traces);" 2>&1) || {
+    if [[ "$WM" == "0" && "$counts" == *"no such table"* ]]; then
+      pass "kill landed before schema commit (WM=0, partial CREATEs rolled back cleanly)"
+      continue
+    fi
     fail "reopen/count failed: $counts"
     continue
   }
