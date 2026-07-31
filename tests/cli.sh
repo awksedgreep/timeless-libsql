@@ -1652,6 +1652,64 @@ got=$(sqlite3 "$TMP/import_st/imported.db" ".load $EXT" \
 check_eq "imported db independently queryable (rows + catalog)" "$got" "150015|4"
 
 # ---------------------------------------------------------------------------
+echo "== section 30: F7 window vocabulary (counters, percentiles, trimmed folds) =="
+# Hand-verified literal expectations on a tiny dataset (the pinned
+# definitions from FEATURE_PLAN F7, computed by hand in the comments):
+#   req: 100 @10, 150 @20, 40 @30 (reset), 90 @40
+#     delta(0,40] = 90 - 100 = -10
+#     increase    = +50, reset->+40, +50 = 140      (NOT PromQL: no extrapolation)
+#     rate        = 140 / 40 = 3.5 per native unit
+#   lat: 5, 100, 7, 6, 900  ->  sorted [5,6,7,100,900]
+#     p50 = rank ceil(2.5)=3 -> 7;  p95 -> rank 5 -> 900
+#     tavg:20 drops 1 each end -> avg(6,7,100) = 37.666...
+F7DB="$TMP/f7_window.db"
+got=$(sqlite3 "$F7DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics;
+CREATE VIRTUAL TABLE t USING timeless_traces;
+INSERT INTO m(name, ts, value) VALUES
+  ('req', 10, 100.0), ('req', 20, 150.0), ('req', 30, 40.0), ('req', 40, 90.0),
+  ('lat', 10, 5.0), ('lat', 20, 100.0), ('lat', 30, 7.0), ('lat', 40, 6.0), ('lat', 50, 900.0);
+INSERT INTO m(m) VALUES ('flush');
+SELECT 'delta', value FROM timeless_window('m','req',NULL,40,40,10,40,'delta');
+SELECT 'incr', value FROM timeless_window('m','req',NULL,40,40,10,40,'increase');
+SELECT 'rate', value FROM timeless_window('m','req',NULL,40,40,10,40,'rate');
+SELECT 'p50', value FROM timeless_window('m','lat',NULL,50,50,10,50,'p50');
+SELECT 'p95', value FROM timeless_window('m','lat',NULL,50,50,10,50,'p95');
+SELECT 'tavg', ROUND(value, 4) FROM timeless_window('m','lat',NULL,50,50,10,50,'tavg:20');
+INSERT INTO t(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
+  SELECT printf('%032x', value), printf('%016x', value), 'op', 'api', 'server', 'ok',
+         1000, value * 100 FROM generate_series(1, 100);
+INSERT INTO t(t) VALUES ('flush');
+SELECT 'tp', dur_p50, dur_p95, dur_p99 FROM timeless_trace_buckets('t', NULL, 0, 2000, 5000);
+SQL
+)
+check_eq "counter kernels (delta / reset-adjusted increase / rate)" \
+  "$(grep -E '^(delta|incr|rate)\|' <<<"$got")" \
+'delta|-10.0
+incr|140.0
+rate|3.5'
+check_eq "exact nearest-rank percentiles + trimmed mean" \
+  "$(grep -E '^(p50|p95|tavg)\|' <<<"$got")" \
+'p50|7.0
+p95|900.0
+tavg|37.6667'
+check_eq "trace duration percentiles (100 durations 100..10000)" \
+  "$(grep '^tp|' <<<"$got")" "tp|5000|9500|9900"
+err=$(sqlite3 "$F7DB" ".load $EXT" \
+  "SELECT * FROM timeless_window('m','lat',NULL,0,1,1,1,'p0');" 2>&1 || true)
+check_eq "p0 rejected (percentile range named)" \
+  "$(grep -c 'percentile must be in (0, 100]' <<<"$err")" "1"
+err=$(sqlite3 "$F7DB" ".load $EXT" \
+  "SELECT * FROM timeless_window('m','lat',NULL,0,1,1,1,'tavg:50');" 2>&1 || true)
+check_eq "tavg:50 rejected (trim range named)" \
+  "$(grep -c 'trim fraction must be in' <<<"$err")" "1"
+err=$(sqlite3 "$F7DB" ".load $EXT" \
+  "SELECT * FROM timeless_window('m','lat',NULL,0,1,1,1,'median');" 2>&1 || true)
+check_eq "unknown agg lists the full vocabulary" \
+  "$(grep -c 'delta, increase, rate, pNN' <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

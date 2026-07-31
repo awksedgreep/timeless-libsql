@@ -65,6 +65,12 @@ pub struct TraceBucketStat {
     pub dur_sum: i64,
     pub dur_min: i64,
     pub dur_max: i64,
+    /// F7: exact NEAREST-RANK duration percentiles over the bucket's
+    /// spans (rank = ceil(q/100 × n), 1-indexed; i64 durations, no
+    /// float subtlety). THE trace dashboard numbers.
+    pub dur_p50: i64,
+    pub dur_p95: i64,
+    pub dur_p99: i64,
 }
 
 /// One query. ts range is always present (i64::MIN / i64::MAX for
@@ -888,31 +894,54 @@ impl SpanBlockEngine {
             }
         }
         let spans = self.query(filter)?;
-        let mut stats: std::collections::BTreeMap<(i64, String), TraceBucketStat> =
+        // F7: percentiles need the bucket's duration VECTORS (same
+        // memory order as the spans query() just materialized).
+        let mut stats: std::collections::BTreeMap<(i64, String), (TraceBucketStat, Vec<i64>)> =
             std::collections::BTreeMap::new();
         for s in &spans {
             let k = (s.start_ts as i128 - start as i128) / step as i128;
             let bucket_ts = (start as i128 + k * step as i128) as i64;
             let entry = stats
                 .entry((bucket_ts, s.service.clone()))
-                .or_insert(TraceBucketStat {
-                    bucket_ts,
-                    service: s.service.clone(),
-                    spans: 0,
-                    errors: 0,
-                    dur_sum: 0,
-                    dur_min: i64::MAX,
-                    dur_max: i64::MIN,
-                });
-            entry.spans += 1;
+                .or_insert((
+                    TraceBucketStat {
+                        bucket_ts,
+                        service: s.service.clone(),
+                        spans: 0,
+                        errors: 0,
+                        dur_sum: 0,
+                        dur_min: i64::MAX,
+                        dur_max: i64::MIN,
+                        dur_p50: 0,
+                        dur_p95: 0,
+                        dur_p99: 0,
+                    },
+                    Vec::new(),
+                ));
+            entry.0.spans += 1;
             if s.status == 2 {
-                entry.errors += 1;
+                entry.0.errors += 1;
             }
-            entry.dur_sum = entry.dur_sum.saturating_add(s.duration_ns);
-            entry.dur_min = entry.dur_min.min(s.duration_ns);
-            entry.dur_max = entry.dur_max.max(s.duration_ns);
+            entry.0.dur_sum = entry.0.dur_sum.saturating_add(s.duration_ns);
+            entry.0.dur_min = entry.0.dur_min.min(s.duration_ns);
+            entry.0.dur_max = entry.0.dur_max.max(s.duration_ns);
+            entry.1.push(s.duration_ns);
         }
-        Ok(stats.into_values().collect())
+        Ok(stats
+            .into_values()
+            .map(|(mut stat, mut durs)| {
+                durs.sort_unstable();
+                let n = durs.len();
+                let rank = |q: f64| -> i64 {
+                    let r = ((q / 100.0) * n as f64).ceil() as usize;
+                    durs[r.clamp(1, n) - 1]
+                };
+                stat.dur_p50 = rank(50.0);
+                stat.dur_p95 = rank(95.0);
+                stat.dur_p99 = rank(99.0);
+                stat
+            })
+            .collect())
     }
 
     /// (persisted blocks, raw blocks, buffered spans) — cheap and payload-free.

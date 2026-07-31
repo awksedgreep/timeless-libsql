@@ -53,6 +53,54 @@ fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
 }
 
+/// F7: the full timeless_window vocabulary. Classic folds, counter
+/// kernels (delta/increase/rate — raw window folds, NOT PromQL: no
+/// extrapolation, no staleness), exact nearest-rank percentiles (pNN),
+/// and explicit-parameter trimmed means (tavg:N). Definitions pinned
+/// in FEATURE_PLAN.md F7.
+fn parse_window_op(name: Option<&str>) -> Result<timeless_core::WindowOp> {
+    use timeless_core::WindowOp;
+    let name = name.unwrap_or("<missing>");
+    Ok(match name {
+        "sum" => WindowOp::Agg(AggFn::Sum),
+        "min" => WindowOp::Agg(AggFn::Min),
+        "max" => WindowOp::Agg(AggFn::Max),
+        "count" => WindowOp::Agg(AggFn::Count),
+        "avg" => WindowOp::Agg(AggFn::Avg),
+        "delta" => WindowOp::Delta,
+        "increase" => WindowOp::Increase,
+        "rate" => WindowOp::Rate,
+        _ => {
+            if let Some(q) = name.strip_prefix('p') {
+                let q: f64 = q.parse().map_err(|_| {
+                    module_err(format!("timeless_window: bad percentile {name:?}"))
+                })?;
+                if !(q > 0.0 && q <= 100.0) {
+                    return Err(module_err(format!(
+                        "timeless_window: percentile must be in (0, 100], got {name:?}"
+                    )));
+                }
+                return Ok(WindowOp::Percentile(q));
+            }
+            if let Some(q) = name.strip_prefix("tavg:") {
+                let q: f64 = q.parse().map_err(|_| {
+                    module_err(format!("timeless_window: bad trim fraction {name:?}"))
+                })?;
+                if !(0.0..50.0).contains(&q) {
+                    return Err(module_err(format!(
+                        "timeless_window: trim fraction must be in [0, 50), got {name:?}"
+                    )));
+                }
+                return Ok(WindowOp::TrimmedMean(q));
+            }
+            return Err(module_err(format!(
+                "timeless_window: unknown agg {name:?}; expected one of: sum, min, max, \
+                 count, avg, delta, increase, rate, pNN (e.g. p95), tavg:N"
+            )));
+        }
+    })
+}
+
 /// Register the TVF modules on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection) -> Result<()> {
     const GRID: Module<GridTab> = Module::eponymous_only_module();
@@ -392,22 +440,10 @@ impl KernelVTab for WindowTab {
     const REQUIRED: c_int = WINDOW_REQUIRED;
 
     fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, f64)>> {
-        let agg = match ka.agg_name.as_deref() {
-            Some("sum") => AggFn::Sum,
-            Some("min") => AggFn::Min,
-            Some("max") => AggFn::Max,
-            Some("count") => AggFn::Count,
-            Some("avg") => AggFn::Avg,
-            other => {
-                return Err(module_err(format!(
-                    "timeless_window: unknown agg {:?}; expected one of: sum, min, max, count, avg",
-                    other.unwrap_or("<missing>")
-                )))
-            }
-        };
+        let op = parse_window_op(ka.agg_name.as_deref())?;
         run_kernel(db, ka, |engine, sid| {
             engine
-                .query_window_agg_by_id(sid, ka.start, ka.stop, ka.step, ka.width, agg)
+                .query_window_op_by_id(sid, ka.start, ka.stop, ka.step, ka.width, op)
                 .map_err(module_err)
         })
     }
@@ -784,7 +820,7 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
 /// → (bucket_ts, service, spans, errors, dur_sum, dur_min, dur_max).
 const TRACE_BUCKETS_ARGS: &[&str] = &["tbl", "service_filter", "start", "stop", "step"];
 const TRACE_BUCKETS_REQUIRED: c_int = 0b1_1101; // all but service_filter
-const TRACE_BUCKETS_FIRST_ARG: c_int = 7;
+const TRACE_BUCKETS_FIRST_ARG: c_int = 10; // F7 added the three dur_pNN columns
 
 #[repr(C)]
 pub(crate) struct TraceBucketsTab {
@@ -809,6 +845,7 @@ unsafe impl<'vtab> VTab<'vtab> for TraceBucketsTab {
         Ok((
             Cow::Borrowed(c"CREATE TABLE x(bucket_ts INTEGER, service TEXT, spans INTEGER, \
                             errors INTEGER, dur_sum INTEGER, dur_min INTEGER, dur_max INTEGER, \
+                            dur_p50 INTEGER, dur_p95 INTEGER, dur_p99 INTEGER, \
                             tbl HIDDEN, service_filter HIDDEN, start HIDDEN, stop HIDDEN, \
                             step HIDDEN)"),
             TraceBucketsTab {
@@ -898,6 +935,9 @@ unsafe impl VTabCursor for TraceBucketsCursor<'_> {
             4 => ctx.set_result(&b.dur_sum),
             5 => ctx.set_result(&b.dur_min),
             6 => ctx.set_result(&b.dur_max),
+            7 => ctx.set_result(&b.dur_p50),
+            8 => ctx.set_result(&b.dur_p95),
+            9 => ctx.set_result(&b.dur_p99),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }

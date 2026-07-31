@@ -548,6 +548,18 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
     println!("    timeless_grid TVF:   {q2_rows} grid rows, {q2_ms:.1} ms");
     println!("    timeless_window TVF (5-min avg): {w_rows} rows, {w_ms:.1} ms");
 
+    // F7: exact p95 over the same windows — the sort cost, published.
+    let tp = Instant::now();
+    let p_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM timeless_window('metrics', 'cpu.usage', NULL, ?1, ?2, ?3, 300000, 'p95')",
+            params![g_start, g_stop, g_step],
+            |r| r.get(0),
+        )
+        .expect("p95 TVF");
+    let p_ms = tp.elapsed().as_secs_f64() * 1e3;
+    println!("    timeless_window TVF (5-min exact p95): {p_rows} rows, {p_ms:.1} ms");
+
     // F3 rollup ladder: the same 1M points into a laddered table
     // (1-minute tier, ms units), then the dashboard aggregate served
     // from the TIER vs computed from raw with GROUP BY.

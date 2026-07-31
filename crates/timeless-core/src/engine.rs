@@ -2473,16 +2473,82 @@ impl Engine {
         points
     }
 
-    /// The window-aggregate walk over one series' ts-sorted samples.
+    /// One F7 window operation over one window slice (engine ts order).
+    /// Returns None for "no row" (empty after NaN exclusion/trimming).
+    /// Definitions pinned in FEATURE_PLAN F7; property tests quote them.
+    fn window_op_value(win: &[(i64, f64)], window: i64, op: WindowOp) -> Option<f64> {
+        debug_assert!(!win.is_empty());
+        match op {
+            WindowOp::Agg(agg) => Some(match agg {
+                AggFn::Count => win.len() as f64,
+                AggFn::Sum => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v),
+                AggFn::Avg => {
+                    win.iter().fold(0.0f64, |acc, &(_, v)| acc + v) / win.len() as f64
+                }
+                AggFn::Min => win[1..]
+                    .iter()
+                    .fold(win[0].1, |acc, &(_, v)| f64::min(acc, v)),
+                AggFn::Max => win[1..]
+                    .iter()
+                    .fold(win[0].1, |acc, &(_, v)| f64::max(acc, v)),
+            }),
+            WindowOp::Delta => Some(win[win.len() - 1].1 - win[0].1),
+            WindowOp::Increase => Some(Self::increase_of(win)),
+            WindowOp::Rate => Some(Self::increase_of(win) / window as f64),
+            WindowOp::Percentile(q) => {
+                let sorted = Self::sorted_finite_or_nanless(win);
+                if sorted.is_empty() {
+                    return None;
+                }
+                let n = sorted.len();
+                let rank = ((q / 100.0) * n as f64).ceil() as usize;
+                Some(sorted[rank.clamp(1, n) - 1])
+            }
+            WindowOp::TrimmedMean(q) => {
+                let sorted = Self::sorted_finite_or_nanless(win);
+                let n = sorted.len();
+                let k = ((n as f64) * (q / 100.0)).floor() as usize;
+                if n == 0 || 2 * k >= n {
+                    return None;
+                }
+                let kept = &sorted[k..n - k];
+                Some(kept.iter().fold(0.0f64, |acc, &v| acc + v) / kept.len() as f64)
+            }
+        }
+    }
+
+    /// The pinned increase rule: reset-adjusted sum of steps, first
+    /// sample contributes nothing. NOT PromQL (no extrapolation).
+    fn increase_of(win: &[(i64, f64)]) -> f64 {
+        let mut acc = 0.0f64;
+        for pair in win.windows(2) {
+            let (prev, cur) = (pair[0].1, pair[1].1);
+            acc += if cur >= prev { cur - prev } else { cur };
+        }
+        acc
+    }
+
+    /// NaN-excluded values sorted by total_cmp (the pNN / tavg:N base).
+    fn sorted_finite_or_nanless(win: &[(i64, f64)]) -> Vec<f64> {
+        let mut vals: Vec<f64> = win
+            .iter()
+            .map(|&(_, v)| v)
+            .filter(|v| !v.is_nan())
+            .collect();
+        vals.sort_unstable_by(f64::total_cmp);
+        vals
+    }
+
+    /// The window-operation walk over one series' ts-sorted samples.
     /// Folds each (t - window, t] window fresh, left-to-right — that IS
     /// the bit-exactness contract, so no prefix-sum tricks.
-    fn window_agg_walk(
+    fn window_op_walk(
         samples: &[(i64, f64)],
         start: i64,
         stop: i64,
         step: i64,
         window: i64,
-        agg: AggFn,
+        op: WindowOp,
     ) -> Vec<(i64, f64)> {
         let n = samples.len();
         let mut points = Vec::new();
@@ -2497,21 +2563,9 @@ impl Engine {
                 lo += 1;
             }
             if lo < hi {
-                let win = &samples[lo..hi];
-                let value = match agg {
-                    AggFn::Count => win.len() as f64,
-                    AggFn::Sum => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v),
-                    AggFn::Avg => {
-                        win.iter().fold(0.0f64, |acc, &(_, v)| acc + v) / win.len() as f64
-                    }
-                    AggFn::Min => win[1..]
-                        .iter()
-                        .fold(win[0].1, |acc, &(_, v)| f64::min(acc, v)),
-                    AggFn::Max => win[1..]
-                        .iter()
-                        .fold(win[0].1, |acc, &(_, v)| f64::max(acc, v)),
-                };
-                points.push((t, value));
+                if let Some(value) = Self::window_op_value(&samples[lo..hi], window, op) {
+                    points.push((t, value));
+                }
             }
             match t.checked_add(step) {
                 Some(next) if next <= stop => t = next,
@@ -2555,6 +2609,38 @@ impl Engine {
         Ok(Self::grid_last_walk(&samples, start, stop, step, lookback))
     }
 
+    /// F7: the full window vocabulary, single series, rayon-free.
+    /// Validation: same grid rules as the classic aggs; op parameters
+    /// are validated by the caller (the vtab's parser) AND defensively
+    /// here (a q outside its documented range is an error, not a
+    /// clamp).
+    pub fn query_window_op_by_id(
+        &self,
+        series_id: i64,
+        start: i64,
+        stop: i64,
+        step: i64,
+        window: i64,
+        op: WindowOp,
+    ) -> EngineResult<Vec<(i64, f64)>> {
+        match op {
+            WindowOp::Percentile(q) if !(q > 0.0 && q <= 100.0) => {
+                return Err(format!("percentile must be in (0, 100], got {q}"));
+            }
+            WindowOp::TrimmedMean(q) if !(0.0..50.0).contains(&q) => {
+                return Err(format!("trim fraction must be in [0, 50), got {q}"));
+            }
+            _ => {}
+        }
+        if Self::validate_window(start, stop, step, window)? == 0 {
+            return Ok(Vec::new());
+        }
+        let _transition = self.transition_read();
+        let samples =
+            self.query_range_by_id_inner(series_id, start.saturating_sub(window), stop)?;
+        Ok(Self::window_op_walk(&samples, start, stop, step, window, op))
+    }
+
     /// Q2(b), single series, rayon-free — safe from vtab callbacks.
     pub fn query_window_agg_by_id(
         &self,
@@ -2571,7 +2657,7 @@ impl Engine {
         let _transition = self.transition_read();
         let samples =
             self.query_range_by_id_inner(series_id, start.saturating_sub(window), stop)?;
-        Ok(Self::window_agg_walk(&samples, start, stop, step, window, agg))
+        Ok(Self::window_op_walk(&samples, start, stop, step, window, WindowOp::Agg(agg)))
     }
 
     /// Q2(a): last sample per grid point, all matching series, parallel.
@@ -2652,7 +2738,7 @@ impl Engine {
             .map(|(sid, labels)| {
                 let samples =
                     self.query_range_by_id_inner(sid, start.saturating_sub(window), stop)?;
-                let points = Self::window_agg_walk(&samples, start, stop, step, window, agg);
+                let points = Self::window_op_walk(&samples, start, stop, step, window, WindowOp::Agg(agg));
                 Ok(if points.is_empty() {
                     None
                 } else {
@@ -3351,6 +3437,34 @@ pub struct EngineInfo {
     pub file_count: usize,
     pub oldest_ts: Option<i64>,
     pub newest_ts: Option<i64>,
+}
+
+/// F7 window operations (FEATURE_PLAN.md "The SQL query tier") — the
+/// full timeless_window vocabulary. Definitions are pinned VERBATIM in
+/// FEATURE_PLAN F7's semantic-line section; the property tests quote
+/// them. Everything here is a mechanical, parameter-explicit fold —
+/// notably NOT PromQL: no extrapolation, no lookback beyond the
+/// window, no staleness inference.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WindowOp {
+    /// The original five folds (NaN-poisoning semantics unchanged).
+    Agg(AggFn),
+    /// last − first (engine-order ties, same rule as grid-last).
+    Delta,
+    /// Σ over consecutive pairs of (v[i] − v[i−1]) if v[i] ≥ v[i−1]
+    /// else v[i] — the stable reset-adjustment rule. The window's
+    /// first sample contributes nothing.
+    Increase,
+    /// increase ÷ window, per NATIVE ts unit.
+    Rate,
+    /// Exact NEAREST-RANK percentile, q in (0, 100]: exclude NaNs,
+    /// sort by f64::total_cmp, take index ceil(q/100 × n) − 1.
+    /// Empty after NaN exclusion → no row.
+    Percentile(f64),
+    /// Trimmed mean, q in [0, 50): after the NaN-excluded sort, drop
+    /// floor(n × q/100) from EACH tail, average the rest
+    /// left-to-right. Empty after trimming → no row.
+    TrimmedMean(f64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

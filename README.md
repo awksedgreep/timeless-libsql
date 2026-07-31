@@ -200,10 +200,25 @@ ship grid points instead of every raw sample:
 SELECT labels, ts, value
   FROM timeless_grid('metrics', 'cpu_usage', '{"host":"pvm1"}', :t0, :t1, 60, 90);
 
--- sliding-window aggregate per grid point: sum|min|max|count|avg
+-- sliding-window operations per grid point:
+--   folds:       sum | min | max | count | avg
+--   counters:    delta | increase | rate
+--   percentiles: pNN (exact nearest-rank: p50, p95, p99.9, …)
+--   robust:      tavg:N (trimmed mean, drop N% from each tail)
 SELECT labels, ts, value
-  FROM timeless_window('metrics', 'cpu_usage', NULL, :t0, :t1, 60, 300, 'avg');
+  FROM timeless_window('metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
 ```
+
+**Counter kernels are raw window folds, NOT PromQL**: `increase` uses
+the standard reset-adjustment rule but does **no** boundary
+extrapolation, lookback, or staleness inference — for conformance-grade
+PromQL semantics, use the evaluator layer above the waist. Percentiles
+are the opposite story: because raw samples are kept, `p95` is the
+**exact** value — no `le`-bucket interpolation, no sketch error — which
+Prometheus-lineage systems cannot offer. `timeless_trace_buckets` gains
+`dur_p50/dur_p95/dur_p99` for the same reason: exact p95 latency per
+service per bucket. Outlier handling is always parameter-explicit
+(`tavg:5`) — the database never decides what an outlier is.
 
 Both windows are half-open `(t - width, t]`; grid points with no sample
 produce no row. The kernels are deliberately *semantics-free* — no
