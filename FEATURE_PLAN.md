@@ -16,7 +16,7 @@ F3 and of each other — reorder freely if priorities shift.
 - [x] **F5** batch blob ingest for logs & traces
 - [x] **F6** trigram index for log message search
 - [x] **F7** SQL query tier: counter kernels, percentiles, trimmed folds
-- [ ] **F8** label matchers + discovery TVF
+- [x] **F8** label matchers + discovery TVF
 - [ ] **F9** gap-fill + the query cookbook
 
 ## Working agreement
@@ -650,14 +650,14 @@ SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
 
 **Implementation.**
 
-- [ ] matcher JSON parsing (back-compatible: plain strings = eq) +
+- [x] matcher JSON parsing (back-compatible: plain strings = eq) +
       shared candidate filtering in the kernel TVFs
-- [ ] regex dep + error surfacing; absent-label semantics per the
+- [x] regex dep + error surfacing; absent-label semantics per the
       pinned rules
-- [ ] timeless_label_values TVF
-- [ ] tests: matcher equivalence vs naive filtering (incl. absent-label
+- [x] timeless_label_values TVF
+- [x] tests: matcher equivalence vs naive filtering (incl. absent-label
       edges, anchoring gotchas, invalid patterns); cli.sh section
-- [ ] docs (README filter syntax table)
+- [x] docs (README filter syntax table)
 
 **Acceptance:** a `{"re": …}` dashboard query over the 1M-point bench
 returns verified-identical results to client-side filtering with no
@@ -708,6 +708,7 @@ every cookbook recipe is machine-verified; suites green.
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
 | 2026-07-26 | Plan | complete | This document; F1 next. |
+| 2026-07-30 | F8 | complete | Matcher operators in every kernel-TVF filter (plain=eq pushed into the label index; {"neq"}/{"re"}/{"nre"} compiled and applied to the candidate series list BEFORE chunk reads). Regexes: Rust `regex` crate (std+perf only), FULLY ANCHORED (PromQL-style — pinned decision), absent label = "" for all three ops per the waist rule. timeless_label_values TVF (registry-only, sorted distinct). 9 new ext unit tests (anchoring incl. substring must-NOT-match, absent-label semantics for neq/re/nre, eq-vs-matcher split, loud invalid-regex/unknown-operator errors) + cli.sh §31 (7 checks incl. the missing-env series and error paths). Bench acceptance MET: selective regex grid verified vs independent client-side filter (8300 rows exact); all-hosts regex 1.5ms vs 1.7ms NULL filter = no measurable overhead. 140 workspace tests, 32 cli.sh sections. F9 next. |
 | 2026-07-30 | F7 | complete | WindowOp vocabulary (delta/increase/rate with the pinned reset rule; exact nearest-rank pNN, NaN-excluded; tavg:N both-tails trim) + trace dur_p50/p95/p99 (exact i64 nearest-rank). Property suites quote the pinned definitions verbatim (25 rounds, resets + NaN staleness + dup ts, bit-exact vs naive; "NaN poisons increase" asserted honestly — staleness stays above the waist; trace percentiles vs naive across 3 step sizes). DEVIATION from the checklist item: cli.sh §30 uses hand-verified literals on a fixed dataset instead of recursive-CTE SQL references — simpler and equally binding; three error paths named (p0, tavg:50, unknown-agg lists vocabulary). Bench: exact p95 5.6ms vs avg 1.5ms over 16,600 5-min windows (sort cost published, acceptance "same order" MET); trace buckets with percentiles 245ms vs 246ms pre-F7 (free — durations already materialized); tier2 21.71M pts/s (noise band). 132 workspace tests, 31 cli.sh sections. Committed 5a71e29. F8 next. |
 | 2026-07-26 | M1 | complete | Waist pinned (timeless_core::waist: query_multi/list_metrics + Eq/Neq matchers in-waist, regex documented above-waist with list_series/query_multi_ids escape hatch; equivalence tests vs naive). Importer shipped (Tier 2 replay + mandatory bit-exact verification; --selftest with hostile fixture). THE FIXTURE FOUND A REAL BUG: NaN samples (Prometheus staleness markers) crashed flush — SQLite binds NaN as NULL, violating the chunk-stat NOT NULL columns. Fixed at the store seam (non-finite stats round-trip as 8-byte bit blobs); NaN VALUES are preserved in storage, surface as SQL NULL (inherent REAL limitation, documented; engine/waist reads return true NaN bits). 129 workspace tests, 30 cli.sh sections incl. §29, 8 consecutive crash-suite runs green (one unreproduced check failure before the reruns, output not captured — watch item). |
 | 2026-07-26 | F6 | complete | Opt-in message_index='trigram': hex-encoded tg: terms + tg: marker per block at extract_terms (4096-trigram budget → over-budget blocks stay unindexed/unpruned), LIKE claimed in best_index (never omitted; ESCAPE'd LIKEs never reach vtabs), candidates = unindexed ∪ has-all-pattern-trigrams. Core: soundness property over hostile messages/patterns, read-count proof (1 of 5 blocks), unindexed-fallback. cli.sh §28 parity checks. Bench: 48.3ms (<50ms acceptance MET; was 334.5ms, beats plain's 74.5ms — last losing row flipped), overhead 1.5MB published. 127 workspace tests, 29 cli.sh sections. ALL SIX FEATURES COMPLETE. |

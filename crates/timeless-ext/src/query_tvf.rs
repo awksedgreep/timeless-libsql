@@ -11,8 +11,26 @@
 //!   SELECT labels, ts, value FROM timeless_grid(
 //!     'metrics',          -- vtab name, or 'schema.table'
 //!     'cpu_usage',        -- metric
-//!     '{"host":"pvm1"}',  -- label equality filter (NULL/'{}' = all)
+//!     '{"host":"pvm1"}',  -- label filter (NULL/'{}' = all); see below
 //!     :start, :stop, :step, :lookback);
+//!
+//! F8 — the filter argument accepts matcher objects per key alongside
+//! plain equality strings:
+//!
+//!   '{"host": {"re": "web-.*"}, "env": {"neq": "dev"}}'
+//!   -- plain "v" = equality | {"neq": v} | {"re": pat} | {"nre": pat}
+//!
+//! Regexes use the Rust `regex` crate (RE2 family: no backrefs, no
+//! lookaround) and are FULLY ANCHORED — the pattern must match the
+//! whole label value, PromQL-style. A label absent from a series
+//! matches as "" (the pinned waist rule): neq-of-anything-nonempty
+//! matches, re must accept "" to match. Matchers filter the candidate
+//! series list before any chunk reads; equality keys still push down
+//! into the registry index.
+//!
+//! Label discovery for UI builders:
+//!
+//!   SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
 //!
 //!   -- Q2(b): sliding-window aggregate, window (t-window, t]
 //!   SELECT labels, ts, value FROM timeless_window(
@@ -43,7 +61,7 @@ use rusqlite::vtab::{
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{AggFn, Engine, Labels};
 
-use crate::flatjson::{labels_to_json, parse_labels_json};
+use crate::flatjson::{labels_to_json, parse_labels_json, parse_matchers_json, MatcherSpec};
 use crate::logs_vtab::LogsTab;
 use crate::metrics_vtab::MetricsTab;
 use crate::traces_vtab::TracesTab;
@@ -51,6 +69,70 @@ use crate::shared::{self, DbGuard, SharedEngine};
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
+}
+
+/// F8: one compiled non-equality matcher. Equality keys never appear
+/// here — they push down into the registry's label index instead.
+#[derive(Debug)]
+enum LabelMatcher {
+    Neq(String),
+    Re(regex::Regex),
+    Nre(regex::Regex),
+}
+
+impl LabelMatcher {
+    /// Absent label = "" (the pinned waist rule, extended to re/nre).
+    fn matches(&self, labels: &Labels, key: &str) -> bool {
+        let val = labels.get(key).map(String::as_str).unwrap_or("");
+        match self {
+            LabelMatcher::Neq(v) => val != v,
+            LabelMatcher::Re(re) => re.is_match(val),
+            LabelMatcher::Nre(re) => !re.is_match(val),
+        }
+    }
+}
+
+fn matchers_pass(labels: &Labels, matchers: &[(String, LabelMatcher)]) -> bool {
+    matchers.iter().all(|(k, m)| m.matches(labels, k))
+}
+
+/// Fully anchored, PromQL-style: the pattern must match the WHOLE label
+/// value. `web-.*` means "starts with web-", `.*web.*` means contains.
+fn compile_anchored(module: &str, key: &str, pat: &str) -> Result<regex::Regex> {
+    regex::Regex::new(&format!("^(?:{pat})$")).map_err(|e| {
+        module_err(format!(
+            "{module}: filter: invalid regex {pat:?} for label {key:?}: {e}"
+        ))
+    })
+}
+
+/// Split a filter's matchers into the equality set (pushed into the
+/// registry index) and compiled non-equality matchers (applied to the
+/// candidate list). Duplicate keys keep JSON-object semantics for
+/// equality (last wins, via Labels insert) while non-eq matchers all
+/// apply (AND).
+fn compile_filter(module: &str, txt: &str) -> Result<(Labels, Vec<(String, LabelMatcher)>)> {
+    let mut eq = Labels::new();
+    let mut rest: Vec<(String, LabelMatcher)> = Vec::new();
+    for (key, spec) in
+        parse_matchers_json(txt).map_err(|e| module_err(format!("{module}: filter: {e}")))?
+    {
+        match spec {
+            MatcherSpec::Eq(v) => {
+                eq.insert(key, v);
+            }
+            MatcherSpec::Neq(v) => rest.push((key, LabelMatcher::Neq(v))),
+            MatcherSpec::Re(p) => {
+                let re = compile_anchored(module, &key, &p)?;
+                rest.push((key, LabelMatcher::Re(re)));
+            }
+            MatcherSpec::Nre(p) => {
+                let re = compile_anchored(module, &key, &p)?;
+                rest.push((key, LabelMatcher::Nre(re)));
+            }
+        }
+    }
+    Ok((eq, rest))
 }
 
 /// F7: the full timeless_window vocabulary. Classic folds, counter
@@ -116,7 +198,9 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     const LOG_BUCKETS: Module<LogBucketsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_log_buckets", &LOG_BUCKETS, None::<()>)?;
     const TRACE_BUCKETS: Module<TraceBucketsTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_trace_buckets", &TRACE_BUCKETS, None::<()>)
+    db.create_module(c"timeless_trace_buckets", &TRACE_BUCKETS, None::<()>)?;
+    const LABEL_VALUES: Module<LabelValuesTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_label_values", &LABEL_VALUES, None::<()>)
 }
 
 // Output columns (both modules).
@@ -125,12 +209,72 @@ const COL_LABELS: c_int = 0;
 // argument order.
 const COL_FIRST_ARG: c_int = 3;
 
+#[cfg(test)]
+mod matcher_semantics_tests {
+    use super::*;
+
+    fn labels(pairs: &[(&str, &str)]) -> Labels {
+        pairs.iter().map(|&(k, v)| (k.into(), v.into())).collect()
+    }
+
+    #[test]
+    fn regex_is_fully_anchored() {
+        let (eq, m) = compile_filter("t", r#"{"host": {"re": "web-.*"}}"#).unwrap();
+        assert!(eq.is_empty());
+        assert!(matchers_pass(&labels(&[("host", "web-1")]), &m));
+        // Substring match must NOT pass: anchoring is the contract.
+        assert!(!matchers_pass(&labels(&[("host", "xweb-1")]), &m));
+        let (_, m) = compile_filter("t", r#"{"host": {"re": "eb-"}}"#).unwrap();
+        assert!(!matchers_pass(&labels(&[("host", "web-1")]), &m));
+    }
+
+    #[test]
+    fn absent_label_is_empty_string() {
+        // neq of a non-empty value matches a series missing the label.
+        let (_, m) = compile_filter("t", r#"{"env": {"neq": "prod"}}"#).unwrap();
+        assert!(matchers_pass(&labels(&[("host", "a")]), &m));
+        assert!(!matchers_pass(&labels(&[("env", "prod")]), &m));
+        // re must accept "" to match an absent label.
+        let (_, m) = compile_filter("t", r#"{"env": {"re": "prod|"}}"#).unwrap();
+        assert!(matchers_pass(&labels(&[]), &m));
+        let (_, m) = compile_filter("t", r#"{"env": {"re": "prod"}}"#).unwrap();
+        assert!(!matchers_pass(&labels(&[]), &m));
+        // nre of ".+" = "label absent or empty".
+        let (_, m) = compile_filter("t", r#"{"env": {"nre": ".+"}}"#).unwrap();
+        assert!(matchers_pass(&labels(&[]), &m));
+        assert!(!matchers_pass(&labels(&[("env", "dev")]), &m));
+    }
+
+    #[test]
+    fn eq_splits_from_matchers_and_ands() {
+        let (eq, m) = compile_filter(
+            "t",
+            r#"{"host": "web-1", "env": {"neq": "dev"}, "dc": {"re": "us-.*"}}"#,
+        )
+        .unwrap();
+        assert_eq!(eq.len(), 1);
+        assert_eq!(eq.get("host").map(String::as_str), Some("web-1"));
+        assert_eq!(m.len(), 2);
+        assert!(matchers_pass(&labels(&[("env", "prod"), ("dc", "us-east")]), &m));
+        assert!(!matchers_pass(&labels(&[("env", "dev"), ("dc", "us-east")]), &m));
+        assert!(!matchers_pass(&labels(&[("env", "prod"), ("dc", "eu-1")]), &m));
+    }
+
+    #[test]
+    fn invalid_regex_names_pattern_and_label() {
+        let err = compile_filter("t", r#"{"host": {"re": "["}}"#).unwrap_err().to_string();
+        assert!(err.contains("invalid regex") && err.contains("host"), "{err}");
+    }
+}
+
 /// Everything one TVF scan needs, decoded from the pushed constraints.
 pub(crate) struct KernelArgs {
     database: String,
     table: String,
     metric: String,
     filter: Labels,
+    /// F8: non-equality matchers, applied to the candidate series list.
+    matchers: Vec<(String, LabelMatcher)>,
     start: i64,
     stop: i64,
     step: i64,
@@ -212,15 +356,12 @@ fn decode_args(
         None => ("main".to_owned(), spec),
     };
 
-    let filter: Labels = match filter_slot {
-        None => Labels::new(),
+    let (filter, matchers) = match filter_slot {
+        None => (Labels::new(), Vec::new()),
         Some(s) => match args.get::<Option<String>>(s)? {
-            None => Labels::new(), // NULL filter = no filter
-            Some(txt) if txt.is_empty() => Labels::new(),
-            Some(txt) => parse_labels_json(&txt)
-                .map_err(|e| module_err(format!("{module}: filter: {e}")))?
-                .into_iter()
-                .collect(),
+            None => (Labels::new(), Vec::new()), // NULL filter = no filter
+            Some(txt) if txt.is_empty() => (Labels::new(), Vec::new()),
+            Some(txt) => compile_filter(module, &txt)?,
         },
     };
 
@@ -234,6 +375,7 @@ fn decode_args(
         table,
         metric: get_text(metric_slot, "metric")?,
         filter,
+        matchers,
         start: get_int(start_slot, "start")?,
         stop: get_int(stop_slot, "stop")?,
         step: match step_slot {
@@ -305,6 +447,10 @@ fn run_kernel(
         reg.find_series(&ka.metric, &ka.filter)
             .into_iter()
             .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+            // F8: non-eq matchers cut the candidate list here, BEFORE
+            // any chunk reads — the regex cost is per-series, not
+            // per-point.
+            .filter(|(_, labels)| matchers_pass(labels, &ka.matchers))
             .collect()
     };
 
@@ -1147,6 +1293,120 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
             5 => ctx.set_result(&(row.disk_points as i64 + row.buffered as i64)),
             6 => ctx.set_result(&(row.chunks as i64)),
             7 => ctx.set_result(&(row.buffered as i64)),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+/// timeless_label_values('metrics', 'cpu_usage', 'host') — sorted
+/// distinct values of one label key across a metric's series, from the
+/// in-memory registry only (no chunk reads). F8's discovery half: the
+/// dropdown-population query for UI builders.
+#[repr(C)]
+pub(crate) struct LabelValuesTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+const LABEL_VALUES_FIRST_ARG: c_int = 1;
+const LABEL_VALUES_ARGS: &[&str] = &["tbl", "metric", "key"];
+
+unsafe impl<'vtab> VTab<'vtab> for LabelValuesTab {
+    type Aux = ();
+    type Cursor = LabelValuesCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(value TEXT, tbl HIDDEN, metric HIDDEN, key HIDDEN)"),
+            LabelValuesTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, LABEL_VALUES_FIRST_ARG, LABEL_VALUES_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<LabelValuesCursor<'vtab>> {
+        Ok(LabelValuesCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LabelValuesCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<String>,
+    pos: usize,
+    phantom: PhantomData<&'vtab LabelValuesTab>,
+}
+
+unsafe impl VTabCursor for LabelValuesCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_label_values";
+        if idx_num != 0b111 {
+            return Err(module_err(format!(
+                "{M}: missing required argument(s) — call as {M}({})",
+                LABEL_VALUES_ARGS.join(", ")
+            )));
+        }
+        let get = |s: usize, what: &str| -> Result<String> {
+            let v: Option<String> = args.get(s)?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&get(0, "tbl")?);
+        let metric = get(1, "metric")?;
+        let key = get(2, "key")?;
+
+        let _bind = DbGuard::bind(self.db);
+        let module = detect_module(&database, &table)?;
+        if module != TimelessModule::Metrics {
+            return Err(module_err(format!(
+                "{M}: {table} is a {} table; label discovery exists for \
+                 timeless_metrics only",
+                module.name()
+            )));
+        }
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        shared.engine.refresh_authoritative_state().map_err(module_err)?;
+        self.rows = shared.engine.series_read().label_values(&metric, &key);
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(&self.rows[self.pos]),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }

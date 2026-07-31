@@ -560,6 +560,69 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
     let p_ms = tp.elapsed().as_secs_f64() * 1e3;
     println!("    timeless_window TVF (5-min exact p95): {p_rows} rows, {p_ms:.1} ms");
 
+    // F8: anchored regex matchers, verified against independent
+    // client-side filtering (plain string logic, no regex crate) over
+    // the same grid walk the Q1 fallback used.
+    let grid_rows_for = |pred: &dyn Fn(&str) -> bool| -> usize {
+        let mut rows = 0usize;
+        for (labels, samples) in &by_series {
+            if !pred(labels) {
+                continue;
+            }
+            let mut k = 0usize;
+            let mut t = g_start;
+            while t <= g_stop {
+                while k < samples.len() && samples[k].0 <= t {
+                    k += 1;
+                }
+                if k > 0 && (samples[k - 1].0 as i128) > (t as i128 - g_lookback as i128) {
+                    rows += 1;
+                }
+                t += g_step;
+            }
+        }
+        rows
+    };
+    // labels render as {"host":"host-0XY"}; host-0[0-4][0-9] = 000..049.
+    let expect_sel = grid_rows_for(&|l: &str| {
+        l.strip_prefix("{\"host\":\"host-0")
+            .and_then(|r| r.as_bytes().first())
+            .is_some_and(|c| (b'0'..=b'4').contains(c))
+    });
+    let ts8 = Instant::now();
+    let sel_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM timeless_grid('metrics', 'cpu.usage', \
+             '{\"host\":{\"re\":\"host-0[0-4][0-9]\"}}', ?1, ?2, ?3, ?4)",
+            params![g_start, g_stop, g_step, g_lookback],
+            |r| r.get(0),
+        )
+        .expect("regex grid TVF");
+    let sel_ms = ts8.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(
+        sel_rows as usize, expect_sel,
+        "regex-matcher grid disagrees with client-side filtering"
+    );
+    // Same regex shape matching every host: identical rows to the NULL
+    // filter, so the delta vs q2_ms IS the total regex overhead.
+    let ta8 = Instant::now();
+    let all_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM timeless_grid('metrics', 'cpu.usage', \
+             '{\"host\":{\"re\":\"host-.*\"}}', ?1, ?2, ?3, ?4)",
+            params![g_start, g_stop, g_step, g_lookback],
+            |r| r.get(0),
+        )
+        .expect("regex-all grid TVF");
+    let a8_ms = ta8.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(all_rows, q2_rows, "regex-all grid disagrees with NULL-filter grid");
+    println!(
+        "    timeless_grid TVF (re: 50 of 100 hosts): {sel_rows} rows, {sel_ms:.1} ms (verified vs client-side filter)"
+    );
+    println!(
+        "    timeless_grid TVF (re: all hosts): {all_rows} rows, {a8_ms:.1} ms (vs {q2_ms:.1} ms NULL filter = regex overhead)"
+    );
+
     // F3 rollup ladder: the same 1M points into a laddered table
     // (1-minute tier, ms units), then the dashboard aggregate served
     // from the TIER vs computed from raw with GROUP BY.

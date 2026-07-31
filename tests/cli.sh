@@ -1710,6 +1710,66 @@ check_eq "unknown agg lists the full vocabulary" \
   "$(grep -c 'delta, increase, rate, pNN' <<<"$err")" "1"
 
 # ---------------------------------------------------------------------------
+echo "== section 31: F8 label matchers + timeless_label_values =="
+# Series: cpu{host=web-1,env=prod}, cpu{host=web-2,env=dev},
+#         cpu{host=db-1,env=prod}, cpu{host=api-1} (env ABSENT).
+# Matcher rules under test: regex fully anchored (PromQL-style),
+# absent label matches as "" for neq/re/nre.
+F8DB="$TMP/f8_matchers.db"
+got=$(sqlite3 "$F8DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics;
+INSERT INTO m(name, labels, ts, value) VALUES
+  ('cpu', '{"host":"web-1","env":"prod"}', 10, 1.0),
+  ('cpu', '{"host":"web-2","env":"dev"}',  10, 2.0),
+  ('cpu', '{"host":"db-1","env":"prod"}',  10, 3.0),
+  ('cpu', '{"host":"api-1"}',              10, 4.0);
+INSERT INTO m(m) VALUES ('flush');
+SELECT 're', value FROM timeless_grid('m','cpu','{"host":{"re":"web-.*"}}',10,10,10,10) ORDER BY value;
+SELECT 'anchor', COUNT(*) FROM timeless_grid('m','cpu','{"host":{"re":"eb-"}}',10,10,10,10);
+SELECT 'neq', value FROM timeless_grid('m','cpu','{"env":{"neq":"prod"}}',10,10,10,10) ORDER BY value;
+SELECT 'nre', value FROM timeless_grid('m','cpu','{"env":{"nre":".+"}}',10,10,10,10) ORDER BY value;
+SELECT 'mix', value FROM timeless_grid('m','cpu','{"env":"prod","host":{"nre":"db-.*"}}',10,10,10,10) ORDER BY value;
+SELECT 'lv', value FROM timeless_label_values('m','cpu','host');
+SELECT 'lv_env', value FROM timeless_label_values('m','cpu','env');
+SELECT 'lv_none', COUNT(*) FROM timeless_label_values('m','cpu','rack');
+SQL
+)
+check_eq "anchored re selects exactly the web hosts" \
+  "$(grep -E '^(re|anchor)\|' <<<"$got")" \
+'re|1.0
+re|2.0
+anchor|0'
+check_eq "neq/nre treat absent env as empty string" \
+  "$(grep -E '^(neq|nre)\|' <<<"$got")" \
+'neq|2.0
+neq|4.0
+nre|4.0'
+check_eq "eq pushdown + matcher AND compose" \
+  "$(grep '^mix|' <<<"$got")" "mix|1.0"
+check_eq "label_values: sorted distinct, absent-key empty" \
+  "$(grep -E '^lv' <<<"$got")" \
+'lv|api-1
+lv|db-1
+lv|web-1
+lv|web-2
+lv_env|dev
+lv_env|prod
+lv_none|0'
+err=$(sqlite3 "$F8DB" ".load $EXT" \
+  "SELECT * FROM timeless_grid('m','cpu','{\"host\":{\"re\":\"[\"}}',0,1,1,1);" 2>&1 || true)
+check_eq "invalid regex is a loud error naming pattern and label" \
+  "$(grep -c 'invalid regex' <<<"$err")" "1"
+err=$(sqlite3 "$F8DB" ".load $EXT" \
+  "SELECT * FROM timeless_grid('m','cpu','{\"host\":{\"like\":\"x\"}}',0,1,1,1);" 2>&1 || true)
+check_eq "unknown operator names the valid set" \
+  "$(grep -c 'valid operators: neq, re, nre' <<<"$err")" "1"
+err=$(sqlite3 "$F8DB" ".load $EXT" \
+  "SELECT * FROM timeless_label_values('m','cpu');" 2>&1 || true)
+check_eq "label_values missing arg lists the call shape" \
+  "$(grep -c 'tbl, metric, key' <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

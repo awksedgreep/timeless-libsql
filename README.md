@@ -233,7 +233,31 @@ the whole range): the raw-scan fallback ships 99,900 samples and
 evaluates client-side in **17.9ms**; `timeless_grid` returns the same
 16,600 grid rows in **1.6ms** — 11x, before a network is even involved.
 
-**Introspection** — two more table-valued functions answer "what's in
+**Label matchers** — every kernel TVF's filter argument accepts matcher
+objects alongside plain equality strings:
+
+```sql
+SELECT labels, ts, value FROM timeless_grid('metrics', 'cpu_usage',
+  '{"host": {"re": "web-.*"}, "env": {"neq": "dev"}}', :t0, :t1, 60, 90);
+```
+
+| Filter value | Meaning |
+|---|---|
+| `"v"` | equality (pushed into the label index, as before) |
+| `{"neq": "v"}` | not equal |
+| `{"re": "pat"}` | regex match ([Rust `regex`](https://docs.rs/regex) dialect — RE2 family: no backrefs/lookaround) |
+| `{"nre": "pat"}` | regex non-match |
+
+Regexes are **fully anchored** (PromQL-style): the pattern must match
+the whole value — `web-.*` means *starts with* `web-`, `.*web.*` means
+*contains*. A label absent from a series matches as the empty string
+`""`, so `{"neq": "prod"}` includes series without the label and
+`{"nre": ".+"}` means "label absent or empty". Matchers prune the
+candidate *series list* before any chunks are read — cost is
+per-series, not per-point. Invalid patterns are loud errors naming the
+pattern and the label.
+
+**Introspection** — three more table-valued functions answer "what's in
 here?" without decompressing anything:
 
 ```sql
@@ -242,6 +266,9 @@ SELECT * FROM timeless_series('metrics');  -- one row per series: name, labels,
                                            -- chunks, buffered  (~3ms for 1000 series)
 SELECT * FROM timeless_stats('metrics');   -- key/value health rows; works for
                                            -- logs and traces tables too
+SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
+                                           -- sorted distinct label values —
+                                           -- the dropdown-population query
 ```
 
 ### Logs

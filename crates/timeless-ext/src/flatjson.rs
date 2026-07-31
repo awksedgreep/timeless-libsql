@@ -203,3 +203,159 @@ pub(crate) fn parse_labels_json(input: &str) -> Result<HashMap<String, String>, 
     }
     Ok(out)
 }
+
+/// One TVF filter matcher, parsed but not compiled — regex compilation
+/// (and the `regex` dependency) lives in query_tvf.rs. Plain string
+/// values stay equality, so every pre-F8 filter parses identically.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MatcherSpec {
+    Eq(String),
+    Neq(String),
+    Re(String),
+    Nre(String),
+}
+
+/// Parse a TVF filter object: values are either plain strings (eq) or
+/// single-operator objects `{"neq"|"re"|"nre": "..."}`. This is the ONE
+/// place filter JSON grows beyond flat — vtab labels themselves stay on
+/// `parse_labels_json` and remain strictly flat.
+pub(crate) fn parse_matchers_json(input: &str) -> Result<Vec<(String, MatcherSpec)>, String> {
+    let mut cur = JsonCursor {
+        chars: input.chars().collect(),
+        pos: 0,
+    };
+    let mut out: Vec<(String, MatcherSpec)> = Vec::new();
+
+    cur.skip_ws();
+    cur.expect('{')?;
+    cur.skip_ws();
+    if cur.peek() == Some('}') {
+        cur.bump();
+    } else {
+        loop {
+            cur.skip_ws();
+            let key = cur.parse_string()?;
+            cur.skip_ws();
+            cur.expect(':')?;
+            cur.skip_ws();
+            let spec = match cur.peek() {
+                Some('"') => MatcherSpec::Eq(cur.parse_string()?),
+                Some('{') => {
+                    cur.bump();
+                    cur.skip_ws();
+                    let op = cur.parse_string()?;
+                    cur.skip_ws();
+                    cur.expect(':')?;
+                    cur.skip_ws();
+                    let val = match cur.peek() {
+                        Some('"') => cur.parse_string()?,
+                        _ => {
+                            return Err(format!(
+                                "filter: operator value for {op:?} at key {key:?} \
+                                 must be a JSON string"
+                            ))
+                        }
+                    };
+                    cur.skip_ws();
+                    match cur.bump() {
+                        Some('}') => {}
+                        _ => {
+                            return Err(format!(
+                                "filter: matcher object at key {key:?} must hold exactly \
+                                 one operator ({{\"neq\"|\"re\"|\"nre\": \"...\"}})"
+                            ))
+                        }
+                    }
+                    match op.as_str() {
+                        "neq" => MatcherSpec::Neq(val),
+                        "re" => MatcherSpec::Re(val),
+                        "nre" => MatcherSpec::Nre(val),
+                        other => {
+                            return Err(format!(
+                                "filter: unknown operator {other:?} at key {key:?}; \
+                                 valid operators: neq, re, nre (plain string = eq)"
+                            ))
+                        }
+                    }
+                }
+                Some(c) => {
+                    return Err(format!(
+                        "filter values must be strings or matcher objects; found '{c}' \
+                         at key {key:?}"
+                    ))
+                }
+                None => return Err("filter JSON: unexpected end of input".into()),
+            };
+            out.push((key, spec));
+            cur.skip_ws();
+            match cur.bump() {
+                Some(',') => continue,
+                Some('}') => break,
+                Some(c) => return Err(format!("filter JSON: expected ',' or '}}', found '{c}'")),
+                None => return Err("filter JSON: unexpected end of input".into()),
+            }
+        }
+    }
+    cur.skip_ws();
+    if cur.pos != cur.chars.len() {
+        return Err("filter JSON: trailing characters after object".into());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod matcher_tests {
+    use super::*;
+
+    #[test]
+    fn plain_strings_stay_equality() {
+        let m = parse_matchers_json(r#"{"host":"pvm1","env":"prod"}"#).unwrap();
+        assert_eq!(
+            m,
+            vec![
+                ("host".into(), MatcherSpec::Eq("pvm1".into())),
+                ("env".into(), MatcherSpec::Eq("prod".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn operators_parse() {
+        let m = parse_matchers_json(
+            r#"{ "a": {"neq": "x"}, "b": {"re": "w.*"}, "c": {"nre": ""} }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            vec![
+                ("a".into(), MatcherSpec::Neq("x".into())),
+                ("b".into(), MatcherSpec::Re("w.*".into())),
+                ("c".into(), MatcherSpec::Nre(String::new())),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_object_is_empty() {
+        assert!(parse_matchers_json("{}").unwrap().is_empty());
+        assert!(parse_matchers_json(" { } ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_reject_loudly() {
+        for (input, needle) in [
+            (r#"{"a": {"like": "x"}}"#, "unknown operator"),
+            (r#"{"a": {"re": "x", "neq": "y"}}"#, "exactly one operator"),
+            (r#"{"a": {"re": 5}}"#, "must be a JSON string"),
+            (r#"{"a": 5}"#, "strings or matcher objects"),
+            (r#"{"a": {}}"#, ""),
+            (r#"{"a": ["x"]}"#, ""),
+        ] {
+            let err = parse_matchers_json(input).unwrap_err();
+            assert!(
+                err.contains(needle),
+                "{input}: error {err:?} should mention {needle:?}"
+            );
+        }
+    }
+}

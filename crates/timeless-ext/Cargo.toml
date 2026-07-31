@@ -14,6 +14,10 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 rusqlite = { version = "0.40.1", features = ["vtab", "loadable_extension"] }
 timeless-core = { path = "../timeless-core" }
+# F8 label matchers ({"re": ...} in TVF filters). SQL-user convenience
+# only — the waist and the layers above it keep their own matcher
+# semantics. std feature only; unicode-perl etc. stay out of the .so.
+regex = { version = "1", default-features = false, features = ["std", "perf"] }
 
 [features]
 default = ["entrypoints"]
