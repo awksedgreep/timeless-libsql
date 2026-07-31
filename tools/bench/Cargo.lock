@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "timeless-core",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-codec"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pco",
  "zstd",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "pco",
