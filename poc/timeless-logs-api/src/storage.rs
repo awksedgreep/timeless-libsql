@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -95,6 +95,14 @@ pub struct StorageStats {
     pub query_bounded_requested_entries: i64,
     pub query_bounded_max_entries: i64,
     pub query_blocks_skipped_by_bound: i64,
+    pub native_count_count: i64,
+    pub native_count_total_ns: i64,
+    pub native_count_snapshot_ns: i64,
+    pub native_count_payload_bytes_read: i64,
+    pub native_count_metadata_blocks: i64,
+    pub native_count_metadata_entries: i64,
+    pub native_count_decoded_blocks: i64,
+    pub native_count_decoded_entries: i64,
     pub optimize_count: i64,
     pub optimize_total_ns: i64,
     pub optimize_blocks_removed: i64,
@@ -621,7 +629,7 @@ fn query_parts(spec: &QuerySpec) -> (String, Vec<SqlValue>) {
         values.push(SqlValue::Text(service.clone()));
     }
     if let Some(message) = &spec.message {
-        clauses.push("message LIKE '%' || ? || '%'");
+        clauses.push("message_contains = ?");
         values.push(SqlValue::Text(message.clone()));
     }
     if let Some(ts_min) = spec.ts_min {
@@ -667,10 +675,32 @@ fn query_rows(conn: &Connection, spec: &QuerySpec) -> Result<Vec<QueryRow>, Stri
 }
 
 fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
-    let (where_sql, values) = query_parts(spec);
-    let sql = format!("SELECT COUNT(*) FROM logs{where_sql}");
-    conn.query_row(&sql, params_from_iter(values), |row| row.get(0))
-        .map_err(|e| format!("count logs: {e}"))
+    let mut filter = BTreeMap::new();
+    if let Some(level) = &spec.level {
+        filter.insert("level", level);
+    }
+    if let Some(service) = &spec.service {
+        filter.insert("service", service);
+    }
+    let filter_json = if filter.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&filter)
+                .map_err(|error| format!("encode native count filter: {error}"))?,
+        )
+    };
+    conn.query_row(
+        "SELECT n FROM timeless_log_count('logs', ?1, ?2, ?3, ?4)",
+        params![
+            filter_json,
+            spec.message.as_deref(),
+            spec.ts_min.unwrap_or(i64::MIN),
+            spec.ts_max.unwrap_or(i64::MAX)
+        ],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("count logs: {e}"))
 }
 
 fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
@@ -772,6 +802,14 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         query_bounded_requested_entries: stat("query_bounded_requested_entries"),
         query_bounded_max_entries: stat("query_bounded_max_entries"),
         query_blocks_skipped_by_bound: stat("query_blocks_skipped_by_bound"),
+        native_count_count: stat("native_count_count"),
+        native_count_total_ns: stat("native_count_total_ns"),
+        native_count_snapshot_ns: stat("native_count_snapshot_ns"),
+        native_count_payload_bytes_read: stat("native_count_payload_bytes_read"),
+        native_count_metadata_blocks: stat("native_count_metadata_blocks"),
+        native_count_metadata_entries: stat("native_count_metadata_entries"),
+        native_count_decoded_blocks: stat("native_count_decoded_blocks"),
+        native_count_decoded_entries: stat("native_count_decoded_entries"),
         optimize_count: stat("optimize_count"),
         optimize_total_ns: stat("optimize_total_ns"),
         optimize_blocks_removed: stat("optimize_blocks_removed"),

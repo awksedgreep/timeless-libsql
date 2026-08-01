@@ -97,6 +97,36 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert!(stats.read_permit_count > 0);
     assert_eq!(stats.waiting_writers, 0);
 
+    // Count is a scalar engine operation, not COUNT(*) over a materialized
+    // vtab rowset. The pure error partition is fully covered, so its durable
+    // entry_count answers this request without reading or decoding payloads.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/select/logsql/query")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "query=level%3Aerror+%7C+stats+count%28*%29",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"{\"total\":410}\n");
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.api_query_count, 2);
+    assert_eq!(stats.query_count, 1, "native count is not a row query");
+    assert_eq!(stats.native_count_count, 1);
+    assert_eq!(stats.native_count_metadata_blocks, 1);
+    assert_eq!(stats.native_count_metadata_entries, 410);
+    assert_eq!(stats.native_count_decoded_blocks, 0);
+    assert_eq!(stats.native_count_decoded_entries, 0);
+    assert_eq!(stats.native_count_payload_bytes_read, 0);
+
     // Manual flush is an ordered durability barrier, not the ingest path.
     let response = app
         .clone()

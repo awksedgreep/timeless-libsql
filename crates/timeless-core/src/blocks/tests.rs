@@ -492,6 +492,14 @@ struct CountingStore {
 }
 
 impl BlockStore for CountingStore {
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        // Tests using this wrapper do not mutate the MemBlockStore while a
+        // query is active, so locations remain stable. This also lets the
+        // native-count tests distinguish metadata-only work from payload
+        // reads exactly as the SQLite store does under its read snapshot.
+        true
+    }
+
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
         self.inner.put_block(block)
     }
@@ -585,6 +593,153 @@ fn term_index_skips_blocks() {
     };
     assert_eq!(engine.query(&q).unwrap().len(), 10);
     assert_eq!(reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn native_count_uses_metadata_when_proven_and_decodes_only_when_needed() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let store = CountingStore {
+        inner: MemBlockStore::new(),
+        reads: Arc::clone(&reads),
+    };
+    let engine = BlockEngine::new(
+        Box::new(store),
+        BlockEngineConfig {
+            message_trigrams: true,
+            ..config(&["service"])
+        },
+    )
+    .unwrap();
+
+    for (ts, message, service) in [
+        (100, "routine one", "api"),
+        (101, "routine two", "api"),
+        (102, "routine three", "api"),
+    ] {
+        engine
+            .push(entry(ts, 1, message, &[("service", service)]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    for (ts, message, service) in [
+        (200, "request failed", "api"),
+        (201, "TIMEOUT waiting for db", "db"),
+        (202, "CafÉ timeout", "db"),
+    ] {
+        engine
+            .push(entry(ts, 3, message, &[("service", service)]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    // The buffer participates in the same exact count without being flushed.
+    engine
+        .push(entry(300, 3, "buffer timeout", &[("service", "db")]))
+        .unwrap();
+
+    reads.store(0, Ordering::SeqCst);
+    assert_eq!(engine.count(&full_range_query()).unwrap(), 7);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    let profile = engine.profile();
+    assert_eq!(profile.native_count_count, 1);
+    assert_eq!(profile.native_count_metadata_blocks, 2);
+    assert_eq!(profile.native_count_metadata_entries, 6);
+    assert_eq!(profile.native_count_decoded_blocks, 0);
+    assert_eq!(profile.native_count_decoded_entries, 0);
+    assert_eq!(profile.native_count_payload_bytes_read, 0);
+
+    // A level term selects only the pure error block. Its partition proves
+    // every persisted row matches, so this remains metadata-only.
+    reads.store(0, Ordering::SeqCst);
+    let errors = LogQuery {
+        level: Some(3),
+        ..full_range_query()
+    };
+    assert_eq!(engine.count(&errors).unwrap(), 4);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+
+    // A boundary through a block, metadata equality, or exact message
+    // predicate cannot be proven by BlockMeta and therefore decodes candidate
+    // blocks. In every case native count agrees with the row query. ASCII
+    // contains gets trigram pruning; Unicode deliberately scans both blocks
+    // because byte trigrams cannot prove Unicode lowercase equivalence.
+    let cases = [
+        (
+            LogQuery {
+                ts_min: 201,
+                ts_max: 300,
+                level: Some(3),
+                ..full_range_query()
+            },
+            1,
+        ),
+        (
+            LogQuery {
+                metadata_eq: vec![("service".into(), "db".into())],
+                ..full_range_query()
+            },
+            1,
+        ),
+        (
+            LogQuery {
+                message_contains: Some("TiMeOuT".into()),
+                ..full_range_query()
+            },
+            1,
+        ),
+        (
+            LogQuery {
+                message_contains: Some("café".into()),
+                ..full_range_query()
+            },
+            2,
+        ),
+    ];
+    for (query, expected_reads) in cases {
+        let expected = engine.query(&query).unwrap().len() as u64;
+        reads.store(0, Ordering::SeqCst);
+        assert_eq!(engine.count(&query).unwrap(), expected);
+        assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+    }
+}
+
+#[test]
+fn exact_contains_is_case_insensitive_and_safe_for_bounded_queries() {
+    let engine = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            message_trigrams: true,
+            ..config(&[])
+        },
+    )
+    .unwrap();
+    for (ts, message) in [
+        (10, "ordinary"),
+        (20, "first TIMEOUT"),
+        (30, "second timeout"),
+        (40, "CAFÉ unavailable"),
+    ] {
+        engine.push(entry(ts, 1, message, &[])).unwrap();
+        engine.flush().unwrap();
+    }
+
+    let timeout = LogQuery {
+        message_contains: Some("TimeOut".into()),
+        ..full_range_query()
+    };
+    let got = engine
+        .query_bounded(&timeout, LogQueryOrder::Desc, 1)
+        .unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].message, "second timeout");
+
+    let unicode = LogQuery {
+        message_contains: Some("café".into()),
+        ..full_range_query()
+    };
+    assert_eq!(engine.count(&unicode).unwrap(), 1);
+
+    assert!(!BlockEngine::message_contains_trigrams("timeout").is_empty());
+    assert!(BlockEngine::message_contains_trigrams("café").is_empty());
 }
 
 // ---------------------------------------------------------------------------

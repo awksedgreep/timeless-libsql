@@ -10,7 +10,8 @@
 //!
 //!   CREATE TABLE x(ts INTEGER, level TEXT, message TEXT, metadata TEXT,
 //!                  "service" TEXT HIDDEN, "path" TEXT HIDDEN,
-//!                  "status" TEXT HIDDEN, "<table>" HIDDEN)
+//!                  "status" TEXT HIDDEN, message_contains TEXT HIDDEN,
+//!                  "<table>" HIDDEN)
 //!
 //! THE DESIGN IMPROVEMENT over the Elixir donor's query API: each
 //! index key gets its own HIDDEN column. `WHERE service = 'api'`
@@ -87,6 +88,10 @@ const BIT_TS_HI: c_int = 4;
 /// F6: message LIKE pattern claimed for trigram block pruning (top
 /// usable bit; index keys occupy 3..=29, capping MAX_INDEX_KEYS at 27).
 const BIT_MSG_LIKE: c_int = 1 << 30;
+/// Exact case-insensitive substring constraint on the public hidden
+/// `message_contains` column. idxNum is an arbitrary signed C integer, so the
+/// sign bit is available without reducing the 27-key compatibility limit.
+const BIT_MSG_CONTAINS: c_int = c_int::MIN;
 const FIRST_KEY_BIT_SHIFT: usize = 3;
 const MAX_INDEX_KEYS: usize = 27;
 
@@ -326,13 +331,14 @@ impl LogsTab {
         shared_engine.engine.set_retention(retention);
 
         // Declared schema, built at runtime: fixed columns + one HIDDEN
-        // TEXT column per index key + the hidden command column named
-        // after the table (FTS5 idiom).
+        // TEXT column per index key + exact message search input + the hidden
+        // command column named after the table (FTS5 idiom).
         let mut schema =
             String::from("CREATE TABLE x(ts INTEGER, level TEXT, message TEXT, metadata TEXT");
         for key in &index_keys {
             schema.push_str(&format!(", \"{}\" TEXT HIDDEN", escape_double_quote(key)));
         }
+        schema.push_str(", message_contains TEXT HIDDEN");
         schema.push_str(&format!(", \"{}\" HIDDEN)", escape_double_quote(&table)));
         let schema = CString::new(schema)
             .map_err(|_| module_err(format!("table/key name contains NUL: {table:?}")))?;
@@ -488,7 +494,8 @@ fn parse_index_keys_value(table: &str, value: &str) -> std::result::Result<Vec<S
             // Each key becomes a declared column name: reject collisions
             // with the fixed columns and the hidden command column now,
             // with a message better than SQLite's "duplicate column".
-            if ["ts", "level", "message", "metadata"].contains(&k) || k == table {
+            if ["ts", "level", "message", "metadata", "message_contains"].contains(&k) || k == table
+            {
                 return Err(format!(
                     "index key {k:?} collides with a built-in column name"
                 ));
@@ -529,19 +536,18 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
     /// 8<<k = equality on index key k. argv slots are claimed in that
     /// canonical order so filter() decodes positions from the mask.
     ///
-    /// `message LIKE '%...%'` is deliberately LEFT TO SQLITE: the vtab
-    /// returns candidate rows (already block-pruned by whatever other
-    /// constraints exist) and SQLite applies the LIKE above us. An
-    /// in-module substring scan (never materializing non-matching rows)
-    /// is a later optimization — correctness is identical, this just
-    /// materializes more rows than strictly necessary.
+    /// `message LIKE '%...%'` remains a compatibility path: the vtab uses it
+    /// for sound trigram block pruning and SQLite rechecks individual rows.
+    /// `message_contains = ?` is the exact case-insensitive substring path;
+    /// it filters inside the engine and can therefore participate in bounded
+    /// ORDER BY ts LIMIT/OFFSET execution.
     ///
     /// `ORDER BY ts ASC|DESC LIMIT/OFFSET` is consumed only when every
     /// row-filtering constraint is exact in the engine. SQLite still rechecks
     /// those constraints and still applies LIMIT/OFFSET; xFilter returns the
     /// already ordered `LIMIT + OFFSET` prefix so that rechecking is harmless.
-    /// Strict timestamp bounds and message LIKE remain unbounded until their
-    /// exact semantics move below this boundary.
+    /// Strict timestamp bounds and compatibility message LIKE remain
+    /// unbounded because their exact semantics still live above this boundary.
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
         use IndexConstraintOp::*;
 
@@ -552,6 +558,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         let mut lo_c: Option<usize> = None;
         let mut hi_c: Option<usize> = None;
         let mut like_c: Option<usize> = None;
+        let mut contains_c: Option<usize> = None;
         let mut limit_c: Option<usize> = None;
         let mut offset_c: Option<usize> = None;
         let mut key_c: Vec<Option<usize>> = vec![None; self.index_keys.len()];
@@ -576,6 +583,12 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
                 (2, SQLITE_INDEX_CONSTRAINT_LIKE) if like_c.is_none() => {
                     like_c = Some(i);
                     bounded_safe = false;
+                }
+                (col, SQLITE_INDEX_CONSTRAINT_EQ)
+                    if col as usize == FIXED_COLS + self.index_keys.len()
+                        && contains_c.is_none() =>
+                {
+                    contains_c = Some(i);
                 }
                 (0, SQLITE_INDEX_CONSTRAINT_GE) if lo_c.is_none() => lo_c = Some(i),
                 (0, SQLITE_INDEX_CONSTRAINT_LE) if hi_c.is_none() => hi_c = Some(i),
@@ -634,6 +647,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         for (k, c) in key_c.iter().enumerate() {
             claim(info, *c, 1 << (FIRST_KEY_BIT_SHIFT + k));
         }
+        claim(info, contains_c, BIT_MSG_CONTAINS);
         if bounded_order.is_some() {
             claim(info, limit_c, 0);
             claim(info, offset_c, 0);
@@ -666,6 +680,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             index_keys: self.index_keys.clone(),
             rows: Vec::new(),
             pos: 0,
+            message_contains: None,
             phantom: PhantomData,
         })
     }
@@ -706,7 +721,8 @@ impl CreateVTab<'_> for LogsTab {
 impl UpdateVTab<'_> for LogsTab {
     /// INSERT. argv: [0] NULL, [1] requested rowid, then declared
     /// columns from index 2: 2=ts, 3=level, 4=message, 5=metadata,
-    /// 6..6+K = index keys, 6+K = hidden command column.
+    /// 6..6+K = index keys, 6+K = message_contains query input,
+    /// 7+K = hidden command column.
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
         // Connection routing + writer gate, as in metrics_vtab.rs
         // (gate is normally taken by begin(); this is the defensive
@@ -715,7 +731,7 @@ impl UpdateVTab<'_> for LogsTab {
         let _bind = DbGuard::bind(self.db);
         self.acquire_write_gate()?;
 
-        let cmd_idx = 2 + FIXED_COLS + self.index_keys.len();
+        let cmd_idx = 2 + FIXED_COLS + self.index_keys.len() + 1;
         // Command idiom, dispatched by TYPE like metrics: TEXT command,
         // BLOB reserved for a future Tier 2 batch format, NULL = data.
         match args.iter().nth(cmd_idx) {
@@ -902,6 +918,9 @@ pub struct LogsCursor<'vtab> {
     index_keys: Vec<String>,
     rows: Vec<OutRow>,
     pos: usize,
+    /// Bound value of the public exact-search hidden column. Returning it from
+    /// column() lets SQLite safely recheck `message_contains = ?`.
+    message_contains: Option<String>,
     phantom: PhantomData<&'vtab LogsTab>,
 }
 
@@ -914,7 +933,8 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         let _bind = DbGuard::bind(self.db);
         // argv slots were claimed in canonical order (level, ts lo,
         // ts hi, index keys), so the mask alone tells us which
-        // positional arg is which.
+        // positional arg is which. Exact message_contains follows all dynamic
+        // index keys, then bounded LIMIT/OFFSET arguments follow it.
         let mut arg = 0usize;
         let mut next = || {
             let i = arg;
@@ -980,6 +1000,16 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 }
             }
         }
+        let message_contains: Option<String> = if idx_num & BIT_MSG_CONTAINS != 0 {
+            let value: Option<String> = args.get(next())?;
+            if value.is_none() {
+                impossible = true;
+            }
+            value
+        } else {
+            None
+        };
+        self.message_contains = message_contains.clone();
 
         let bounded_order = match idx_str {
             Some(PLAN_BOUNDED_TS_ASC) => Some((LogQueryOrder::Asc, false)),
@@ -1025,7 +1055,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 ts_max,
                 level,
                 metadata_eq,
-                message_contains: None,
+                message_contains,
                 message_like_prune,
             };
             match bounded {
@@ -1079,6 +1109,10 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                     None => ctx.set_result(&Null),
                 }
             }
+            _ if i == FIXED_COLS + self.index_keys.len() => match &self.message_contains {
+                Some(value) => ctx.set_result(value),
+                None => ctx.set_result(&Null),
+            },
             // The hidden command column reads as NULL.
             _ => ctx.set_result(&Null),
         }

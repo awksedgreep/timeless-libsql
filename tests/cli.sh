@@ -77,6 +77,9 @@
 # the base vtab and every per-series query TVF, including parameterized joins.
 # Section 41 independently decodes TAF1/TLF1 aggregate/latest result frames and
 # proves row parity, NaN/NULL handling, empty omission, and live publication.
+# Section 42 covers exact native log substring search plus scalar native count:
+# bounded ordering, ASCII/Unicode case folding, metadata-only fast paths,
+# exact decode fallbacks, buffered rows, zero results, and work counters.
 
 set -euo pipefail
 
@@ -2984,6 +2987,73 @@ PY
 check_eq "independent TAF1/TLF1 decoders match rows and preserve publication" \
   "$got" \
 $'frame_detection|ok\naggregate_frames|5|ok\nlatest_frame|ok\nframe_publication|ok'
+
+# ---------------------------------------------------------------------------
+echo "== section 42: exact log contains + native scalar count =="
+LOG_NATIVE_DB="$TMP/log_native.db"
+got=$(sqlite3 "$LOG_NATIVE_DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service', message_index='trigram');
+INSERT INTO logs(ts,level,message,metadata) VALUES
+  (100,'info','routine one','{"service":"api"}'),
+  (101,'info','routine two','{"service":"api"}'),
+  (102,'info','routine three','{"service":"api"}'),
+  (200,'error','request failed','{"service":"api"}'),
+  (201,'error','TIMEOUT waiting for db','{"service":"db"}'),
+  (202,'error','CafÉ timeout','{"service":"db"}');
+INSERT INTO logs(logs) VALUES('flush');
+INSERT INTO logs(ts,level,message,metadata) VALUES
+  (300,'error','buffer timeout','{"service":"db"}');
+SELECT 'contains', group_concat(ts, ',') FROM (
+  SELECT ts FROM logs
+  WHERE message_contains='TiMeOuT'
+  ORDER BY ts DESC LIMIT 2
+);
+SELECT 'unicode', group_concat(ts, ',') FROM (
+  SELECT ts FROM logs
+  WHERE message_contains='café'
+  ORDER BY ts
+);
+SELECT 'all', n FROM timeless_log_count('logs');
+SELECT 'error', n FROM timeless_log_count('logs', '{"level":"error"}');
+SELECT 'db', n FROM timeless_log_count('logs', '{"service":"db"}');
+SELECT 'message', n FROM timeless_log_count('logs', NULL, 'TIMEOUT');
+SELECT 'boundary', n FROM timeless_log_count(
+  'logs', '{"level":"error"}', NULL, 201, 300
+);
+SELECT 'zero', n FROM timeless_log_count('logs', NULL, 'absent');
+SELECT 'stats',
+  max(CASE WHEN key='query_bounded_count' THEN value END),
+  max(CASE WHEN key='native_count_count' THEN value END),
+  max(CASE WHEN key='native_count_metadata_blocks' THEN value END),
+  max(CASE WHEN key='native_count_metadata_entries' THEN value END),
+  max(CASE WHEN key='native_count_decoded_blocks' THEN value END),
+  max(CASE WHEN key='native_count_decoded_entries' THEN value END)
+FROM timeless_stats('logs');
+SQL
+) || { fail "section 42 native log query crashed"; got=""; }
+
+check_eq "exact log contains and native count share bounded engine primitives" \
+  "$got" \
+$'contains|300,202\nunicode|202\nall|7\nerror|4\ndb|3\nmessage|3\nboundary|3\nzero|0\nstats|1|6|3|9|3|9'
+
+plan=$(sqlite3 "$LOG_NATIVE_DB" ".load $EXT" \
+  "EXPLAIN QUERY PLAN SELECT ts FROM logs WHERE message_contains='timeout' ORDER BY ts DESC LIMIT 2;")
+if [[ "$plan" == *"bounded-ts-desc"* ]]; then
+  pass "exact message_contains participates in bounded newest-first planning"
+else
+  fail "exact message_contains participates in bounded newest-first planning"
+  echo "$plan"
+fi
+
+err=$(sqlite3 "$TMP/log_native_bad.db" ".load $EXT" \
+  "CREATE VIRTUAL TABLE bad USING timeless_logs(index_keys='message_contains');" 2>&1 || true)
+if [[ "$err" == *"collides with a built-in column name"* ]]; then
+  pass "message_contains is reserved from dynamic index-key columns"
+else
+  fail "message_contains is reserved from dynamic index-key columns"
+  echo "$err"
+fi
 
 # ---------------------------------------------------------------------------
 echo

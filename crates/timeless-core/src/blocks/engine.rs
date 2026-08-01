@@ -98,6 +98,14 @@ pub struct BlockEngineProfileSnapshot {
     pub query_bounded_requested_entries: u64,
     pub query_bounded_max_entries: u64,
     pub query_blocks_skipped_by_bound: u64,
+    pub native_count_count: u64,
+    pub native_count_total_ns: u64,
+    pub native_count_snapshot_ns: u64,
+    pub native_count_payload_bytes_read: u64,
+    pub native_count_metadata_blocks: u64,
+    pub native_count_metadata_entries: u64,
+    pub native_count_decoded_blocks: u64,
+    pub native_count_decoded_entries: u64,
     pub optimize_count: u64,
     pub optimize_total_ns: u64,
     pub optimize_blocks_removed: u64,
@@ -134,6 +142,14 @@ struct BlockEngineProfile {
     query_bounded_requested_entries: AtomicU64,
     query_bounded_max_entries: AtomicU64,
     query_blocks_skipped_by_bound: AtomicU64,
+    native_count_count: AtomicU64,
+    native_count_total_ns: AtomicU64,
+    native_count_snapshot_ns: AtomicU64,
+    native_count_payload_bytes_read: AtomicU64,
+    native_count_metadata_blocks: AtomicU64,
+    native_count_metadata_entries: AtomicU64,
+    native_count_decoded_blocks: AtomicU64,
+    native_count_decoded_entries: AtomicU64,
     optimize_count: AtomicU64,
     optimize_total_ns: AtomicU64,
     optimize_blocks_removed: AtomicU64,
@@ -172,6 +188,14 @@ impl BlockEngineProfile {
             query_bounded_requested_entries: load(&self.query_bounded_requested_entries),
             query_bounded_max_entries: load(&self.query_bounded_max_entries),
             query_blocks_skipped_by_bound: load(&self.query_blocks_skipped_by_bound),
+            native_count_count: load(&self.native_count_count),
+            native_count_total_ns: load(&self.native_count_total_ns),
+            native_count_snapshot_ns: load(&self.native_count_snapshot_ns),
+            native_count_payload_bytes_read: load(&self.native_count_payload_bytes_read),
+            native_count_metadata_blocks: load(&self.native_count_metadata_blocks),
+            native_count_metadata_entries: load(&self.native_count_metadata_entries),
+            native_count_decoded_blocks: load(&self.native_count_decoded_blocks),
+            native_count_decoded_entries: load(&self.native_count_decoded_entries),
             optimize_count: load(&self.optimize_count),
             optimize_total_ns: load(&self.optimize_total_ns),
             optimize_blocks_removed: load(&self.optimize_blocks_removed),
@@ -199,7 +223,8 @@ pub struct LogQuery {
     /// index_keys also prune blocks via the term index; the rest are
     /// checked per-entry only.
     pub metadata_eq: Vec<(String, String)>,
-    /// Case-sensitive substring match on the message.
+    /// Case-insensitive substring match on the message. ASCII matching is
+    /// allocation-free; non-ASCII falls back to Unicode lowercase matching.
     pub message_contains: Option<String>,
     /// F6: a LIKE pattern used ONLY for trigram block PRUNING — no
     /// entries are filtered by it (the SQL layer rechecks LIKE exactly;
@@ -223,6 +248,7 @@ struct LogQueryBlockSnapshot {
     payload: Option<Vec<u8>>,
     location: Option<BlockLoc>,
     meta: BlockMeta,
+    partition: Option<u8>,
     sequence: usize,
 }
 
@@ -905,6 +931,19 @@ impl BlockEngine {
         set.into_iter().map(Self::tg_term).collect()
     }
 
+    /// Required trigram terms for the exact case-insensitive contains
+    /// predicate. The persisted index performs ASCII folding, so non-ASCII
+    /// needles deliberately get no pruning: Unicode lowercase equivalence can
+    /// change UTF-8 bytes and must never create a false negative.
+    pub fn message_contains_trigrams(needle: &str) -> Vec<String> {
+        if !needle.is_ascii() {
+            return Vec::new();
+        }
+        let mut set = BTreeSet::new();
+        Self::message_trigrams_of(needle, &mut set);
+        set.into_iter().map(Self::tg_term).collect()
+    }
+
     /// Per-block trigram budget: a block whose messages exceed this many
     /// DISTINCT trigrams is left unindexed (no marker → never pruned)
     /// rather than bloating `_terms` past the data.
@@ -1283,7 +1322,7 @@ impl BlockEngine {
     {
         let started = Instant::now();
         let snapshot_started = Instant::now();
-        let snapshot = self.snapshot_query(q)?;
+        let snapshot = self.snapshot_query(q, false)?;
         let snapshot_ns = elapsed_ns(snapshot_started);
         after_snapshot();
 
@@ -1496,7 +1535,112 @@ impl BlockEngine {
         }
     }
 
-    fn snapshot_query(&self, q: &LogQuery) -> Result<LogQuerySnapshot, String> {
+    /// Count exact matches without materializing a rowset. Fully covered
+    /// blocks are answered from `entry_count` when every filter is proven by
+    /// the block itself (unfiltered blocks, or a matching level-pure block).
+    /// Boundary, legacy-mixed, metadata-filtered, and message-filtered blocks
+    /// are decoded one at a time.
+    pub fn count(&self, q: &LogQuery) -> Result<u64, String> {
+        self.count_after_snapshot(q, || {})
+    }
+
+    /// Native count with the same snapshot ownership callback used by row
+    /// queries. The extension releases its cross-connection read permit after
+    /// the generation is captured, before boundary blocks are decoded.
+    pub fn count_after_snapshot<F>(&self, q: &LogQuery, after_snapshot: F) -> Result<u64, String>
+    where
+        F: FnOnce(),
+    {
+        if q.message_like_prune.is_some() {
+            return Err(
+                "native count requires an exact message_contains predicate, not LIKE pruning"
+                    .into(),
+            );
+        }
+
+        let started = Instant::now();
+        let snapshot_started = Instant::now();
+        let snapshot = self.snapshot_query(q, q.level.is_some())?;
+        let snapshot_ns = elapsed_ns(snapshot_started);
+        after_snapshot();
+
+        let mut total = snapshot.buffered.len() as u64;
+        let mut payload_bytes_read = snapshot.payload_bytes;
+        let mut metadata_blocks = 0u64;
+        let mut metadata_entries = 0u64;
+        let mut decoded_blocks = 0u64;
+        let mut decoded_entries = 0u64;
+
+        for block in snapshot.blocks {
+            let fully_covered = block.meta.ts_min >= q.ts_min && block.meta.ts_max <= q.ts_max;
+            let message_free = q
+                .message_contains
+                .as_deref()
+                .is_none_or(|needle| needle.is_empty());
+            let level_proven = match q.level {
+                None => true,
+                Some(level) => block.partition == Some(level),
+            };
+            if fully_covered && message_free && q.metadata_eq.is_empty() && level_proven {
+                let entries = block.meta.entry_count as u64;
+                total = total.saturating_add(entries);
+                metadata_blocks = metadata_blocks.saturating_add(1);
+                metadata_entries = metadata_entries.saturating_add(entries);
+                continue;
+            }
+
+            let bytes = match (block.payload, block.location) {
+                (Some(bytes), None) => bytes,
+                (None, Some(loc)) => {
+                    let bytes = self.store.read_block(&loc)?;
+                    payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
+                    bytes
+                }
+                _ => return Err("invalid log count block snapshot".into()),
+            };
+            let entries = decode_block(&bytes)?;
+            decoded_blocks = decoded_blocks.saturating_add(1);
+            decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
+            total = total.saturating_add(
+                entries
+                    .iter()
+                    .filter(|entry| entry_matches(entry, q))
+                    .count() as u64,
+            );
+        }
+
+        self.profile
+            .native_count_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.profile
+            .native_count_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.profile
+            .native_count_snapshot_ns
+            .fetch_add(snapshot_ns, Ordering::Relaxed);
+        self.profile
+            .native_count_payload_bytes_read
+            .fetch_add(payload_bytes_read, Ordering::Relaxed);
+        self.profile
+            .native_count_metadata_blocks
+            .fetch_add(metadata_blocks, Ordering::Relaxed);
+        self.profile
+            .native_count_metadata_entries
+            .fetch_add(metadata_entries, Ordering::Relaxed);
+        self.profile
+            .native_count_decoded_blocks
+            .fetch_add(decoded_blocks, Ordering::Relaxed);
+        self.profile
+            .native_count_decoded_entries
+            .fetch_add(decoded_entries, Ordering::Relaxed);
+        Ok(total)
+    }
+
+    fn snapshot_query(
+        &self,
+        q: &LogQuery,
+        include_partitions: bool,
+    ) -> Result<LogQuerySnapshot, String> {
         let _transition = self.transition_read();
         let mut terms: Vec<String> = Vec::new();
         if let Some(lvl) = q.level {
@@ -1518,8 +1662,14 @@ impl BlockEngine {
         // blocks carrying ALL of the pattern's required trigrams). Blocks
         // without the `tg:` marker are never pruned, so pre-F6 data,
         // budget-capped blocks, and disabled-index tables are all safe.
-        if let Some(pattern) = &q.message_like_prune {
-            let required = Self::like_pattern_trigrams(pattern);
+        if q.message_contains.is_some() || q.message_like_prune.is_some() {
+            let mut required = BTreeSet::new();
+            if let Some(needle) = &q.message_contains {
+                required.extend(Self::message_contains_trigrams(needle));
+            }
+            if let Some(pattern) = &q.message_like_prune {
+                required.extend(Self::like_pattern_trigrams(pattern));
+            }
             if !required.is_empty() {
                 let mut marker_terms = terms.clone();
                 marker_terms.push("tg:".to_string());
@@ -1541,6 +1691,16 @@ impl BlockEngine {
             }
         }
         let candidate_blocks = locs.len() as u64;
+        // Only native count needs level-purity proof. Row queries already
+        // filter decoded entries exactly, so avoid an O(total blocks) map and
+        // allocation on their latency-sensitive snapshot path.
+        let partitions: Option<HashMap<i64, Option<u8>>> = include_partitions.then(|| {
+            let index = self.index_lock();
+            index
+                .iter()
+                .map(|entry| (entry.loc.id, entry.partition))
+                .collect()
+        });
         let stable_locations = self.store.query_snapshot_keeps_locations_readable();
         let mut blocks = Vec::with_capacity(locs.len());
         let mut payload_bytes = 0u64;
@@ -1550,6 +1710,9 @@ impl BlockEngine {
                     payload: None,
                     location: Some(location),
                     meta,
+                    partition: partitions
+                        .as_ref()
+                        .and_then(|partitions| partitions.get(&location.id).copied().flatten()),
                     sequence,
                 });
             }
@@ -1561,6 +1724,9 @@ impl BlockEngine {
                     payload: Some(bytes),
                     location: None,
                     meta,
+                    partition: partitions
+                        .as_ref()
+                        .and_then(|partitions| partitions.get(&location.id).copied().flatten()),
                     sequence,
                 });
             }
@@ -1763,9 +1929,23 @@ fn entry_matches(e: &LogEntry, q: &LogQuery) -> bool {
         }
     }
     if let Some(needle) = &q.message_contains {
-        if !e.message.contains(needle.as_str()) {
+        if !message_contains_case_insensitive(&e.message, needle) {
             return false;
         }
     }
     true
+}
+
+fn message_contains_case_insensitive(message: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.is_ascii() {
+        let needle = needle.as_bytes();
+        return message
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle));
+    }
+    message.to_lowercase().contains(&needle.to_lowercase())
 }

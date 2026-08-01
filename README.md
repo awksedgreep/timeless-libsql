@@ -96,7 +96,7 @@ sqlite3 demo.db \
 | module | row shape | ts unit | indexed dimensions (pushdown) |
 |---|---|---|---|
 | `timeless_metrics` | `(name, ts, value, labels)` | **seconds** | `name` =, `ts` ranges |
-| `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column = |
+| `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column =, exact `message_contains` = |
 | `timeless_traces` | `(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes)` | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
 
 All three share the same lifecycle: inserts land in an in-memory buffer
@@ -439,6 +439,19 @@ SELECT ts, level, message FROM logs
   1M entries: `LIKE '%timeout%'` in **48.3ms** vs 334.5ms unindexed —
   and vs 74.5ms for the plain table, flipping the one benchmark row this
   extension used to lose (index overhead ~1.5 MB, opt-in).
+- For a literal case-insensitive substring rather than full SQL LIKE syntax,
+  use the exact hidden input `message_contains`. It filters before rows cross
+  the virtual-table boundary and can consume `ORDER BY ts ... LIMIT/OFFSET`:
+
+  ```sql
+  SELECT ts, level, message FROM logs
+   WHERE message_contains='timeout'
+   ORDER BY ts DESC LIMIT 100;
+  ```
+
+  ASCII matching is allocation-free; non-ASCII matching uses Unicode
+  lowercase equivalence. Trigram pruning remains conservative and is disabled
+  for a non-ASCII needle so it cannot introduce false negatives.
 - Index keys can also be used as INSERT shorthand: a non-NULL value in the
   hidden column merges into the metadata JSON.
 - **Batch ingest**: a columnar blob (v0 spec in the vtab docs) into the
@@ -459,6 +472,21 @@ SELECT bucket_ts, group_key, n FROM timeless_log_buckets(
 
 1M entries, whole range, 1-minute buckets: **95.9ms** vs 543.5ms for the
 GROUP BY over the raw vtab (5.7x, totals verified equal).
+
+**Scalar count** — exact count without materializing a log rowset. `filter` is
+a flat JSON object: `level` selects severity and every other member is a
+metadata equality. The remaining arguments are optional exact substring and
+inclusive timestamp bounds:
+
+```sql
+SELECT n FROM timeless_log_count(
+  'logs', '{"level":"error","service":"api"}', 'timeout', :t0, :t1
+);
+```
+
+Only the table name is required. Fully covered unfiltered or level-pure blocks
+use persisted `entry_count` without reading payloads. Boundary, legacy-mixed,
+metadata-filtered, and message-filtered blocks decode one at a time.
 
 ### Traces
 

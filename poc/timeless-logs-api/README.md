@@ -87,15 +87,37 @@ Session 4 pushes exact `ORDER BY ts ASC|DESC LIMIT/OFFSET` windows through the
 virtual-table planner into a bounded engine query. The engine retains at most
 `LIMIT + OFFSET` entries and stops on block timestamp bounds. An isolated
 latest-100 over 3.109M raw entries returned 100 engine rows in 77.91ms and
-skipped 1,424 of 1,492 candidate blocks. Strict bounds and message LIKE remain
-on the conservative unbounded path until exact filtering moves into the
-extension; native count is likewise Session 5 work.
+skipped 1,424 of 1,492 candidate blocks.
+
+Session 5 moves the remaining broad shapes into shared extension primitives.
+The public hidden `message_contains` column performs exact case-insensitive
+substring matching inside the engine and participates in bounded timestamp
+windows. The existing `message LIKE` path remains for SQLite-compatible LIKE
+semantics. Direct callers can use the scalar TVF:
+
+```sql
+SELECT n FROM timeless_log_count(
+  'logs', '{"level":"error","service":"api"}', 'timeout', :start, :stop
+);
+```
+
+The API uses these same two surfaces. Fully covered unfiltered or level-pure
+blocks count from persisted metadata; other filters stream and decode one
+block at a time without materializing matching rows.
+
+With one and two query workers, the pinned mixed workload completed 477.7K
+and 471.7K writes/s, query p99 was 237ms and 242ms, and Linux process HWM was
+124,504KiB and 105,060KiB. Session 4 measured 458.8K/467.3K, 1.83s/1.95s,
+and 5.66GiB/6.84GiB. Both Session 5 runs drained to zero with no HTTP errors
+or writer timeouts. The two-reader run answered 102 native counts entirely
+from 7,637 metadata rows (2,910,678 entries, zero payload reads), while all
+407 row queries—including substring—used bounded execution.
 
 The POC still uses the unchanged storage mechanism. No alternate buffer size,
 block layout, partition scheme, or compaction policy was introduced to hide
-the result. The next measured change is native exact message filtering and
-counts. Those two unbounded shapes still dominate peak memory in the mixed
-workload even though limited row queries are now bounded.
+the result. Session 5 closes the whole-workload embedded-memory gate without
+changing buffer, block, flush, compaction, or durability policy. Session 6 is
+the separate compaction-amplification investigation.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

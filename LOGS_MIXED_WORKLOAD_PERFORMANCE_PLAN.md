@@ -233,18 +233,44 @@ whole-workload embedded-memory gate.
 
 ## Session 5 — Native exact filtering and counts
 
-- [ ] Move exact message matching below the virtual-table boundary after
+- [x] Move exact message matching below the virtual-table boundary after
       trigram candidate pruning, without weakening SQLite `LIKE` semantics.
-- [ ] Add a native filtered-count path that uses level-pure block metadata
+- [x] Add a native filtered-count path that uses level-pure block metadata
       whenever a complete block is provably inside the query and decodes only
       boundary or non-exact blocks.
-- [ ] Use native count and bounded query paths from the Rust API without
+- [x] Use native count and bounded query paths from the Rust API without
       creating an API-only storage behavior.
-- [ ] Benchmark error count, service+level count, substring, and latest-tail
+- [x] Benchmark error count, service+level count, substring, and latest-tail
       queries independently.
 
+Direct SQLite/libSQL callers now use `message_contains = ?` for exact
+case-insensitive substring filtering inside the engine while the existing
+`message LIKE ?` compatibility path remains available with SQLite's own
+recheck. `timeless_log_count(tbl, filter, message_contains, start, stop)`
+returns one exact INTEGER without constructing a virtual-table rowset. Fully
+covered unfiltered and level-pure blocks contribute `entry_count`; time
+boundaries, legacy mixed blocks, metadata equality, and message predicates
+decode one payload at a time.
+
+On the pinned raw 3.1M-entry workload, one and two readers completed 477.7K
+and 471.7K writes/s with zero queue or errors. Query p99 fell from Session 4's
+1.83s/1.95s to 237ms/242ms. Process HWM fell from 5.66GiB/6.84GiB to
+124,504KiB/105,060KiB. Across the two-reader run, 102 count calls counted
+2,910,678 entries from 7,637 block metadata rows with zero payload reads;
+all 407 row queries, including substring, used bounded execution.
+
+Independent cold probes on the 3,107,000-entry database recorded: error
+count 2.80ms HTTP / 1.91ms engine with 147,885 entries answered from 375 block
+headers; exact substring latest-50 150ms HTTP / 149ms engine with 1,388 of
+1,500 blocks skipped; service+level count 966ms because metadata presence
+cannot prove every row's service (375 blocks / 1,406,253 entries decoded
+one-at-a-time); and latest-100 124ms HTTP / 123ms engine. The hard filtered
+count remains linear CPU/I/O, but no longer allocates a database-sized result.
+
 Exit criterion: direct SQLite/libSQL callers and the API share the same faster
-query implementation and exact oracle counts.
+query implementation and exact oracle counts. **Met.** Core metadata/read
+proofs, the extension-backed API test, workspace tests, and CLI section 42 pin
+the shared behavior.
 
 ## Session 6 — Reduce compaction amplification
 

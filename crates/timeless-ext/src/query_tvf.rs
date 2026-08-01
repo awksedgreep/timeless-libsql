@@ -82,6 +82,18 @@
 //! wins; duplicate maximum timestamps retain the first point in stable raw
 //! engine order. Candidate chunks are searched newest-first.
 //!
+//! Logs expose an exact scalar-count waist as a one-row TVF. `filter` is a
+//! flat JSON object whose `level` member selects severity and whose other
+//! members are metadata equalities; `message_contains` is a case-insensitive
+//! substring. Missing bounds default to the complete i64 range:
+//!
+//!   SELECT n FROM timeless_log_count(
+//!     'logs', '{"level":"error","service":"api"}', 'timeout', :start, :stop);
+//!
+//! Fully covered unfiltered or level-pure blocks contribute persisted entry
+//! counts without payload reads. All other blocks decode one at a time, so
+//! exact counts never materialize a database-sized rowset.
+//!
 //! F9 — both kernel TVFs take an optional trailing fill argument:
 //! 'none' (default, sparse) or 'null' (dense: every grid point emitted
 //! per matched series, value NULL where the window/lookback is empty).
@@ -140,7 +152,7 @@ use rusqlite::vtab::{
     VTabCursor,
 };
 use rusqlite::{Connection, Error, Result};
-use timeless_core::{AggFn, Engine, Labels};
+use timeless_core::{AggFn, Engine, Labels, LogQuery};
 
 use crate::flatjson::{labels_to_json, parse_labels_json, parse_matchers_json, MatcherSpec};
 use crate::logs_vtab::LogsTab;
@@ -295,6 +307,8 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     db.create_module(c"timeless_rollup_batches", &ROLLUP_BATCHES, None::<()>)?;
     const LOG_BUCKETS: Module<LogBucketsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_log_buckets", &LOG_BUCKETS, None::<()>)?;
+    const LOG_COUNT: Module<LogCountTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_log_count", &LOG_COUNT, None::<()>)?;
     const TRACE_BUCKETS: Module<TraceBucketsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_trace_buckets", &TRACE_BUCKETS, None::<()>)?;
     const LABEL_VALUES: Module<LabelValuesTab> = Module::eponymous_only_module();
@@ -2757,6 +2771,153 @@ mod rollup_batch_tests {
 // from the metrics grid kernels, which sample BACKWARD over (t-w, t].
 // Both conventions are documented where they live.
 
+/// timeless_log_count('logs', filter_json, message_contains, start, stop)
+/// → one INTEGER row. Only `tbl` is required; optional bounds default to the
+/// full i64 range. Filter JSON uses `level` plus metadata equalities, matching
+/// timeless_log_buckets.
+const LOG_COUNT_ARGS: &[&str] = &["tbl", "filter", "message_contains", "start", "stop"];
+const LOG_COUNT_REQUIRED: c_int = 0b00001;
+const LOG_COUNT_FIRST_ARG: c_int = 1;
+
+#[repr(C)]
+pub(crate) struct LogCountTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for LogCountTab {
+    type Aux = ();
+    type Cursor = LogCountCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(n INTEGER, tbl HIDDEN, filter HIDDEN, \
+                                 message_contains HIDDEN, start HIDDEN, stop HIDDEN)",
+            ),
+            LogCountTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, LOG_COUNT_FIRST_ARG, LOG_COUNT_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<LogCountCursor<'vtab>> {
+        Ok(LogCountCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            value: 0,
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LogCountCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    value: i64,
+    pos: usize,
+    phantom: PhantomData<&'vtab LogCountTab>,
+}
+
+unsafe impl VTabCursor for LogCountCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_log_count";
+        let slots = named_slots(M, LOG_COUNT_ARGS, LOG_COUNT_REQUIRED, idx_num)?;
+        let table_spec: Option<String> = args.get(slots[0].unwrap())?;
+        let table_spec =
+            table_spec.ok_or_else(|| module_err(format!("{M}: tbl must not be NULL")))?;
+        let (database, table) = split_spec(&table_spec);
+        let filter_json: Option<String> = match slots[1] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
+        let message_contains: Option<String> = match slots[2] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
+        let ts_min: i64 = match slots[3] {
+            Some(slot) => args.get::<Option<i64>>(slot)?.unwrap_or(i64::MIN),
+            None => i64::MIN,
+        };
+        let ts_max: i64 = match slots[4] {
+            Some(slot) => args.get::<Option<i64>>(slot)?.unwrap_or(i64::MAX),
+            None => i64::MAX,
+        };
+
+        let mut level = None;
+        let mut metadata_eq = Vec::new();
+        if let Some(text) = filter_json.filter(|text| !text.is_empty()) {
+            for (key, value) in parse_labels_json(&text)
+                .map_err(|error| module_err(format!("{M}: filter: {error}")))?
+            {
+                if key == "level" {
+                    level = Some(timeless_core::level_from_name(&value).map_err(module_err)?);
+                } else {
+                    metadata_eq.push((key, value));
+                }
+            }
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
+        let read = read_permit(&shared, self.db, &table)?;
+        let count = shared
+            .engine
+            .count_after_snapshot(
+                &LogQuery {
+                    ts_min,
+                    ts_max,
+                    level,
+                    metadata_eq,
+                    message_contains,
+                    message_like_prune: None,
+                },
+                move || drop(read),
+            )
+            .map_err(module_err)?;
+        self.value = i64::try_from(count)
+            .map_err(|_| module_err(format!("{M}: count exceeds SQLite INTEGER range")))?;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos > 0
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(&self.value),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(0)
+    }
+}
+
 /// Map provided args (bitmask) back to argv slots by name, with the
 /// missing-required check. Shared by the F4 bucket TVFs.
 fn named_slots(
@@ -3750,6 +3911,38 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "query_blocks_skipped_by_bound",
                         Value::Integer(profile.query_blocks_skipped_by_bound as i64),
+                    ),
+                    (
+                        "native_count_count",
+                        Value::Integer(profile.native_count_count as i64),
+                    ),
+                    (
+                        "native_count_total_ns",
+                        Value::Integer(profile.native_count_total_ns as i64),
+                    ),
+                    (
+                        "native_count_snapshot_ns",
+                        Value::Integer(profile.native_count_snapshot_ns as i64),
+                    ),
+                    (
+                        "native_count_payload_bytes_read",
+                        Value::Integer(profile.native_count_payload_bytes_read as i64),
+                    ),
+                    (
+                        "native_count_metadata_blocks",
+                        Value::Integer(profile.native_count_metadata_blocks as i64),
+                    ),
+                    (
+                        "native_count_metadata_entries",
+                        Value::Integer(profile.native_count_metadata_entries as i64),
+                    ),
+                    (
+                        "native_count_decoded_blocks",
+                        Value::Integer(profile.native_count_decoded_blocks as i64),
+                    ),
+                    (
+                        "native_count_decoded_entries",
+                        Value::Integer(profile.native_count_decoded_entries as i64),
                     ),
                     (
                         "optimize_count",

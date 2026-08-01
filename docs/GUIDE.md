@@ -247,16 +247,26 @@ Choosing index keys:
 - Up to 28 keys per table. The list is fixed at creation and persisted;
   to change it, create a new table.
 
-Full-text search works but is honest about its cost:
+Full SQL `LIKE` works and keeps SQLite's exact semantics:
 
 ```sql
 SELECT * FROM logs WHERE message LIKE '%timeout%';   -- works, but scans
 ```
 
-`LIKE` on `message` decompresses every block. Fine for occasional forensics
-on a bounded `ts` range; add `AND ts > ...` to keep it cheap. If substring
-search is your *primary* workload, a plain table with FTS5 is the better
-tool — this table is optimized for dimensional filtering and compression.
+Without `message_index='trigram'`, `LIKE` on `message` decompresses every
+candidate block. The trigram option prunes blocks soundly, but SQLite still
+rechecks rows. For a literal case-insensitive substring, use the exact engine
+predicate; it can also bound an ordered result before rows cross SQLite:
+
+```sql
+SELECT * FROM logs
+WHERE message_contains='timeout' AND ts >= :start
+ORDER BY ts DESC LIMIT 100;
+```
+
+For tokenized/ranked full-text search, a plain table with FTS5 remains the
+better tool; this table is optimized for dimensional filtering, literal
+substring search, and compression.
 
 ## 6. Storing traces
 
@@ -329,17 +339,16 @@ Everything else still *works* — it's ordinary SQL over the decompressed rows
 
 - **Always constrain the time range** when you can. It's the universal
   pruner on all three tables.
-- **Aggregations are just SQL.** `count`, `avg`, `min/max`, `GROUP BY`,
-  window functions — no special syntax, and they benefit from the same
-  pushdown as row queries.
+- **Aggregations are just SQL.** `avg`, `min/max`, `GROUP BY`, and window
+  functions work normally. For a large logs count, `timeless_log_count`
+  avoids constructing the matching rowset and can use block metadata.
 - **Joins work.** These are real tables to SQLite; join telemetry against
   your application tables in the same file.
 - Mind the timestamp units — they follow each signal's native convention:
   metrics = **seconds**, logs = **milliseconds**, traces = **nanoseconds**.
-- Two things a compressed store will never win: unbounded
-  `LIKE '%substring%'` scans, and single-row point lookups against a B-tree
-  index. If a query is one of those two and it's hot, that's what plain
-  tables are for.
+- Two shapes still favor specialized tables: ranked/tokenized full-text
+  search and single-row point lookups against a B-tree index. Use the native
+  exact substring/count surfaces when those simpler semantics fit.
 
 When row order matters, say so with `ORDER BY ts` — metrics results come back
 time-ordered, but logs and traces blocks can overlap, and it's ordinary cheap
