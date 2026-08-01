@@ -212,7 +212,7 @@ pins SQL `NULL`/NaN behavior consistently across SQLite host bindings.
 - [x] Session 3: ship `timeless_aggregate_frame`
 - [x] Session 4: ship `timeless_latest_frame`
 - [x] Session 5: direct-user hardening, documentation, and release gate
-- [ ] Session 6: optional TimelessMetrics adoption
+- [x] Session 6: optional TimelessMetrics adoption
 
 Sessions 0 through 5 belong entirely to `timeless-libsql`. Session 6 is
 optional integration work and must not determine whether the extension APIs
@@ -245,8 +245,21 @@ are sound.
   (including randomized/crash/recovery suites), Python decoder checks, and a
   native libSQL `0.9.30` local connection exercising a bound ID lookup,
   catalog join, `TAF1`, and `TLF1`.
-- Session 6 remains intentionally unstarted. The extension feature is complete
-  for direct users and does not depend on an Elixir adapter.
+- Session 6 is complete on the TimelessMetrics
+  `feat/standalone-query-api-adoption` branch. Cached exact raw, aggregate, and
+  latest reads use the `series_id` constraint; scalar aggregate and wide latest
+  use TAF1/TLF1 when detected through `pragma_module_list`, with the original
+  row statements retained as compatibility fallbacks.
+- At 12,000 series, the public TimelessMetrics scalar aggregate fell from
+  38.833ms to 12.695ms median and latest fell from 37.488ms to 12.332ms in a
+  controlled same-code row-versus-frame comparison. TAF1 reduced sampled peak
+  process memory from 13.33MB to 9.21MB; TLF1 increased it from 8.24MB to
+  10.78MB despite reducing transport bytes, so that tradeoff is recorded
+  explicitly rather than treated as a universal allocation win.
+- The adapter added strict dirty-CPU NIF decoders and semantic tests comparing
+  frame and row routes, selected-ID reads against label supersets, malformed
+  frames, restart/reopen, and the existing read barrier. No extension contract
+  was changed for an Elixir-only result shape.
 
 ### Session 0: contracts and planner spike
 
