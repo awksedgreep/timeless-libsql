@@ -159,7 +159,7 @@ PromQL counter extrapolation and staleness remain above the boundary.
 - [x] Session 5: wide raw transport
 - [x] Session 6: catalog publication and first-query latency
 - [x] Session 7: matcher and discovery pushdown
-- [ ] Session 8: integration, soak, and default-engine decision
+- [x] Session 8: integration, soak, and default-engine decision
 
 Session 0 is mandatory before optimization. Sessions 1 and 2 are the first
 implementation priorities. Sessions 3 through 7 may be reordered only when the
@@ -572,9 +572,13 @@ maintenance/backups, a forced writer restart, reopen, and backup verification
 with zero escaped read transients. `cargo test --workspace`, all 39 CLI
 sections, and all 477 Elixir tests pass.
 
-Session 8 remains open only for the immutable extension dependency pin and any
-additional work chosen to close the documented read-p95 gaps. A default-engine
-change is not warranted by the current fixed gate.
+Session 8 is complete. TimelessMetrics pins merged revision
+`09aa46e94185c8380d5a16a6efda353b62e0083a`; its unpacked Hex package builds
+the wrapper with `cargo check --locked` without a sibling checkout, and all 477
+Elixir tests pass against the pin. Further read-p95 work is optional
+extension-first optimization, not unfinished migration work. The rollout keeps
+`:rust` as the TimelessMetrics default for the next release or two while
+`:libsql` ships as the supported forward path.
 
 ## Per-session checklist
 
