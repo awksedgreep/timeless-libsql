@@ -100,19 +100,25 @@ sqlite3 demo.db \
 | `timeless_traces` | `(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes)` | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
 
 All three share the same lifecycle: inserts land in an in-memory buffer
-(queryable immediately, auto-flushed at a size threshold), `'flush'` encodes
-the buffer into compressed blocks riding the host transaction, and reads
-transparently merge flushed blocks with the live buffer. Commands use the
-FTS5 hidden-column idiom — an INSERT into the column named after the table:
+(queryable immediately, auto-flushed at a size threshold), and reads
+transparently merge flushed blocks with the live buffer. For logs and traces,
+`'flush'` deliberately writes cheap raw columnar blocks; compression and
+merging happen later through `'optimize'`. Commands use the FTS5 hidden-column
+idiom — an INSERT into the column named after the table:
 
 ```sql
 INSERT INTO metrics(metrics) VALUES ('flush');       -- make buffered points durable
 INSERT INTO metrics(metrics) VALUES ('compact');     -- merge small chunks
 INSERT INTO logs(logs)       VALUES ('optimize');    -- re-encode into larger, purer blocks
+INSERT INTO logs(logs)       VALUES ('optimize:8192'); -- one bounded background pass
 INSERT INTO traces(traces)   VALUES ('prune:<ns>');  -- drop everything older than <ts>
 ```
 
-(`prune:` takes the table's own ts unit: seconds / ms / ns.)
+`optimize:<max_source_entries>` is the logs form intended for background
+maintenance: it never splits a persisted block, processes at least one group,
+and leaves any remaining raw debt for the next pass. Plain `optimize` keeps its
+manual drain-all behavior. (`prune:` takes the table's own ts unit: seconds /
+ms / ns.)
 
 Retention can also be automatic — declared at CREATE, applied during the
 maintenance the engine already performs (no background threads; the vtab
@@ -395,6 +401,8 @@ SELECT * FROM timeless_series('metrics');  -- one row per series: name, labels,
                                            -- chunks, buffered  (~3ms for 1000 series)
 SELECT * FROM timeless_stats('metrics');   -- key/value health rows; works for
                                            -- logs and traces tables too
+SELECT * FROM timeless_stats('logs');      -- includes buffered/disk/raw/compressed
+                                           -- entries, blocks, and payload bytes
 SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
                                            -- sorted distinct label values —
                                            -- the dropdown-population query

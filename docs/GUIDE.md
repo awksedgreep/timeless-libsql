@@ -392,6 +392,7 @@ INSERT INTO metrics(metrics) VALUES ('flush');      -- persist the buffer (all t
 INSERT INTO metrics(metrics) VALUES ('compact');    -- metrics: merge small chunks
 INSERT INTO logs(logs)       VALUES ('optimize');   -- logs/traces: re-encode into
 INSERT INTO traces(traces)   VALUES ('optimize');   --   larger, better-compressed blocks
+INSERT INTO logs(logs)       VALUES ('optimize:8192'); -- logs: one bounded pass
 ```
 
 - **`flush`** — you know this one (section 3).
@@ -399,6 +400,11 @@ INSERT INTO traces(traces)   VALUES ('optimize');   --   larger, better-compress
   blocks, which cost a little disk and read speed. Run this occasionally
   (e.g. daily, or after a big backfill) to merge them into optimally
   compressed blocks. Never required for correctness.
+- **`optimize:<max_source_entries>` (logs)** — the host-friendly form for a
+  recurring maintenance loop. One call rewrites at most that many source
+  entries, except that a persisted block is never split and one oversized
+  group is allowed so the backlog cannot stall. Inspect `raw_entries` and
+  `raw_bytes` through `timeless_stats('logs')`, then repeat while debt remains.
 - **`prune:<ts>`** — retention. Drops all data older than the timestamp,
   which is given in *that table's* unit:
 

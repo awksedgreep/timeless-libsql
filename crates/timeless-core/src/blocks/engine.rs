@@ -712,12 +712,36 @@ impl BlockEngine {
     ///
     /// Returns (blocks_removed, blocks_written).
     pub fn optimize(&self) -> Result<(usize, usize), String> {
-        let out = self.optimize_inner()?;
+        let out = self.optimize_inner(None)?;
         self.apply_retention()?;
         Ok(out)
     }
 
-    fn optimize_inner(&self) -> Result<(usize, usize), String> {
+    /// Run one bounded compaction pass.
+    ///
+    /// `max_source_entries` limits how many entries are decoded and
+    /// rewritten during this call. A source block is never split, and the
+    /// first rewrite-worthy group is allowed to exceed the limit so every
+    /// positive budget makes progress. Callers can therefore run this from
+    /// a background maintenance loop without one command draining an
+    /// arbitrarily large raw backlog or monopolizing the SQLite writer.
+    ///
+    /// `optimize()` deliberately keeps its historical drain-all semantics
+    /// for manual maintenance. Hosts should normally call this bounded form
+    /// repeatedly while raw debt remains.
+    pub fn optimize_with_budget(
+        &self,
+        max_source_entries: usize,
+    ) -> Result<(usize, usize), String> {
+        if max_source_entries == 0 {
+            return Err("optimize budget must be greater than zero".into());
+        }
+        let out = self.optimize_inner(Some(max_source_entries))?;
+        self.apply_retention()?;
+        Ok(out)
+    }
+
+    fn optimize_inner(&self, max_source_entries: Option<usize>) -> Result<(usize, usize), String> {
         let _transition = self.transition_write();
         // Snapshot the index; plan on the copy (no lock held while we
         // read/decode block payloads).
@@ -808,10 +832,24 @@ impl BlockEngine {
         let mut adds: Vec<EncodedBlock> = Vec::new();
         let mut add_partitions: Vec<Option<u8>> = Vec::new();
         let mut removes: Vec<BlockLoc> = Vec::new();
+        let mut source_entries = 0usize;
         for (group, partition) in &groups {
             let worth_it = group.len() >= 2 || group.iter().any(|e| e.meta.codec == CODEC_RAW);
             if !worth_it {
                 continue;
+            }
+            let group_entries = group
+                .iter()
+                .map(|e| e.meta.entry_count as usize)
+                .sum::<usize>();
+            if let Some(limit) = max_source_entries {
+                // Never split a persisted block/group. Once this pass has
+                // selected work, leave an over-budget group for the next
+                // pass. The first group may exceed the budget so a single
+                // large raw block cannot stall maintenance forever.
+                if source_entries > 0 && source_entries.saturating_add(group_entries) > limit {
+                    break;
+                }
             }
             let mut entries: Vec<LogEntry> = Vec::new();
             for e in group {
@@ -824,6 +862,7 @@ impl BlockEngine {
             adds.push(EncodedBlock { meta, data, terms });
             add_partitions.push(*partition);
             removes.extend(group.iter().map(|e| e.loc));
+            source_entries = source_entries.saturating_add(group_entries);
         }
         if adds.is_empty() {
             return Ok((0, 0));

@@ -26,7 +26,9 @@
 //!              INSERT shorthand: a non-NULL value is merged into the
 //!              metadata pairs.
 //! Commands:    INSERT INTO logs(logs) VALUES ('flush' | 'optimize' |
-//!              'prune:<ts>') — the same FTS5 idiom as metrics.
+//!              'optimize:<max_source_entries>' | 'prune:<ts>') — the
+//!              same FTS5 idiom as metrics. The bounded optimize form is
+//!              intended for background maintenance loops.
 //! Read path:   flushed blocks and the in-memory buffer are merged, so
 //!              entries are queryable immediately after INSERT and
 //!              durable (as durable as the enclosing transaction) after
@@ -437,7 +439,8 @@ impl LogsTab {
         Ok(count as i64)
     }
 
-    /// Hidden-column command insert ('flush' | 'optimize' | 'prune:<ts>').
+    /// Hidden-column command insert ('flush' | 'optimize' |
+    /// 'optimize:<max_source_entries>' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "flush" {
             // Drain the buffer into one RAW block (+ terms). Durable as
@@ -447,6 +450,19 @@ impl LogsTab {
             // Two-tier compaction: raw → zstd-columnar, plus merge of
             // small compressed blocks (span-capped) — one atomic swap.
             self.shared.engine.optimize().map_err(module_err)?;
+        } else if let Some(budget_str) = cmd.strip_prefix("optimize:") {
+            // One bounded background-maintenance pass. Manual `optimize`
+            // keeps the historical drain-all behavior; hosts can loop this
+            // form while timeless_stats reports raw debt.
+            let budget: usize = budget_str.trim().parse().map_err(|_| {
+                module_err(format!(
+                    "optimize: expected 'optimize:<positive max_source_entries>', got {cmd:?}"
+                ))
+            })?;
+            self.shared
+                .engine
+                .optimize_with_budget(budget)
+                .map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             // Retention: whole-block deletes by ts_max, term rows
             // removed in the same operation.
@@ -457,7 +473,8 @@ impl LogsTab {
             self.shared.engine.prune(ts).map_err(module_err)?;
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'optimize', 'prune:<ts>'"
+                "unknown command {cmd:?}; supported: 'flush', 'optimize', \
+                 'optimize:<max_source_entries>', 'prune:<ts>'"
             )));
         }
         Ok(0)

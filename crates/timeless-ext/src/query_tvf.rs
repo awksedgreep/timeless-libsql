@@ -3569,6 +3569,38 @@ fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
     Ok(conn.query_row(&sql, [], |r| r.get(0))?)
 }
 
+#[derive(Clone, Copy)]
+struct BlockStorageStats {
+    disk_entries: i64,
+    raw_entries: i64,
+    raw_bytes: i64,
+    compressed_bytes: i64,
+}
+
+/// Storage-lifecycle counters derived directly from the shadow block
+/// table. These make raw debt and compression progress observable to
+/// embedded SQLite/libSQL users without requiring knowledge of the
+/// shadow schema or decoding any payload blobs.
+fn block_storage_stats(database: &str, table: &str) -> Result<BlockStorageStats> {
+    let conn = shared::current_conn().map_err(module_err)?;
+    let blocks = crate::sql_ident::qualified_shadow(database, table, "blocks");
+    let sql = format!(
+        "SELECT COALESCE(SUM(entry_count), 0), \
+                COALESCE(SUM(CASE WHEN codec = 1 THEN entry_count ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN codec = 1 THEN length(data) ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN codec <> 1 THEN length(data) ELSE 0 END), 0) \
+         FROM {blocks}"
+    );
+    conn.query_row(&sql, [], |row| {
+        Ok(BlockStorageStats {
+            disk_entries: row.get(0)?,
+            raw_entries: row.get(1)?,
+            raw_bytes: row.get(2)?,
+            compressed_bytes: row.get(3)?,
+        })
+    })
+}
+
 unsafe impl VTabCursor for StatsCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         use rusqlite::types::Value;
@@ -3629,14 +3661,27 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let _read = read_permit(&shared, self.db, &table)?;
                 let (blocks, raw_blocks, buffered) = shared.engine.stats();
                 let (ts_min, ts_max) = shared.engine.ts_range();
+                let storage = block_storage_stats(&database, &table)?;
                 rows.extend([
                     ("blocks", Value::Integer(blocks as i64)),
                     ("raw_blocks", Value::Integer(raw_blocks as i64)),
+                    (
+                        "compressed_blocks",
+                        Value::Integer(blocks.saturating_sub(raw_blocks) as i64),
+                    ),
+                    ("disk_entries", Value::Integer(storage.disk_entries)),
+                    ("raw_entries", Value::Integer(storage.raw_entries)),
+                    (
+                        "compressed_entries",
+                        Value::Integer(storage.disk_entries - storage.raw_entries),
+                    ),
                     ("buffered_entries", Value::Integer(buffered as i64)),
                     (
                         "bytes_on_disk",
-                        Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
+                        Value::Integer(storage.raw_bytes + storage.compressed_bytes),
                     ),
+                    ("raw_bytes", Value::Integer(storage.raw_bytes)),
+                    ("compressed_bytes", Value::Integer(storage.compressed_bytes)),
                     (
                         "terms",
                         Value::Integer(count_rows(&database, &table, "terms")?),

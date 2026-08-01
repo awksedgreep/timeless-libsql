@@ -2940,6 +2940,58 @@ check_eq "independent TAF1/TLF1 decoders match rows and preserve publication" \
 $'frame_detection|ok\naggregate_frames|5|ok\nlatest_frame|ok\nframe_publication|ok'
 
 # ---------------------------------------------------------------------------
+echo "== section 42: bounded logs maintenance + lifecycle stats =="
+# Three time-separated raw blocks cannot merge under the logs table's 1h
+# span cap. A five-entry optimize budget must therefore rewrite exactly one
+# block per call rather than draining all raw debt. The public stats TVF is
+# the only observability used here; direct users need not know shadow SQL.
+LIFECYCLE_DB="$TMP/logs_bounded_optimize.db"
+got=$(sqlite3 "$LIFECYCLE_DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');
+WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<4)
+INSERT INTO logs(ts,level,message,metadata)
+SELECT x,'info','first','{"service":"api"}' FROM n;
+INSERT INTO logs(logs) VALUES ('flush');
+WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<4)
+INSERT INTO logs(ts,level,message,metadata)
+SELECT 3600001+x,'info','second','{"service":"api"}' FROM n;
+INSERT INTO logs(logs) VALUES ('flush');
+WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<4)
+INSERT INTO logs(ts,level,message,metadata)
+SELECT 7200002+x,'info','third','{"service":"api"}' FROM n;
+INSERT INTO logs(logs) VALUES ('flush');
+INSERT INTO logs(logs) VALUES ('optimize:5');
+SELECT 'pass1',
+  (SELECT value FROM timeless_stats('logs') WHERE key='raw_blocks'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='compressed_blocks'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='disk_entries'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='raw_entries'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='compressed_entries'),
+  COUNT(*) FROM logs;
+INSERT INTO logs(logs) VALUES ('optimize:5');
+INSERT INTO logs(logs) VALUES ('optimize:5');
+SELECT 'drained',
+  (SELECT value FROM timeless_stats('logs') WHERE key='raw_blocks'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='compressed_blocks'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='raw_entries'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='compressed_entries'),
+  COUNT(*) FROM logs;
+SQL
+)
+check_eq "bounded optimize progresses one group at a time with exact lifecycle stats" \
+  "$got" \
+$'pass1|2|1|15|10|5|15\ndrained|0|3|0|15|15'
+
+err=$(sqlite3 "$LIFECYCLE_DB" ".load $EXT" \
+  "INSERT INTO logs(logs) VALUES ('optimize:0');" 2>&1 || true)
+if [[ "$err" == *"optimize budget must be greater than zero"* ]]; then
+  pass "zero optimize budget rejected"
+else
+  fail "zero optimize budget rejected with unexpected message: $err"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"

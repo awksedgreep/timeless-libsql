@@ -974,6 +974,55 @@ fn optimize_leaves_lone_small_zstd_blocks_alone() {
     assert_eq!(engine.optimize().unwrap(), (0, 0));
 }
 
+#[test]
+fn bounded_optimize_drains_raw_debt_one_entry_budget_at_a_time() {
+    let cfg = BlockEngineConfig {
+        // Each ten-entry raw block becomes its own rewrite group. That
+        // makes a ten-entry maintenance budget observably select one
+        // group per pass rather than draining the whole backlog.
+        merge_target_entries: 10,
+        ..config(&[])
+    };
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), cfg).unwrap();
+
+    for batch in 0..3i64 {
+        for i in 0..10i64 {
+            engine
+                .push(entry(batch * 100 + i, 1, &format!("m-{batch}-{i}"), &[]))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+    }
+    assert_eq!(engine.stats(), (3, 3, 0));
+
+    assert_eq!(engine.optimize_with_budget(10).unwrap(), (1, 1));
+    assert_eq!(engine.stats(), (3, 2, 0));
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 30);
+
+    assert_eq!(engine.optimize_with_budget(10).unwrap(), (1, 1));
+    assert_eq!(engine.stats(), (3, 1, 0));
+
+    assert_eq!(engine.optimize_with_budget(10).unwrap(), (1, 1));
+    assert_eq!(engine.stats(), (3, 0, 0));
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 30);
+}
+
+#[test]
+fn bounded_optimize_never_splits_or_stalls_on_an_oversized_block() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    for i in 0..20i64 {
+        engine.push(entry(i, 1, "oversized", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+
+    // The only source block is larger than the budget. It is still
+    // rewritten whole so repeated bounded maintenance always progresses.
+    assert_eq!(engine.optimize_with_budget(5).unwrap(), (1, 1));
+    assert_eq!(engine.stats(), (1, 0, 0));
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 20);
+    assert!(engine.optimize_with_budget(0).is_err());
+}
+
 // ---------------------------------------------------------------------------
 // Buffer + flushed merge
 // ---------------------------------------------------------------------------

@@ -1,0 +1,22 @@
+[workspace]
+
+[package]
+name = "timeless-logs-storage-poc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "timeless_logs_storage_poc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "logs-lifecycle"
+path = "src/bin/logs_lifecycle.rs"
+
+[dependencies]
+rusqlite = { version = "0.40", features = ["bundled", "load_extension"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
