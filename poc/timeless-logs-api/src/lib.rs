@@ -33,10 +33,10 @@ impl Default for Config {
             extension_path: PathBuf::new(),
             database_path: PathBuf::new(),
             listen: "127.0.0.1:19429".parse().unwrap(),
-            reader_connections: std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(4)
-                .clamp(1, 8),
+            // Two readers gave the best latency/memory balance in the pinned
+            // mixed workload. Larger pools did not improve completed writes
+            // and duplicate SQLite/extension working sets unnecessarily.
+            reader_connections: 2,
             command_queue_batches: 256,
             // Host orchestration only: the extension remains passive at low
             // volume, just as it does for every direct SQLite user.
@@ -106,4 +106,14 @@ pub async fn run(config: Config) -> Result<(), String> {
     optimize_task.abort();
     let shutdown = storage.shutdown().await;
     served.and(shutdown)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn default_reader_pool_is_the_measured_embedded_balance() {
+        assert_eq!(Config::default().reader_connections, 2);
+    }
 }

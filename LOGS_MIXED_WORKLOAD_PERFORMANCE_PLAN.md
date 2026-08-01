@@ -333,17 +333,51 @@ Exit criterion: **met.**
 
 ## Session 7 — API scheduling and final comparison
 
-- [ ] Sweep one, two, four, and eight SQLite readers after extension fixes.
-- [ ] If necessary, apply API query admission fairness using observable writer
+- [x] Sweep one, two, four, and eight SQLite readers after extension fixes.
+- [x] If necessary, apply API query admission fairness using observable writer
       backlog; do not add a second storage buffer or flush threshold.
-- [ ] Consider grouping multiple already-admitted SQLite statements into one
+- [x] Consider grouping multiple already-admitted SQLite statements into one
       host transaction only as a separately measured API optimization. It must
       not change the extension's 8,192-entry buffer contract.
-- [ ] Run the full pinned matrix and compare completed ingestion, query
+- [x] Run the full pinned matrix and compare completed ingestion, query
       latency, optimize pauses, disk size, and memory with the Elixir API.
 
+The reader sweep found a narrow optimum at two SQLite readers. Relative to one
+reader it reduced final-step query p99 from 383ms to 261ms. Four readers only
+reduced that to 251ms while raising process HWM from 62,340KiB to 97,088KiB;
+eight regressed query p99 to 287ms and raised HWM to 127,888KiB. Completed
+ingestion remained 468–478K entries/s with zero final queue and zero HTTP
+errors across the sweep. The API therefore defaults to two readers and keeps
+`TIMELESS_LOGS_READER_CONNECTIONS` as an explicit deployment override.
+
+No new admission layer was added. With the shared Session 5 query primitives,
+the writer queue was empty at every sweep boundary, writer timeouts remained
+zero, and completed ingestion was flat across reader counts. Grouping host
+inserts into a second transaction policy was also rejected: there is no
+measured write bottleneck for it to solve, and it would move the API away from
+the transaction behavior direct SQLite callers exercise.
+
+In the final raw-storage matrix, Rust completed 466–472K entries/s and Elixir
+467–489K. With one/two query workers, Rust query p99 was 234/261ms versus
+1.25/1.61s for Elixir. Rust HWM was 73,436/62,340KiB versus
+1,479,264/1,663,480KiB. All runs completed every admitted entry with no final
+queue or errors. At roughly 3.1M entries, the Rust raw payload was 472MB in
+1,496 blocks versus Elixir's 698MB in 3,091 blocks.
+
+The retained two-reader datasets were then drained through each established
+compactor. Rust compressed 3,104,500 entries in nine 32MiB-budgeted turns,
+using 5.55s aggregate optimize time and 32,404KiB process HWM; logical payload
+fell from 472.2MB to 27.6MB. Elixir compressed 3,103,502 entries in 13.90s and
+863,576KiB HWM; payload fell from 697.8MB to 46.8MB. Rust's SQLite file stayed
+at its 477.9MB high-water allocation after logical compaction, while Elixir's
+block files plus index occupied 223.9MB. Logical payload and physical footprint
+are therefore reported separately rather than treating optimize as `VACUUM`.
+
 Exit criterion: a production-boundary decision based on completed work and
-bounded tail latency, not queue admission alone.
+bounded tail latency, not queue admission alone. **Met.** The Rust API is the
+successful data-plane boundary for the POC, with two readers as the measured
+default. The unchanged Elixir API remains the control implementation; cluster
+administration and the Phoenix UI are outside this POC.
 
 ## Deferred decision gate — flush partition implementation
 

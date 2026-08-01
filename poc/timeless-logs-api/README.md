@@ -44,12 +44,20 @@ poc/timeless-logs-api/target/release/timeless-logs-api \
   127.0.0.1:19429
 ```
 
+`TIMELESS_LOGS_READER_CONNECTIONS` selects the positive SQLite reader-pool
+size. The measured default is two: one reader materially increased query tail
+latency, while four and eight added memory without a useful throughput or tail
+latency return. This is a deployment control only; it does not change query or
+storage semantics.
+
 The API uses one SQLite writer and a small pool of SQLite readers. Retryable
 extension publication conflicts wait inside the API rather than leaking as
 HTTP 500 responses. Health and stats expose admitted/completed work, queue
 depth and age, API phase timers, extension flush/query/optimize counters, and
 read-permit/writer-wait counters so admission cannot be confused with
-completed SQLite ingestion.
+completed SQLite ingestion. `index_size` is the SQLite page bytes allocated to
+the logs posting/timestamp/meta structures; `term_postings` is their posting
+row count. These are deliberately separate units.
 
 The ignored end-to-end contract test pins the storage boundary explicitly:
 
@@ -128,6 +136,23 @@ benchmark, entry rewrite amplification fell from 7.755x to 2.414x, aggregate
 optimize time fell 61.2%, optimize p95 fell 40.6%, and compressed payload grew
 only 2.1%. The API merely schedules that public capability from observed
 backlog bytes.
+
+Session 7 selects two SQLite readers as the measured default. In the pinned
+1/2/4/8-reader sweep, two cut query p99 from 383ms to 261ms relative to one;
+four saved only another 10ms while adding 34MiB HWM, and eight regressed to
+287ms while reaching 125MiB HWM. Completed ingestion stayed 468–478K entries/s
+with no final queue or errors, so neither an API query-admission layer nor
+host-side transaction grouping had a measured problem to solve.
+
+Against the established Elixir API at two query workers, Rust completed
+470.2K versus 466.9K entries/s, query p99 was 261ms versus 1.61s, and process
+HWM was 62,340KiB versus 1,663,480KiB. A retained ~3.1M-entry maintenance
+drain compressed the Rust payload to 27.6MB in 5.55s aggregate optimize work
+and 32,404KiB HWM; Elixir produced 46.8MB in 13.90s and 863,576KiB HWM. SQLite
+retains freed pages until vacuum/reuse: Rust's physical file remained 477.9MB
+versus Elixir's 223.9MB block-plus-index footprint after drain. The stats
+intentionally distinguish logical compressed payload from database file
+high-water.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

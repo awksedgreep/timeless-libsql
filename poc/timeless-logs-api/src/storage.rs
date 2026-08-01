@@ -46,6 +46,7 @@ pub struct StorageStats {
     pub total_bytes: i64,
     pub disk_size: i64,
     pub index_size: i64,
+    pub term_postings: i64,
     pub oldest_timestamp: Option<i64>,
     pub newest_timestamp: Option<i64>,
     pub raw_blocks: i64,
@@ -801,7 +802,21 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
             |row| row.get(0),
         )
         .map_err(|e| format!("read database size: {e}"))?;
-    let terms: i64 = conn
+    let index_bytes: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(pgsize), 0)
+               FROM dbstat
+              WHERE name IN (
+                'logs_terms',
+                'logs_blocks_ts',
+                'logs_meta',
+                'sqlite_autoindex_logs_meta_1'
+              )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read database index size: {e}"))?;
+    let term_postings: i64 = conn
         .query_row("SELECT COUNT(*) FROM logs_terms", [], |row| row.get(0))
         .map_err(|e| format!("read term count: {e}"))?;
     Ok(StorageStats {
@@ -809,7 +824,8 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         total_entries: disk_entries + buffered,
         total_bytes: bytes,
         disk_size: page_bytes,
-        index_size: terms,
+        index_size: index_bytes,
+        term_postings,
         oldest_timestamp: oldest,
         newest_timestamp: newest,
         raw_blocks,
@@ -973,5 +989,22 @@ mod tests {
             optimize_entry_budget(100_000, 0, 0),
             OPTIMIZE_TARGET_ENTRIES
         );
+    }
+
+    #[test]
+    fn bundled_sqlite_exposes_page_accounting_for_compatible_index_bytes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE postings(term TEXT PRIMARY KEY)", [])
+            .unwrap();
+        conn.execute("INSERT INTO postings VALUES ('level:error')", [])
+            .unwrap();
+        let bytes: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name = 'postings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(bytes > 0);
     }
 }
