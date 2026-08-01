@@ -175,23 +175,61 @@ generation remains readable.
 
 Exit criterion: query CPU no longer blocks the writer, and snapshot ownership
 does not accumulate payload bytes on SQLite. Whole-result materialization is
-measured separately and is the blocking memory issue for Session 4.
+measured separately and was the blocking memory issue taken into Session 4.
 
 ## Session 4 — Push bounded query intent into the extension
 
-- [ ] Teach `xBestIndex`/`xFilter` to accept `LIMIT` and `OFFSET`.
-- [ ] Consume a supported single-column `ORDER BY ts ASC|DESC` only when the
+- [x] Teach `xBestIndex`/`xFilter` to accept `LIMIT` and `OFFSET`.
+- [x] Consume a supported single-column `ORDER BY ts ASC|DESC` only when the
       engine guarantees that order exactly.
-- [ ] Add ascending/descending bounded query execution. Traverse blocks in
+- [x] Add ascending/descending bounded query execution. Traverse blocks in
       time order and stop when remaining block bounds cannot displace the
       current top `limit + offset` matches.
-- [ ] Keep SQLite rechecks until every pushed constraint has exact semantics.
-- [ ] Add tests for overlapping block ranges, duplicate timestamps, buffered
+- [x] Keep SQLite rechecks until every pushed constraint has exact semantics.
+- [x] Add tests for overlapping block ranges, duplicate timestamps, buffered
       entries, sparse matches, offsets, and both orders.
 
 Exit criterion: a latest-100 query materializes approximately the rows it
 needs rather than the complete time-window result, with byte-for-byte API
 parity.
+
+The extension now claims SQLite's special LIMIT/OFFSET constraints only for a
+single exact `ORDER BY ts ASC|DESC` plan. It returns the ordered
+`LIMIT + OFFSET` prefix, leaves LIMIT/OFFSET and row predicates for SQLite to
+recheck, and declines the bounded plan for strict timestamp inequalities,
+message LIKE, duplicate predicates, or any unsupported filter. This makes
+partial pushdown conservative: a row that SQLite might reject can never
+displace a valid row from the bounded window.
+
+The engine keeps a bounded heap with deterministic equal-timestamp ordering.
+Candidate blocks are traversed by `ts_min` ascending or `ts_max` descending;
+once the next block's bound cannot displace the worst retained row, the rest
+are skipped without payload reads or decoding. Exact tests cover overlapping
+ranges, duplicate timestamps across blocks and the buffer, sparse metadata
+matches, zero and oversized limits, offsets, both directions, and the planner
+fallbacks. The complete Rust workspace, CLI/oracle/crash suite, and the
+extension-backed 8,192-entry API test pass.
+
+On the final two-reader database (3,109,000 raw entries), an isolated
+latest-100 query took 77.91ms inside the engine. It returned 100 rows, decoded
+141,000 rather than 3,109,000 entries, read 20.45MiB, and skipped 1,424 of
+1,492 candidate blocks. The remaining 68 blocks overlap the newest timestamp
+in this deliberately dense 21-second benchmark; their metadata bounds cannot
+soundly exclude them.
+
+The pinned mixed workload remained write-healthy (458.8K completed entries/s
+with one reader and 467.3K with two, zero queue at every boundary), while
+query p99 improved from 2.40s to 1.83s and from 2.09s to 1.95s respectively.
+The bounded calls returned no more than 100 rows each and skipped 8,087 blocks
+across 92 one-reader calls and 13,415 across 179 two-reader calls.
+
+Overall process HWM was still 5.66GiB with one reader and 6.84GiB with two.
+This does not come from the bounded result sets: the workload intentionally
+executes one unbounded native-count candidate scan and one SQLite-rechecked
+substring scan in every five queries. Those shapes still materialized
+millions of `LogEntry` values and dominate allocator high-water behavior.
+Session 4's limited-row exit criterion is met; Session 5 is now the explicit
+whole-workload embedded-memory gate.
 
 ## Session 5 — Native exact filtering and counts
 

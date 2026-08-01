@@ -17,7 +17,7 @@ use super::codec::{
     decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
     PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS,
 };
-use super::engine::{BlockEngine, BlockEngineConfig, LogQuery};
+use super::engine::{BlockEngine, BlockEngineConfig, LogQuery, LogQueryOrder};
 use super::mem::MemBlockStore;
 use super::{level_from_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry};
 
@@ -1005,6 +1005,121 @@ fn buffered_and_flushed_entries_merge_sorted() {
     let got = engine.query(&q).unwrap();
     let msgs: Vec<&str> = got.iter().map(|e| e.message.as_str()).collect();
     assert_eq!(msgs, ["buffered-20", "flushed-30"]);
+}
+
+#[test]
+fn bounded_query_is_exact_for_overlaps_ties_buffer_and_both_orders() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&["service"])).unwrap();
+
+    // Two overlapping persisted ranges with duplicate timestamps, followed by
+    // a matching in-memory generation. Canonical tie order is block creation
+    // order, row order, then buffered insertion order.
+    for (ts, message, service) in [
+        (10, "b0-10", "api"),
+        (30, "b0-30-a", "api"),
+        (30, "b0-30-b", "web"),
+    ] {
+        engine
+            .push(entry(ts, 1, message, &[("service", service)]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    for (ts, message, service) in [
+        (5, "b1-05", "api"),
+        (20, "b1-20", "web"),
+        (30, "b1-30", "api"),
+        (40, "b1-40", "api"),
+    ] {
+        engine
+            .push(entry(ts, 1, message, &[("service", service)]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    for (ts, message, service) in [
+        (0, "buf-00", "api"),
+        (30, "buf-30", "api"),
+        (50, "buf-50", "web"),
+    ] {
+        engine
+            .push(entry(ts, 1, message, &[("service", service)]))
+            .unwrap();
+    }
+
+    let asc = [
+        "buf-00", "b1-05", "b0-10", "b1-20", "b0-30-a", "b0-30-b", "b1-30", "buf-30", "b1-40",
+        "buf-50",
+    ];
+    let desc = [
+        "buf-50", "b1-40", "b0-30-a", "b0-30-b", "b1-30", "buf-30", "b1-20", "b0-10", "b1-05",
+        "buf-00",
+    ];
+    for capacity in [0, 1, 4, 6, 10, 20, usize::MAX] {
+        let got = engine
+            .query_bounded(&full_range_query(), LogQueryOrder::Asc, capacity)
+            .unwrap();
+        assert_eq!(
+            got.iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            asc[..capacity.min(asc.len())]
+        );
+
+        let got = engine
+            .query_bounded(&full_range_query(), LogQueryOrder::Desc, capacity)
+            .unwrap();
+        assert_eq!(
+            got.iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            desc[..capacity.min(desc.len())]
+        );
+    }
+
+    // Sparse exact filters are applied before a row can occupy the bound.
+    let api = LogQuery {
+        metadata_eq: vec![("service".into(), "api".into())],
+        ..full_range_query()
+    };
+    let got = engine.query_bounded(&api, LogQueryOrder::Desc, 4).unwrap();
+    assert_eq!(
+        got.iter()
+            .map(|entry| entry.message.as_str())
+            .collect::<Vec<_>>(),
+        ["b1-40", "b0-30-a", "b1-30", "buf-30"]
+    );
+}
+
+#[test]
+fn bounded_query_stops_on_block_bounds_and_reports_bounded_work() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    for base in [0i64, 100, 200] {
+        for i in 0..10 {
+            engine
+                .push(entry(base + i, 1, &format!("disk-{base}-{i}"), &[]))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+    }
+    engine.push(entry(1_000, 1, "buffer-1000", &[])).unwrap();
+    engine.push(entry(1_001, 1, "buffer-1001", &[])).unwrap();
+
+    let got = engine
+        .query_bounded(&full_range_query(), LogQueryOrder::Desc, 2)
+        .unwrap();
+    assert_eq!(
+        got.iter()
+            .map(|entry| entry.message.as_str())
+            .collect::<Vec<_>>(),
+        ["buffer-1001", "buffer-1000"]
+    );
+    let profile = engine.profile();
+    assert_eq!(profile.query_bounded_count, 1);
+    assert_eq!(profile.query_bounded_requested_entries, 2);
+    assert_eq!(profile.query_bounded_max_entries, 2);
+    assert_eq!(profile.query_blocks_skipped_by_bound, 3);
+    assert_eq!(profile.query_decoded_entries, 0);
+    assert_eq!(profile.query_matched_entries, 2);
+    assert_eq!(profile.query_returned_entries, 2);
 }
 
 // ---------------------------------------------------------------------------

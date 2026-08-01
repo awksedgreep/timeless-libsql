@@ -83,10 +83,19 @@ locations readable while the extension streams one payload at a time, so this
 does not retain every candidate payload in memory. With one and two query
 workers the API reaches 479.7K and 463.3K completed entries/s respectively.
 
+Session 4 pushes exact `ORDER BY ts ASC|DESC LIMIT/OFFSET` windows through the
+virtual-table planner into a bounded engine query. The engine retains at most
+`LIMIT + OFFSET` entries and stops on block timestamp bounds. An isolated
+latest-100 over 3.109M raw entries returned 100 engine rows in 77.91ms and
+skipped 1,424 of 1,492 candidate blocks. Strict bounds and message LIKE remain
+on the conservative unbounded path until exact filtering moves into the
+extension; native count is likewise Session 5 work.
+
 The POC still uses the unchanged storage mechanism. No alternate buffer size,
 block layout, partition scheme, or compaction policy was introduced to hide
-the result. The next measured change is bounded `ORDER BY`/`LIMIT` pushdown;
-the current cursor still materializes millions of rows that SQLite discards.
+the result. The next measured change is native exact message filtering and
+counts. Those two unbounded shapes still dominate peak memory in the mixed
+workload even though limited row queries are now bounded.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

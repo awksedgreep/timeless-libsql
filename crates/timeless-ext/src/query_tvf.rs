@@ -3728,8 +3728,28 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(profile.query_decoded_entries as i64),
                     ),
                     (
+                        "query_matched_entries",
+                        Value::Integer(profile.query_matched_entries as i64),
+                    ),
+                    (
                         "query_returned_entries",
                         Value::Integer(profile.query_returned_entries as i64),
+                    ),
+                    (
+                        "query_bounded_count",
+                        Value::Integer(profile.query_bounded_count as i64),
+                    ),
+                    (
+                        "query_bounded_requested_entries",
+                        Value::Integer(profile.query_bounded_requested_entries as i64),
+                    ),
+                    (
+                        "query_bounded_max_entries",
+                        Value::Integer(profile.query_bounded_max_entries as i64),
+                    ),
+                    (
+                        "query_blocks_skipped_by_bound",
+                        Value::Integer(profile.query_blocks_skipped_by_bound as i64),
                     ),
                     (
                         "optimize_count",

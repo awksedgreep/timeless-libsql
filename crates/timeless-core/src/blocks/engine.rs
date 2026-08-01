@@ -10,7 +10,8 @@
 //! re-enter SQLite on the host connection whose mutex the vtab callback
 //! thread holds; a worker thread touching the store would deadlock.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -91,7 +92,12 @@ pub struct BlockEngineProfileSnapshot {
     pub query_payload_bytes_read: u64,
     pub query_candidate_blocks: u64,
     pub query_decoded_entries: u64,
+    pub query_matched_entries: u64,
     pub query_returned_entries: u64,
+    pub query_bounded_count: u64,
+    pub query_bounded_requested_entries: u64,
+    pub query_bounded_max_entries: u64,
+    pub query_blocks_skipped_by_bound: u64,
     pub optimize_count: u64,
     pub optimize_total_ns: u64,
     pub optimize_blocks_removed: u64,
@@ -122,7 +128,12 @@ struct BlockEngineProfile {
     query_payload_bytes_read: AtomicU64,
     query_candidate_blocks: AtomicU64,
     query_decoded_entries: AtomicU64,
+    query_matched_entries: AtomicU64,
     query_returned_entries: AtomicU64,
+    query_bounded_count: AtomicU64,
+    query_bounded_requested_entries: AtomicU64,
+    query_bounded_max_entries: AtomicU64,
+    query_blocks_skipped_by_bound: AtomicU64,
     optimize_count: AtomicU64,
     optimize_total_ns: AtomicU64,
     optimize_blocks_removed: AtomicU64,
@@ -155,7 +166,12 @@ impl BlockEngineProfile {
             query_payload_bytes_read: load(&self.query_payload_bytes_read),
             query_candidate_blocks: load(&self.query_candidate_blocks),
             query_decoded_entries: load(&self.query_decoded_entries),
+            query_matched_entries: load(&self.query_matched_entries),
             query_returned_entries: load(&self.query_returned_entries),
+            query_bounded_count: load(&self.query_bounded_count),
+            query_bounded_requested_entries: load(&self.query_bounded_requested_entries),
+            query_bounded_max_entries: load(&self.query_bounded_max_entries),
+            query_blocks_skipped_by_bound: load(&self.query_blocks_skipped_by_bound),
             optimize_count: load(&self.optimize_count),
             optimize_total_ns: load(&self.optimize_total_ns),
             optimize_blocks_removed: load(&self.optimize_blocks_removed),
@@ -194,13 +210,78 @@ pub struct LogQuery {
     pub message_like_prune: Option<String>,
 }
 
+/// Ordering guaranteed by the bounded log query path. Equal timestamps keep
+/// their canonical engine sequence in both directions, making pagination
+/// deterministic without inventing a user-visible secondary SQL key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogQueryOrder {
+    Asc,
+    Desc,
+}
+
+struct LogQueryBlockSnapshot {
+    payload: Option<Vec<u8>>,
+    location: Option<BlockLoc>,
+    meta: BlockMeta,
+    sequence: usize,
+}
+
 struct LogQuerySnapshot {
-    payloads: Vec<Vec<u8>>,
-    locations: Vec<BlockLoc>,
+    blocks: Vec<LogQueryBlockSnapshot>,
     buffered: Vec<LogEntry>,
     candidate_blocks: u64,
     payload_bytes: u64,
     stable_locations: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct QuerySequence {
+    source: usize,
+    row: usize,
+}
+
+struct BoundedEntry {
+    entry: LogEntry,
+    sequence: QuerySequence,
+    order: LogQueryOrder,
+}
+
+impl PartialEq for BoundedEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.entry.ts == other.entry.ts
+            && self.sequence == other.sequence
+            && self.order == other.order
+    }
+}
+
+impl Eq for BoundedEntry {}
+
+impl PartialOrd for BoundedEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BoundedEntry {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        debug_assert_eq!(self.order, other.order);
+        match self.order {
+            // BinaryHeap keeps the greatest item at the root. For ASC the
+            // greatest key is the worst retained row.
+            LogQueryOrder::Asc => self
+                .entry
+                .ts
+                .cmp(&other.entry.ts)
+                .then_with(|| self.sequence.cmp(&other.sequence)),
+            // For DESC, an older timestamp is worse. At equal timestamps the
+            // later canonical row is worse, so ties remain stable.
+            LogQueryOrder::Desc => other
+                .entry
+                .ts
+                .cmp(&self.entry.ts)
+                .then_with(|| self.sequence.cmp(&other.sequence)),
+        }
+    }
 }
 
 /// One entry in the engine's in-memory block index: the store-persisted
@@ -1151,6 +1232,20 @@ impl BlockEngine {
         self.query_after_snapshot(q, || {})
     }
 
+    /// Return at most `max_entries` rows in exact timestamp order. This is
+    /// the engine half of SQLite's `ORDER BY ts ... LIMIT/OFFSET` pushdown:
+    /// callers pass `LIMIT + OFFSET`, then SQLite may apply OFFSET and LIMIT
+    /// to this already-bounded prefix. Memory is O(max_entries), and block
+    /// bounds stop the scan once later blocks cannot enter the prefix.
+    pub fn query_bounded(
+        &self,
+        q: &LogQuery,
+        order: LogQueryOrder,
+        max_entries: usize,
+    ) -> Result<Vec<LogEntry>, String> {
+        self.query_ordered_after_snapshot(q, order, Some(max_entries), || {})
+    }
+
     /// Query with a synchronous notification at the ownership boundary.
     ///
     /// `after_snapshot` runs after candidate payload ownership (stable store
@@ -1169,6 +1264,23 @@ impl BlockEngine {
     where
         F: FnOnce(),
     {
+        self.query_ordered_after_snapshot(q, LogQueryOrder::Asc, None, after_snapshot)
+    }
+
+    /// Ordered query with an optional result-window bound and a synchronous
+    /// notification at the snapshot ownership boundary. `None` preserves the
+    /// original unbounded query behavior; `Some(n)` retains only the first n
+    /// rows in the requested order.
+    pub fn query_ordered_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        order: LogQueryOrder,
+        max_entries: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<Vec<LogEntry>, String>
+    where
+        F: FnOnce(),
+    {
         let started = Instant::now();
         let snapshot_started = Instant::now();
         let snapshot = self.snapshot_query(q)?;
@@ -1182,31 +1294,137 @@ impl BlockEngine {
         let stable_locations = snapshot.stable_locations;
         let mut payload_bytes_read = snapshot_payload_bytes;
         let mut decoded_entries = 0u64;
-        let mut out: Vec<LogEntry> = Vec::new();
-        for bytes in snapshot.payloads {
-            let entries = decode_block(&bytes)?;
-            decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
-            for entry in entries {
-                if entry_matches(&entry, q) {
-                    out.push(entry);
+        let mut matched_entries = 0u64;
+        let mut blocks_skipped_by_bound = 0u64;
+        let mut out: Vec<LogEntry>;
+
+        if let Some(capacity) = max_entries {
+            let mut blocks = snapshot.blocks;
+            match order {
+                LogQueryOrder::Asc => {
+                    blocks.sort_by_key(|block| (block.meta.ts_min, block.sequence))
+                }
+                LogQueryOrder::Desc => blocks.sort_by(|a, b| {
+                    b.meta
+                        .ts_max
+                        .cmp(&a.meta.ts_max)
+                        .then_with(|| a.sequence.cmp(&b.sequence))
+                }),
+            }
+
+            // Do not reserve the SQL LIMIT up front: direct callers may use a
+            // huge sentinel limit, and allocation must follow actual matches
+            // rather than an untrusted integer in the statement.
+            let mut heap: BinaryHeap<BoundedEntry> = BinaryHeap::new();
+            let buffered_source = candidate_blocks as usize;
+            for (row, entry) in snapshot.buffered.into_iter().enumerate() {
+                matched_entries = matched_entries.saturating_add(1);
+                Self::retain_bounded(
+                    &mut heap,
+                    BoundedEntry {
+                        entry,
+                        sequence: QuerySequence {
+                            source: buffered_source,
+                            row,
+                        },
+                        order,
+                    },
+                    capacity,
+                );
+            }
+
+            let block_count = blocks.len();
+            for (position, block) in blocks.into_iter().enumerate() {
+                let cannot_displace = capacity == 0
+                    || (heap.len() == capacity
+                        && heap.peek().is_some_and(|worst| match order {
+                            // Equality is deliberately not enough: a row at
+                            // the same timestamp may win on canonical order.
+                            LogQueryOrder::Asc => block.meta.ts_min > worst.entry.ts,
+                            LogQueryOrder::Desc => block.meta.ts_max < worst.entry.ts,
+                        }));
+                if cannot_displace {
+                    blocks_skipped_by_bound =
+                        blocks_skipped_by_bound.saturating_add((block_count - position) as u64);
+                    break;
+                }
+
+                let bytes = match (block.payload, block.location) {
+                    (Some(bytes), None) => bytes,
+                    (None, Some(loc)) => {
+                        let bytes = self.store.read_block(&loc)?;
+                        payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
+                        bytes
+                    }
+                    _ => return Err("invalid log query block snapshot".into()),
+                };
+                let entries = decode_block(&bytes)?;
+                decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
+                for (row, entry) in entries.into_iter().enumerate() {
+                    if entry_matches(&entry, q) {
+                        matched_entries = matched_entries.saturating_add(1);
+                        Self::retain_bounded(
+                            &mut heap,
+                            BoundedEntry {
+                                entry,
+                                sequence: QuerySequence {
+                                    source: block.sequence,
+                                    row,
+                                },
+                                order,
+                            },
+                            capacity,
+                        );
+                    }
                 }
             }
-        }
-        for loc in snapshot.locations {
-            let bytes = self.store.read_block(&loc)?;
-            payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
-            let entries = decode_block(&bytes)?;
-            decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
-            for entry in entries {
-                if entry_matches(&entry, q) {
-                    out.push(entry);
+
+            let mut ranked = heap.into_vec();
+            ranked.sort_by(|a, b| match order {
+                LogQueryOrder::Asc => a
+                    .entry
+                    .ts
+                    .cmp(&b.entry.ts)
+                    .then_with(|| a.sequence.cmp(&b.sequence)),
+                LogQueryOrder::Desc => b
+                    .entry
+                    .ts
+                    .cmp(&a.entry.ts)
+                    .then_with(|| a.sequence.cmp(&b.sequence)),
+            });
+            out = ranked.into_iter().map(|ranked| ranked.entry).collect();
+        } else {
+            let mut blocks = snapshot.blocks;
+            blocks.sort_by_key(|block| block.sequence);
+            out = Vec::new();
+            for block in blocks {
+                let bytes = match (block.payload, block.location) {
+                    (Some(bytes), None) => bytes,
+                    (None, Some(loc)) => {
+                        let bytes = self.store.read_block(&loc)?;
+                        payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
+                        bytes
+                    }
+                    _ => return Err("invalid log query block snapshot".into()),
+                };
+                let entries = decode_block(&bytes)?;
+                decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
+                for entry in entries {
+                    if entry_matches(&entry, q) {
+                        matched_entries = matched_entries.saturating_add(1);
+                        out.push(entry);
+                    }
                 }
             }
+            matched_entries = matched_entries.saturating_add(snapshot.buffered.len() as u64);
+            out.extend(snapshot.buffered);
+            // Stable sort: equal timestamps keep canonical block order and
+            // buffered entries land after flushed ones in either direction.
+            match order {
+                LogQueryOrder::Asc => out.sort_by_key(|entry| entry.ts),
+                LogQueryOrder::Desc => out.sort_by(|a, b| b.ts.cmp(&a.ts)),
+            }
         }
-        out.extend(snapshot.buffered);
-        // Stable sort: entries with equal ts keep block order, buffered
-        // entries land after flushed ones — deterministic either way.
-        out.sort_by_key(|e| e.ts);
         let materialize_ns = elapsed_ns(materialize_started);
 
         self.profile.query_count.fetch_add(1, Ordering::Relaxed);
@@ -1243,9 +1461,39 @@ impl BlockEngine {
             .query_decoded_entries
             .fetch_add(decoded_entries, Ordering::Relaxed);
         self.profile
+            .query_matched_entries
+            .fetch_add(matched_entries, Ordering::Relaxed);
+        self.profile
             .query_returned_entries
             .fetch_add(out.len() as u64, Ordering::Relaxed);
+        if let Some(capacity) = max_entries {
+            let capacity = capacity as u64;
+            self.profile
+                .query_bounded_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.profile
+                .query_bounded_requested_entries
+                .fetch_add(capacity, Ordering::Relaxed);
+            self.profile
+                .query_bounded_max_entries
+                .fetch_max(capacity, Ordering::Relaxed);
+            self.profile
+                .query_blocks_skipped_by_bound
+                .fetch_add(blocks_skipped_by_bound, Ordering::Relaxed);
+        }
         Ok(out)
+    }
+
+    fn retain_bounded(heap: &mut BinaryHeap<BoundedEntry>, entry: BoundedEntry, capacity: usize) {
+        if capacity == 0 {
+            return;
+        }
+        if heap.len() < capacity {
+            heap.push(entry);
+        } else if heap.peek().is_some_and(|worst| entry < *worst) {
+            let _ = heap.pop();
+            heap.push(entry);
+        }
     }
 
     fn snapshot_query(&self, q: &LogQuery) -> Result<LogQuerySnapshot, String> {
@@ -1294,17 +1542,27 @@ impl BlockEngine {
         }
         let candidate_blocks = locs.len() as u64;
         let stable_locations = self.store.query_snapshot_keeps_locations_readable();
-        let mut payloads = Vec::new();
-        let mut locations = Vec::new();
+        let mut blocks = Vec::with_capacity(locs.len());
         let mut payload_bytes = 0u64;
         if stable_locations {
-            locations = locs.into_iter().map(|(loc, _meta)| loc).collect();
+            for (sequence, (location, meta)) in locs.into_iter().enumerate() {
+                blocks.push(LogQueryBlockSnapshot {
+                    payload: None,
+                    location: Some(location),
+                    meta,
+                    sequence,
+                });
+            }
         } else {
-            payloads.reserve(locs.len());
-            for (loc, _meta) in &locs {
-                let bytes = self.store.read_block(loc)?;
+            for (sequence, (location, meta)) in locs.into_iter().enumerate() {
+                let bytes = self.store.read_block(&location)?;
                 payload_bytes = payload_bytes.saturating_add(bytes.len() as u64);
-                payloads.push(bytes);
+                blocks.push(LogQueryBlockSnapshot {
+                    payload: Some(bytes),
+                    location: None,
+                    meta,
+                    sequence,
+                });
             }
         }
         // Buffer membership is part of the protected generation. Filter while
@@ -1317,8 +1575,7 @@ impl BlockEngine {
             .cloned()
             .collect();
         Ok(LogQuerySnapshot {
-            payloads,
-            locations,
+            blocks,
             buffered,
             candidate_blocks,
             payload_bytes,

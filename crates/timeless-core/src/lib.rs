@@ -16,7 +16,7 @@ pub mod waist;
 
 pub use blocks::{
     level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta, BlockStore,
-    EncodedBlock, LogEntry, LogQuery, MemBlockStore,
+    EncodedBlock, LogEntry, LogQuery, LogQueryOrder, MemBlockStore,
 };
 pub use engine::*;
 pub use rollup::{

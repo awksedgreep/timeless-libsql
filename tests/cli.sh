@@ -579,6 +579,52 @@ q_like|1'
 check_eq "service/level/ts pushdown + LIKE above the vtab" "$got" "$expected"
 
 # ---------------------------------------------------------------------------
+echo "== section 10b: logs bounded ORDER BY/LIMIT/OFFSET pushdown =="
+# Two overlapping flushed ranges, duplicate timestamps, and a buffered tail.
+# The bounded path must return the same exact window SQLite would select while
+# retaining only LIMIT+OFFSET rows. LIKE and strict bounds remain on the
+# conservative unbounded path because SQLite still performs those exact checks.
+BOUNDEDLOGDB="$TMP/logs_bounded.db"
+got=$(sqlite3 "$BOUNDEDLOGDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');
+INSERT INTO logs(ts,level,message,service) VALUES
+  (10,'info','b0-10','api'),(30,'info','b0-30-a','api'),(30,'info','b0-30-b','web');
+INSERT INTO logs(logs) VALUES('flush');
+INSERT INTO logs(ts,level,message,service) VALUES
+  (5,'info','b1-05','api'),(20,'info','b1-20','web'),
+  (30,'info','b1-30','api'),(40,'info','b1-40','api');
+INSERT INTO logs(logs) VALUES('flush');
+INSERT INTO logs(ts,level,message,service) VALUES
+  (0,'info','buf-00','api'),(30,'info','buf-30','api'),(50,'info','buf-50','web');
+SELECT 'desc', ts, message FROM logs ORDER BY ts DESC LIMIT 3 OFFSET 2;
+SELECT 'asc', ts, message FROM logs ORDER BY ts ASC LIMIT 3 OFFSET 1;
+SELECT 'api', ts, message FROM logs WHERE service='api' ORDER BY ts ASC LIMIT 3 OFFSET 1;
+SELECT 'like', ts, message FROM logs WHERE message LIKE '%30%' ORDER BY ts DESC LIMIT 2;
+SELECT 'strict', ts, message FROM logs WHERE ts > 30 ORDER BY ts ASC LIMIT 2;
+SELECT 'profile',
+  (SELECT value FROM timeless_stats('logs') WHERE key='query_bounded_count'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='query_bounded_requested_entries'),
+  (SELECT value FROM timeless_stats('logs') WHERE key='query_bounded_max_entries');
+SQL
+)
+expected='desc|30|b1-30
+desc|30|b0-30-a
+desc|30|b0-30-b
+asc|5|b1-05
+asc|10|b0-10
+asc|20|b1-20
+api|5|b1-05
+api|10|b0-10
+api|30|b1-30
+like|30|b1-30
+like|30|b0-30-a
+strict|40|b1-40
+strict|50|buf-50
+profile|3|13|5'
+check_eq "bounded log windows exact; unsafe rechecks stay unbounded" "$got" "$expected"
+
+# ---------------------------------------------------------------------------
 echo "== section 11: logs prune removes blocks AND their term rows =="
 # Fresh db, two flushes -> two blocks with disjoint ts ranges. Pruning
 # between them must delete the old block and its posting-list rows in
