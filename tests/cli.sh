@@ -73,6 +73,10 @@
 # Section 39 pins the cross-connection transaction visibility gate: an
 # intra-transaction flush must report a retryable busy conflict to another
 # connection, never expose an index location whose shadow row is invisible.
+# Section 40 makes durable metrics series IDs first-class read constraints on
+# the base vtab and every per-series query TVF, including parameterized joins.
+# Section 41 independently decodes TAF1/TLF1 aggregate/latest result frames and
+# proves row parity, NaN/NULL handling, empty omission, and live publication.
 
 set -euo pipefail
 
@@ -2621,6 +2625,319 @@ check_eq "rollback restores the reader's committed chunk view" \
 check_eq "commit publishes the replacement view before the reader retries" \
   "$(grep '^commit|' <<<"$got")" \
   'commit|[(10, 1.0), (30, 3.0)]'
+
+# ---------------------------------------------------------------------------
+echo "== section 40: durable series-id read constraints =="
+E40DB="$TMP/series_id40.db"
+sqlite3 "$E40DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics(rollups='10s@0');
+INSERT INTO m(name,labels,ts,value) VALUES
+  ('cpu','{"host":"a"}',0,1.0),
+  ('cpu','{"host":"a"}',10,3.0),
+  ('cpu','{"host":"a"}',20,5.0),
+  ('cpu','{"host":"b"}',0,9.0),
+  ('cpu','{"host":"b"}',10,11.0),
+  ('mem','{"host":"a"}',0,99.0);
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(m) VALUES ('rollup');
+SQL
+
+got=$(EXT_PATH="$EXT" DB_PATH="$E40DB" python3 - <<'PY'
+import os, sqlite3
+
+db = os.environ["DB_PATH"]
+ext = os.environ["EXT_PATH"]
+conn = sqlite3.connect(db)
+conn.enable_load_extension(True)
+conn.load_extension(ext)
+conn.enable_load_extension(False)
+
+sid = conn.execute(
+    "SELECT series_id FROM timeless_series('m','cpu','{\"host\":\"a\"}')"
+).fetchone()[0]
+assert sid == 1
+
+checks = [
+    (
+        "series",
+        "SELECT name,labels,min_ts,max_ts,points FROM timeless_series('m') "
+        "WHERE series_id=?",
+        "SELECT name,labels,min_ts,max_ts,points FROM timeless_series("
+        "'m','cpu','{\"host\":\"a\"}')",
+    ),
+    (
+        "base",
+        "SELECT ts,value FROM m WHERE series_id=? ORDER BY ts,value",
+        "SELECT ts,value FROM m WHERE name='cpu' AND labels='{\"host\":\"a\"}' "
+        "ORDER BY ts,value",
+    ),
+    (
+        "raw",
+        "SELECT ts,value FROM timeless_raw('m','cpu',NULL,0,30) "
+        "WHERE series_id=? ORDER BY ts,value",
+        "SELECT ts,value FROM timeless_raw('m','cpu','{\"host\":\"a\"}',0,30) "
+        "ORDER BY ts,value",
+    ),
+    (
+        "raw_batches",
+        "SELECT points FROM timeless_raw_batches('m','cpu',NULL,0,30) "
+        "WHERE series_id=?",
+        "SELECT points FROM timeless_raw_batches('m','cpu','{\"host\":\"a\"}',0,30)",
+    ),
+    (
+        "aggregate",
+        "SELECT value FROM timeless_aggregate('m','cpu',NULL,0,30,'avg') "
+        "WHERE series_id=?",
+        "SELECT value FROM timeless_aggregate('m','cpu','{\"host\":\"a\"}',0,30,'avg')",
+    ),
+    (
+        "latest",
+        "SELECT ts,value FROM timeless_latest('m','cpu',NULL,0,30) WHERE series_id=?",
+        "SELECT ts,value FROM timeless_latest('m','cpu','{\"host\":\"a\"}',0,30)",
+    ),
+    (
+        "grid",
+        "SELECT ts,value FROM timeless_grid('m','cpu',NULL,0,20,10,10) "
+        "WHERE series_id=? ORDER BY ts",
+        "SELECT ts,value FROM timeless_grid('m','cpu','{\"host\":\"a\"}',0,20,10,10) "
+        "ORDER BY ts",
+    ),
+    (
+        "window",
+        "SELECT ts,value FROM timeless_window('m','cpu',NULL,0,20,10,10,'avg') "
+        "WHERE series_id=? ORDER BY ts",
+        "SELECT ts,value FROM timeless_window("
+        "'m','cpu','{\"host\":\"a\"}',0,20,10,10,'avg') ORDER BY ts",
+    ),
+    (
+        "window_batches",
+        "SELECT buckets FROM timeless_window_batches("
+        "'m','cpu',NULL,0,20,10,10,'avg') WHERE series_id=?",
+        "SELECT buckets FROM timeless_window_batches("
+        "'m','cpu','{\"host\":\"a\"}',0,20,10,10,'avg')",
+    ),
+    (
+        "rollup",
+        "SELECT ts,value FROM timeless_rollup('m','cpu',NULL,10,0,100,'avg') "
+        "WHERE series_id=? ORDER BY ts",
+        "SELECT ts,value FROM timeless_rollup("
+        "'m','cpu','{\"host\":\"a\"}',10,0,100,'avg') ORDER BY ts",
+    ),
+    (
+        "rollup_batches",
+        "SELECT buckets FROM timeless_rollup_batches('m','cpu',NULL,10,0,100) "
+        "WHERE series_id=?",
+        "SELECT buckets FROM timeless_rollup_batches("
+        "'m','cpu','{\"host\":\"a\"}',10,0,100)",
+    ),
+]
+for name, by_id, by_labels in checks:
+    selected = conn.execute(by_id, (sid,)).fetchall()
+    expected = conn.execute(by_labels).fetchall()
+    assert selected == expected, (name, selected, expected)
+    print(f"parity|{name}|{len(selected)}")
+
+# INTEGER affinity is part of the SQL contract once xBestIndex omits the
+# original predicate. Non-integral, NULL, and malformed values match nothing.
+coercions = [
+    (1, 1), (1.0, 1), ("1", 1), ("+1.0e0", 1),
+    (1.5, 0), ("1x", 0), (None, 0), (sqlite3.Binary(b"1"), 0),
+]
+for value, expected in coercions:
+    count = conn.execute(
+        "SELECT count(*) FROM timeless_aggregate("
+        "'m','cpu',NULL,0,30,'avg') WHERE series_id=?",
+        (value,),
+    ).fetchone()[0]
+    assert count == expected, (value, count, expected)
+print("affinity|ok")
+
+assert conn.execute(
+    "SELECT count(*) FROM timeless_aggregate("
+    "'m','cpu','{\"host\":\"b\"}',0,30,'avg') WHERE series_id=?",
+    (sid,),
+).fetchone()[0] == 0
+assert conn.execute(
+    "SELECT count(*) FROM timeless_aggregate("
+    "'m','mem',NULL,0,30,'avg') WHERE series_id=?",
+    (sid,),
+).fetchone()[0] == 0
+assert conn.execute(
+    "SELECT count(*) FROM timeless_aggregate("
+    "'m','cpu',NULL,0,30,'avg') WHERE series_id=999999"
+).fetchone()[0] == 0
+print("intersection|ok")
+
+joined = conn.execute(
+    "SELECT s.series_id,q.value "
+    "FROM timeless_series('m','cpu',NULL) AS s "
+    "JOIN timeless_aggregate('m','cpu',NULL,0,30,'avg') AS q "
+    "ON q.series_id=s.series_id ORDER BY s.series_id"
+).fetchall()
+assert joined == [(1, 3.0), (2, 10.0)]
+base_joined = conn.execute(
+    "SELECT a.series_id FROM m AS a JOIN m AS b "
+    "ON b.series_id=a.series_id WHERE a.ts=0 AND b.ts=10 "
+    "ORDER BY a.series_id"
+).fetchall()
+assert base_joined == [(1,), (2,)], base_joined
+plan = conn.execute(
+    "EXPLAIN QUERY PLAN SELECT s.series_id,q.value "
+    "FROM timeless_series('m','cpu',NULL) AS s "
+    "JOIN timeless_aggregate('m','cpu',NULL,0,30,'avg') AS q "
+    "ON q.series_id=s.series_id"
+).fetchall()
+assert any("107374" in row[3] for row in plan), plan
+print("join|ok")
+
+# Corrupt only series 2's raw payload. A selected series-1 scan still works;
+# an unselected scan reaches the unrelated chunk and fails to decode it.
+conn.execute("UPDATE m_chunks SET ts_data=x'00' WHERE series_id=2 AND resolution=0")
+conn.commit()
+assert conn.execute(
+    "SELECT count(*) FROM timeless_raw('m','cpu',NULL,0,30) WHERE series_id=1"
+).fetchone()[0] == 3
+try:
+    conn.execute(
+        "SELECT count(*) FROM timeless_raw('m','cpu',NULL,0,30)"
+    ).fetchone()
+    raise AssertionError("broad scan unexpectedly ignored the corrupt unrelated chunk")
+except sqlite3.DatabaseError as error:
+    message = str(error).lower()
+    assert (
+        "decode" in message or "payload" in message or
+        "insufficientdata" in message or "out of bounds" in message
+    ), error
+print("pruning|ok")
+conn.close()
+PY
+) || { fail "section 40 series-id driver crashed"; got=""; }
+
+check_eq "series-id output constraint matches every label-selected query surface" \
+  "$(grep '^parity|' <<<"$got")" \
+'parity|series|1
+parity|base|3
+parity|raw|3
+parity|raw_batches|1
+parity|aggregate|1
+parity|latest|1
+parity|grid|3
+parity|window|3
+parity|window_batches|1
+parity|rollup|1
+parity|rollup_batches|1'
+check_eq "series-id affinity, intersections, parameterized join, and chunk pruning" \
+  "$(grep -E '^(affinity|intersection|join|pruning)\|' <<<"$got")" \
+$'affinity|ok\nintersection|ok\njoin|ok\npruning|ok'
+
+# ---------------------------------------------------------------------------
+echo "== section 41: packed aggregate/latest result frames =="
+E41DB="$TMP/frames41.db"
+got=$(PYTHONDONTWRITEBYTECODE=1 EXT_PATH="$EXT" EXAMPLES_PATH="$ROOT/examples" AGG_DB="$E35DB" \
+  LATEST_DB="$E36DB" FRAME_DB="$E41DB" python3 - <<'PY'
+import os, sqlite3, sys
+
+sys.path.insert(0, os.environ["EXAMPLES_PATH"])
+from query_frames import decode_aggregate_frame, decode_latest_frame
+
+ext = os.environ["EXT_PATH"]
+
+def connect(path):
+    conn = sqlite3.connect(path, timeout=10)
+    conn.enable_load_extension(True)
+    conn.load_extension(ext)
+    conn.enable_load_extension(False)
+    return conn
+
+agg = connect(os.environ["AGG_DB"])
+modules = agg.execute(
+    "SELECT name FROM pragma_module_list WHERE name IN "
+    "('timeless_aggregate_frame','timeless_latest_frame') ORDER BY name"
+).fetchall()
+assert modules == [("timeless_aggregate_frame",), ("timeless_latest_frame",)]
+print("frame_detection|ok")
+for kind, name in enumerate(("avg", "sum", "min", "max", "count")):
+    blob, = agg.execute(
+        "SELECT frame FROM timeless_aggregate_frame("
+        "'ag',?,NULL,-10,20,?)",
+        ("nan_metric" if name != "count" else "cpu", name),
+    ).fetchone()
+    decoded_kind, decoded = decode_aggregate_frame(blob)
+    assert decoded_kind == kind
+    metric = "nan_metric" if name != "count" else "cpu"
+    expected = agg.execute(
+        "SELECT series_id,value FROM timeless_aggregate("
+        "'ag',?,NULL,-10,20,?) ORDER BY series_id",
+        (metric, name),
+    ).fetchall()
+    assert sorted(decoded) == expected, (name, decoded, expected)
+assert agg.execute(
+    "SELECT count(*) FROM timeless_aggregate_frame("
+    "'ag','cpu','{\"host\":\"missing\"}',0,20,'avg')"
+).fetchone()[0] == 0
+print("aggregate_frames|5|ok")
+agg.close()
+
+latest = connect(os.environ["LATEST_DB"])
+blob, = latest.execute(
+    "SELECT frame FROM timeless_latest_frame('latest','cpu',NULL,0,100)"
+).fetchone()
+decoded = sorted(decode_latest_frame(blob))
+expected = latest.execute(
+    "SELECT series_id,ts,value FROM timeless_latest("
+    "'latest','cpu',NULL,0,100) ORDER BY series_id"
+).fetchall()
+assert decoded == expected, (decoded, expected)
+assert latest.execute(
+    "SELECT count(*) FROM timeless_latest_frame("
+    "'latest','cpu','{\"host\":\"missing\"}',0,100)"
+).fetchone()[0] == 0
+print("latest_frame|ok")
+latest.close()
+
+# Two live connections prove that frames retain the extension's publication
+# and transaction gate rather than opening a private storage path.
+frame_db = os.environ["FRAME_DB"]
+a = connect(frame_db)
+b = connect(frame_db)
+a.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
+a.commit()
+a.execute(
+    "INSERT INTO m(name,labels,ts,value) VALUES "
+    "('cpu','{\"host\":\"a\"}',10,1.0)"
+)
+a.commit()
+first = decode_latest_frame(b.execute(
+    "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)"
+).fetchone()[0])
+assert first == [(1, 10, 1.0)]
+a.execute("BEGIN")
+a.execute(
+    "INSERT INTO m(name,labels,ts,value) VALUES "
+    "('cpu','{\"host\":\"a\"}',20,2.0)"
+)
+try:
+    b.execute(
+        "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)"
+    ).fetchone()
+    raise AssertionError("frame read escaped an active write transaction")
+except sqlite3.OperationalError as error:
+    assert "active write transaction" in str(error)
+a.commit()
+second = decode_latest_frame(b.execute(
+    "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)"
+).fetchone()[0])
+assert second == [(1, 20, 2.0)]
+print("frame_publication|ok")
+a.close()
+b.close()
+PY
+) || { fail "section 41 frame driver crashed"; got=""; }
+
+check_eq "independent TAF1/TLF1 decoders match rows and preserve publication" \
+  "$got" \
+$'frame_detection|ok\naggregate_frames|5|ok\nlatest_frame|ok\nframe_publication|ok'
 
 # ---------------------------------------------------------------------------
 echo

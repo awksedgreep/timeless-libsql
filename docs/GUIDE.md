@@ -320,7 +320,7 @@ storage engine can use to *skip* decompression:
 
 | table | accelerated predicates |
 |---|---|
-| metrics | `name = ...`, `ts` ranges (`>`, `>=`, `<`, `<=`, `BETWEEN`) |
+| metrics | `series_id = ...`, `name = ...`, `ts` ranges (`>`, `>=`, `<`, `<=`, `BETWEEN`) |
 | logs | `level = ...`, any index-key `= ...`, `ts` ranges |
 | traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges |
 
@@ -345,6 +345,42 @@ When row order matters, say so with `ORDER BY ts` — metrics results come back
 time-ordered, but logs and traces blocks can overlap, and it's ordinary cheap
 SQL either way. Don't rely on `rowid`; it's synthetic and only stable within
 a single scan.
+
+For a client that repeatedly reads the same metrics series, resolve its durable
+handle once and reuse it:
+
+```sql
+SELECT series_id
+  FROM timeless_series('metrics', 'cpu_usage', '{"host":"web1"}');
+
+SELECT ts, value
+  FROM timeless_raw('metrics', 'cpu_usage', NULL, :start, :stop)
+ WHERE series_id = :series_id;
+```
+
+The equality constraint works on the base metrics table and every per-series
+metrics query function. It still intersects with the function's metric and
+label filter. IDs survive reopen and backup/restore, are scoped to one metrics
+table, and must not be copied between independently created databases.
+
+Ordinary row results are the best interface for SQL composition. A host
+language fetching thousands of aggregate or latest rows can instead cross
+SQLite once:
+
+```sql
+SELECT frame FROM timeless_aggregate_frame(
+  'metrics', 'cpu_usage', NULL, :start, :stop, 'avg');
+
+SELECT frame FROM timeless_latest_frame(
+  'metrics', 'cpu_usage', NULL, :start, :stop);
+```
+
+These return versioned `TAF1` and `TLF1` blobs. Use the strict Rust decoders in
+`timeless_ext::query_frame`, or copy the dependency-free
+[Python example](../examples/query_frames.py). See the
+[query cookbook](QUERIES.md#packed-aggregate-frame) for the exact byte layouts
+and NULL rules. The frames are result transport only; database storage,
+transactions, backups, and replication are unchanged.
 
 ## 8. Housekeeping: optimize, compact, prune
 

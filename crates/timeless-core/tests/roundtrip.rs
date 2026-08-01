@@ -148,6 +148,37 @@ fn aggregate_summary_covers_chunks_boundaries_buffer_and_reopen() {
         assert_eq!(nan_summary.value(AggFn::Min), 2.0);
         assert_eq!(nan_summary.value(AggFn::Max), 4.0);
 
+        let ids = [sid + 10_000, sid, nan_sid, sid];
+        let batch = engine
+            .query_aggregate_summary_batch_by_id(&ids, 0, 10)
+            .unwrap();
+        assert_eq!(batch.len(), ids.len());
+        for ((result_id, actual), expected_id) in batch.into_iter().zip(ids) {
+            assert_eq!(result_id, expected_id);
+            let expected = engine
+                .query_aggregate_summary_by_id(expected_id, 0, 10)
+                .unwrap();
+            match (actual, expected) {
+                (None, None) => {}
+                (Some(actual), Some(expected)) => {
+                    assert_eq!(actual.count(), expected.count());
+                    for aggregate in [AggFn::Avg, AggFn::Sum, AggFn::Min, AggFn::Max, AggFn::Count]
+                    {
+                        assert_eq!(
+                            actual.value(aggregate).to_bits(),
+                            expected.value(aggregate).to_bits()
+                        );
+                    }
+                }
+                other => panic!("batch/individual aggregate mismatch: {other:?}"),
+            }
+        }
+        assert!(engine
+            .query_aggregate_summary_batch_by_id(&[sid, nan_sid], 10, 0)
+            .unwrap()
+            .into_iter()
+            .all(|(_, summary)| summary.is_none()));
+
         engine.flush_all().unwrap();
         engine.shutdown().unwrap();
     }
@@ -204,6 +235,18 @@ fn latest_matches_stable_range_order_across_chunks_buffer_and_reopen() {
         );
         assert_eq!(engine.query_latest_by_id(sid, 41, 100).unwrap(), None);
         assert_eq!(engine.query_latest_by_id(sid, 10, 9).unwrap(), None);
+
+        let ids = [sid + 10_000, sid, sid];
+        let batch = engine.query_latest_batch_by_id(&ids, 0, 100).unwrap();
+        let expected = engine.query_latest_by_id(sid, 0, 100).unwrap();
+        assert_eq!(
+            batch,
+            vec![(sid + 10_000, None), (sid, expected), (sid, expected)]
+        );
+        assert_eq!(
+            engine.query_latest_batch_by_id(&[sid], 10, 9).unwrap(),
+            vec![(sid, None)]
+        );
 
         engine.shutdown().unwrap();
     }

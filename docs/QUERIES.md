@@ -1,7 +1,8 @@
 # The query cookbook
 
 Recipes for the query surface: the raw vtabs, the kernel TVFs
-(`timeless_aggregate`, `timeless_latest`, `timeless_grid`, `timeless_window`,
+(`timeless_aggregate`, `timeless_aggregate_frame`, `timeless_latest`,
+`timeless_latest_frame`, `timeless_grid`, `timeless_window`,
 `timeless_window_batches`, `timeless_raw_frame`, `timeless_rollup`,
 `timeless_rollup_batches`), the bucket TVFs, and the catalog TVFs. Every recipe is
 executed by `tests/cli.sh` against a fixed dataset with hand-verified output
@@ -53,9 +54,18 @@ SELECT series_id, labels, buckets
 SELECT series_id, labels, value
   FROM timeless_aggregate('metrics', 'cpu_usage', NULL, :t0, :t1, 'avg');
 
+-- the same scalar result for every series in one versioned frame
+SELECT frame
+  FROM timeless_aggregate_frame(
+    'metrics', 'cpu_usage', NULL, :t0, :t1, 'avg');
+
 -- newest point per matched series over inclusive bounds
 SELECT series_id, labels, ts, value
   FROM timeless_latest('metrics', 'cpu_usage', NULL, :t0, :t1);
+
+-- every newest point in one versioned frame
+SELECT frame
+  FROM timeless_latest_frame('metrics', 'cpu_usage', NULL, :t0, :t1);
 
 -- every raw series in one versioned columnar frame for wide embedded reads
 SELECT frame
@@ -122,6 +132,149 @@ New chunks persist the first value at their maximum timestamp as nullable
 metadata, avoiding decompression for the common unbounded-latest query. On
 reopen, databases created by an older extension add the column automatically;
 old rows keep `NULL` and use the exact decode fallback until compaction.
+
+## Choosing and detecting a query interface
+
+- Use ordinary row TVFs for SQL joins, filtering, ordering, and modest result
+  sets.
+- Use the `*_batches` TVFs when a host wants one independently consumable blob
+  per series, especially for raw, window, or rollup streams.
+- Use a whole-result `*_frame` TVF when a high-cardinality host or remote
+  boundary wants to fetch one columnar aggregate, latest, or raw result with a
+  single SQLite row.
+
+Detect additive modules through SQLite rather than comparing extension version
+strings:
+
+```sql
+SELECT name
+  FROM pragma_module_list
+ WHERE name IN ('timeless_aggregate_frame', 'timeless_latest_frame')
+ ORDER BY name;
+```
+
+Both rows mean both frame APIs are available. A host can prepare and reuse the
+same ID-selected statement in the normal SQLite fashion; no extension-specific
+binding API is involved:
+
+```python
+read_one = db.cursor()
+sql = """SELECT value FROM timeless_aggregate(
+           'metrics', 'cpu_usage', NULL, ?, ?, 'avg')
+         WHERE series_id = ?"""
+value = read_one.execute(sql, (start, stop, series_id)).fetchone()
+```
+
+## Durable series IDs as relational read handles
+
+Resolve a catalog ID once, cache it in the host, and use ordinary equality
+constraints on later reads:
+
+```sql
+SELECT series_id
+  FROM timeless_series('metrics', 'cpu_usage', '{"host":"web-1"}');
+
+SELECT ts, value
+  FROM timeless_raw('metrics', 'cpu_usage', NULL, :t0, :t1)
+ WHERE series_id = :series_id;
+
+SELECT value
+  FROM timeless_aggregate('metrics', 'cpu_usage', NULL, :t0, :t1, 'avg')
+ WHERE series_id = :series_id;
+
+SELECT ts, value
+  FROM metrics
+ WHERE series_id = :series_id AND ts BETWEEN :t0 AND :t1;
+```
+
+`series_id = ?` pushes into the base metrics table, `timeless_series`, and
+every per-series metrics TVF. On the row-oriented grid, window, and rollup
+TVFs it is an explicitly selectable hidden column, so old `SELECT *` shapes and
+function arities do not change. The constraint intersects with the TVF's table,
+metric, and matcher arguments: an ID from another metric or one rejected by the
+filter returns no rows and reads no chunks.
+
+The same constraint composes with catalog-driven joins:
+
+```sql
+SELECT s.labels, q.ts, q.value
+  FROM timeless_series('metrics', 'cpu_usage', '{"env":"prod"}') AS s
+  JOIN timeless_latest('metrics', 'cpu_usage', NULL, :t0, :t1) AS q
+    ON q.series_id = s.series_id;
+```
+
+IDs are durable and table-scoped. They survive flush, reopen, backup, restore,
+compaction, and retention, but an ID from one independently created database
+must not be used in another. INTEGER affinity is honored (`1`, `1.0`, and
+`'1'` select the same handle); NULL, non-integral, malformed, and missing IDs
+match nothing. The initial API intentionally supports equality only, not
+`IN (...)`.
+
+## Packed aggregate frame
+
+`timeless_aggregate_frame` has the same arguments and semantics as
+`timeless_aggregate`, but emits one row for the complete non-empty result:
+
+```sql
+SELECT frame
+  FROM timeless_aggregate_frame(
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1, 'avg');
+```
+
+The versioned little-endian `TAF1` layout is:
+
+```text
+"TAF1" | aggregate_kind:u8 | flags:u8=0 | reserved:u16=0 |
+series_count:u32 | series_ids:i64[series_count] |
+validity_bitmap:u8[ceil(series_count/8)] |
+value_words:u64[series_count]
+```
+
+Aggregate kinds are `avg=0`, `sum=1`, `min=2`, `max=3`, and `count=4`.
+Valid float words contain IEEE-754 bits. Count words are nonnegative SQLite
+INTEGER values. A clear validity bit is SQL `NULL`, its word must be zero, and
+count is never NULL. Empty series are omitted; if every series is empty the TVF
+emits no row. Series order is unspecified and labels attach through
+`timeless_series`.
+
+Rust callers can use
+`timeless_ext::query_frame::decode_aggregate_frame`; the dependency-free
+[Python decoder](../examples/query_frames.py) consumes the same test fixtures.
+Both reject unknown versions, flags, reserved bits, nonzero bitmap padding,
+non-canonical NULLs, invalid kinds, and inconsistent lengths.
+`series_count` is limited to `u32`; the encoder uses checked host-size
+arithmetic and also remains subject to SQLite's configured maximum BLOB size.
+
+## Packed latest frame
+
+`timeless_latest_frame` likewise returns the complete non-empty
+`timeless_latest` result in one row:
+
+```sql
+SELECT frame
+  FROM timeless_latest_frame(
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+```
+
+The versioned little-endian `TLF1` layout is:
+
+```text
+"TLF1" | series_count:u32 |
+series_ids:i64[series_count] | timestamps:i64[series_count] |
+validity_bitmap:u8[ceil(series_count/8)] |
+value_bits:u64[series_count]
+```
+
+Only series with a point in the inclusive range appear. Timestamp and
+duplicate-winner semantics are identical to the row TVF. A clear validity bit
+represents the row interface's SQL NULL for a NaN value and requires a zero
+word. Use `timeless_ext::query_frame::decode_latest_frame` or the
+[Python decoder](../examples/query_frames.py). `TLF1`, like every packed query
+format, is an additive result envelope and never appears in shadow tables or
+replication-visible storage.
+`series_count` is limited to `u32`; frame-size arithmetic is checked before
+allocation and SQLite's configured maximum BLOB size remains the practical
+upper bound.
 
 ## Packed raw frame
 

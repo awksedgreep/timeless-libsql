@@ -217,6 +217,22 @@ little-endian. The entire id set is validated before any point is buffered.
 Named batch `0x01` remains the portable path when the caller has no durable
 id cache.
 
+The same durable ID is a read handle. SQLite pushes an equality constraint
+through the base metrics table and every per-series metrics query TVF:
+
+```sql
+SELECT ts, value FROM metrics
+ WHERE series_id = :series_id AND ts BETWEEN :t0 AND :t1;
+
+SELECT value
+  FROM timeless_aggregate('metrics', 'cpu_usage', NULL, :t0, :t1, 'avg')
+ WHERE series_id = :series_id;
+```
+
+The ID is intersected with the TVF's metric and matcher arguments and composes
+with joins against `timeless_series`. It is durable and table-scoped, but is not
+portable between independently created database files.
+
 **Query kernels** — table-valued functions evaluate the dominant
 dashboard shapes inside the engine, so remote deployments (sqld, HTTP)
 ship grid points instead of every raw sample:
@@ -239,9 +255,18 @@ SELECT frame
 SELECT series_id, labels, value
   FROM timeless_aggregate('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1, 'avg');
 
+-- every scalar result in one TAF1 frame:
+SELECT frame
+  FROM timeless_aggregate_frame(
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1, 'avg');
+
 -- newest point per matched series; inclusive bounds
 SELECT series_id, labels, ts, value
   FROM timeless_latest('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+
+-- every newest point in one TLF1 frame:
+SELECT frame
+  FROM timeless_latest_frame('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
 
 -- last sample per grid point, per series (instant-selector shape):
 --                 table      metric       label filter    start  stop   step lookback
@@ -294,6 +319,14 @@ the first point in the raw engine's stable order. New chunks persist that
 point as metadata, so the usual unbounded-latest query does not decompress
 history. Databases created by older versions are upgraded additively: legacy
 chunks use the decode fallback until compaction rewrites them.
+
+For high-cardinality host-language reads, `timeless_aggregate_frame` and
+`timeless_latest_frame` return the same logical row results in one versioned
+columnar blob. Their `TAF1`/`TLF1` layouts, strict Rust decoders, and a
+dependency-free Python decoder are documented in
+[the query cookbook](docs/QUERIES.md#packed-aggregate-frame). The row TVFs
+remain the normal relational interface; frames are an additive transport and
+never change the on-disk format.
 
 **Counter kernels are raw window folds, NOT PromQL**: `increase` uses
 the standard reset-adjustment rule but does **no** boundary

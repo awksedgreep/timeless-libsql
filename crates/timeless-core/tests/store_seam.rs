@@ -4,7 +4,69 @@
 //! bare FsStore scan (the store alone understands the on-disk layout).
 
 use std::collections::HashMap;
-use timeless_core::{ChunkStore, Engine, FsStore};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use timeless_core::{ChunkBytes, ChunkLoc, ChunkStore, EncodedChunk, Engine, FsStore, StoredChunk};
+
+struct FaultyBatchStore {
+    inner: FsStore,
+    mode: Arc<AtomicU8>,
+}
+
+impl ChunkStore for FaultyBatchStore {
+    fn put_chunks(&self, chunks: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String> {
+        self.inner.put_chunks(chunks)
+    }
+
+    fn replace_chunks(
+        &self,
+        add: &[EncodedChunk],
+        remove: &[ChunkLoc],
+        on_committed: &mut dyn FnMut(&[ChunkLoc]),
+    ) -> Result<Vec<ChunkLoc>, String> {
+        self.inner.replace_chunks(add, remove, on_committed)
+    }
+
+    fn read_chunk(&self, loc: &ChunkLoc) -> Result<ChunkBytes, String> {
+        self.inner.read_chunk(loc)
+    }
+
+    fn read_chunks(&self, locs: &[ChunkLoc]) -> Result<Vec<ChunkBytes>, String> {
+        match self.mode.load(Ordering::SeqCst) {
+            1 => Err("injected batch read failure".into()),
+            2 => {
+                let mut payloads = self.inner.read_chunks(locs)?;
+                payloads.pop();
+                Ok(payloads)
+            }
+            _ => self.inner.read_chunks(locs),
+        }
+    }
+
+    fn delete_chunks(&self, locs: &[ChunkLoc]) -> Vec<String> {
+        self.inner.delete_chunks(locs)
+    }
+
+    fn scan(&self) -> Result<Vec<StoredChunk>, String> {
+        self.inner.scan()
+    }
+
+    fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
+        self.inner.save_registry(bytes)
+    }
+
+    fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
+        self.inner.load_registry()
+    }
+
+    fn storage_stats(&self) -> (u64, usize) {
+        self.inner.storage_stats()
+    }
+
+    fn sweep_cache(&self) {
+        self.inner.sweep_cache();
+    }
+}
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir =
@@ -124,5 +186,50 @@ fn fs_store_scan_reads_engine_output() {
         assert!(!bytes.val().is_empty());
     }
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn aggregate_and_latest_batches_propagate_store_contract_failures() {
+    let dir = temp_dir("batch_store_failures");
+    let mode = Arc::new(AtomicU8::new(0));
+    let store = FaultyBatchStore {
+        inner: FsStore::new(dir.clone()).unwrap(),
+        mode: Arc::clone(&mode),
+    };
+    let engine = Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap();
+    let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
+    for timestamp in 0..10 {
+        engine.write_point(sid, timestamp, timestamp as f64);
+    }
+    engine.flush_all().unwrap();
+
+    // The strict subrange forces both primitives off their metadata-only fast
+    // paths so the injected batch-store behavior is observed.
+    mode.store(1, Ordering::SeqCst);
+    for error in [
+        engine
+            .query_aggregate_summary_batch_by_id(&[sid], 1, 8)
+            .unwrap_err(),
+        engine.query_latest_batch_by_id(&[sid], 1, 8).unwrap_err(),
+    ] {
+        assert!(error.contains("injected batch read failure"), "{error}");
+    }
+
+    mode.store(2, Ordering::SeqCst);
+    for error in [
+        engine
+            .query_aggregate_summary_batch_by_id(&[sid], 1, 8)
+            .unwrap_err(),
+        engine.query_latest_batch_by_id(&[sid], 1, 8).unwrap_err(),
+    ] {
+        assert!(
+            error.contains("returned 0 payloads for 1 locations"),
+            "{error}"
+        );
+    }
+
+    mode.store(0, Ordering::SeqCst);
+    engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

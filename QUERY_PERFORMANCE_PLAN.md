@@ -580,6 +580,11 @@ extension-first optimization, not unfinished migration work. The rollout keeps
 `:rust` as the TimelessMetrics default for the next release or two while
 `:libsql` ships as the supported forward path.
 
+The extension-first follow-on is captured in
+[`STANDALONE_QUERY_PLAN.md`](STANDALONE_QUERY_PLAN.md). It is gated on direct
+SQLite/libSQL value rather than TimelessMetrics benchmark parity and is planned
+before the separate Rust telemetry data-plane POC.
+
 ## Per-session checklist
 
 Every implementation session must:

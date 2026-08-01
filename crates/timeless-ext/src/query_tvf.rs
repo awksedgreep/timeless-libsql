@@ -134,6 +134,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use rusqlite::ffi;
+use rusqlite::types::Value;
 use rusqlite::vtab::{
     Context, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig, VTabConnection,
     VTabCursor,
@@ -144,7 +145,9 @@ use timeless_core::{AggFn, Engine, Labels};
 use crate::flatjson::{labels_to_json, parse_labels_json, parse_matchers_json, MatcherSpec};
 use crate::logs_vtab::LogsTab;
 use crate::metrics_vtab::MetricsTab;
+use crate::query_frame::{encode_aggregate_frame, encode_latest_frame};
 use crate::shared::{self, DbGuard, SharedEngine};
+use crate::sql_value::integer_affinity;
 use crate::traces_vtab::TracesTab;
 
 fn module_err(msg: String) -> Error {
@@ -304,8 +307,12 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     db.create_module(c"timeless_raw_frame", &RAW_FRAME, None::<()>)?;
     const AGGREGATE: Module<AggregateTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_aggregate", &AGGREGATE, None::<()>)?;
+    const AGGREGATE_FRAME: Module<AggregateFrameTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_aggregate_frame", &AGGREGATE_FRAME, None::<()>)?;
     const LATEST: Module<LatestTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_latest", &LATEST, None::<()>)
+    db.create_module(c"timeless_latest", &LATEST, None::<()>)?;
+    const LATEST_FRAME: Module<LatestFrameTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_latest_frame", &LATEST_FRAME, None::<()>)
 }
 
 // Output columns (both modules).
@@ -405,6 +412,8 @@ pub(crate) struct KernelArgs {
     /// NULL where the window is empty. Presentation only, zero
     /// semantics: the kernels still decide which points have values.
     fill: bool,
+    /// Optional relational series-handle constraint supplied by SQLite.
+    series_selection: SeriesSelection,
 }
 
 /// Decode the hidden-column EQ args per the best_index bitmask.
@@ -525,6 +534,7 @@ fn decode_args(
         width: get_int(width_slot, "width")?,
         agg_name,
         fill,
+        series_selection: decode_series_selection(idx_num, names.len(), args)?,
     })
 }
 
@@ -533,11 +543,43 @@ fn decode_args(
 /// order, defer required-arg checking to filter (clearer errors than a
 /// bare "no query solution").
 fn best_index_args(info: &mut IndexInfo, first_arg: c_int, n_args: c_int) -> Result<bool> {
+    best_index_args_with_series_id(info, first_arg, n_args, None)
+}
+
+// Keep the selected-series marker outside every hidden-argument mask. The
+// largest metrics TVF currently has nine arguments, so bit 30 leaves ample
+// room for additive arguments without changing the public planner encoding.
+const PLAN_SERIES_ID_EQ: c_int = 1 << 30;
+
+/// Hidden-argument planning plus an optional equality constraint on a visible
+/// (or explicitly selectable hidden) `series_id` column. Hidden arguments are
+/// always assigned first in canonical order and the series id is appended, so
+/// the existing argument decoders remain backward-compatible.
+fn best_index_args_with_series_id(
+    info: &mut IndexInfo,
+    first_arg: c_int,
+    n_args: c_int,
+    series_id_col: Option<c_int>,
+) -> Result<bool> {
     let mut idx_num: c_int = 0;
     let mut unusable: c_int = 0;
     let mut slots: Vec<Option<usize>> = vec![None; n_args as usize];
+    let mut series_slot: Option<usize> = None;
     for (i, constraint) in info.constraints().enumerate() {
         let col = constraint.column();
+        if Some(col) == series_id_col
+            && constraint.operator() == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
+        {
+            // An unusable visible/output-column constraint can simply be
+            // evaluated by SQLite after a broad scan. Rejecting that plan
+            // creates a dependency cycle when two series-aware virtual
+            // tables are joined on series_id: either side must remain a
+            // valid outer loop before the other side can use the handle.
+            if constraint.is_usable() && series_slot.is_none() {
+                series_slot = Some(i);
+            }
+            continue;
+        }
         if col < first_arg || col >= first_arg + n_args {
             continue;
         }
@@ -563,10 +605,96 @@ fn best_index_args(info: &mut IndexInfo, first_arg: c_int, n_args: c_int) -> Res
         usage.set_argv_index(n_arg);
         usage.set_omit(true);
     }
-    info.set_estimated_cost(1000.0);
-    info.set_estimated_rows(1000);
+    if let Some(slot) = series_slot {
+        n_arg += 1;
+        let mut usage = info.constraint_usage(slot);
+        usage.set_argv_index(n_arg);
+        usage.set_omit(true);
+        idx_num |= PLAN_SERIES_ID_EQ;
+        info.set_estimated_cost(10.0);
+        info.set_estimated_rows(10);
+    } else {
+        info.set_estimated_cost(1000.0);
+        info.set_estimated_rows(1000);
+    }
     info.set_idx_num(idx_num);
     Ok(true)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SeriesSelection {
+    All,
+    Empty,
+    Id(i64),
+}
+
+type KernelRow = (i64, String, i64, Option<f64>);
+
+/// Decode the series-id argv appended by `best_index_args_with_series_id`.
+/// SQL `series_id = NULL` is an empty predicate, not an extension error.
+fn decode_series_selection(
+    idx_num: c_int,
+    n_args: usize,
+    args: &Filters<'_>,
+) -> Result<SeriesSelection> {
+    if idx_num & PLAN_SERIES_ID_EQ == 0 {
+        return Ok(SeriesSelection::All);
+    }
+    let arg_mask = if n_args == 0 { 0 } else { (1u32 << n_args) - 1 };
+    let slot = ((idx_num as u32) & arg_mask).count_ones() as usize;
+    match integer_affinity(args.get::<Value>(slot)?) {
+        Some(series_id) => Ok(SeriesSelection::Id(series_id)),
+        None => Ok(SeriesSelection::Empty),
+    }
+}
+
+/// Select catalog candidates without enumerating a metric when SQLite has
+/// supplied an exact durable series handle. The ID predicate intersects with
+/// metric and matcher arguments; it never bypasses their public semantics.
+fn metric_candidates(
+    engine: &Engine,
+    metric: &str,
+    eq: &Labels,
+    matchers: &[(String, LabelMatcher)],
+    selection: SeriesSelection,
+) -> Vec<(i64, Labels)> {
+    let reg = engine.series_read();
+    match selection {
+        SeriesSelection::Empty => Vec::new(),
+        SeriesSelection::Id(sid) => reg
+            .info_for(sid)
+            .filter(|info| info.metric_name == metric)
+            .filter(|info| {
+                eq.iter()
+                    .all(|(key, value)| info.labels.get(key) == Some(value))
+            })
+            .filter(|info| matchers_pass(&info.labels, matchers))
+            .map(|info| vec![(sid, info.labels.clone())])
+            .unwrap_or_default(),
+        SeriesSelection::All => reg
+            .find_series(metric, eq)
+            .into_iter()
+            .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+            .filter(|(_, labels)| matchers_pass(labels, matchers))
+            .collect(),
+    }
+}
+
+/// Frame TVFs attach catalog data by ID and therefore need no label clones.
+fn metric_candidate_ids(
+    engine: &Engine,
+    metric: &str,
+    eq: &Labels,
+    matchers: &[(String, LabelMatcher)],
+) -> Vec<i64> {
+    let reg = engine.series_read();
+    reg.find_series(metric, eq)
+        .into_iter()
+        .filter(|series_id| {
+            reg.info_for(*series_id)
+                .is_some_and(|info| matchers_pass(&info.labels, matchers))
+        })
+        .collect()
 }
 
 /// Resolve the engine and run one kernel scan into materialized rows.
@@ -574,7 +702,7 @@ fn run_kernel(
     db: *mut ffi::sqlite3,
     ka: &KernelArgs,
     kernel: impl Fn(&Engine, i64) -> Result<Vec<(i64, f64)>>,
-) -> Result<Vec<(String, i64, Option<f64>)>> {
+) -> Result<Vec<KernelRow>> {
     let _bind = DbGuard::bind(db);
     let shared: Arc<SharedEngine<Engine>> =
         MetricsTab::shared_engine_for(db, &ka.database, &ka.table)?;
@@ -587,17 +715,13 @@ fn run_kernel(
     // Candidate snapshot, then sequential per-series kernels — the
     // rayon-free discipline every vtab callback must follow (see
     // collect_metric in metrics_vtab.rs).
-    let candidates: Vec<(i64, Labels)> = {
-        let reg = shared.engine.series_read();
-        reg.find_series(&ka.metric, &ka.filter)
-            .into_iter()
-            .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-            // F8: non-eq matchers cut the candidate list here, BEFORE
-            // any chunk reads — the regex cost is per-series, not
-            // per-point.
-            .filter(|(_, labels)| matchers_pass(labels, &ka.matchers))
-            .collect()
-    };
+    let candidates = metric_candidates(
+        &shared.engine,
+        &ka.metric,
+        &ka.filter,
+        &ka.matchers,
+        ka.series_selection,
+    );
 
     let mut rows = Vec::new();
     for (sid, labels) in candidates {
@@ -622,7 +746,7 @@ fn run_kernel(
                     }
                     _ => None,
                 };
-                rows.push((labels_json.clone(), t, v));
+                rows.push((sid, labels_json.clone(), t, v));
                 match t.checked_add(ka.step) {
                     Some(next) => t = next,
                     None => break,
@@ -630,7 +754,7 @@ fn run_kernel(
             }
         } else {
             for (ts, value) in points {
-                rows.push((labels_json.clone(), ts, Some(value)));
+                rows.push((sid, labels_json.clone(), ts, Some(value)));
             }
         }
     }
@@ -671,7 +795,8 @@ unsafe impl<'vtab> VTab<'vtab> for GridTab {
             Cow::Borrowed(
                 c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
-                            stop HIDDEN, step HIDDEN, lookback HIDDEN, fill HIDDEN)",
+                            stop HIDDEN, step HIDDEN, lookback HIDDEN, fill HIDDEN, \
+                            series_id HIDDEN)",
             ),
             GridTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -681,7 +806,12 @@ unsafe impl<'vtab> VTab<'vtab> for GridTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, COL_FIRST_ARG, GRID_ARGS.len() as c_int)
+        best_index_args_with_series_id(
+            info,
+            COL_FIRST_ARG,
+            GRID_ARGS.len() as c_int,
+            Some(COL_FIRST_ARG + GRID_ARGS.len() as c_int),
+        )
     }
 
     fn open(&mut self) -> Result<KernelCursor<'vtab, GridTab>> {
@@ -693,8 +823,9 @@ impl KernelVTab for GridTab {
     const MODULE: &'static str = "timeless_grid";
     const ARGS: &'static [&'static str] = GRID_ARGS;
     const REQUIRED: c_int = GRID_REQUIRED;
+    const SERIES_ID_COL: c_int = COL_FIRST_ARG + GRID_ARGS.len() as c_int;
 
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>> {
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<KernelRow>> {
         run_kernel(db, ka, |engine, sid| {
             engine
                 .query_grid_last_by_id(sid, ka.start, ka.stop, ka.step, ka.width)
@@ -738,7 +869,7 @@ unsafe impl<'vtab> VTab<'vtab> for WindowTab {
                 c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
                             stop HIDDEN, step HIDDEN, window HIDDEN, agg HIDDEN, \
-                            fill HIDDEN)",
+                            fill HIDDEN, series_id HIDDEN)",
             ),
             WindowTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -748,7 +879,12 @@ unsafe impl<'vtab> VTab<'vtab> for WindowTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, COL_FIRST_ARG, WINDOW_ARGS.len() as c_int)
+        best_index_args_with_series_id(
+            info,
+            COL_FIRST_ARG,
+            WINDOW_ARGS.len() as c_int,
+            Some(COL_FIRST_ARG + WINDOW_ARGS.len() as c_int),
+        )
     }
 
     fn open(&mut self) -> Result<KernelCursor<'vtab, WindowTab>> {
@@ -760,8 +896,9 @@ impl KernelVTab for WindowTab {
     const MODULE: &'static str = "timeless_window";
     const ARGS: &'static [&'static str] = WINDOW_ARGS;
     const REQUIRED: c_int = WINDOW_REQUIRED;
+    const SERIES_ID_COL: c_int = COL_FIRST_ARG + WINDOW_ARGS.len() as c_int;
 
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>> {
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<KernelRow>> {
         let op = parse_window_op(Self::MODULE, ka.agg_name.as_deref())?;
         run_kernel(db, ka, |engine, sid| {
             engine
@@ -811,7 +948,7 @@ unsafe impl<'vtab> VTab<'vtab> for WindowBatchTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, 3, WINDOW_ARGS.len() as c_int)
+        best_index_args_with_series_id(info, 3, WINDOW_ARGS.len() as c_int, Some(0))
     }
 
     fn open(&mut self) -> Result<WindowBatchCursor<'vtab>> {
@@ -849,14 +986,13 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
             .refresh_authoritative_state()
             .map_err(module_err)?;
 
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = shared.engine.series_read();
-            reg.find_series(&ka.metric, &ka.filter)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .filter(|(_, labels)| matchers_pass(labels, &ka.matchers))
-                .collect()
-        };
+        let candidates = metric_candidates(
+            &shared.engine,
+            &ka.metric,
+            &ka.filter,
+            &ka.matchers,
+            ka.series_selection,
+        );
 
         let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
         let batch = shared
@@ -989,6 +1125,7 @@ mod window_batch_tests {
             width: 10,
             agg_name: Some("avg".into()),
             fill,
+            series_selection: SeriesSelection::All,
         }
     }
 
@@ -1034,6 +1171,19 @@ enum AggregateValue {
     Integer(i64),
 }
 
+fn parse_scalar_aggregate(module: &str, name: &str) -> Result<AggFn> {
+    match name {
+        "avg" => Ok(AggFn::Avg),
+        "sum" => Ok(AggFn::Sum),
+        "min" => Ok(AggFn::Min),
+        "max" => Ok(AggFn::Max),
+        "count" => Ok(AggFn::Count),
+        other => Err(module_err(format!(
+            "{module}: unknown agg {other:?}; expected one of: avg, sum, min, max, count"
+        ))),
+    }
+}
+
 #[repr(C)]
 pub(crate) struct AggregateTab {
     base: ffi::sqlite3_vtab,
@@ -1068,7 +1218,12 @@ unsafe impl<'vtab> VTab<'vtab> for AggregateTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, AGGREGATE_FIRST_ARG, AGGREGATE_ARGS.len() as c_int)
+        best_index_args_with_series_id(
+            info,
+            AGGREGATE_FIRST_ARG,
+            AGGREGATE_ARGS.len() as c_int,
+            Some(0),
+        )
     }
 
     fn open(&mut self) -> Result<AggregateCursor<'vtab>> {
@@ -1115,18 +1270,8 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
             Some(txt) => compile_filter(M, txt)?,
         };
         let (start, stop) = (int(3, "start")?, int(4, "stop")?);
-        let agg = match text(5, "agg")?.as_str() {
-            "avg" => AggFn::Avg,
-            "sum" => AggFn::Sum,
-            "min" => AggFn::Min,
-            "max" => AggFn::Max,
-            "count" => AggFn::Count,
-            other => {
-                return Err(module_err(format!(
-                    "{M}: unknown agg {other:?}; expected one of: avg, sum, min, max, count"
-                )))
-            }
-        };
+        let selection = decode_series_selection(idx_num, AGGREGATE_ARGS.len(), args)?;
+        let agg = parse_scalar_aggregate(M, &text(5, "agg")?)?;
         if start > stop {
             self.rows.clear();
             self.pos = 0;
@@ -1140,22 +1285,16 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = shared.engine.series_read();
-            reg.find_series(&metric, &eq)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .filter(|(_, labels)| matchers_pass(labels, &matchers))
-                .collect()
-        };
-
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
+        let series_ids: Vec<i64> = candidates.iter().map(|(series_id, _)| *series_id).collect();
+        let batch = shared
+            .engine
+            .query_aggregate_summary_batch_by_id(&series_ids, start, stop)
+            .map_err(module_err)?;
         let mut rows = Vec::new();
-        for (sid, labels) in candidates {
-            let Some(summary) = shared
-                .engine
-                .query_aggregate_summary_by_id(sid, start, stop)
-                .map_err(module_err)?
-            else {
+        for ((sid, labels), (result_sid, summary)) in candidates.into_iter().zip(batch) {
+            debug_assert_eq!(sid, result_sid);
+            let Some(summary) = summary else {
                 continue;
             };
             let value =
@@ -1195,6 +1334,139 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
                 AggregateValue::Real(value) => ctx.set_result(value),
                 AggregateValue::Integer(value) => ctx.set_result(value),
             },
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_aggregate_frame — one packed scalar value per non-empty series
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+pub(crate) struct AggregateFrameTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for AggregateFrameTab {
+    type Aux = ();
+    type Cursor = AggregateFrameCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(frame BLOB, tbl HIDDEN, metric HIDDEN, filter HIDDEN, \
+                            start HIDDEN, stop HIDDEN, agg HIDDEN)",
+            ),
+            AggregateFrameTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, 1, AGGREGATE_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<AggregateFrameCursor<'vtab>> {
+        Ok(AggregateFrameCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct AggregateFrameCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<Vec<u8>>,
+    pos: usize,
+    phantom: PhantomData<&'vtab AggregateFrameTab>,
+}
+
+unsafe impl VTabCursor for AggregateFrameCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_aggregate_frame";
+        let slots = named_slots(M, AGGREGATE_ARGS, AGGREGATE_REQUIRED, idx_num)?;
+        let text = |index: usize, what: &str| -> Result<String> {
+            let value: Option<String> = args.get(slots[index].unwrap())?;
+            value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let integer = |index: usize, what: &str| -> Result<i64> {
+            let value: Option<i64> = args.get(slots[index].unwrap())?;
+            value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let metric = text(1, "metric")?;
+        let filter_text: Option<String> = match slots[2] {
+            None => None,
+            Some(slot) => args.get(slot)?,
+        };
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(filter) => compile_filter(M, filter)?,
+        };
+        let (start, stop) = (integer(3, "start")?, integer(4, "stop")?);
+        let aggregate = parse_scalar_aggregate(M, &text(5, "agg")?)?;
+        if start > stop {
+            self.rows.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        let series_ids = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers);
+        let batch = shared
+            .engine
+            .query_aggregate_summary_batch_by_id(&series_ids, start, stop)
+            .map_err(module_err)?;
+        let frame = encode_aggregate_frame(&batch, aggregate).map_err(module_err)?;
+        self.rows = if frame.is_empty() {
+            Vec::new()
+        } else {
+            vec![frame]
+        };
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(&self.rows[self.pos]),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -1245,7 +1517,7 @@ unsafe impl<'vtab> VTab<'vtab> for LatestTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, LATEST_FIRST_ARG, LATEST_ARGS.len() as c_int)
+        best_index_args_with_series_id(info, LATEST_FIRST_ARG, LATEST_ARGS.len() as c_int, Some(0))
     }
 
     fn open(&mut self) -> Result<LatestCursor<'vtab>> {
@@ -1292,6 +1564,7 @@ unsafe impl VTabCursor for LatestCursor<'_> {
             Some(txt) => compile_filter(M, txt)?,
         };
         let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        let selection = decode_series_selection(idx_num, LATEST_ARGS.len(), args)?;
         if start > stop {
             self.rows.clear();
             self.pos = 0;
@@ -1305,22 +1578,16 @@ unsafe impl VTabCursor for LatestCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = shared.engine.series_read();
-            reg.find_series(&metric, &eq)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .filter(|(_, labels)| matchers_pass(labels, &matchers))
-                .collect()
-        };
-
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
+        let series_ids: Vec<i64> = candidates.iter().map(|(series_id, _)| *series_id).collect();
+        let batch = shared
+            .engine
+            .query_latest_batch_by_id(&series_ids, start, stop)
+            .map_err(module_err)?;
         let mut rows = Vec::new();
-        for (sid, labels) in candidates {
-            let Some((ts, value)) = shared
-                .engine
-                .query_latest_by_id(sid, start, stop)
-                .map_err(module_err)?
-            else {
+        for ((sid, labels), (result_sid, point)) in candidates.into_iter().zip(batch) {
+            debug_assert_eq!(sid, result_sid);
+            let Some((ts, value)) = point else {
                 continue;
             };
             rows.push((sid, labels, ts, value));
@@ -1350,6 +1617,138 @@ unsafe impl VTabCursor for LatestCursor<'_> {
             }
             2 => ctx.set_result(ts),
             3 => ctx.set_result(value),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_latest_frame — one packed newest point per non-empty series
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+pub(crate) struct LatestFrameTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for LatestFrameTab {
+    type Aux = ();
+    type Cursor = LatestFrameCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(frame BLOB, tbl HIDDEN, metric HIDDEN, filter HIDDEN, \
+                            start HIDDEN, stop HIDDEN)",
+            ),
+            LatestFrameTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, 1, LATEST_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<LatestFrameCursor<'vtab>> {
+        Ok(LatestFrameCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LatestFrameCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<Vec<u8>>,
+    pos: usize,
+    phantom: PhantomData<&'vtab LatestFrameTab>,
+}
+
+unsafe impl VTabCursor for LatestFrameCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_latest_frame";
+        let slots = named_slots(M, LATEST_ARGS, LATEST_REQUIRED, idx_num)?;
+        let text = |index: usize, what: &str| -> Result<String> {
+            let value: Option<String> = args.get(slots[index].unwrap())?;
+            value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let integer = |index: usize, what: &str| -> Result<i64> {
+            let value: Option<i64> = args.get(slots[index].unwrap())?;
+            value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let metric = text(1, "metric")?;
+        let filter_text: Option<String> = match slots[2] {
+            None => None,
+            Some(slot) => args.get(slot)?,
+        };
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(filter) => compile_filter(M, filter)?,
+        };
+        let (start, stop) = (integer(3, "start")?, integer(4, "stop")?);
+        if start > stop {
+            self.rows.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        let series_ids = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers);
+        let batch = shared
+            .engine
+            .query_latest_batch_by_id(&series_ids, start, stop)
+            .map_err(module_err)?;
+        let frame = encode_latest_frame(&batch).map_err(module_err)?;
+        self.rows = if frame.is_empty() {
+            Vec::new()
+        } else {
+            vec![frame]
+        };
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(&self.rows[self.pos]),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -1400,7 +1799,7 @@ unsafe impl<'vtab> VTab<'vtab> for RawTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, RAW_FIRST_ARG, RAW_ARGS.len() as c_int)
+        best_index_args_with_series_id(info, RAW_FIRST_ARG, RAW_ARGS.len() as c_int, Some(0))
     }
 
     fn open(&mut self) -> Result<RawCursor<'vtab>> {
@@ -1446,6 +1845,7 @@ unsafe impl VTabCursor for RawCursor<'_> {
             Some(txt) => compile_filter(M, txt)?,
         };
         let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        let selection = decode_series_selection(idx_num, RAW_ARGS.len(), args)?;
         if start > stop {
             self.rows.clear();
             self.pos = 0;
@@ -1459,14 +1859,7 @@ unsafe impl VTabCursor for RawCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = shared.engine.series_read();
-            reg.find_series(&metric, &eq)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .filter(|(_, labels)| matchers_pass(labels, &matchers))
-                .collect()
-        };
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
 
         let mut rows = Vec::new();
         for (sid, labels) in candidates {
@@ -1547,7 +1940,7 @@ unsafe impl<'vtab> VTab<'vtab> for RawBatchTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, 3, RAW_ARGS.len() as c_int)
+        best_index_args_with_series_id(info, 3, RAW_ARGS.len() as c_int, Some(0))
     }
 
     fn open(&mut self) -> Result<RawBatchCursor<'vtab>> {
@@ -1593,6 +1986,7 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
             Some(txt) => compile_filter(M, txt)?,
         };
         let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        let selection = decode_series_selection(idx_num, RAW_ARGS.len(), args)?;
         if start > stop {
             self.rows.clear();
             self.pos = 0;
@@ -1606,14 +2000,7 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = shared.engine.series_read();
-            reg.find_series(&metric, &eq)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .filter(|(_, labels)| matchers_pass(labels, &matchers))
-                .collect()
-        };
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
 
         let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
         let batch = shared
@@ -1942,14 +2329,15 @@ pub(crate) trait KernelVTab {
     const MODULE: &'static str;
     const ARGS: &'static [&'static str];
     const REQUIRED: c_int;
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>>;
+    const SERIES_ID_COL: c_int;
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<KernelRow>>;
 }
 
 #[repr(C)]
 pub(crate) struct KernelCursor<'vtab, T: KernelVTab> {
     base: ffi::sqlite3_vtab_cursor,
     db: *mut ffi::sqlite3,
-    rows: Vec<(String, i64, Option<f64>)>,
+    rows: Vec<KernelRow>,
     pos: usize,
     phantom: PhantomData<&'vtab T>,
 }
@@ -1986,7 +2374,7 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (labels, ts, value) = &self.rows[self.pos];
+        let (series_id, labels, ts, value) = &self.rows[self.pos];
         match col {
             COL_LABELS => ctx.set_result(labels),
             1 => ctx.set_result(ts),
@@ -1994,6 +2382,7 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
                 Some(v) => ctx.set_result(v),
                 None => ctx.set_result(&rusqlite::types::Null),
             },
+            col if col == T::SERIES_ID_COL => ctx.set_result(series_id),
             // Hidden arg columns are omitted from output by set_omit;
             // selecting them explicitly yields NULL (args are echoed in
             // the query text anyway).
@@ -2054,7 +2443,7 @@ unsafe impl<'vtab> VTab<'vtab> for RollupTab {
             Cow::Borrowed(
                 c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, resolution HIDDEN, \
-                            start HIDDEN, stop HIDDEN, agg HIDDEN)",
+                            start HIDDEN, stop HIDDEN, agg HIDDEN, series_id HIDDEN)",
             ),
             RollupTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -2064,7 +2453,12 @@ unsafe impl<'vtab> VTab<'vtab> for RollupTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, COL_FIRST_ARG, ROLLUP_ARGS.len() as c_int)
+        best_index_args_with_series_id(
+            info,
+            COL_FIRST_ARG,
+            ROLLUP_ARGS.len() as c_int,
+            Some(COL_FIRST_ARG + ROLLUP_ARGS.len() as c_int),
+        )
     }
 
     fn open(&mut self) -> Result<KernelCursor<'vtab, RollupTab>> {
@@ -2086,8 +2480,9 @@ impl KernelVTab for RollupTab {
     const MODULE: &'static str = "timeless_rollup";
     const ARGS: &'static [&'static str] = ROLLUP_ARGS;
     const REQUIRED: c_int = ROLLUP_REQUIRED;
+    const SERIES_ID_COL: c_int = COL_FIRST_ARG + ROLLUP_ARGS.len() as c_int;
 
-    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>> {
+    fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<KernelRow>> {
         // KernelArgs reuse: width carries `resolution`; agg arrives as a
         // string in ka.agg_name (rollup vocabulary is larger than AggFn).
         let agg = match ka.agg_name.as_deref() {
@@ -2168,7 +2563,7 @@ unsafe impl<'vtab> VTab<'vtab> for RollupBatchTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, 3, ROLLUP_BATCH_ARGS.len() as c_int)
+        best_index_args_with_series_id(info, 3, ROLLUP_BATCH_ARGS.len() as c_int, Some(0))
     }
 
     fn open(&mut self) -> Result<RollupBatchCursor<'vtab>> {
@@ -2205,14 +2600,13 @@ unsafe impl VTabCursor for RollupBatchCursor<'_> {
             .refresh_authoritative_state()
             .map_err(module_err)?;
 
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = shared.engine.series_read();
-            reg.find_series(&ka.metric, &ka.filter)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .filter(|(_, labels)| matchers_pass(labels, &ka.matchers))
-                .collect()
-        };
+        let candidates = metric_candidates(
+            &shared.engine,
+            &ka.metric,
+            &ka.filter,
+            &ka.matchers,
+            ka.series_selection,
+        );
         let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
         let batch = shared
             .engine
@@ -2819,7 +3213,7 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, SERIES_FIRST_ARG, SERIES_ARGS.len() as c_int)
+        best_index_args_with_series_id(info, SERIES_FIRST_ARG, SERIES_ARGS.len() as c_int, Some(2))
     }
 
     fn open(&mut self) -> Result<SeriesCursor<'vtab>> {
@@ -2868,6 +3262,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
             None | Some("") => (Labels::new(), Vec::new()),
             Some(text) => compile_filter(M, text)?,
         };
+        let selection = decode_series_selection(idx_num, SERIES_ARGS.len(), args)?;
         let _bind = DbGuard::bind(self.db);
         let module = detect_module(&database, &table)?;
         if module != TimelessModule::Metrics {
@@ -2883,8 +3278,28 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        self.rows = match metric {
-            Some(metric) => {
+        self.rows = match (metric, selection) {
+            (_, SeriesSelection::Empty) => Vec::new(),
+            (metric, SeriesSelection::Id(series_id)) => {
+                let matches = {
+                    let reg = shared.engine.series_read();
+                    reg.info_for(series_id).is_some_and(|info| {
+                        metric
+                            .as_deref()
+                            .is_none_or(|metric| info.metric_name == metric)
+                            && eq
+                                .iter()
+                                .all(|(key, value)| info.labels.get(key) == Some(value))
+                            && matchers_pass(&info.labels, &matchers)
+                    })
+                };
+                if matches {
+                    shared.engine.series_overview_by_ids(&[series_id])
+                } else {
+                    Vec::new()
+                }
+            }
+            (Some(metric), SeriesSelection::All) => {
                 let series_ids: Vec<i64> = {
                     let reg = shared.engine.series_read();
                     reg.find_series(&metric, &eq)
@@ -2897,7 +3312,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 };
                 shared.engine.series_overview_by_ids(&series_ids)
             }
-            None => shared.engine.series_overview(),
+            (None, SeriesSelection::All) => shared.engine.series_overview(),
         };
         self.pos = 0;
         Ok(())

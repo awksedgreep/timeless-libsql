@@ -36,6 +36,12 @@ const COMPACT_MIN_AGE_SECS: i64 = 3600;
 /// Sorted label set. BTreeMap gives deterministic ordering for hashing.
 pub type Labels = BTreeMap<String, String>;
 
+/// Ordered newest-point results keyed by durable series ID.
+pub type LatestSeriesBatch = Vec<(i64, Option<(i64, f64)>)>;
+
+/// Ordered scalar-summary results keyed by durable series ID.
+pub type AggregateSummaryBatch = Vec<(i64, Option<AggregateSummary>)>;
+
 /// Partition key is just a series_id. The series registry maps
 /// (metric_name, labels) → series_id.
 #[derive(Hash, Eq, PartialEq, Clone, Debug, Ord, PartialOrd, Copy)]
@@ -2408,6 +2414,147 @@ impl Engine {
         self.query_latest_by_id_inner(series_id, t_start, t_end)
     }
 
+    /// Return the newest point for an ordered batch of durable series IDs.
+    ///
+    /// This is the callback-safe packed-latest primitive: one transition guard,
+    /// one index snapshot, and one ordered store batch read replace a separate
+    /// query transition and shadow-table statement per series. Results retain
+    /// input ID order, including repeated and missing IDs.
+    pub fn query_latest_batch_by_id(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<LatestSeriesBatch> {
+        if t_start > t_end {
+            return Ok(series_ids.iter().map(|&sid| (sid, None)).collect());
+        }
+
+        let _transition = self.transition_read();
+        let matching: Vec<Vec<(usize, ChunkMeta)>> = {
+            let index = self.index_read();
+            series_ids
+                .iter()
+                .map(|&series_id| {
+                    let pk = PartitionKey { series_id };
+                    let mut chunks: Vec<_> = index
+                        .range((pk, i64::MIN, u64::MIN)..)
+                        .take_while(|((key, _, _), _)| key == &pk)
+                        .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
+                        .enumerate()
+                        .map(|(rank, (_, meta))| (rank, meta.clone()))
+                        .collect();
+                    chunks.sort_by(|(rank_a, a), (rank_b, b)| {
+                        b.max_ts
+                            .min(t_end)
+                            .cmp(&a.max_ts.min(t_end))
+                            .then_with(|| rank_a.cmp(rank_b))
+                    });
+                    chunks
+                })
+                .collect()
+        };
+
+        // Metadata answers an unbounded latest lookup without bytes. Collect
+        // only chunks whose maximum lies beyond the upper bound or whose
+        // persisted newest-value metadata is absent (legacy databases).
+        let mut locs = Vec::new();
+        let work: Vec<Vec<(usize, ChunkMeta, Option<usize>)>> = matching
+            .into_iter()
+            .map(|chunks| {
+                chunks
+                    .into_iter()
+                    .map(|(rank, meta)| {
+                        let decode_index = if meta.max_ts <= t_end && meta.max_ts_val.is_some() {
+                            None
+                        } else {
+                            let index = locs.len();
+                            locs.push(meta.loc.clone());
+                            Some(index)
+                        };
+                        (rank, meta, decode_index)
+                    })
+                    .collect()
+            })
+            .collect();
+        let payloads = self.store.read_chunks(&locs)?;
+        if payloads.len() != locs.len() {
+            return Err(format!(
+                "batch chunk read returned {} payloads for {} locations",
+                payloads.len(),
+                locs.len()
+            ));
+        }
+
+        let mut result = Vec::with_capacity(series_ids.len());
+        for (&series_id, chunks) in series_ids.iter().zip(work) {
+            let pk = PartitionKey { series_id };
+            // Buffered points follow persisted chunks in stable raw order.
+            let mut best: Option<(i64, f64, usize)> = None;
+            if let Some(buffer) = self.partitions.get(&pk) {
+                for index in 0..buffer.timestamps.len() {
+                    let timestamp = buffer.timestamps[index];
+                    if timestamp < t_start || timestamp > t_end {
+                        continue;
+                    }
+                    if best
+                        .as_ref()
+                        .is_none_or(|(best_timestamp, _, _)| timestamp > *best_timestamp)
+                    {
+                        best = Some((timestamp, buffer.values[index], usize::MAX));
+                    }
+                }
+            }
+
+            for (rank, meta, decode_index) in chunks {
+                let possible_ts = meta.max_ts.min(t_end);
+                if best
+                    .as_ref()
+                    .is_some_and(|(best_timestamp, _, _)| possible_ts < *best_timestamp)
+                {
+                    break;
+                }
+
+                let chunk_best = match decode_index {
+                    None => meta.max_ts_val.map(|value| (meta.max_ts, value)),
+                    Some(index) => {
+                        let points =
+                            Self::decode_chunk_data(&meta, &payloads[index], t_start, t_end)?;
+                        let mut decoded_best: Option<(i64, f64)> = None;
+                        for (timestamp, value) in points {
+                            if decoded_best
+                                .as_ref()
+                                .is_none_or(|(best_timestamp, _)| timestamp > *best_timestamp)
+                            {
+                                decoded_best = Some((timestamp, value));
+                            }
+                        }
+                        decoded_best
+                    }
+                };
+
+                let Some((timestamp, value)) = chunk_best else {
+                    continue;
+                };
+                let replace = match best {
+                    None => true,
+                    Some((best_timestamp, _, best_rank)) => {
+                        timestamp > best_timestamp
+                            || (timestamp == best_timestamp && rank < best_rank)
+                    }
+                };
+                if replace {
+                    best = Some((timestamp, value, rank));
+                }
+            }
+            result.push((
+                series_id,
+                best.map(|(timestamp, value, _)| (timestamp, value)),
+            ));
+        }
+        Ok(result)
+    }
+
     fn query_latest_by_id_inner(
         &self,
         series_id: i64,
@@ -2550,6 +2697,133 @@ impl Engine {
     ) -> EngineResult<Option<AggregateSummary>> {
         let _transition = self.transition_read();
         self.query_aggregate_summary_by_id_inner(series_id, t_start, t_end)
+    }
+
+    /// Compute chunk-aware scalar summaries for an ordered batch of durable
+    /// series IDs without Rayon.
+    ///
+    /// Fully covered chunks retain the metadata fast path. Boundary and legacy
+    /// NaN-metadata chunks are fetched through one ordered store batch. Results
+    /// retain input ID order, including repeated and missing IDs.
+    pub fn query_aggregate_summary_batch_by_id(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<AggregateSummaryBatch> {
+        let _transition = self.transition_read();
+        let matching: Vec<Vec<ChunkMeta>> = {
+            let index = self.index_read();
+            series_ids
+                .iter()
+                .map(|&series_id| {
+                    let pk = PartitionKey { series_id };
+                    index
+                        .range((pk, i64::MIN, u64::MIN)..)
+                        .take_while(|((key, _, _), _)| key == &pk)
+                        .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
+                        .map(|(_, meta)| meta.clone())
+                        .collect()
+                })
+                .collect()
+        };
+
+        let mut locs = Vec::new();
+        let work: Vec<Vec<(ChunkMeta, Option<usize>)>> = matching
+            .into_iter()
+            .map(|chunks| {
+                chunks
+                    .into_iter()
+                    .map(|meta| {
+                        let covered = meta.min_ts >= t_start
+                            && meta.max_ts <= t_end
+                            && !meta.min_val.is_nan()
+                            && !meta.max_val.is_nan();
+                        let decode_index = if covered {
+                            None
+                        } else {
+                            let index = locs.len();
+                            locs.push(meta.loc.clone());
+                            Some(index)
+                        };
+                        (meta, decode_index)
+                    })
+                    .collect()
+            })
+            .collect();
+        let payloads = self.store.read_chunks(&locs)?;
+        if payloads.len() != locs.len() {
+            return Err(format!(
+                "batch chunk read returned {} payloads for {} locations",
+                payloads.len(),
+                locs.len()
+            ));
+        }
+
+        let mut result = Vec::with_capacity(series_ids.len());
+        for (&series_id, chunks) in series_ids.iter().zip(work) {
+            let mut total_count: u64 = 0;
+            let mut total_sum: f64 = 0.0;
+            let mut global_min: Option<f64> = None;
+            let mut global_max: Option<f64> = None;
+
+            for (meta, decode_index) in chunks {
+                if let Some(index) = decode_index {
+                    let points = Self::decode_chunk_data(&meta, &payloads[index], t_start, t_end)?;
+                    for (_, value) in points {
+                        total_count += 1;
+                        total_sum += value;
+                        global_min = Some(match global_min {
+                            Some(current) => current.min(value),
+                            None => value,
+                        });
+                        global_max = Some(match global_max {
+                            Some(current) => current.max(value),
+                            None => value,
+                        });
+                    }
+                } else {
+                    total_count += meta.point_count as u64;
+                    total_sum += meta.sum_val;
+                    global_min = Some(match global_min {
+                        Some(current) => current.min(meta.min_val),
+                        None => meta.min_val,
+                    });
+                    global_max = Some(match global_max {
+                        Some(current) => current.max(meta.max_val),
+                        None => meta.max_val,
+                    });
+                }
+            }
+
+            let pk = PartitionKey { series_id };
+            if let Some(buffer) = self.partitions.get(&pk) {
+                for index in 0..buffer.timestamps.len() {
+                    if buffer.timestamps[index] >= t_start && buffer.timestamps[index] <= t_end {
+                        let value = buffer.values[index];
+                        total_count += 1;
+                        total_sum += value;
+                        global_min = Some(match global_min {
+                            Some(current) => current.min(value),
+                            None => value,
+                        });
+                        global_max = Some(match global_max {
+                            Some(current) => current.max(value),
+                            None => value,
+                        });
+                    }
+                }
+            }
+
+            let summary = (total_count != 0).then(|| AggregateSummary {
+                count: total_count,
+                sum: total_sum,
+                min: global_min.expect("non-empty aggregate has a minimum"),
+                max: global_max.expect("non-empty aggregate has a maximum"),
+            });
+            result.push((series_id, summary));
+        }
+        Ok(result)
     }
 
     fn query_aggregate_summary_by_id_inner(

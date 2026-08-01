@@ -67,7 +67,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use rusqlite::ffi;
-use rusqlite::types::{Null, ValueRef};
+use rusqlite::types::{Null, Value, ValueRef};
 use rusqlite::vtab::{
     escape_double_quote, Context, CreateVTab, Filters, IndexConstraintOp, IndexInfo, Inserts,
     Module, TransactionVTab, UpdateVTab, Updates, VTab, VTabConnection, VTabCursor, VTabKind,
@@ -81,6 +81,7 @@ use crate::shadow_meta;
 use crate::shadow_store::{self, ShadowTableStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
 use crate::sql_ident;
+use crate::sql_value::integer_affinity;
 use crate::table_args;
 use crate::vtab_tx::{self, SavepointVTab};
 
@@ -686,7 +687,7 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
     /// tell SQLite which ones to hand to filter() as arguments.
     ///
     /// idx_num bitmask:  1 = name equality,  2 = ts lower bound,
-    ///                   4 = ts upper bound.
+    ///                   4 = ts upper bound, 8 = series_id equality.
     /// argv slots are assigned in that canonical order, so filter() can
     /// decode positions from the mask alone.
     ///
@@ -698,10 +699,12 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
         use IndexConstraintOp::*;
 
         // Pass 1 (immutable borrow): find the first usable constraint of
-        // each kind. Column order: 0 name, 1 ts, 2 value, 3 labels.
+        // each kind. Column order: 0 name, 1 ts, 2 value, 3 labels,
+        // 4 hidden series_id.
         let mut name_c: Option<usize> = None;
         let mut lo_c: Option<usize> = None;
         let mut hi_c: Option<usize> = None;
+        let mut series_c: Option<usize> = None;
         for (i, c) in info.constraints().enumerate() {
             if !c.is_usable() {
                 continue;
@@ -718,10 +721,10 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
                 {
                     hi_c = Some(i)
                 }
+                (4, SQLITE_INDEX_CONSTRAINT_EQ) if series_c.is_none() => series_c = Some(i),
                 _ => {}
             }
         }
-
         // Pass 2 (mutable borrows): claim argv slots in canonical order.
         let mut mask: c_int = 0;
         let mut slot: c_int = 1; // argv indexes are 1-based
@@ -737,13 +740,26 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
         }
         if let Some(i) = hi_c {
             info.constraint_usage(i).set_argv_index(slot);
+            slot += 1;
             mask |= 4;
+        }
+        if let Some(i) = series_c {
+            let mut usage = info.constraint_usage(i);
+            usage.set_argv_index(slot);
+            usage.set_omit(true);
+            mask |= 8;
         }
 
         info.set_idx_num(mask);
         // A name-equality plan touches one metric's series; a bare scan
         // touches everything. Rough costs steer the planner accordingly.
-        info.set_estimated_cost(if mask & 1 != 0 { 1e3 } else { 1e6 });
+        if mask & 8 != 0 {
+            info.set_estimated_cost(10.0);
+            info.set_estimated_rows(100);
+        } else {
+            info.set_estimated_cost(if mask & 1 != 0 { 1e3 } else { 1e6 });
+            info.set_estimated_rows(if mask & 1 != 0 { 1000 } else { 1_000_000 });
+        }
         Ok(true)
     }
 
@@ -1086,6 +1102,45 @@ pub struct MetricsCursor<'vtab> {
 }
 
 impl MetricsCursor<'_> {
+    /// Query one durable catalog handle without enumerating a metric's series.
+    /// An optional name constraint is intersected here before any chunk read.
+    fn collect_series(
+        &self,
+        series_id: i64,
+        expected_name: Option<&str>,
+        t0: i64,
+        t1: i64,
+    ) -> Result<Vec<OutRow>> {
+        let Some((name, labels)) = ({
+            let reg = self.shared.engine.series_read();
+            reg.info_for(series_id).and_then(|info| {
+                expected_name
+                    .is_none_or(|expected| info.metric_name == expected)
+                    .then(|| (info.metric_name.clone(), info.labels.clone()))
+            })
+        }) else {
+            return Ok(Vec::new());
+        };
+
+        let labels_json = labels_to_json(&labels);
+        self.shared
+            .engine
+            .query_range_by_id(series_id, t0, t1)
+            .map_err(module_err)
+            .map(|points| {
+                points
+                    .into_iter()
+                    .map(|(ts, value)| OutRow {
+                        series_id,
+                        name: name.clone(),
+                        ts,
+                        value,
+                        labels_json: labels_json.clone(),
+                    })
+                    .collect()
+            })
+    }
+
     /// Query every series of one metric SEQUENTIALLY on this thread.
     ///
     /// Deliberate deviation: we do NOT call engine.query_range_labeled()
@@ -1174,7 +1229,9 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
             i64::MIN
         };
         let t1: i64 = if idx_num & 4 != 0 {
-            match args.get::<Option<i64>>(arg)? {
+            let value = args.get::<Option<i64>>(arg)?;
+            arg += 1;
+            match value {
                 Some(v) => v,
                 None => {
                     impossible = true;
@@ -1184,10 +1241,23 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
         } else {
             i64::MAX
         };
+        let series_id = if idx_num & 8 != 0 {
+            match integer_affinity(args.get::<Value>(arg)?) {
+                Some(series_id) => Some(series_id),
+                None => {
+                    impossible = true;
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let mut rows = Vec::new();
         if !impossible {
-            if idx_num & 1 != 0 {
+            if let Some(series_id) = series_id {
+                rows = self.collect_series(series_id, name.as_deref(), t0, t1)?;
+            } else if idx_num & 1 != 0 {
                 // Name pushdown: only this metric's series.
                 if let Some(name) = name {
                     rows = self.collect_metric(&name, t0, t1)?;

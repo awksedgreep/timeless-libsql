@@ -27,6 +27,7 @@ struct Config {
 struct Outcome {
     series: usize,
     points: usize,
+    bytes: usize,
     checksum: u64,
 }
 
@@ -117,6 +118,7 @@ fn main() {
     let exact_expected = Outcome {
         series: 1,
         points: config.points,
+        bytes: first.outcome.bytes,
         checksum: first.outcome.checksum,
     };
     assert_eq!(
@@ -190,7 +192,10 @@ fn main() {
     });
     let negative_series = config.series.div_ceil(2);
     assert_eq!(selective_negative.outcome.series, negative_series);
-    assert_eq!(selective_negative.outcome.points, negative_series * config.points);
+    assert_eq!(
+        selective_negative.outcome.points,
+        negative_series * config.points
+    );
 
     let mut selective_discovery_stmt = reader
         .prepare("SELECT COUNT(*) FROM timeless_series('metrics', ?1, ?2)")
@@ -235,8 +240,7 @@ fn main() {
         consume_raw(&mut wide_stmt, wide_filter, start, stop, false)
     });
 
-    let raw_frame_sql =
-        "SELECT frame FROM timeless_raw_frame('metrics', ?1, ?2, ?3, ?4)";
+    let raw_frame_sql = "SELECT frame FROM timeless_raw_frame('metrics', ?1, ?2, ?3, ?4)";
     let mut raw_frame_stmt = reader.prepare(raw_frame_sql).expect("prepare raw frame");
     let raw_frame_warm = consume_raw_frame(&mut raw_frame_stmt, wide_filter, start, stop);
     assert_eq!(
@@ -275,6 +279,30 @@ fn main() {
         consume_aggregate(&mut native_aggregate_stmt, wide_filter, start, stop)
     });
 
+    let aggregate_frame_sql = "SELECT frame FROM timeless_aggregate_frame(
+      'metrics', ?1, ?2, ?3, ?4, 'avg')";
+    let mut aggregate_frame_stmt = reader
+        .prepare(aggregate_frame_sql)
+        .expect("prepare aggregate frame");
+    let aggregate_frame_warm =
+        consume_aggregate_frame(&mut aggregate_frame_stmt, wide_filter, start, stop);
+    assert_eq!(
+        (
+            aggregate_frame_warm.series,
+            aggregate_frame_warm.points,
+            aggregate_frame_warm.checksum,
+        ),
+        (
+            native_aggregate_warm.series,
+            native_aggregate_warm.points,
+            native_aggregate_warm.checksum,
+        ),
+        "aggregate frame differs from native aggregate rows"
+    );
+    let aggregate_frame = measure(config.runs, || {
+        consume_aggregate_frame(&mut aggregate_frame_stmt, wide_filter, start, stop)
+    });
+
     let mut latest_stmt = reader.prepare(raw_sql).expect("prepare latest fallback");
     let latest_warm = consume_latest(&mut latest_stmt, wide_filter, start, stop);
     let latest_fallback = measure(config.runs, || {
@@ -293,11 +321,39 @@ fn main() {
     let native_latest_warm =
         consume_native_latest(&mut native_latest_stmt, wide_filter, start, stop);
     assert_eq!(
-        native_latest_warm, latest_warm,
+        (
+            native_latest_warm.series,
+            native_latest_warm.points,
+            native_latest_warm.checksum,
+        ),
+        (latest_warm.series, latest_warm.points, latest_warm.checksum),
         "native latest differs from raw fallback"
     );
     let native_latest = measure(config.runs, || {
         consume_native_latest(&mut native_latest_stmt, wide_filter, start, stop)
+    });
+
+    let latest_frame_sql = "SELECT frame FROM timeless_latest_frame(
+      'metrics', ?1, ?2, ?3, ?4)";
+    let mut latest_frame_stmt = reader
+        .prepare(latest_frame_sql)
+        .expect("prepare latest frame");
+    let latest_frame_warm = consume_latest_frame(&mut latest_frame_stmt, wide_filter, start, stop);
+    assert_eq!(
+        (
+            latest_frame_warm.series,
+            latest_frame_warm.points,
+            latest_frame_warm.checksum,
+        ),
+        (
+            native_latest_warm.series,
+            native_latest_warm.points,
+            native_latest_warm.checksum,
+        ),
+        "latest frame differs from native latest rows"
+    );
+    let latest_frame = measure(config.runs, || {
+        consume_latest_frame(&mut latest_frame_stmt, wide_filter, start, stop)
     });
 
     let step = 10i64;
@@ -373,8 +429,7 @@ fn main() {
                 .expect("prepare row rollup query")
         })
         .collect();
-    let rollup_row_warm =
-        consume_rollup_rows(&mut rollup_row_stmts, wide_filter, start, stop);
+    let rollup_row_warm = consume_rollup_rows(&mut rollup_row_stmts, wide_filter, start, stop);
     assert_eq!(
         rollup_row_warm.points, rollup.outcome.points,
         "six row rollup calls lost buckets"
@@ -409,7 +464,7 @@ fn main() {
     println!("# ingest_us={ingest_us}");
     println!("# flush_us={flush_us}");
     println!("# database_bytes={database_bytes}");
-    println!("metric,median_us,p95_us,min_us,max_us,runs,result_series,result_points");
+    println!("metric,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes");
     print_stats("first_exact_after_flush", &first);
     print_stats("catalog_generation_select", &generation_select);
     print_stats("warm_refresh_noop", &refresh_noop);
@@ -423,8 +478,10 @@ fn main() {
     print_stats("wide_raw_frame", &raw_frame);
     print_stats("scalar_aggregate_raw_fallback", &aggregate_fallback);
     print_stats("scalar_aggregate_native", &native_aggregate);
+    print_stats("scalar_aggregate_frame", &aggregate_frame);
     print_stats("latest_raw_fallback", &latest_fallback);
     print_stats("latest_native", &native_latest);
+    print_stats("latest_frame", &latest_frame);
     print_stats("grid_count", &grid);
     print_stats("window_avg_count", &window_stats);
     print_stats("window_avg_batches", &window_batch);
@@ -438,8 +495,10 @@ fn main() {
     drop(window_batch_stmt);
     drop(window_stmt);
     drop(grid_stmt);
+    drop(latest_frame_stmt);
     drop(native_latest_stmt);
     drop(latest_stmt);
+    drop(aggregate_frame_stmt);
     drop(native_aggregate_stmt);
     drop(aggregate_stmt);
     drop(raw_frame_stmt);
@@ -583,6 +642,7 @@ fn consume_raw(
         .expect("query raw batches");
     let mut series = 0usize;
     let mut points = 0usize;
+    let mut bytes = 0usize;
     let mut checksum = 0u64;
     while let Some(row) = rows.next().expect("step raw batches") {
         let sid: i64 = row.get(0).expect("series id");
@@ -591,6 +651,7 @@ fn consume_raw(
         let count = validate_point_blob(&blob);
         series += 1;
         points += count;
+        bytes += 8 + labels.len() + blob.len();
         checksum = checksum
             .wrapping_add(sid as u64)
             .wrapping_add(labels.len() as u64);
@@ -609,6 +670,7 @@ fn consume_raw(
     Outcome {
         series,
         points,
+        bytes,
         checksum,
     }
 }
@@ -619,9 +681,11 @@ fn consume_latest(stmt: &mut Statement<'_>, filter: &str, start: i64, stop: i64)
         .expect("query latest fallback");
     let mut series = 0usize;
     let mut points = 0usize;
+    let mut bytes = 0usize;
     let mut checksum = 0u64;
     while let Some(row) = rows.next().expect("step latest fallback") {
         let sid: i64 = row.get(0).expect("series id");
+        let labels: String = row.get(1).expect("labels");
         let blob: Vec<u8> = row.get(2).expect("points blob");
         let count = validate_point_blob(&blob);
         if count > 0 {
@@ -636,28 +700,27 @@ fn consume_latest(stmt: &mut Statement<'_>, filter: &str, start: i64, stop: i64)
                 .wrapping_add(value_bits);
             series += 1;
             points += 1;
+            bytes += 8 + labels.len() + blob.len();
         }
     }
     Outcome {
         series,
         points,
+        bytes,
         checksum,
     }
 }
 
-fn consume_native_latest(
-    stmt: &mut Statement<'_>,
-    filter: &str,
-    start: i64,
-    stop: i64,
-) -> Outcome {
+fn consume_native_latest(stmt: &mut Statement<'_>, filter: &str, start: i64, stop: i64) -> Outcome {
     let mut rows = stmt
         .query(params![METRIC, filter, start, stop])
         .expect("query native latest");
     let mut series = 0usize;
+    let mut bytes = 0usize;
     let mut checksum = 0u64;
     while let Some(row) = rows.next().expect("step native latest") {
         let sid: i64 = row.get(0).expect("series id");
+        let labels: String = row.get(1).expect("latest labels");
         let ts: i64 = row.get(2).expect("latest timestamp");
         let value: f64 = row.get(3).expect("latest value");
         checksum = checksum
@@ -665,10 +728,12 @@ fn consume_native_latest(
             .wrapping_add(ts as u64)
             .wrapping_add(value.to_bits());
         series += 1;
+        bytes += 24 + labels.len();
     }
     Outcome {
         series,
         points: series,
+        bytes,
         checksum,
     }
 }
@@ -678,20 +743,113 @@ fn consume_aggregate(stmt: &mut Statement<'_>, filter: &str, start: i64, stop: i
         .query(params![METRIC, filter, start, stop])
         .expect("query native aggregate");
     let mut series = 0usize;
+    let mut bytes = 0usize;
     let mut checksum = 0u64;
     while let Some(row) = rows.next().expect("step native aggregate") {
         let sid: i64 = row.get(0).expect("series id");
         let labels: String = row.get(1).expect("labels");
         let value: f64 = row.get(2).expect("aggregate value");
         series += 1;
+        bytes += 16 + labels.len();
         checksum = checksum
             .wrapping_add(sid as u64)
-            .wrapping_add(labels.len() as u64)
             .wrapping_add(value.to_bits());
     }
     Outcome {
         series,
         points: series,
+        bytes,
+        checksum,
+    }
+}
+
+fn consume_aggregate_frame(
+    stmt: &mut Statement<'_>,
+    filter: &str,
+    start: i64,
+    stop: i64,
+) -> Outcome {
+    let blob: Vec<u8> = stmt
+        .query_row(params![METRIC, filter, start, stop], |row| row.get(0))
+        .expect("query aggregate frame");
+    assert!(blob.len() >= 12, "truncated aggregate frame");
+    assert_eq!(&blob[..4], b"TAF1", "unknown aggregate frame version");
+    assert_eq!(blob[4], 0, "benchmark expected an avg aggregate frame");
+    assert_eq!(&blob[5..8], &[0, 0, 0], "aggregate frame flags set");
+    let series = u32::from_le_bytes(blob[8..12].try_into().unwrap()) as usize;
+    let bitmap_bytes = series.checked_add(7).expect("bitmap size overflow") / 8;
+    let expected = 12usize
+        .checked_add(series.checked_mul(16).expect("aggregate columns overflow"))
+        .and_then(|size| size.checked_add(bitmap_bytes))
+        .expect("aggregate frame size overflow");
+    assert_eq!(blob.len(), expected, "malformed aggregate frame");
+    let bitmap_start = 12 + series * 8;
+    let values_start = bitmap_start + bitmap_bytes;
+    let mut checksum = 0u64;
+    for index in 0..series {
+        assert_ne!(
+            blob[bitmap_start + index / 8] & (1 << (index % 8)),
+            0,
+            "benchmark aggregate unexpectedly returned NULL"
+        );
+        let id_start = 12 + index * 8;
+        let value_start = values_start + index * 8;
+        let series_id = i64::from_le_bytes(blob[id_start..id_start + 8].try_into().unwrap());
+        let value_bits = u64::from_le_bytes(blob[value_start..value_start + 8].try_into().unwrap());
+        checksum = checksum
+            .wrapping_add(series_id as u64)
+            .wrapping_add(value_bits);
+    }
+    Outcome {
+        series,
+        points: series,
+        bytes: blob.len(),
+        checksum,
+    }
+}
+
+fn consume_latest_frame(stmt: &mut Statement<'_>, filter: &str, start: i64, stop: i64) -> Outcome {
+    let blob: Vec<u8> = stmt
+        .query_row(params![METRIC, filter, start, stop], |row| row.get(0))
+        .expect("query latest frame");
+    assert!(blob.len() >= 8, "truncated latest frame");
+    assert_eq!(&blob[..4], b"TLF1", "unknown latest frame version");
+    let series = u32::from_le_bytes(blob[4..8].try_into().unwrap()) as usize;
+    let bitmap_bytes = series.checked_add(7).expect("bitmap size overflow") / 8;
+    let expected = 8usize
+        .checked_add(series.checked_mul(24).expect("latest columns overflow"))
+        .and_then(|size| size.checked_add(bitmap_bytes))
+        .expect("latest frame size overflow");
+    assert_eq!(blob.len(), expected, "malformed latest frame");
+    let timestamps_start = 8 + series * 8;
+    let bitmap_start = timestamps_start + series * 8;
+    let values_start = bitmap_start + bitmap_bytes;
+    let mut checksum = 0u64;
+    for index in 0..series {
+        assert_ne!(
+            blob[bitmap_start + index / 8] & (1 << (index % 8)),
+            0,
+            "benchmark latest unexpectedly returned NULL"
+        );
+        let id_start = 8 + index * 8;
+        let timestamp_start = timestamps_start + index * 8;
+        let value_start = values_start + index * 8;
+        let series_id = i64::from_le_bytes(blob[id_start..id_start + 8].try_into().unwrap());
+        let timestamp = i64::from_le_bytes(
+            blob[timestamp_start..timestamp_start + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let value_bits = u64::from_le_bytes(blob[value_start..value_start + 8].try_into().unwrap());
+        checksum = checksum
+            .wrapping_add(series_id as u64)
+            .wrapping_add(timestamp as u64)
+            .wrapping_add(value_bits);
+    }
+    Outcome {
+        series,
+        points: series,
+        bytes: blob.len(),
         checksum,
     }
 }
@@ -706,12 +864,7 @@ fn validate_point_blob(blob: &[u8]) -> usize {
     count
 }
 
-fn consume_raw_frame(
-    stmt: &mut Statement<'_>,
-    filter: &str,
-    start: i64,
-    stop: i64,
-) -> Outcome {
+fn consume_raw_frame(stmt: &mut Statement<'_>, filter: &str, start: i64, stop: i64) -> Outcome {
     let blob: Vec<u8> = stmt
         .query_row(params![METRIC, filter, start, stop], |row| row.get(0))
         .expect("query raw frame");
@@ -735,16 +888,15 @@ fn consume_raw_frame(
         .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
         .sum();
     assert_eq!(counted_points, points, "raw frame point counts differ");
-    let checksum = blob
-        .chunks(8)
-        .fold(0u64, |sum, bytes| {
-            let mut word = [0u8; 8];
-            word[..bytes.len()].copy_from_slice(bytes);
-            sum.wrapping_add(u64::from_le_bytes(word))
-        });
+    let checksum = blob.chunks(8).fold(0u64, |sum, bytes| {
+        let mut word = [0u8; 8];
+        word[..bytes.len()].copy_from_slice(bytes);
+        sum.wrapping_add(u64::from_le_bytes(word))
+    });
     Outcome {
         series,
         points,
+        bytes: blob.len(),
         checksum,
     }
 }
@@ -762,6 +914,7 @@ fn consume_window_batches(
         .expect("query packed window batches");
     let mut series = 0usize;
     let mut points = 0usize;
+    let mut bytes = 0usize;
     let mut checksum = 0u64;
     while let Some(row) = rows.next().expect("step packed window batches") {
         let sid: i64 = row.get(0).expect("window series id");
@@ -769,6 +922,7 @@ fn consume_window_batches(
         let count = validate_window_blob(&blob);
         series += 1;
         points += count;
+        bytes += 8 + blob.len();
         checksum = checksum
             .wrapping_add(sid as u64)
             .wrapping_add(blob.len() as u64);
@@ -776,6 +930,7 @@ fn consume_window_batches(
     Outcome {
         series,
         points,
+        bytes,
         checksum,
     }
 }
@@ -802,6 +957,7 @@ fn consume_rollup_rows(
     const AGGS: [&str; 6] = ["avg", "min", "max", "count", "sum", "last"];
     assert_eq!(stmts.len(), AGGS.len());
     let mut values = 0usize;
+    let mut bytes = 0usize;
     let mut checksum = 0u64;
     for (stmt, agg) in stmts.iter_mut().zip(AGGS) {
         let mut rows = stmt
@@ -812,16 +968,22 @@ fn consume_rollup_rows(
             let timestamp: i64 = row.get(1).expect("rollup timestamp");
             let value: f64 = row.get(2).expect("rollup value");
             values += 1;
+            bytes += labels.len() + 16;
             checksum = checksum
                 .wrapping_add(labels.len() as u64)
                 .wrapping_add(timestamp as u64)
                 .wrapping_add(value.to_bits());
         }
     }
-    assert_eq!(values % AGGS.len(), 0, "rollup aggregate cardinality differs");
+    assert_eq!(
+        values % AGGS.len(),
+        0,
+        "rollup aggregate cardinality differs"
+    );
     Outcome {
         series: 0,
         points: values / AGGS.len(),
+        bytes,
         checksum,
     }
 }
@@ -837,6 +999,7 @@ fn consume_rollup_batches(
         .expect("query packed rollups");
     let mut series = 0usize;
     let mut points = 0usize;
+    let mut bytes = 0usize;
     let mut checksum = 0u64;
     while let Some(row) = rows.next().expect("step packed rollups") {
         let series_id: i64 = row.get(0).expect("rollup series id");
@@ -844,6 +1007,7 @@ fn consume_rollup_batches(
         let count = validate_rollup_blob(&blob);
         series += 1;
         points += count;
+        bytes += 8 + blob.len();
         checksum = checksum.wrapping_add(series_id as u64);
         for word in blob[8..].chunks_exact(8) {
             checksum = checksum.wrapping_add(u64::from_le_bytes(word.try_into().unwrap()));
@@ -852,6 +1016,7 @@ fn consume_rollup_batches(
     Outcome {
         series,
         points,
+        bytes,
         checksum,
     }
 }
@@ -877,6 +1042,7 @@ where
     Outcome {
         series: 0,
         points: count as usize,
+        bytes: 8,
         checksum: count as u64,
     }
 }
@@ -910,13 +1076,14 @@ fn measure(mut runs: usize, mut operation: impl FnMut() -> Outcome) -> Stats {
 
 fn print_stats(metric: &str, stats: &Stats) {
     println!(
-        "{metric},{},{},{},{},{},{},{}",
+        "{metric},{},{},{},{},{},{},{},{}",
         stats.median_us,
         stats.p95_us,
         stats.min_us,
         stats.max_us,
         stats.runs,
         stats.outcome.series,
-        stats.outcome.points
+        stats.outcome.points,
+        stats.outcome.bytes
     );
 }
