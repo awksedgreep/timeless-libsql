@@ -12,8 +12,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use super::codec::{decode_block, encode_block, CODEC_COLUMNAR_V2, CODEC_RAW};
 use super::{level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry};
@@ -60,6 +61,94 @@ impl Default for BlockEngineConfig {
             index_keys: Vec::new(),
         }
     }
+}
+
+/// Cumulative, process-local work counters. These deliberately measure work
+/// performed rather than durable logical state: a later SQLite rollback does
+/// not erase CPU time or bytes decoded. Callers take before/after snapshots
+/// when attributing one workload interval.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockEngineProfileSnapshot {
+    pub ingest_batch_count: u64,
+    pub ingest_batch_entries: u64,
+    pub ingest_wire_decode_ns: u64,
+    pub ingest_normalize_ns: u64,
+    pub ingest_buffer_append_ns: u64,
+    pub flush_count: u64,
+    pub flush_entries: u64,
+    pub flush_total_ns: u64,
+    pub flush_partition_ns: u64,
+    pub flush_encode_terms_ns: u64,
+    pub flush_store_ns: u64,
+    pub query_count: u64,
+    pub query_total_ns: u64,
+    pub query_candidate_blocks: u64,
+    pub query_decoded_entries: u64,
+    pub query_returned_entries: u64,
+    pub optimize_count: u64,
+    pub optimize_total_ns: u64,
+    pub optimize_blocks_removed: u64,
+    pub optimize_blocks_written: u64,
+}
+
+#[derive(Default)]
+struct BlockEngineProfile {
+    ingest_batch_count: AtomicU64,
+    ingest_batch_entries: AtomicU64,
+    ingest_wire_decode_ns: AtomicU64,
+    ingest_normalize_ns: AtomicU64,
+    ingest_buffer_append_ns: AtomicU64,
+    flush_count: AtomicU64,
+    flush_entries: AtomicU64,
+    flush_total_ns: AtomicU64,
+    flush_partition_ns: AtomicU64,
+    flush_encode_terms_ns: AtomicU64,
+    flush_store_ns: AtomicU64,
+    query_count: AtomicU64,
+    query_total_ns: AtomicU64,
+    query_candidate_blocks: AtomicU64,
+    query_decoded_entries: AtomicU64,
+    query_returned_entries: AtomicU64,
+    optimize_count: AtomicU64,
+    optimize_total_ns: AtomicU64,
+    optimize_blocks_removed: AtomicU64,
+    optimize_blocks_written: AtomicU64,
+}
+
+impl BlockEngineProfile {
+    fn snapshot(&self) -> BlockEngineProfileSnapshot {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        BlockEngineProfileSnapshot {
+            ingest_batch_count: load(&self.ingest_batch_count),
+            ingest_batch_entries: load(&self.ingest_batch_entries),
+            ingest_wire_decode_ns: load(&self.ingest_wire_decode_ns),
+            ingest_normalize_ns: load(&self.ingest_normalize_ns),
+            ingest_buffer_append_ns: load(&self.ingest_buffer_append_ns),
+            flush_count: load(&self.flush_count),
+            flush_entries: load(&self.flush_entries),
+            flush_total_ns: load(&self.flush_total_ns),
+            flush_partition_ns: load(&self.flush_partition_ns),
+            flush_encode_terms_ns: load(&self.flush_encode_terms_ns),
+            flush_store_ns: load(&self.flush_store_ns),
+            query_count: load(&self.query_count),
+            query_total_ns: load(&self.query_total_ns),
+            query_candidate_blocks: load(&self.query_candidate_blocks),
+            query_decoded_entries: load(&self.query_decoded_entries),
+            query_returned_entries: load(&self.query_returned_entries),
+            optimize_count: load(&self.optimize_count),
+            optimize_total_ns: load(&self.optimize_total_ns),
+            optimize_blocks_removed: load(&self.optimize_blocks_removed),
+            optimize_blocks_written: load(&self.optimize_blocks_written),
+        }
+    }
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// One query. All filters are optional except the ts range (pass
@@ -209,6 +298,7 @@ pub struct BlockEngine {
     retention_native: AtomicI64,
     /// Last retention cutoff applied (advance guard); i64::MIN = never.
     retention_floor: AtomicI64,
+    profile: BlockEngineProfile,
 }
 
 impl BlockEngine {
@@ -260,11 +350,24 @@ impl BlockEngine {
             txn: Mutex::new(TxnJournal::default()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
+            profile: BlockEngineProfile::default(),
         })
     }
 
     pub fn config(&self) -> &BlockEngineConfig {
         &self.config
+    }
+
+    pub fn profile(&self) -> BlockEngineProfileSnapshot {
+        self.profile.snapshot()
+    }
+
+    /// Attribute successful extension wire decoding without coupling the
+    /// storage engine to a particular batch format.
+    pub fn record_ingest_wire_decode(&self, duration: Duration) {
+        self.profile
+            .ingest_wire_decode_ns
+            .fetch_add(duration_ns(duration), Ordering::Relaxed);
     }
 
     /// Poison-tolerant locks, same style as the rest of timeless-core:
@@ -486,6 +589,7 @@ impl BlockEngine {
     /// because they are engine invariants, and a bad one mid-batch
     /// aborts BEFORE anything is appended.
     pub fn push_batch(&self, mut entries: Vec<LogEntry>) -> Result<usize, String> {
+        let normalize_started = Instant::now();
         for entry in &mut entries {
             if entry.level > 3 {
                 return Err(format!(
@@ -498,12 +602,27 @@ impl BlockEngine {
             entry.metadata.dedup_by(|a, b| a.0 == b.0);
             entry.metadata.reverse();
         }
+        let normalize_ns = elapsed_ns(normalize_started);
         let n = entries.len();
+        let append_started = Instant::now();
         let should_flush = {
             let mut buf = self.buffer_lock();
             buf.extend(entries);
             buf.len() >= self.config.flush_threshold
         };
+        let append_ns = elapsed_ns(append_started);
+        self.profile
+            .ingest_batch_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.profile
+            .ingest_batch_entries
+            .fetch_add(n as u64, Ordering::Relaxed);
+        self.profile
+            .ingest_normalize_ns
+            .fetch_add(normalize_ns, Ordering::Relaxed);
+        self.profile
+            .ingest_buffer_append_ns
+            .fetch_add(append_ns, Ordering::Relaxed);
         if should_flush {
             self.flush()?;
         }
@@ -533,8 +652,18 @@ impl BlockEngine {
     /// store in ONE put_blocks call (one lock + prepared-statement
     /// reuse in the SQLite backend).
     pub fn flush(&self) -> Result<usize, String> {
+        let started = Instant::now();
         let out = self.flush_inner()?;
         self.apply_retention()?;
+        if out > 0 {
+            self.profile.flush_count.fetch_add(1, Ordering::Relaxed);
+            self.profile
+                .flush_entries
+                .fetch_add(out as u64, Ordering::Relaxed);
+            self.profile
+                .flush_total_ns
+                .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        }
         Ok(out)
     }
 
@@ -568,8 +697,11 @@ impl BlockEngine {
         // encode or store call below fails. Within a run the entries
         // are time-ordered, which is what the delta codec and merge-
         // friendly queries want.
+        let partition_started = Instant::now();
         buf.sort_by_key(|e| (e.level, e.ts));
+        let partition_ns = elapsed_ns(partition_started);
 
+        let encode_started = Instant::now();
         let mut blocks: Vec<EncodedBlock> = Vec::new();
         let mut levels: Vec<u8> = Vec::new(); // partition tag per block
         let mut start = 0usize;
@@ -584,8 +716,11 @@ impl BlockEngine {
             levels.push(level);
             start = end;
         }
+        let encode_terms_ns = elapsed_ns(encode_started);
 
+        let store_started = Instant::now();
         let locs = self.store.put_blocks(&blocks)?;
+        let store_ns = elapsed_ns(store_started);
         {
             let mut index = self.index_lock();
             for ((block, loc), level) in blocks.iter().zip(&locs).zip(&levels) {
@@ -604,6 +739,15 @@ impl BlockEngine {
         }
         let n = buf.len();
         buf.clear();
+        self.profile
+            .flush_partition_ns
+            .fetch_add(partition_ns, Ordering::Relaxed);
+        self.profile
+            .flush_encode_terms_ns
+            .fetch_add(encode_terms_ns, Ordering::Relaxed);
+        self.profile
+            .flush_store_ns
+            .fetch_add(store_ns, Ordering::Relaxed);
         Ok(n)
     }
 
@@ -712,8 +856,19 @@ impl BlockEngine {
     ///
     /// Returns (blocks_removed, blocks_written).
     pub fn optimize(&self) -> Result<(usize, usize), String> {
+        let started = Instant::now();
         let out = self.optimize_inner()?;
         self.apply_retention()?;
+        self.profile.optimize_count.fetch_add(1, Ordering::Relaxed);
+        self.profile
+            .optimize_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.profile
+            .optimize_blocks_removed
+            .fetch_add(out.0 as u64, Ordering::Relaxed);
+        self.profile
+            .optimize_blocks_written
+            .fetch_add(out.1 as u64, Ordering::Relaxed);
         Ok(out)
     }
 
@@ -963,6 +1118,7 @@ impl BlockEngine {
     ///   4. merge in matching BUFFERED entries (queryable-before-flush),
     ///   5. sort by ts.
     pub fn query(&self, q: &LogQuery) -> Result<Vec<LogEntry>, String> {
+        let started = Instant::now();
         let _transition = self.transition_read();
         let mut terms: Vec<String> = Vec::new();
         if let Some(lvl) = q.level {
@@ -1006,10 +1162,14 @@ impl BlockEngine {
                 locs.retain(|(loc, _)| !indexed.contains(&loc.id) || matching.contains(&loc.id));
             }
         }
+        let candidate_blocks = locs.len() as u64;
+        let mut decoded_entries = 0u64;
         let mut out: Vec<LogEntry> = Vec::new();
         for (loc, _meta) in &locs {
             let bytes = self.store.read_block(loc)?;
-            for entry in decode_block(&bytes)? {
+            let entries = decode_block(&bytes)?;
+            decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
+            for entry in entries {
                 if entry_matches(&entry, q) {
                     out.push(entry);
                 }
@@ -1023,6 +1183,19 @@ impl BlockEngine {
         // Stable sort: entries with equal ts keep block order, buffered
         // entries land after flushed ones — deterministic either way.
         out.sort_by_key(|e| e.ts);
+        self.profile.query_count.fetch_add(1, Ordering::Relaxed);
+        self.profile
+            .query_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.profile
+            .query_candidate_blocks
+            .fetch_add(candidate_blocks, Ordering::Relaxed);
+        self.profile
+            .query_decoded_entries
+            .fetch_add(decoded_entries, Ordering::Relaxed);
+        self.profile
+            .query_returned_entries
+            .fetch_add(out.len() as u64, Ordering::Relaxed);
         Ok(out)
     }
 

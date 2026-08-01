@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Form, Query, State};
@@ -35,7 +36,12 @@ async fn health(State(storage): State<Storage>) -> impl IntoResponse {
                 "blocks": stats.total_blocks,
                 "entries": stats.total_entries,
                 "disk_size": stats.disk_size,
-                "queued_entries": stats.queued_entries
+                "buffered_entries": stats.buffered_entries,
+                "queued_batches": stats.queued_batches,
+                "queued_entries": stats.queued_entries,
+                "oldest_queued_ms": stats.oldest_queued_ms,
+                "admitted_entries": stats.admitted_entries,
+                "completed_entries": stats.completed_entries
             })),
         )
             .into_response(),
@@ -58,7 +64,9 @@ async fn ingest(
 ) -> impl IntoResponse {
     let message_field = params.message_field.as_deref().unwrap_or("_msg");
     let time_field = params.time_field.as_deref().unwrap_or("_time");
+    let parse_started = Instant::now();
     let (entries, errors) = parse_ndjson(&body, message_field, time_field);
+    storage.record_parse(parse_started.elapsed());
     match storage.ingest(entries).await {
         Ok(_count) if errors == 0 => StatusCode::NO_CONTENT.into_response(),
         Ok(count) => (

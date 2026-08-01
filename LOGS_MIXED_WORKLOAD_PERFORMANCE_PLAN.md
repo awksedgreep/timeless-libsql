@@ -1,6 +1,6 @@
 # Logs mixed-workload performance plan
 
-Status: proposed on `poc/rust-logs-api-v3` (2026-08-01)
+Status: active on `poc/rust-logs-api-v3` (2026-08-01)
 
 This plan improves the existing `timeless_logs` virtual table and the Rust
 logs API without replacing or reproducing the storage engine. Work is split
@@ -116,13 +116,20 @@ ingestion throughput.
 
 ## Session 1 — Instrument and pin the baseline
 
-- [ ] Make the HTTP workload deterministic through a recorded seed or fixture.
-- [ ] Add completed-ingestion, queue-age, and final-drain reporting.
-- [ ] Measure engine phases separately: batch parse, metadata normalization,
+- [x] Make the HTTP workload deterministic through a recorded seed or fixture.
+- [x] Add completed-ingestion, queue-age, and final-drain reporting.
+- [x] Measure engine phases separately: batch parse, metadata normalization,
       buffer append, flush partition/order work, term extraction, raw encode,
-      shadow-table write, and transaction completion.
-- [ ] Measure query permit wait/hold time and materialized-versus-returned rows.
-- [ ] Record no-query and mixed-load baselines using the measurement contract.
+      shadow-table write, and transaction completion. The current SQLite
+      statement timer includes blob decode, append/flush, and autocommit; the
+      extension counters split the material flush phases from that total.
+- [x] Measure query permit wait/hold time and materialized-versus-returned rows.
+- [x] Record no-query and mixed-load baselines using the measurement contract.
+
+Pinned results are recorded in
+`../timeless_logs/bench/results/2026-08-01_rust_logs_api_session1.md`. Peak RSS
+was not sampled in these short attribution runs and remains mandatory for the
+final Session 7 matrix.
 
 Exit criterion: the bottleneck attribution is repeatable, and admitted work
 cannot be mistaken for completed SQLite ingestion.

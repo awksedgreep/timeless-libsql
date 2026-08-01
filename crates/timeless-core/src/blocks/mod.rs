@@ -34,7 +34,7 @@ mod tests;
 pub use codec::{
     decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
 };
-pub use engine::{BlockEngine, BlockEngineConfig, LogQuery};
+pub use engine::{BlockEngine, BlockEngineConfig, BlockEngineProfileSnapshot, LogQuery};
 pub use mem::MemBlockStore;
 
 /// Log severity levels, matching the timeless_logs on-disk convention:

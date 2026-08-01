@@ -112,6 +112,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -213,6 +214,22 @@ struct GateState {
 pub(crate) struct WriterGate {
     state: Mutex<GateState>,
     released: Condvar,
+    read_permit_count: AtomicU64,
+    read_permit_hold_ns: AtomicU64,
+    read_conflicts: AtomicU64,
+    writer_wait_count: AtomicU64,
+    writer_wait_ns: AtomicU64,
+    writer_timeouts: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WriterGateProfileSnapshot {
+    pub(crate) read_permit_count: u64,
+    pub(crate) read_permit_hold_ns: u64,
+    pub(crate) read_conflicts: u64,
+    pub(crate) writer_wait_count: u64,
+    pub(crate) writer_wait_ns: u64,
+    pub(crate) writer_timeouts: u64,
 }
 
 /// Short read-side permit. It prevents a writer from publishing
@@ -222,6 +239,7 @@ pub(crate) struct WriterGate {
 pub(crate) struct ReadPermit<'a> {
     gate: &'a WriterGate,
     active: bool,
+    started: Option<Instant>,
 }
 
 impl Drop for ReadPermit<'_> {
@@ -233,7 +251,17 @@ impl Drop for ReadPermit<'_> {
         debug_assert!(state.readers > 0);
         state.readers -= 1;
         self.gate.released.notify_all();
+        self.gate.read_permit_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(started) = self.started {
+            self.gate
+                .read_permit_hold_ns
+                .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        }
     }
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 impl WriterGate {
@@ -241,6 +269,12 @@ impl WriterGate {
         WriterGate {
             state: Mutex::new(GateState::default()),
             released: Condvar::new(),
+            read_permit_count: AtomicU64::new(0),
+            read_permit_hold_ns: AtomicU64::new(0),
+            read_conflicts: AtomicU64::new(0),
+            writer_wait_count: AtomicU64::new(0),
+            writer_wait_ns: AtomicU64::new(0),
+            writer_timeouts: AtomicU64::new(0),
         }
     }
 
@@ -268,14 +302,21 @@ impl WriterGate {
         table: &str,
         timeout: Duration,
     ) -> Result<(), String> {
+        let started = Instant::now();
+        let mut waited = false;
         let mut state = self.lock();
         if state.writer == Some(conn_id) {
             return Ok(()); // re-entrant: same connection, same txn
         }
         let deadline = Instant::now() + timeout;
         while state.writer.is_some() || state.readers > 0 {
+            waited = true;
             let now = Instant::now();
             if now >= deadline {
+                self.writer_wait_count.fetch_add(1, Ordering::Relaxed);
+                self.writer_wait_ns
+                    .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+                self.writer_timeouts.fetch_add(1, Ordering::Relaxed);
                 return Err(format!(
                     "table {table:?} is busy (timed out after {:?} waiting for {} \
                      writer and {} active reader(s) — retry, as for SQLITE_BUSY)",
@@ -295,6 +336,11 @@ impl WriterGate {
             state = g;
         }
         state.writer = Some(conn_id);
+        if waited {
+            self.writer_wait_count.fetch_add(1, Ordering::Relaxed);
+            self.writer_wait_ns
+                .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -313,18 +359,35 @@ impl WriterGate {
             Some(writer) if writer == conn_id => Ok(ReadPermit {
                 gate: self,
                 active: false,
+                started: None,
             }),
-            Some(_) => Err(format!(
-                "table {table:?} read is blocked by another connection's active write \
-                 transaction — retry, as for SQLITE_BUSY"
-            )),
+            Some(_) => {
+                self.read_conflicts.fetch_add(1, Ordering::Relaxed);
+                Err(format!(
+                    "table {table:?} read is blocked by another connection's active write \
+                     transaction — retry, as for SQLITE_BUSY"
+                ))
+            }
             None => {
                 state.readers += 1;
                 Ok(ReadPermit {
                     gate: self,
                     active: true,
+                    started: Some(Instant::now()),
                 })
             }
+        }
+    }
+
+    pub(crate) fn profile(&self) -> WriterGateProfileSnapshot {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        WriterGateProfileSnapshot {
+            read_permit_count: load(&self.read_permit_count),
+            read_permit_hold_ns: load(&self.read_permit_hold_ns),
+            read_conflicts: load(&self.read_conflicts),
+            writer_wait_count: load(&self.writer_wait_count),
+            writer_wait_ns: load(&self.writer_wait_ns),
+            writer_timeouts: load(&self.writer_timeouts),
         }
     }
 

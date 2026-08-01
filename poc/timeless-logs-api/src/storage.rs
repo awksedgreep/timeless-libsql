@@ -1,8 +1,10 @@
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection};
@@ -53,6 +55,60 @@ pub struct StorageStats {
     pub buffered_entries: i64,
     pub queued_batches: i64,
     pub queued_entries: i64,
+    pub oldest_queued_ms: i64,
+    pub admitted_batches: i64,
+    pub admitted_entries: i64,
+    pub completed_batches: i64,
+    pub completed_entries: i64,
+    pub api_parse_ns: i64,
+    pub api_batch_encode_ns: i64,
+    pub api_sqlite_insert_ns: i64,
+    pub api_queue_wait_ns: i64,
+    pub api_queue_wait_max_ns: i64,
+    pub api_query_count: i64,
+    pub api_query_ns: i64,
+    pub ingest_batch_count: i64,
+    pub ingest_batch_entries: i64,
+    pub ingest_wire_decode_ns: i64,
+    pub ingest_normalize_ns: i64,
+    pub ingest_buffer_append_ns: i64,
+    pub flush_count: i64,
+    pub flush_entries: i64,
+    pub flush_total_ns: i64,
+    pub flush_partition_ns: i64,
+    pub flush_encode_terms_ns: i64,
+    pub flush_store_ns: i64,
+    pub query_count: i64,
+    pub query_total_ns: i64,
+    pub query_candidate_blocks: i64,
+    pub query_decoded_entries: i64,
+    pub query_returned_entries: i64,
+    pub optimize_count: i64,
+    pub optimize_total_ns: i64,
+    pub optimize_blocks_removed: i64,
+    pub optimize_blocks_written: i64,
+    pub read_permit_count: i64,
+    pub read_permit_hold_ns: i64,
+    pub read_conflicts: i64,
+    pub writer_wait_count: i64,
+    pub writer_wait_ns: i64,
+    pub writer_timeouts: i64,
+}
+
+#[derive(Default)]
+struct QueueProfile {
+    pending: VecDeque<(Instant, usize)>,
+    admitted_batches: u64,
+    admitted_entries: u64,
+    completed_batches: u64,
+    completed_entries: u64,
+    parse_ns: u64,
+    batch_encode_ns: u64,
+    sqlite_insert_ns: u64,
+    queue_wait_ns: u64,
+    queue_wait_max_ns: u64,
+    query_count: u64,
+    query_ns: u64,
 }
 
 enum WriteCommand {
@@ -74,7 +130,7 @@ struct StorageInner {
     writer: mpsc::Sender<WriteCommand>,
     readers: Vec<mpsc::Sender<ReadCommand>>,
     next_reader: AtomicUsize,
-    pending_entries: Arc<AtomicUsize>,
+    profile: Arc<StdMutex<QueueProfile>>,
     joins: Mutex<Vec<JoinHandle<Result<(), String>>>>,
 }
 
@@ -90,8 +146,8 @@ impl Storage {
     ) -> Result<Self, String> {
         let (writer_tx, writer_rx) = mpsc::channel(queue_batches);
         let (ready_tx, ready_rx) = std_mpsc::channel();
-        let pending_entries = Arc::new(AtomicUsize::new(0));
-        let writer_pending_entries = Arc::clone(&pending_entries);
+        let profile = Arc::new(StdMutex::new(QueueProfile::default()));
+        let writer_profile = Arc::clone(&profile);
         let writer_db = database_path.clone();
         let writer_ext = extension_path.clone();
         let writer_join = thread::Builder::new()
@@ -102,7 +158,7 @@ impl Storage {
                     writer_ext,
                     writer_rx,
                     ready_tx,
-                    writer_pending_entries,
+                    writer_profile,
                 )
             })
             .map_err(|e| format!("spawn SQLite writer: {e}"))?;
@@ -117,9 +173,18 @@ impl Storage {
             let (ready_tx, ready_rx) = std_mpsc::channel();
             let reader_db = database_path.clone();
             let reader_ext = extension_path.clone();
+            let reader_profile = Arc::clone(&profile);
             let join = thread::Builder::new()
                 .name(format!("timeless-logs-reader-{number}"))
-                .spawn(move || reader_main(reader_db, reader_ext, reader_rx, ready_tx))
+                .spawn(move || {
+                    reader_main(
+                        reader_db,
+                        reader_ext,
+                        reader_rx,
+                        ready_tx,
+                        reader_profile,
+                    )
+                })
                 .map_err(|e| format!("spawn SQLite reader {number}: {e}"))?;
             ready_rx
                 .recv()
@@ -132,25 +197,32 @@ impl Storage {
             writer: writer_tx,
             readers,
             next_reader: AtomicUsize::new(0),
-            pending_entries,
+            profile,
             joins: Mutex::new(joins),
         })))
     }
 
     pub async fn ingest(&self, entries: Vec<LogEntry>) -> Result<usize, String> {
         let count = entries.len();
-        self.0.pending_entries.fetch_add(count, Ordering::Relaxed);
-        if self
+        let permit = self
             .0
             .writer
-            .send(WriteCommand::Ingest(entries))
+            .reserve()
             .await
-            .is_err()
+            .map_err(|_| "SQLite writer is not running".to_string())?;
         {
-            self.0.pending_entries.fetch_sub(count, Ordering::Relaxed);
-            return Err("SQLite writer is not running".into());
+            let mut profile = profile_lock(&self.0.profile);
+            profile.pending.push_back((Instant::now(), count));
+            profile.admitted_batches = profile.admitted_batches.saturating_add(1);
+            profile.admitted_entries = profile.admitted_entries.saturating_add(count as u64);
         }
+        permit.send(WriteCommand::Ingest(entries));
         Ok(count)
+    }
+
+    pub fn record_parse(&self, duration: Duration) {
+        let mut profile = profile_lock(&self.0.profile);
+        profile.parse_ns = profile.parse_ns.saturating_add(duration_ns(duration));
     }
 
     pub async fn schedule_flush(&self) -> Result<(), String> {
@@ -227,8 +299,25 @@ impl Storage {
         let mut stats = reply_rx
             .await
             .map_err(|_| "SQLite reader stopped before stats completed".to_string())??;
-        stats.queued_batches = (self.0.writer.max_capacity() - self.0.writer.capacity()) as i64;
-        stats.queued_entries = self.0.pending_entries.load(Ordering::Relaxed) as i64;
+        let profile = profile_lock(&self.0.profile);
+        stats.queued_batches = profile.pending.len() as i64;
+        stats.queued_entries = profile.pending.iter().map(|(_, count)| *count as i64).sum();
+        stats.oldest_queued_ms = profile
+            .pending
+            .front()
+            .map(|(queued_at, _)| queued_at.elapsed().as_millis() as i64)
+            .unwrap_or(0);
+        stats.admitted_batches = profile.admitted_batches as i64;
+        stats.admitted_entries = profile.admitted_entries as i64;
+        stats.completed_batches = profile.completed_batches as i64;
+        stats.completed_entries = profile.completed_entries as i64;
+        stats.api_parse_ns = profile.parse_ns as i64;
+        stats.api_batch_encode_ns = profile.batch_encode_ns as i64;
+        stats.api_sqlite_insert_ns = profile.sqlite_insert_ns as i64;
+        stats.api_queue_wait_ns = profile.queue_wait_ns as i64;
+        stats.api_queue_wait_max_ns = profile.queue_wait_max_ns as i64;
+        stats.api_query_count = profile.query_count as i64;
+        stats.api_query_ns = profile.query_ns as i64;
         Ok(stats)
     }
 
@@ -265,7 +354,7 @@ fn writer_main(
     extension_path: PathBuf,
     mut commands: mpsc::Receiver<WriteCommand>,
     ready: std_mpsc::Sender<Result<(), String>>,
-    pending_entries: Arc<AtomicUsize>,
+    profile: Arc<StdMutex<QueueProfile>>,
 ) -> Result<(), String> {
     let conn = match open_connection(&database_path, &extension_path, true) {
         Ok(conn) => {
@@ -281,8 +370,9 @@ fn writer_main(
         match command {
             WriteCommand::Ingest(entries) => {
                 let count = entries.len();
-                let result = insert_batch(&conn, &entries);
-                pending_entries.fetch_sub(count, Ordering::Relaxed);
+                record_queue_start(&profile);
+                let result = insert_batch(&conn, &entries, &profile);
+                record_queue_completion(&profile, count, result.is_ok());
                 result?;
             }
             WriteCommand::Flush(reply) => {
@@ -329,6 +419,7 @@ fn reader_main(
     extension_path: PathBuf,
     mut commands: mpsc::Receiver<ReadCommand>,
     ready: std_mpsc::Sender<Result<(), String>>,
+    profile: Arc<StdMutex<QueueProfile>>,
 ) -> Result<(), String> {
     let conn = match open_connection(&database_path, &extension_path, false) {
         Ok(conn) => {
@@ -343,10 +434,16 @@ fn reader_main(
     while let Some(command) = commands.blocking_recv() {
         match command {
             ReadCommand::Query(spec, reply) => {
-                let _ = reply.send(retry_read(|| query_rows(&conn, &spec)));
+                let started = Instant::now();
+                let result = retry_read(|| query_rows(&conn, &spec));
+                record_query(&profile, started.elapsed());
+                let _ = reply.send(result);
             }
             ReadCommand::Count(spec, reply) => {
-                let _ = reply.send(retry_read(|| query_count(&conn, &spec)));
+                let started = Instant::now();
+                let result = retry_read(|| query_count(&conn, &spec));
+                record_query(&profile, started.elapsed());
+                let _ = reply.send(result);
             }
             ReadCommand::Stats(reply) => {
                 let _ = reply.send(retry_read(|| storage_stats(&conn)));
@@ -405,14 +502,64 @@ fn retry_read<T>(mut operation: impl FnMut() -> Result<T, String>) -> Result<T, 
     }
 }
 
-fn insert_batch(conn: &Connection, entries: &[LogEntry]) -> Result<(), String> {
+fn profile_lock(profile: &StdMutex<QueueProfile>) -> std::sync::MutexGuard<'_, QueueProfile> {
+    profile.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    duration_ns(started.elapsed())
+}
+
+fn record_queue_start(profile: &StdMutex<QueueProfile>) {
+    let mut profile = profile_lock(profile);
+    if let Some((queued_at, _)) = profile.pending.front() {
+        let wait_ns = elapsed_ns(*queued_at);
+        profile.queue_wait_ns = profile.queue_wait_ns.saturating_add(wait_ns);
+        profile.queue_wait_max_ns = profile.queue_wait_max_ns.max(wait_ns);
+    }
+}
+
+fn record_queue_completion(profile: &StdMutex<QueueProfile>, count: usize, success: bool) {
+    let mut profile = profile_lock(profile);
+    let queued = profile.pending.pop_front();
+    debug_assert_eq!(queued.map(|(_, queued_count)| queued_count), Some(count));
+    if success {
+        profile.completed_batches = profile.completed_batches.saturating_add(1);
+        profile.completed_entries = profile.completed_entries.saturating_add(count as u64);
+    }
+}
+
+fn record_query(profile: &StdMutex<QueueProfile>, duration: Duration) {
+    let mut profile = profile_lock(profile);
+    profile.query_count = profile.query_count.saturating_add(1);
+    profile.query_ns = profile.query_ns.saturating_add(duration_ns(duration));
+}
+
+fn insert_batch(
+    conn: &Connection,
+    entries: &[LogEntry],
+    profile: &StdMutex<QueueProfile>,
+) -> Result<(), String> {
     if entries.is_empty() {
         return Ok(());
     }
+    let encode_started = Instant::now();
     let blob = encode_batch(entries)?;
-    conn.execute("INSERT INTO logs(logs) VALUES (?1)", params![blob])
+    let encode_ns = elapsed_ns(encode_started);
+    let insert_started = Instant::now();
+    let result = conn
+        .execute("INSERT INTO logs(logs) VALUES (?1)", params![blob])
         .map(|_| ())
-        .map_err(|e| format!("insert logs batch: {e}"))
+        .map_err(|e| format!("insert logs batch: {e}"));
+    let insert_ns = elapsed_ns(insert_started);
+    let mut profile = profile_lock(profile);
+    profile.batch_encode_ns = profile.batch_encode_ns.saturating_add(encode_ns);
+    profile.sqlite_insert_ns = profile.sqlite_insert_ns.saturating_add(insert_ns);
+    result
 }
 
 fn encode_batch(entries: &[LogEntry]) -> Result<Vec<u8>, String> {
@@ -512,7 +659,9 @@ fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
 }
 
 fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
-    let buffered = stat_value(conn, "buffered_entries")?;
+    let engine = stat_values(conn)?;
+    let stat = |key: &str| engine.get(key).copied().unwrap_or(0);
+    let buffered = stat("buffered_entries");
     let (blocks, disk_entries, bytes, raw_blocks, raw_bytes, oldest, newest): (
         i64,
         i64,
@@ -568,16 +717,67 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         buffered_entries: buffered,
         queued_batches: 0,
         queued_entries: 0,
+        oldest_queued_ms: 0,
+        admitted_batches: 0,
+        admitted_entries: 0,
+        completed_batches: 0,
+        completed_entries: 0,
+        api_parse_ns: 0,
+        api_batch_encode_ns: 0,
+        api_sqlite_insert_ns: 0,
+        api_queue_wait_ns: 0,
+        api_queue_wait_max_ns: 0,
+        api_query_count: 0,
+        api_query_ns: 0,
+        ingest_batch_count: stat("ingest_batch_count"),
+        ingest_batch_entries: stat("ingest_batch_entries"),
+        ingest_wire_decode_ns: stat("ingest_wire_decode_ns"),
+        ingest_normalize_ns: stat("ingest_normalize_ns"),
+        ingest_buffer_append_ns: stat("ingest_buffer_append_ns"),
+        flush_count: stat("flush_count"),
+        flush_entries: stat("flush_entries"),
+        flush_total_ns: stat("flush_total_ns"),
+        flush_partition_ns: stat("flush_partition_ns"),
+        flush_encode_terms_ns: stat("flush_encode_terms_ns"),
+        flush_store_ns: stat("flush_store_ns"),
+        query_count: stat("query_count"),
+        query_total_ns: stat("query_total_ns"),
+        query_candidate_blocks: stat("query_candidate_blocks"),
+        query_decoded_entries: stat("query_decoded_entries"),
+        query_returned_entries: stat("query_returned_entries"),
+        optimize_count: stat("optimize_count"),
+        optimize_total_ns: stat("optimize_total_ns"),
+        optimize_blocks_removed: stat("optimize_blocks_removed"),
+        optimize_blocks_written: stat("optimize_blocks_written"),
+        read_permit_count: stat("read_permit_count"),
+        read_permit_hold_ns: stat("read_permit_hold_ns"),
+        read_conflicts: stat("read_conflicts"),
+        writer_wait_count: stat("writer_wait_count"),
+        writer_wait_ns: stat("writer_wait_ns"),
+        writer_timeouts: stat("writer_timeouts"),
     })
 }
 
-fn stat_value(conn: &Connection, key: &str) -> Result<i64, String> {
-    conn.query_row(
-        "SELECT CAST(value AS INTEGER) FROM timeless_stats('logs') WHERE key=?1",
-        [key],
-        |row| row.get(0),
-    )
-    .map_err(|e| format!("read timeless_stats {key}: {e}"))
+fn stat_values(conn: &Connection) -> Result<HashMap<String, i64>, String> {
+    let mut stmt = conn
+        .prepare("SELECT key, CAST(value AS INTEGER) FROM timeless_stats('logs')")
+        .map_err(|e| format!("prepare timeless_stats: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+            ))
+        })
+        .map_err(|e| format!("read timeless_stats: {e}"))?;
+    let mut values = HashMap::new();
+    for row in rows {
+        let (key, value) = row.map_err(|e| format!("collect timeless_stats: {e}"))?;
+        if let Some(value) = value {
+            values.insert(key, value);
+        }
+    }
+    Ok(values)
 }
 
 #[cfg(test)]

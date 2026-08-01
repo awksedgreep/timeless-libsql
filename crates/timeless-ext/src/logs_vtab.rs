@@ -382,6 +382,7 @@ impl LogsTab {
     /// single entry reaches the engine buffer; durability is identical
     /// to row inserts (buffered until 'flush', auto-flush included).
     fn ingest_batch(&self, blob: &[u8]) -> Result<i64> {
+        let decode_started = std::time::Instant::now();
         let mut r = BatchReader::new(blob);
         let version = r.u8("version")?;
         if version != 0x01 {
@@ -433,6 +434,9 @@ impl LogsTab {
                 r.remaining()
             )));
         }
+        self.shared
+            .engine
+            .record_ingest_wire_decode(decode_started.elapsed());
         let count = self.shared.engine.push_batch(entries).map_err(module_err)?;
         Ok(count as i64)
     }

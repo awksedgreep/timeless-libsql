@@ -3629,6 +3629,8 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let _read = read_permit(&shared, self.db, &table)?;
                 let (blocks, raw_blocks, buffered) = shared.engine.stats();
                 let (ts_min, ts_max) = shared.engine.ts_range();
+                let profile = shared.engine.profile();
+                let gate = shared.write_gate.profile();
                 rows.extend([
                     ("blocks", Value::Integer(blocks as i64)),
                     ("raw_blocks", Value::Integer(raw_blocks as i64)),
@@ -3643,6 +3645,98 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ),
                     ("ts_min", opt_ts(ts_min)),
                     ("ts_max", opt_ts(ts_max)),
+                    (
+                        "ingest_batch_count",
+                        Value::Integer(profile.ingest_batch_count as i64),
+                    ),
+                    (
+                        "ingest_batch_entries",
+                        Value::Integer(profile.ingest_batch_entries as i64),
+                    ),
+                    (
+                        "ingest_wire_decode_ns",
+                        Value::Integer(profile.ingest_wire_decode_ns as i64),
+                    ),
+                    (
+                        "ingest_normalize_ns",
+                        Value::Integer(profile.ingest_normalize_ns as i64),
+                    ),
+                    (
+                        "ingest_buffer_append_ns",
+                        Value::Integer(profile.ingest_buffer_append_ns as i64),
+                    ),
+                    ("flush_count", Value::Integer(profile.flush_count as i64)),
+                    (
+                        "flush_entries",
+                        Value::Integer(profile.flush_entries as i64),
+                    ),
+                    (
+                        "flush_total_ns",
+                        Value::Integer(profile.flush_total_ns as i64),
+                    ),
+                    (
+                        "flush_partition_ns",
+                        Value::Integer(profile.flush_partition_ns as i64),
+                    ),
+                    (
+                        "flush_encode_terms_ns",
+                        Value::Integer(profile.flush_encode_terms_ns as i64),
+                    ),
+                    (
+                        "flush_store_ns",
+                        Value::Integer(profile.flush_store_ns as i64),
+                    ),
+                    ("query_count", Value::Integer(profile.query_count as i64)),
+                    (
+                        "query_total_ns",
+                        Value::Integer(profile.query_total_ns as i64),
+                    ),
+                    (
+                        "query_candidate_blocks",
+                        Value::Integer(profile.query_candidate_blocks as i64),
+                    ),
+                    (
+                        "query_decoded_entries",
+                        Value::Integer(profile.query_decoded_entries as i64),
+                    ),
+                    (
+                        "query_returned_entries",
+                        Value::Integer(profile.query_returned_entries as i64),
+                    ),
+                    (
+                        "optimize_count",
+                        Value::Integer(profile.optimize_count as i64),
+                    ),
+                    (
+                        "optimize_total_ns",
+                        Value::Integer(profile.optimize_total_ns as i64),
+                    ),
+                    (
+                        "optimize_blocks_removed",
+                        Value::Integer(profile.optimize_blocks_removed as i64),
+                    ),
+                    (
+                        "optimize_blocks_written",
+                        Value::Integer(profile.optimize_blocks_written as i64),
+                    ),
+                    (
+                        "read_permit_count",
+                        Value::Integer(gate.read_permit_count as i64),
+                    ),
+                    (
+                        "read_permit_hold_ns",
+                        Value::Integer(gate.read_permit_hold_ns as i64),
+                    ),
+                    ("read_conflicts", Value::Integer(gate.read_conflicts as i64)),
+                    (
+                        "writer_wait_count",
+                        Value::Integer(gate.writer_wait_count as i64),
+                    ),
+                    ("writer_wait_ns", Value::Integer(gate.writer_wait_ns as i64)),
+                    (
+                        "writer_timeouts",
+                        Value::Integer(gate.writer_timeouts as i64),
+                    ),
                 ]);
             }
             TimelessModule::Traces => {

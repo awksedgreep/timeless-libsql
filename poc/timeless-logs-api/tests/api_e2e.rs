@@ -25,6 +25,10 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert_eq!(stats.total_entries, 100);
     assert_eq!(stats.buffered_entries, 100);
     assert_eq!(stats.raw_blocks, 0);
+    assert_eq!(stats.queued_entries, 0);
+    assert_eq!(stats.admitted_entries, 100);
+    assert_eq!(stats.completed_entries, 100);
+    assert_eq!(stats.flush_count, 0);
 
     // Crossing exactly 8,192 lets the unmodified vtab perform its own
     // automatic level-partitioned raw flush.
@@ -40,6 +44,19 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert_eq!(stats.buffered_entries, 0);
     assert_eq!(stats.raw_blocks, 4, "one raw block per level present");
     assert_eq!(stats.compressed_blocks, 0, "ingest must not optimize");
+    assert_eq!(stats.admitted_entries, 8_192);
+    assert_eq!(stats.completed_entries, 8_192);
+    assert_eq!(stats.ingest_batch_count, 2);
+    assert_eq!(stats.ingest_batch_entries, 8_192);
+    assert!(stats.ingest_wire_decode_ns > 0);
+    assert!(stats.ingest_normalize_ns > 0);
+    assert!(stats.ingest_buffer_append_ns > 0);
+    assert_eq!(stats.flush_count, 1);
+    assert_eq!(stats.flush_entries, 8_192);
+    assert!(stats.flush_total_ns > 0);
+    assert!(stats.flush_partition_ns > 0);
+    assert!(stats.flush_encode_terms_ns > 0);
+    assert!(stats.flush_store_ns > 0);
 
     // The API query path sees the exact batch after the engine-controlled
     // flush and pushes service+level into the existing hidden columns.
@@ -61,6 +78,13 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
             .count(),
         410
     );
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.query_count, 1);
+    assert_eq!(stats.query_candidate_blocks, 1);
+    assert_eq!(stats.query_decoded_entries, 410);
+    assert_eq!(stats.query_returned_entries, 410);
+    assert!(stats.query_total_ns > 0);
+    assert!(stats.read_permit_count > 0);
 
     // Manual flush is an ordered durability barrier, not the ingest path.
     let response = app

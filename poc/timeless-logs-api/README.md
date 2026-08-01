@@ -10,7 +10,8 @@ The storage contract is fixed:
 - The API never flushes at a request or producer-batch boundary.
 - A one-second low-volume timer sends the existing `flush` command.
 - A 30-second maintenance timer sends the existing `optimize` command only
-  when raw blocks exist.
+  when raw blocks exist. `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` can defer it
+  for isolated benchmarks without changing the production default.
 - Graceful shutdown sends an ordered `flush` after all accepted batches.
 
 `204` means the parsed batch was admitted to the bounded SQLite-writer queue,
@@ -43,8 +44,10 @@ poc/timeless-logs-api/target/release/timeless-logs-api \
 
 The API uses one SQLite writer and a small pool of SQLite readers. Retryable
 extension publication conflicts wait inside the API rather than leaking as
-HTTP 500 responses. Stats expose `queued_batches` and `queued_entries` so
-admission throughput cannot be confused with completed SQLite ingestion.
+HTTP 500 responses. Health and stats expose admitted/completed work, queue
+depth and age, API phase timers, extension flush/query/optimize counters, and
+read-permit/writer-wait counters so admission cannot be confused with
+completed SQLite ingestion.
 
 The ignored end-to-end contract test pins the storage boundary explicitly:
 
@@ -61,16 +64,19 @@ between those requests.
 
 ## Current POC result
 
-The initial mixed API workload is useful boundary evidence, not a final engine
-benchmark. With four writers, 500-entry requests, and two concurrent query
-workers, the current Rust POC sustains 76.3K admitted entries/s with 1.60ms
-write p99. At the next ramp step it admits 124.0K entries/s but crosses the
-100ms p99 limit as the bounded queue fills behind long reads. The untouched
-Elixir API reaches 456.5K entries/s on the same workload configuration.
+The deterministic Session 1 baseline reaches 478.7K completed entries/s with
+no queries. With one and two query workers, it saturates at 162.3K and 85.5K
+completed entries/s respectively while the unchanged Elixir API reaches
+489.5K and 465.5K. Extension telemetry locates the difference: mixed queries
+held read permits for 7.53–10.31 aggregate seconds while writers waited
+7.06–7.56 seconds.
 
-The important finding is now correctly located: concurrent extension reads
-hold the publication boundary long enough to limit writer drain. No alternate
-buffer size or block-store policy was introduced to hide that result.
+The POC still uses the unchanged storage mechanism. No alternate buffer size,
+block layout, partition scheme, or compaction policy was introduced to hide
+the result. The next measured change is writer fairness and a shorter read
+permit lifetime.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).
+The pinned Session 1 results are in
+[`2026-08-01_rust_logs_api_session1.md`](../../../timeless_logs/bench/results/2026-08-01_rust_logs_api_session1.md).
