@@ -1,6 +1,7 @@
 # Rust metrics API POC plan
 
-Status: active on `poc/rust-telemetry-data-plane` (2026-08-01)
+Status: Session 0 complete; Session 1 ready on
+`poc/rust-telemetry-data-plane` (2026-08-01)
 
 This POC tests the process boundary, not a new metrics storage engine. The
 server will use the existing `timeless_metrics` virtual table, its public batch
@@ -122,20 +123,28 @@ helps product decisions—the current Rust block engine on the same host.
 
 ## Session 0 — Pin the control implementation
 
-- [ ] Freeze representative request/response fixtures for health, Victoria
+- [x] Freeze representative request/response fixtures for health, Victoria
       JSON-line ingest, Prometheus text ingest, native latest/range/export,
       label names/values, and series discovery.
-- [ ] Add deterministic HTTP workload controls and completed-work reporting to
+- [x] Add deterministic HTTP workload controls and completed-work reporting to
       the existing metrics harness rather than creating a benchmark-only
       storage path.
-- [ ] Run fresh-process baselines for Elixir HTTP with `engine: :libsql` and
+- [x] Run fresh-process baselines for Elixir HTTP with `engine: :libsql` and
       `engine: :rust`, including HWM and maintenance-deferred storage stats.
-- [ ] Record the exact current behavior for malformed and partially valid
+- [x] Record the exact current behavior for malformed and partially valid
       Prometheus/VM bodies, timestamp units, NaN/Inf, duplicate series, empty
       results, inclusive range edges, and asynchronous `204` admission.
 
 Exit criterion: the control is reproducible and request admission cannot be
 mistaken for SQLite completion.
+
+Result: complete. See
+`timeless_metrics/bench/results/2026-08-01_metrics_api_session0.md`. The final
+fixed step completed 777.0–792.7K points/s on Elixir+libSQL and 806.6–819.1K
+points/s on the Rust block engine across zero/one/two query-worker runs. All
+runs drained to queue zero with no request/query errors. The pinned black-box
+contract passes on both engines, and completion-aware health/flush controls now
+prevent asynchronous `204` admission from being reported as stored work.
 
 ## Session 1 — Descriptive server shell and storage contract
 
