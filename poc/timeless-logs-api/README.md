@@ -71,3 +71,6 @@ Elixir API reaches 456.5K entries/s on the same workload configuration.
 The important finding is now correctly located: concurrent extension reads
 hold the publication boundary long enough to limit writer drain. No alternate
 buffer size or block-store policy was introduced to hide that result.
+
+The measured follow-up work is organized in
+[`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).
