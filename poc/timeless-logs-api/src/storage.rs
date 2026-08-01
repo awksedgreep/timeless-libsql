@@ -90,6 +90,8 @@ pub struct StorageStats {
     pub read_permit_count: i64,
     pub read_permit_hold_ns: i64,
     pub read_conflicts: i64,
+    pub read_barge_rejections: i64,
+    pub waiting_writers: i64,
     pub writer_wait_count: i64,
     pub writer_wait_ns: i64,
     pub writer_timeouts: i64,
@@ -492,6 +494,7 @@ fn retry_read<T>(mut operation: impl FnMut() -> Result<T, String>) -> Result<T, 
             Err(error)
                 if std::time::Instant::now() < deadline
                     && (error.contains("active write transaction")
+                        || error.contains("pending writer transaction")
                         || error.contains("database is locked")
                         || error.contains("database is busy")) =>
             {
@@ -752,6 +755,8 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         read_permit_count: stat("read_permit_count"),
         read_permit_hold_ns: stat("read_permit_hold_ns"),
         read_conflicts: stat("read_conflicts"),
+        read_barge_rejections: stat("read_barge_rejections"),
+        waiting_writers: stat("waiting_writers"),
         writer_wait_count: stat("writer_wait_count"),
         writer_wait_ns: stat("writer_wait_ns"),
         writer_timeouts: stat("writer_timeouts"),
@@ -783,6 +788,7 @@ fn stat_values(conn: &Connection) -> Result<HashMap<String, i64>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn batch_encoding_preserves_the_established_v0_header_and_count() {
@@ -797,5 +803,22 @@ mod tests {
         assert_eq!(&blob[4..8], &1u32.to_le_bytes());
         assert_eq!(&blob[8..16], &42i64.to_le_bytes());
         assert_eq!(blob[16], 3);
+    }
+
+    #[test]
+    fn pending_writer_conflicts_are_retried_instead_of_becoming_http_errors() {
+        let attempts = Cell::new(0);
+        let value = retry_read(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err("table \"logs\" read is blocked by a pending writer transaction — retry, as for SQLITE_BUSY".to_string())
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(value, 42);
+        assert_eq!(attempts.get(), 2);
     }
 }

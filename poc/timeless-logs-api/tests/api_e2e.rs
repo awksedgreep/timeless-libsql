@@ -85,6 +85,7 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert_eq!(stats.query_returned_entries, 410);
     assert!(stats.query_total_ns > 0);
     assert!(stats.read_permit_count > 0);
+    assert_eq!(stats.waiting_writers, 0);
 
     // Manual flush is an ordered durability barrier, not the ingest path.
     let response = app

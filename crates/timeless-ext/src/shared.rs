@@ -209,6 +209,10 @@ struct GateState {
     /// Engine reads currently materializing on connections that started
     /// before a writer. The permit never survives a vtab xFilter callback.
     readers: usize,
+    /// Writers that found an active reader/writer and are waiting on the
+    /// condition variable. While non-zero, later readers must retry instead
+    /// of barging ahead and extending writer latency without bound.
+    waiting_writers: usize,
 }
 
 pub(crate) struct WriterGate {
@@ -217,6 +221,7 @@ pub(crate) struct WriterGate {
     read_permit_count: AtomicU64,
     read_permit_hold_ns: AtomicU64,
     read_conflicts: AtomicU64,
+    read_barge_rejections: AtomicU64,
     writer_wait_count: AtomicU64,
     writer_wait_ns: AtomicU64,
     writer_timeouts: AtomicU64,
@@ -227,6 +232,8 @@ pub(crate) struct WriterGateProfileSnapshot {
     pub(crate) read_permit_count: u64,
     pub(crate) read_permit_hold_ns: u64,
     pub(crate) read_conflicts: u64,
+    pub(crate) read_barge_rejections: u64,
+    pub(crate) waiting_writers: u64,
     pub(crate) writer_wait_count: u64,
     pub(crate) writer_wait_ns: u64,
     pub(crate) writer_timeouts: u64,
@@ -272,6 +279,7 @@ impl WriterGate {
             read_permit_count: AtomicU64::new(0),
             read_permit_hold_ns: AtomicU64::new(0),
             read_conflicts: AtomicU64::new(0),
+            read_barge_rejections: AtomicU64::new(0),
             writer_wait_count: AtomicU64::new(0),
             writer_wait_ns: AtomicU64::new(0),
             writer_timeouts: AtomicU64::new(0),
@@ -309,10 +317,15 @@ impl WriterGate {
             return Ok(()); // re-entrant: same connection, same txn
         }
         let deadline = Instant::now() + timeout;
-        while state.writer.is_some() || state.readers > 0 {
+        if state.writer.is_some() || state.readers > 0 {
+            state.waiting_writers += 1;
             waited = true;
+        }
+        while state.writer.is_some() || state.readers > 0 {
             let now = Instant::now();
             if now >= deadline {
+                debug_assert!(state.waiting_writers > 0);
+                state.waiting_writers -= 1;
                 self.writer_wait_count.fetch_add(1, Ordering::Relaxed);
                 self.writer_wait_ns
                     .fetch_add(elapsed_ns(started), Ordering::Relaxed);
@@ -334,6 +347,10 @@ impl WriterGate {
                 .wait_timeout(state, deadline - now)
                 .unwrap_or_else(|e| e.into_inner());
             state = g;
+        }
+        if waited {
+            debug_assert!(state.waiting_writers > 0);
+            state.waiting_writers -= 1;
         }
         state.writer = Some(conn_id);
         if waited {
@@ -368,7 +385,7 @@ impl WriterGate {
                      transaction — retry, as for SQLITE_BUSY"
                 ))
             }
-            None => {
+            None if state.waiting_writers == 0 => {
                 state.readers += 1;
                 Ok(ReadPermit {
                     gate: self,
@@ -376,15 +393,26 @@ impl WriterGate {
                     started: Some(Instant::now()),
                 })
             }
+            None => {
+                self.read_conflicts.fetch_add(1, Ordering::Relaxed);
+                self.read_barge_rejections.fetch_add(1, Ordering::Relaxed);
+                Err(format!(
+                    "table {table:?} read is blocked by a pending writer \
+                     transaction — retry, as for SQLITE_BUSY"
+                ))
+            }
         }
     }
 
     pub(crate) fn profile(&self) -> WriterGateProfileSnapshot {
         let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        let waiting_writers = self.lock().waiting_writers as u64;
         WriterGateProfileSnapshot {
             read_permit_count: load(&self.read_permit_count),
             read_permit_hold_ns: load(&self.read_permit_hold_ns),
             read_conflicts: load(&self.read_conflicts),
+            read_barge_rejections: load(&self.read_barge_rejections),
+            waiting_writers,
             writer_wait_count: load(&self.writer_wait_count),
             writer_wait_ns: load(&self.writer_wait_ns),
             writer_timeouts: load(&self.writer_timeouts),
@@ -748,6 +776,57 @@ mod tests {
         );
         drop(permit);
         writer.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn waiting_writer_prevents_later_readers_from_barging() {
+        let gate = Arc::new(WriterGate::new());
+        let first_reader = gate.acquire_read(1, "logs").unwrap();
+        let (writer_acquired_tx, writer_acquired_rx) = std::sync::mpsc::channel();
+        let (release_writer_tx, release_writer_rx) = std::sync::mpsc::channel();
+
+        let writer_gate = Arc::clone(&gate);
+        let writer = thread::spawn(move || {
+            writer_gate.acquire_timeout(2, "logs", Duration::from_secs(10))?;
+            writer_acquired_tx.send(()).unwrap();
+            release_writer_rx.recv().unwrap();
+            writer_gate.release(2);
+            Ok::<(), String>(())
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while gate.profile().waiting_writers == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(gate.profile().waiting_writers, 1);
+        let err = match gate.acquire_read(3, "logs") {
+            Ok(_) => panic!("later reader barged ahead of a waiting writer"),
+            Err(err) => err,
+        };
+        assert!(err.contains("pending writer"), "{err}");
+        assert_eq!(gate.profile().read_barge_rejections, 1);
+
+        drop(first_reader);
+        writer_acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer did not progress after the first reader released");
+        release_writer_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+
+        drop(gate.acquire_read(3, "logs").unwrap());
+    }
+
+    #[test]
+    fn timed_out_writer_removes_its_reader_barrier() {
+        let gate = WriterGate::new();
+        let first_reader = gate.acquire_read(1, "logs").unwrap();
+        let err = gate.acquire_timeout(2, "logs", SHORT).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert_eq!(gate.profile().waiting_writers, 0);
+
+        // The timed-out writer must not leave future readers blocked.
+        drop(gate.acquire_read(3, "logs").unwrap());
+        drop(first_reader);
     }
 
     #[test]

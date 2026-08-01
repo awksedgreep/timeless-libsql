@@ -71,10 +71,16 @@ completed entries/s respectively while the unchanged Elixir API reaches
 held read permits for 7.53–10.31 aggregate seconds while writers waited
 7.06–7.56 seconds.
 
+Session 2 writer fairness raises completed ingestion at equal offered load
+from 162.3K to 225.5K entries/s with one query worker and from 85.5K to
+152.0K with two. New readers retry while a writer is queued, so they cannot
+starve it; the logs cursor also releases its permit before metadata JSON
+rendering. Both measured runs had zero HTTP errors and drained to zero.
+
 The POC still uses the unchanged storage mechanism. No alternate buffer size,
 block layout, partition scheme, or compaction policy was introduced to hide
-the result. The next measured change is writer fairness and a shorter read
-permit lifetime.
+the result. The next measured change is shrinking the engine read critical
+section.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

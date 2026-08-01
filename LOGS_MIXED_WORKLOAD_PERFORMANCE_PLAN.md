@@ -136,14 +136,17 @@ cannot be mistaken for completed SQLite ingestion.
 
 ## Session 2 — Writer fairness and shorter permit lifetime
 
-- [ ] Track waiting writers in `WriterGate`.
-- [ ] Once a writer is waiting, prevent later readers from barging ahead;
+- [x] Track waiting writers in `WriterGate`.
+- [x] Once a writer is waiting, prevent later readers from barging ahead;
       return the existing retryable busy-style result.
-- [ ] Release the virtual-table read permit immediately after engine result
+- [x] Release the virtual-table read permit immediately after engine result
       materialization, before metadata JSON rendering.
-- [ ] Add concurrency tests proving no missing rows, stale block locations,
+- [x] Add concurrency tests proving no missing rows, stale block locations,
       starvation, deadlock, or transaction-visibility regression.
-- [ ] Repeat the one- and two-reader mixed workloads.
+- [x] Repeat the one- and two-reader mixed workloads.
+
+The pinned Session 2 comparison is appended to
+`../timeless_logs/bench/results/2026-08-01_rust_logs_api_session1.md`.
 
 Exit criterion: writers make bounded progress under continuous query load,
 with exact query results and no new HTTP errors after retry.

@@ -947,6 +947,11 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 .map_err(module_err)?
         };
 
+        // The engine result owns every entry needed by the cursor. Release
+        // publication protection before CPU-only metadata JSON rendering so
+        // a waiting writer does not pay that avoidable tail.
+        drop(_read);
+
         self.rows = entries
             .into_iter()
             .map(|entry| OutRow {

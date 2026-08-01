@@ -3729,6 +3729,14 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ),
                     ("read_conflicts", Value::Integer(gate.read_conflicts as i64)),
                     (
+                        "read_barge_rejections",
+                        Value::Integer(gate.read_barge_rejections as i64),
+                    ),
+                    (
+                        "waiting_writers",
+                        Value::Integer(gate.waiting_writers as i64),
+                    ),
+                    (
                         "writer_wait_count",
                         Value::Integer(gate.writer_wait_count as i64),
                     ),
