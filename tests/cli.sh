@@ -80,6 +80,8 @@
 # Section 42 covers exact native log substring search plus scalar native count:
 # bounded ordering, ASCII/Unicode case folding, metadata-only fast paths,
 # exact decode fallbacks, buffered rows, zero results, and work counters.
+# Section 43 pins size-tiered log optimization, rewrite amplification,
+# bounded optimize commands, actionable/deferred backlog, and phase telemetry.
 
 set -euo pipefail
 
@@ -3054,6 +3056,98 @@ else
   fail "message_contains is reserved from dynamic index-key columns"
   echo "$err"
 fi
+
+# ---------------------------------------------------------------------------
+echo "== section 43: size-tiered and bounded logs optimize =="
+LOG_OPT_DB="$TMP/log_optimize.db"
+got=$(python3 - "$EXT" "$LOG_OPT_DB" <<'PY'
+import sqlite3
+import struct
+import sys
+
+extension, database = sys.argv[1:]
+db = sqlite3.connect(database)
+db.enable_load_extension(True)
+db.load_extension(extension)
+db.enable_load_extension(False)
+
+def batch(start, count, step=1):
+    timestamps = [start + i * step for i in range(count)]
+    messages = [f"request {ts}".encode() for ts in timestamps]
+    metadata = [b'{"service":"api"}'] * count
+    out = bytearray(b'\x01\x00\x00\x00')
+    out += struct.pack('<I', count)
+    out += b''.join(struct.pack('<q', ts) for ts in timestamps)
+    out += b'\x01' * count
+    for values in (messages, metadata):
+        for value in values:
+            out += struct.pack('<I', len(value)) + value
+    return bytes(out)
+
+def stats(table):
+    return dict(db.execute(
+        "SELECT key, CAST(value AS INTEGER) FROM timeless_stats(?)", (table,)
+    ))
+
+db.execute("CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service')")
+for cycle in range(40):
+    db.execute("INSERT INTO logs(logs) VALUES (?)", (batch(cycle * 256, 256),))
+    db.execute("INSERT INTO logs(logs) VALUES ('flush')")
+    db.execute("INSERT INTO logs(logs) VALUES ('optimize')")
+    db.commit()
+
+s = stats('logs')
+assert db.execute("SELECT n FROM timeless_log_count('logs')").fetchone()[0] == 10_240
+assert s['optimize_raw_entries'] == 10_240
+assert s['optimize_merge_entries'] == 12_288
+assert s['optimize_blocks_removed'] == 73
+assert s['optimize_blocks_written'] == 42
+assert s['blocks'] == 9
+assert s['optimize_pending_raw_entries'] == 0
+assert s['optimize_merge_ready_entries'] == 0
+assert s['optimize_merge_deferred_blocks'] == 8
+assert s['optimize_merge_deferred_entries'] == 2_048
+rewritten = s['optimize_raw_entries'] + s['optimize_merge_entries']
+print(f"amplification|{rewritten / 10_240:.3f}|{s['blocks']}|"
+      f"{s['optimize_merge_deferred_blocks']}|{s['optimize_merge_deferred_entries']}")
+
+db.execute("CREATE VIRTUAL TABLE budgeted USING timeless_logs")
+for cycle in range(4):
+    # More than the one-hour merge-span cap makes four independent raw groups.
+    db.execute(
+        "INSERT INTO budgeted(budgeted) VALUES (?)",
+        (batch(cycle * 3_600_001, 256),),
+    )
+    db.execute("INSERT INTO budgeted(budgeted) VALUES ('flush')")
+db.execute("INSERT INTO budgeted(budgeted) VALUES ('optimize:512')")
+db.commit()
+first = stats('budgeted')
+assert first['raw_blocks'] == 2
+assert first['optimize_raw_entries'] == 512
+assert first['optimize_budgeted_count'] == 1
+assert first['optimize_budget_entries'] == 512
+assert first['optimize_budget_limited_count'] == 1
+db.execute("INSERT INTO budgeted(budgeted) VALUES ('optimize:512')")
+db.commit()
+second = stats('budgeted')
+assert second['raw_blocks'] == 0
+assert second['optimize_raw_entries'] == 1_024
+assert db.execute("SELECT count(*) FROM budgeted").fetchone()[0] == 1_024
+try:
+    db.execute("INSERT INTO budgeted(budgeted) VALUES ('optimize:0')")
+    raise AssertionError('zero optimize budget unexpectedly accepted')
+except sqlite3.OperationalError as error:
+    assert 'budget must be positive' in str(error)
+print(f"budget|{first['raw_blocks']}|{first['optimize_raw_entries']}|"
+      f"{first['optimize_budget_limited_count']}|{second['optimize_raw_entries']}|"
+      f"{second['raw_blocks']}")
+db.close()
+PY
+) || { fail "section 43 optimize driver crashed"; got=""; }
+
+check_eq "size-tiered optimize bounds rewrites and direct callers can budget work" \
+  "$got" \
+$'amplification|2.200|9|8|2048\nbudget|2|512|1|1024|0'
 
 # ---------------------------------------------------------------------------
 echo

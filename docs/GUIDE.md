@@ -401,6 +401,7 @@ INSERT INTO metrics(metrics) VALUES ('flush');      -- persist the buffer (all t
 INSERT INTO metrics(metrics) VALUES ('compact');    -- metrics: merge small chunks
 INSERT INTO logs(logs)       VALUES ('optimize');   -- logs/traces: re-encode into
 INSERT INTO traces(traces)   VALUES ('optimize');   --   larger, better-compressed blocks
+INSERT INTO logs(logs)       VALUES ('optimize:65536'); -- bounded logs source entries
 ```
 
 - **`flush`** — you know this one (section 3).

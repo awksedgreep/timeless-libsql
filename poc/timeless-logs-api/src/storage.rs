@@ -107,6 +107,28 @@ pub struct StorageStats {
     pub optimize_total_ns: i64,
     pub optimize_blocks_removed: i64,
     pub optimize_blocks_written: i64,
+    pub optimize_budgeted_count: i64,
+    pub optimize_budget_entries: i64,
+    pub optimize_budget_limited_count: i64,
+    pub optimize_raw_groups: i64,
+    pub optimize_raw_blocks: i64,
+    pub optimize_raw_entries: i64,
+    pub optimize_raw_input_bytes: i64,
+    pub optimize_raw_output_bytes: i64,
+    pub optimize_raw_total_ns: i64,
+    pub optimize_merge_groups: i64,
+    pub optimize_merge_blocks: i64,
+    pub optimize_merge_entries: i64,
+    pub optimize_merge_input_bytes: i64,
+    pub optimize_merge_output_bytes: i64,
+    pub optimize_merge_total_ns: i64,
+    pub optimize_pending_raw_blocks: i64,
+    pub optimize_pending_raw_entries: i64,
+    pub optimize_merge_ready_groups: i64,
+    pub optimize_merge_ready_blocks: i64,
+    pub optimize_merge_ready_entries: i64,
+    pub optimize_merge_deferred_blocks: i64,
+    pub optimize_merge_deferred_entries: i64,
     pub read_permit_count: i64,
     pub read_permit_hold_ns: i64,
     pub read_conflicts: i64,
@@ -148,6 +170,12 @@ enum ReadCommand {
     Shutdown,
 }
 
+// Optimize remains extension-owned. The API timer is only a maintenance
+// wake-up; this byte target turns the extension's current actionable backlog
+// into a bounded entry budget without adding a host-side flush/block policy.
+const OPTIMIZE_SOURCE_BYTE_BUDGET: u64 = 32 * 1024 * 1024;
+const OPTIMIZE_TARGET_ENTRIES: usize = 8192;
+
 struct StorageInner {
     writer: mpsc::Sender<WriteCommand>,
     readers: Vec<mpsc::Sender<ReadCommand>>,
@@ -174,15 +202,7 @@ impl Storage {
         let writer_ext = extension_path.clone();
         let writer_join = thread::Builder::new()
             .name("timeless-logs-writer".into())
-            .spawn(move || {
-                writer_main(
-                    writer_db,
-                    writer_ext,
-                    writer_rx,
-                    ready_tx,
-                    writer_profile,
-                )
-            })
+            .spawn(move || writer_main(writer_db, writer_ext, writer_rx, ready_tx, writer_profile))
             .map_err(|e| format!("spawn SQLite writer: {e}"))?;
         ready_rx
             .recv()
@@ -199,13 +219,7 @@ impl Storage {
             let join = thread::Builder::new()
                 .name(format!("timeless-logs-reader-{number}"))
                 .spawn(move || {
-                    reader_main(
-                        reader_db,
-                        reader_ext,
-                        reader_rx,
-                        ready_tx,
-                        reader_profile,
-                    )
+                    reader_main(reader_db, reader_ext, reader_rx, ready_tx, reader_profile)
                 })
                 .map_err(|e| format!("spawn SQLite reader {number}: {e}"))?;
             ready_rx
@@ -408,16 +422,43 @@ fn writer_main(
                 result?;
             }
             WriteCommand::Optimize => {
-                let raw: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM logs_blocks WHERE codec = 1",
-                        [],
-                        |row| row.get(0),
+                let stats = stat_values(&conn)?;
+                let actionable_entries = stats
+                    .get("optimize_pending_raw_entries")
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(
+                        stats
+                            .get("optimize_merge_ready_entries")
+                            .copied()
+                            .unwrap_or(0),
                     )
-                    .map_err(|e| format!("inspect raw blocks: {e}"))?;
-                if raw > 0 {
-                    conn.execute("INSERT INTO logs(logs) VALUES ('optimize')", [])
-                        .map_err(|e| format!("optimize logs: {e}"))?;
+                    .max(0) as u64;
+                if actionable_entries > 0 {
+                    // The exact planner identifies actionable entries. Blob
+                    // bytes are sampled over all raw/small compressed
+                    // candidates because block payload length intentionally
+                    // is not part of the engine's in-memory metadata index.
+                    let (sample_entries, sample_bytes): (i64, i64) = conn
+                        .query_row(
+                            "SELECT COALESCE(SUM(entry_count), 0),
+                                    COALESCE(SUM(length(data)), 0)
+                             FROM logs_blocks
+                             WHERE codec = 1 OR entry_count < 8192",
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(|e| format!("inspect optimize source bytes: {e}"))?;
+                    let budget = optimize_entry_budget(
+                        actionable_entries,
+                        sample_entries.max(0) as u64,
+                        sample_bytes.max(0) as u64,
+                    );
+                    conn.execute(
+                        "INSERT INTO logs(logs) VALUES (?1)",
+                        [format!("optimize:{budget}")],
+                    )
+                    .map_err(|e| format!("optimize logs with {budget}-entry budget: {e}"))?;
                 }
             }
             WriteCommand::Barrier(reply) => {
@@ -434,6 +475,22 @@ fn writer_main(
         }
     }
     Ok(())
+}
+
+fn optimize_entry_budget(actionable_entries: u64, sample_entries: u64, sample_bytes: u64) -> usize {
+    if actionable_entries == 0 {
+        return 0;
+    }
+    let target_entries = OPTIMIZE_TARGET_ENTRIES as u64;
+    if sample_entries == 0 || sample_bytes == 0 {
+        return usize::try_from(actionable_entries.min(target_entries)).unwrap_or(usize::MAX);
+    }
+    let estimated = (u128::from(OPTIMIZE_SOURCE_BYTE_BUDGET)
+        .saturating_mul(u128::from(sample_entries))
+        .saturating_add(u128::from(sample_bytes - 1))
+        / u128::from(sample_bytes))
+    .min(u128::from(u64::MAX)) as u64;
+    usize::try_from(actionable_entries.min(estimated.max(target_entries))).unwrap_or(usize::MAX)
 }
 
 fn reader_main(
@@ -814,6 +871,28 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         optimize_total_ns: stat("optimize_total_ns"),
         optimize_blocks_removed: stat("optimize_blocks_removed"),
         optimize_blocks_written: stat("optimize_blocks_written"),
+        optimize_budgeted_count: stat("optimize_budgeted_count"),
+        optimize_budget_entries: stat("optimize_budget_entries"),
+        optimize_budget_limited_count: stat("optimize_budget_limited_count"),
+        optimize_raw_groups: stat("optimize_raw_groups"),
+        optimize_raw_blocks: stat("optimize_raw_blocks"),
+        optimize_raw_entries: stat("optimize_raw_entries"),
+        optimize_raw_input_bytes: stat("optimize_raw_input_bytes"),
+        optimize_raw_output_bytes: stat("optimize_raw_output_bytes"),
+        optimize_raw_total_ns: stat("optimize_raw_total_ns"),
+        optimize_merge_groups: stat("optimize_merge_groups"),
+        optimize_merge_blocks: stat("optimize_merge_blocks"),
+        optimize_merge_entries: stat("optimize_merge_entries"),
+        optimize_merge_input_bytes: stat("optimize_merge_input_bytes"),
+        optimize_merge_output_bytes: stat("optimize_merge_output_bytes"),
+        optimize_merge_total_ns: stat("optimize_merge_total_ns"),
+        optimize_pending_raw_blocks: stat("optimize_pending_raw_blocks"),
+        optimize_pending_raw_entries: stat("optimize_pending_raw_entries"),
+        optimize_merge_ready_groups: stat("optimize_merge_ready_groups"),
+        optimize_merge_ready_blocks: stat("optimize_merge_ready_blocks"),
+        optimize_merge_ready_entries: stat("optimize_merge_ready_entries"),
+        optimize_merge_deferred_blocks: stat("optimize_merge_deferred_blocks"),
+        optimize_merge_deferred_entries: stat("optimize_merge_deferred_entries"),
         read_permit_count: stat("read_permit_count"),
         read_permit_hold_ns: stat("read_permit_hold_ns"),
         read_conflicts: stat("read_conflicts"),
@@ -831,10 +910,7 @@ fn stat_values(conn: &Connection) -> Result<HashMap<String, i64>, String> {
         .map_err(|e| format!("prepare timeless_stats: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
         })
         .map_err(|e| format!("read timeless_stats: {e}"))?;
     let mut values = HashMap::new();
@@ -882,5 +958,20 @@ mod tests {
 
         assert_eq!(value, 42);
         assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn optimize_budget_tracks_source_bytes_and_one_complete_group() {
+        assert_eq!(optimize_entry_budget(0, 0, 0), 0);
+        assert_eq!(optimize_entry_budget(4_000, 4_000, 1024), 4_000);
+        assert_eq!(optimize_entry_budget(100_000, 100_000, 64 << 20), 50_000);
+        assert_eq!(
+            optimize_entry_budget(100_000, 100_000, 1024 << 20),
+            OPTIMIZE_TARGET_ENTRIES
+        );
+        assert_eq!(
+            optimize_entry_budget(100_000, 0, 0),
+            OPTIMIZE_TARGET_ENTRIES
+        );
     }
 }

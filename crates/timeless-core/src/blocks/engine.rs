@@ -110,6 +110,21 @@ pub struct BlockEngineProfileSnapshot {
     pub optimize_total_ns: u64,
     pub optimize_blocks_removed: u64,
     pub optimize_blocks_written: u64,
+    pub optimize_budgeted_count: u64,
+    pub optimize_budget_entries: u64,
+    pub optimize_budget_limited_count: u64,
+    pub optimize_raw_groups: u64,
+    pub optimize_raw_blocks: u64,
+    pub optimize_raw_entries: u64,
+    pub optimize_raw_input_bytes: u64,
+    pub optimize_raw_output_bytes: u64,
+    pub optimize_raw_total_ns: u64,
+    pub optimize_merge_groups: u64,
+    pub optimize_merge_blocks: u64,
+    pub optimize_merge_entries: u64,
+    pub optimize_merge_input_bytes: u64,
+    pub optimize_merge_output_bytes: u64,
+    pub optimize_merge_total_ns: u64,
 }
 
 #[derive(Default)]
@@ -154,6 +169,21 @@ struct BlockEngineProfile {
     optimize_total_ns: AtomicU64,
     optimize_blocks_removed: AtomicU64,
     optimize_blocks_written: AtomicU64,
+    optimize_budgeted_count: AtomicU64,
+    optimize_budget_entries: AtomicU64,
+    optimize_budget_limited_count: AtomicU64,
+    optimize_raw_groups: AtomicU64,
+    optimize_raw_blocks: AtomicU64,
+    optimize_raw_entries: AtomicU64,
+    optimize_raw_input_bytes: AtomicU64,
+    optimize_raw_output_bytes: AtomicU64,
+    optimize_raw_total_ns: AtomicU64,
+    optimize_merge_groups: AtomicU64,
+    optimize_merge_blocks: AtomicU64,
+    optimize_merge_entries: AtomicU64,
+    optimize_merge_input_bytes: AtomicU64,
+    optimize_merge_output_bytes: AtomicU64,
+    optimize_merge_total_ns: AtomicU64,
 }
 
 impl BlockEngineProfile {
@@ -200,6 +230,21 @@ impl BlockEngineProfile {
             optimize_total_ns: load(&self.optimize_total_ns),
             optimize_blocks_removed: load(&self.optimize_blocks_removed),
             optimize_blocks_written: load(&self.optimize_blocks_written),
+            optimize_budgeted_count: load(&self.optimize_budgeted_count),
+            optimize_budget_entries: load(&self.optimize_budget_entries),
+            optimize_budget_limited_count: load(&self.optimize_budget_limited_count),
+            optimize_raw_groups: load(&self.optimize_raw_groups),
+            optimize_raw_blocks: load(&self.optimize_raw_blocks),
+            optimize_raw_entries: load(&self.optimize_raw_entries),
+            optimize_raw_input_bytes: load(&self.optimize_raw_input_bytes),
+            optimize_raw_output_bytes: load(&self.optimize_raw_output_bytes),
+            optimize_raw_total_ns: load(&self.optimize_raw_total_ns),
+            optimize_merge_groups: load(&self.optimize_merge_groups),
+            optimize_merge_blocks: load(&self.optimize_merge_blocks),
+            optimize_merge_entries: load(&self.optimize_merge_entries),
+            optimize_merge_input_bytes: load(&self.optimize_merge_input_bytes),
+            optimize_merge_output_bytes: load(&self.optimize_merge_output_bytes),
+            optimize_merge_total_ns: load(&self.optimize_merge_total_ns),
         }
     }
 }
@@ -341,6 +386,51 @@ struct IndexEntry {
     meta: BlockMeta,
     loc: BlockLoc,
     partition: Option<u8>,
+}
+
+/// Current metadata-only optimizer backlog. `merge_ready_*` counts only
+/// compressed groups that satisfy the size-tiered rewrite policy; deferred
+/// small tails are reported separately and do not cause maintenance work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockOptimizeBacklog {
+    pub raw_blocks: u64,
+    pub raw_entries: u64,
+    pub merge_ready_groups: u64,
+    pub merge_ready_blocks: u64,
+    pub merge_ready_entries: u64,
+    pub merge_deferred_blocks: u64,
+    pub merge_deferred_entries: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OptimizeKind {
+    RawCompression,
+    CompressedMerge,
+}
+
+struct OptimizeGroup {
+    sources: Vec<IndexEntry>,
+    partition: Option<u8>,
+    kind: OptimizeKind,
+}
+
+#[derive(Default)]
+struct OptimizeOutcome {
+    blocks_removed: usize,
+    blocks_written: usize,
+    budget_limited: bool,
+    raw_groups: u64,
+    raw_blocks: u64,
+    raw_entries: u64,
+    raw_input_bytes: u64,
+    raw_output_bytes: u64,
+    raw_total_ns: u64,
+    merge_groups: u64,
+    merge_blocks: u64,
+    merge_entries: u64,
+    merge_input_bytes: u64,
+    merge_output_bytes: u64,
+    merge_total_ns: u64,
 }
 
 /// Transaction journal (PLAN.md risk R5) — the blocks twin of the
@@ -981,15 +1071,18 @@ impl BlockEngine {
     }
 
     /// The two-tier compaction pass ('optimize' command):
-    ///   1. every RAW block gets recompressed to CODEC_COLUMNAR_V2
-    ///      (codec 5, adaptive per-column strategies + shredded
-    ///      metadata — the Session 8 shredding winner; legacy codec-2/4
-    ///      blocks remain decodable and are upgraded whenever a merge
-    ///      rewrites them anyway), and
-    ///   2. small compressed blocks get MERGED into ~merge_target_entries
-    ///      blocks (bigger dictionary window → better ratio), subject to
-    ///      the merge_max_ts_span hard cap (see config — the retention
-    ///      boundary rule; the cap applies PER PARTITION, unchanged).
+    ///   1. every RAW block gets grouped with RAW peers and recompressed to
+    ///      CODEC_COLUMNAR_V2, and
+    ///   2. existing compressed blocks merge only when the output is at least
+    ///      half full AND at least twice the largest input block.
+    ///
+    /// Keeping the phases disjoint is intentional. The old planner appended
+    /// each new raw arrival directly into an existing compressed tail, so the
+    /// complete growing tail was decoded and rewritten on every maintenance
+    /// call. The half-full + 2x-growth rule is a compact size-tiered policy:
+    /// small tails accumulate independently, then merge in logarithmic steps.
+    /// Raw data is still compressed on its first optimize call, never held
+    /// hostage waiting for a merge cohort.
     ///
     /// PARTITION RULE (the "level-term weakness" fix, see IndexEntry):
     /// blocks only merge with blocks of the SAME level partition.
@@ -1006,8 +1099,26 @@ impl BlockEngine {
     ///
     /// Returns (blocks_removed, blocks_written).
     pub fn optimize(&self) -> Result<(usize, usize), String> {
+        self.optimize_with_budget(None)
+    }
+
+    /// Incremental optimize. The entry budget limits source entries rewritten
+    /// by one call; a single group (raw groups up to merge_target_entries,
+    /// compressed tiers up to 125% of that target, or a pre-existing
+    /// oversized raw block) is always allowed so maintenance makes progress.
+    /// The SQL extension exposes this as
+    /// `optimize:<max_entries>` for hosts that schedule from observed backlog
+    /// bytes instead of accepting one unbounded maintenance pause.
+    pub fn optimize_budgeted(&self, max_entries: usize) -> Result<(usize, usize), String> {
+        if max_entries == 0 {
+            return Err("optimize entry budget must be positive".into());
+        }
+        self.optimize_with_budget(Some(max_entries))
+    }
+
+    fn optimize_with_budget(&self, max_entries: Option<usize>) -> Result<(usize, usize), String> {
         let started = Instant::now();
-        let out = self.optimize_inner()?;
+        let out = self.optimize_inner(max_entries)?;
         self.apply_retention()?;
         self.profile.optimize_count.fetch_add(1, Ordering::Relaxed);
         self.profile
@@ -1015,17 +1126,289 @@ impl BlockEngine {
             .fetch_add(elapsed_ns(started), Ordering::Relaxed);
         self.profile
             .optimize_blocks_removed
-            .fetch_add(out.0 as u64, Ordering::Relaxed);
+            .fetch_add(out.blocks_removed as u64, Ordering::Relaxed);
         self.profile
             .optimize_blocks_written
-            .fetch_add(out.1 as u64, Ordering::Relaxed);
-        Ok(out)
+            .fetch_add(out.blocks_written as u64, Ordering::Relaxed);
+        if let Some(budget) = max_entries {
+            self.profile
+                .optimize_budgeted_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.profile
+                .optimize_budget_entries
+                .fetch_add(budget as u64, Ordering::Relaxed);
+        }
+        if out.budget_limited {
+            self.profile
+                .optimize_budget_limited_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        for (counter, value) in [
+            (&self.profile.optimize_raw_groups, out.raw_groups),
+            (&self.profile.optimize_raw_blocks, out.raw_blocks),
+            (&self.profile.optimize_raw_entries, out.raw_entries),
+            (&self.profile.optimize_raw_input_bytes, out.raw_input_bytes),
+            (
+                &self.profile.optimize_raw_output_bytes,
+                out.raw_output_bytes,
+            ),
+            (&self.profile.optimize_raw_total_ns, out.raw_total_ns),
+            (&self.profile.optimize_merge_groups, out.merge_groups),
+            (&self.profile.optimize_merge_blocks, out.merge_blocks),
+            (&self.profile.optimize_merge_entries, out.merge_entries),
+            (
+                &self.profile.optimize_merge_input_bytes,
+                out.merge_input_bytes,
+            ),
+            (
+                &self.profile.optimize_merge_output_bytes,
+                out.merge_output_bytes,
+            ),
+            (&self.profile.optimize_merge_total_ns, out.merge_total_ns),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
+        Ok((out.blocks_removed, out.blocks_written))
     }
 
-    fn optimize_inner(&self) -> Result<(usize, usize), String> {
+    /// Metadata-only view of work an optimize call can perform now. This uses
+    /// the exact planner, so hosts do not wake maintenance for permanently
+    /// deferred singleton/underfilled tails.
+    pub fn optimize_backlog(&self) -> BlockOptimizeBacklog {
+        let candidates: Vec<IndexEntry> = self
+            .index_lock()
+            .iter()
+            .filter(|entry| {
+                entry.meta.codec == CODEC_RAW
+                    || (entry.meta.entry_count as usize) < self.config.merge_target_entries
+            })
+            .copied()
+            .collect();
+        let groups = self.plan_optimize(&candidates);
+        let mut backlog = BlockOptimizeBacklog::default();
+        let mut ready_compressed = HashSet::new();
+        for group in &groups {
+            let entries = group
+                .sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as u64)
+                .sum::<u64>();
+            match group.kind {
+                OptimizeKind::RawCompression => {
+                    backlog.raw_blocks += group.sources.len() as u64;
+                    backlog.raw_entries += entries;
+                }
+                OptimizeKind::CompressedMerge => {
+                    backlog.merge_ready_groups += 1;
+                    backlog.merge_ready_blocks += group.sources.len() as u64;
+                    backlog.merge_ready_entries += entries;
+                    ready_compressed.extend(group.sources.iter().map(|entry| entry.loc.id));
+                }
+            }
+        }
+        for entry in candidates.iter().filter(|entry| {
+            entry.meta.codec != CODEC_RAW && !ready_compressed.contains(&entry.loc.id)
+        }) {
+            backlog.merge_deferred_blocks += 1;
+            backlog.merge_deferred_entries += entry.meta.entry_count as u64;
+        }
+        backlog
+    }
+
+    fn plan_optimize(&self, candidates: &[IndexEntry]) -> Vec<OptimizeGroup> {
+        let mut raw_buckets: [Vec<IndexEntry>; 5] = Default::default();
+        let mut compressed_buckets: [Vec<IndexEntry>; 5] = Default::default();
+        for entry in candidates {
+            let bucket = entry.partition.map_or(4, usize::from);
+            if entry.meta.codec == CODEC_RAW {
+                raw_buckets[bucket].push(*entry);
+            } else {
+                compressed_buckets[bucket].push(*entry);
+            }
+        }
+
+        let mut groups = Vec::new();
+        for bucket in 0..5 {
+            let partition = (bucket < 4).then_some(bucket as u8);
+            groups
+                .extend(self.plan_raw_groups(std::mem::take(&mut raw_buckets[bucket]), partition));
+            groups.extend(self.plan_compressed_groups(
+                std::mem::take(&mut compressed_buckets[bucket]),
+                partition,
+            ));
+        }
+        // Compress raw backlog before spending a bounded call on optional
+        // merges; within each phase, oldest data advances first.
+        groups.sort_by_key(|group| {
+            (
+                group.kind,
+                group
+                    .sources
+                    .iter()
+                    .map(|entry| entry.meta.ts_min)
+                    .min()
+                    .unwrap_or(i64::MAX),
+                group.partition,
+            )
+        });
+        groups
+    }
+
+    fn plan_raw_groups(
+        &self,
+        mut entries: Vec<IndexEntry>,
+        partition: Option<u8>,
+    ) -> Vec<OptimizeGroup> {
+        entries.sort_by_key(|entry| (entry.meta.ts_min, entry.meta.ts_max));
+        let mut groups = Vec::new();
+        let mut current = Vec::new();
+        let mut current_entries = 0usize;
+        let (mut current_min, mut current_max) = (0i64, 0i64);
+        for entry in entries {
+            let fits = current.is_empty()
+                || (current_entries.saturating_add(entry.meta.entry_count as usize)
+                    <= self.config.merge_target_entries
+                    && Self::merged_span_fits(
+                        current_min,
+                        current_max,
+                        entry.meta,
+                        self.config.merge_max_ts_span,
+                    ));
+            if !fits {
+                groups.push(OptimizeGroup {
+                    sources: std::mem::take(&mut current),
+                    partition,
+                    kind: OptimizeKind::RawCompression,
+                });
+                current_entries = 0;
+            }
+            if current.is_empty() {
+                current_min = entry.meta.ts_min;
+                current_max = entry.meta.ts_max;
+            } else {
+                current_min = current_min.min(entry.meta.ts_min);
+                current_max = current_max.max(entry.meta.ts_max);
+            }
+            current_entries = current_entries.saturating_add(entry.meta.entry_count as usize);
+            current.push(entry);
+        }
+        if !current.is_empty() {
+            groups.push(OptimizeGroup {
+                sources: current,
+                partition,
+                kind: OptimizeKind::RawCompression,
+            });
+        }
+        groups
+    }
+
+    fn plan_compressed_groups(
+        &self,
+        mut entries: Vec<IndexEntry>,
+        partition: Option<u8>,
+    ) -> Vec<OptimizeGroup> {
+        entries.sort_by_key(|entry| (entry.meta.ts_min, entry.meta.ts_max));
+        let mut groups = Vec::new();
+        let mut segment = Vec::new();
+        let (mut segment_min, mut segment_max) = (0i64, 0i64);
+        for entry in entries {
+            let fits = segment.is_empty()
+                || Self::merged_span_fits(
+                    segment_min,
+                    segment_max,
+                    entry.meta,
+                    self.config.merge_max_ts_span,
+                );
+            if !fits {
+                self.plan_compressed_segment(std::mem::take(&mut segment), partition, &mut groups);
+            }
+            if segment.is_empty() {
+                segment_min = entry.meta.ts_min;
+                segment_max = entry.meta.ts_max;
+            } else {
+                segment_min = segment_min.min(entry.meta.ts_min);
+                segment_max = segment_max.max(entry.meta.ts_max);
+            }
+            segment.push(entry);
+        }
+        self.plan_compressed_segment(segment, partition, &mut groups);
+        groups
+    }
+
+    fn plan_compressed_segment(
+        &self,
+        mut entries: Vec<IndexEntry>,
+        partition: Option<u8>,
+        groups: &mut Vec<OptimizeGroup>,
+    ) {
+        entries.sort_by_key(|entry| (entry.meta.entry_count, entry.meta.ts_min, entry.meta.ts_max));
+        let mut current = Vec::new();
+        let mut current_entries = 0usize;
+        // A hard target ceiling strands two valid half-full tiers whenever
+        // their combined size lands just above the target (for example,
+        // 4,300 + 4,300 with an 8,192 target). A small bounded overshoot lets
+        // equal-size tiers reach their required 2x growth and become terminal
+        // blocks without reopening the append-to-tail amplification path.
+        let merge_limit = self
+            .config
+            .merge_target_entries
+            .saturating_add(self.config.merge_target_entries.div_ceil(4));
+        for entry in entries {
+            let count = entry.meta.entry_count as usize;
+            if !current.is_empty() && current_entries.saturating_add(count) > merge_limit {
+                self.push_compressed_group(std::mem::take(&mut current), partition, groups);
+                current_entries = 0;
+            }
+            current_entries = current_entries.saturating_add(count);
+            current.push(entry);
+        }
+        self.push_compressed_group(current, partition, groups);
+    }
+
+    fn push_compressed_group(
+        &self,
+        sources: Vec<IndexEntry>,
+        partition: Option<u8>,
+        groups: &mut Vec<OptimizeGroup>,
+    ) {
+        if sources.len() < 2 {
+            return;
+        }
+        let entries = sources
+            .iter()
+            .map(|entry| entry.meta.entry_count as usize)
+            .sum::<usize>();
+        let largest = sources
+            .iter()
+            .map(|entry| entry.meta.entry_count as usize)
+            .max()
+            .unwrap_or(0);
+        let minimum_fill = self.config.merge_target_entries.div_ceil(2);
+        if entries >= minimum_fill && entries >= largest.saturating_mul(2) {
+            groups.push(OptimizeGroup {
+                sources,
+                partition,
+                kind: OptimizeKind::CompressedMerge,
+            });
+        }
+    }
+
+    fn merged_span_fits(
+        current_min: i64,
+        current_max: i64,
+        next: BlockMeta,
+        max_span: i64,
+    ) -> bool {
+        current_max
+            .max(next.ts_max)
+            .saturating_sub(current_min.min(next.ts_min))
+            <= max_span
+    }
+
+    fn optimize_inner(&self, max_entries: Option<usize>) -> Result<OptimizeOutcome, String> {
         let _transition = self.transition_write();
-        // Snapshot the index; plan on the copy (no lock held while we
-        // read/decode block payloads).
+        // Snapshot the index; plan on the copy (no lock held while payloads
+        // are read/decoded).
         let candidates: Vec<IndexEntry> = self
             .index_lock()
             .iter()
@@ -1036,102 +1419,84 @@ impl BlockEngine {
             .copied()
             .collect();
         if candidates.is_empty() {
-            return Ok((0, 0));
+            return Ok(OptimizeOutcome::default());
         }
-
-        // Split candidates into merge partitions: one bucket per pure
-        // level (0..=3) plus one for mixed legacy blocks. The greedy
-        // time-locality grouping below then runs INSIDE each bucket, so
-        // no group can span two partitions.
-        let mut buckets: [Vec<IndexEntry>; 5] = Default::default();
-        for e in candidates {
-            let b = match e.partition {
-                Some(lvl) => lvl as usize,
-                None => 4, // the mixed bucket
-            };
-            buckets[b].push(e);
+        let planned = self.plan_optimize(&candidates);
+        if planned.is_empty() {
+            return Ok(OptimizeOutcome::default());
         }
-
-        // (group of source blocks, partition tag for the merged output).
-        // A merged pure group stays pure — all its entries share one
-        // level; a merged mixed group stays mixed.
-        let mut groups: Vec<(Vec<IndexEntry>, Option<u8>)> = Vec::new();
-        for (b, bucket) in buckets.iter_mut().enumerate() {
-            if bucket.is_empty() {
-                continue;
-            }
-            let partition = if b < 4 { Some(b as u8) } else { None };
-            // Group by time locality: neighbors in ts_min order merge
-            // into blocks with tight ts ranges (which is what makes both
-            // range pruning and retention deletes effective).
-            bucket.sort_by_key(|e| (e.meta.ts_min, e.meta.ts_max));
-
-            // Greedy grouping under two constraints: target entry count
-            // and the merged-span hard cap.
-            let mut cur: Vec<IndexEntry> = Vec::new();
-            let mut cur_entries = 0usize;
-            let (mut cur_min, mut cur_max) = (0i64, 0i64);
-            for e in bucket.drain(..) {
-                let m = e.meta;
-                let fits = if cur.is_empty() {
-                    true
-                } else {
-                    let new_min = cur_min.min(m.ts_min);
-                    let new_max = cur_max.max(m.ts_max);
-                    // saturating_sub: spans near i64 extremes must not wrap.
-                    let span_ok = new_max.saturating_sub(new_min) <= self.config.merge_max_ts_span;
-                    let size_ok =
-                        cur_entries + m.entry_count as usize <= self.config.merge_target_entries;
-                    span_ok && size_ok
-                };
-                if !fits {
-                    groups.push((std::mem::take(&mut cur), partition));
-                    cur_entries = 0;
+        let mut selected = Vec::new();
+        let mut selected_entries = 0usize;
+        let mut budget_limited = false;
+        for group in planned {
+            let entries = group
+                .sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as usize)
+                .sum::<usize>();
+            if let Some(budget) = max_entries {
+                if !selected.is_empty() && selected_entries.saturating_add(entries) > budget {
+                    budget_limited = true;
+                    break;
                 }
-                if cur.is_empty() {
-                    cur_min = m.ts_min;
-                    cur_max = m.ts_max;
-                } else {
-                    cur_min = cur_min.min(m.ts_min);
-                    cur_max = cur_max.max(m.ts_max);
-                }
-                cur_entries += m.entry_count as usize;
-                cur.push(e);
             }
-            if !cur.is_empty() {
-                groups.push((std::mem::take(&mut cur), partition));
-            }
+            selected_entries = selected_entries.saturating_add(entries);
+            selected.push(group);
         }
 
-        // Decode each rewrite-worthy group and re-encode as one zstd
-        // block. A group is "worth rewriting" if it contains any RAW
-        // block (must transition to zstd regardless) or at least two
-        // blocks (an actual merge). A lone already-zstd small block is
-        // left alone — rewriting it would be pure write amplification
-        // for zero gain. Sequential reads on THIS thread — see module
-        // header.
         let mut adds: Vec<EncodedBlock> = Vec::new();
         let mut add_partitions: Vec<Option<u8>> = Vec::new();
         let mut removes: Vec<BlockLoc> = Vec::new();
-        for (group, partition) in &groups {
-            let worth_it = group.len() >= 2 || group.iter().any(|e| e.meta.codec == CODEC_RAW);
-            if !worth_it {
-                continue;
-            }
-            let mut entries: Vec<LogEntry> = Vec::new();
-            for e in group {
-                let bytes = self.store.read_block(&e.loc)?;
+        let mut outcome = OptimizeOutcome {
+            budget_limited,
+            ..OptimizeOutcome::default()
+        };
+        for group in &selected {
+            let phase_started = Instant::now();
+            let expected_entries = group
+                .sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as usize)
+                .sum();
+            let mut entries: Vec<LogEntry> = Vec::with_capacity(expected_entries);
+            let mut input_bytes = 0u64;
+            for source in &group.sources {
+                let bytes = self.store.read_block(&source.loc)?;
+                input_bytes = input_bytes.saturating_add(bytes.len() as u64);
                 entries.extend(decode_block(&bytes)?);
             }
             entries.sort_by_key(|e| e.ts);
             let terms = self.extract_terms(&entries);
             let (data, meta) = encode_block(&entries, CODEC_COLUMNAR_V2, self.config.zstd_level)?;
+            let output_bytes = data.len() as u64;
             adds.push(EncodedBlock { meta, data, terms });
-            add_partitions.push(*partition);
-            removes.extend(group.iter().map(|e| e.loc));
+            add_partitions.push(group.partition);
+            removes.extend(group.sources.iter().map(|entry| entry.loc));
+            let elapsed = elapsed_ns(phase_started);
+            match group.kind {
+                OptimizeKind::RawCompression => {
+                    outcome.raw_groups += 1;
+                    outcome.raw_blocks += group.sources.len() as u64;
+                    outcome.raw_entries += entries.len() as u64;
+                    outcome.raw_input_bytes = outcome.raw_input_bytes.saturating_add(input_bytes);
+                    outcome.raw_output_bytes =
+                        outcome.raw_output_bytes.saturating_add(output_bytes);
+                    outcome.raw_total_ns = outcome.raw_total_ns.saturating_add(elapsed);
+                }
+                OptimizeKind::CompressedMerge => {
+                    outcome.merge_groups += 1;
+                    outcome.merge_blocks += group.sources.len() as u64;
+                    outcome.merge_entries += entries.len() as u64;
+                    outcome.merge_input_bytes =
+                        outcome.merge_input_bytes.saturating_add(input_bytes);
+                    outcome.merge_output_bytes =
+                        outcome.merge_output_bytes.saturating_add(output_bytes);
+                    outcome.merge_total_ns = outcome.merge_total_ns.saturating_add(elapsed);
+                }
+            }
         }
         if adds.is_empty() {
-            return Ok((0, 0));
+            return Ok(outcome);
         }
 
         // One atomic swap. The on_committed callback rewrites the
@@ -1146,7 +1511,8 @@ impl BlockEngine {
         // add; new blocks journal their locs.
         let mut j = self.txn_guard();
         let add_metas: Vec<BlockMeta> = adds.iter().map(|b| b.meta).collect();
-        let removed = removes.len();
+        outcome.blocks_removed = removes.len();
+        outcome.blocks_written = add_metas.len();
         self.store
             .replace_blocks(&adds, &removes, &mut |new_locs: &[BlockLoc]| {
                 let mut index = self.index_lock();
@@ -1171,7 +1537,7 @@ impl BlockEngine {
                 }
             })?;
         drop(j);
-        Ok((removed, add_metas.len()))
+        Ok(outcome)
     }
 
     /// Retention: delete every block whose ts_max < cutoff (whole-block

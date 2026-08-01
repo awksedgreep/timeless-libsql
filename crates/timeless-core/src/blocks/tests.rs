@@ -1129,6 +1129,109 @@ fn optimize_leaves_lone_small_zstd_blocks_alone() {
     assert_eq!(engine.optimize().unwrap(), (0, 0));
 }
 
+#[test]
+fn size_tiered_optimize_bounds_repeated_tail_rewrites() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    let entries_per_arrival = 256i64;
+    let arrivals = 40i64;
+
+    // This is the Session 6 amplification fixture. The former append-to-tail
+    // planner rewrote 144,384 source entries for these 10,240 ingested rows
+    // (14.1x): 256 + 512 + ... as the compressed tail grew each call.
+    for cycle in 0..arrivals {
+        for row in 0..entries_per_arrival {
+            let ts = cycle * entries_per_arrival + row;
+            engine
+                .push(entry(ts, 1, "tail rewrite payload", &[]))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+        engine.optimize().unwrap();
+    }
+
+    let profile = engine.profile();
+    assert_eq!(profile.optimize_raw_blocks, arrivals as u64);
+    assert_eq!(profile.optimize_raw_entries, 10_240);
+    // Sixteen 256-entry compressed tails first merge to 4,096; that output
+    // later merges with sixteen peers to reach the terminal 8,192 block.
+    assert_eq!(profile.optimize_merge_groups, 2);
+    assert_eq!(profile.optimize_merge_entries, 4_096 + 8_192);
+    assert_eq!(
+        profile.optimize_raw_entries + profile.optimize_merge_entries,
+        22_528,
+        "2.2x total rewrite work, down from the pinned 14.1x baseline"
+    );
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 10_240);
+
+    let backlog = engine.optimize_backlog();
+    assert_eq!(backlog.raw_blocks, 0);
+    assert_eq!(backlog.merge_ready_groups, 0);
+    assert_eq!(backlog.merge_deferred_blocks, 8);
+    assert_eq!(backlog.merge_deferred_entries, 2_048);
+    assert_eq!(engine.optimize().unwrap(), (0, 0));
+}
+
+#[test]
+fn size_tiered_optimize_consolidates_just_over_target_half_tiers() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    for cycle in 0..30i64 {
+        for row in 0..307i64 {
+            engine
+                .push(entry(cycle * 307 + row, 1, "uneven tier payload", &[]))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+        engine.optimize().unwrap();
+    }
+
+    let profile = engine.profile();
+    // Fourteen 307-entry blocks first form 4,298. Fourteen later peers can
+    // then join that tier into 8,596: 105% of the target, under the bounded
+    // 125% ceiling, and exactly 2x the largest input tier.
+    assert_eq!(profile.optimize_merge_groups, 2);
+    assert_eq!(profile.optimize_merge_entries, 4_298 + 8_596);
+    assert_eq!(engine.stats().0, 3);
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 9_210);
+    assert_eq!(engine.optimize_backlog().merge_ready_entries, 0);
+}
+
+#[test]
+fn budgeted_optimize_bounds_each_call_and_drains_oldest_raw_groups() {
+    let engine = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            merge_max_ts_span: 0,
+            ..config(&[])
+        },
+    )
+    .unwrap();
+    for cycle in 0..4i64 {
+        for _ in 0..256 {
+            engine
+                .push(entry(cycle, 1, &format!("cycle-{cycle}"), &[]))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+    }
+    assert_eq!(engine.optimize_backlog().raw_entries, 1_024);
+
+    assert_eq!(engine.optimize_budgeted(512).unwrap(), (2, 2));
+    assert_eq!(engine.optimize_backlog().raw_entries, 512);
+    let profile = engine.profile();
+    assert_eq!(profile.optimize_budgeted_count, 1);
+    assert_eq!(profile.optimize_budget_entries, 512);
+    assert_eq!(profile.optimize_budget_limited_count, 1);
+    assert_eq!(profile.optimize_raw_entries, 512);
+
+    assert_eq!(engine.optimize_budgeted(512).unwrap(), (2, 2));
+    assert_eq!(engine.optimize_backlog().raw_entries, 0);
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 1_024);
+    assert!(engine
+        .optimize_budgeted(0)
+        .unwrap_err()
+        .contains("positive"));
+}
+
 // ---------------------------------------------------------------------------
 // Buffer + flushed merge
 // ---------------------------------------------------------------------------

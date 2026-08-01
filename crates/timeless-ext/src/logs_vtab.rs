@@ -27,7 +27,9 @@
 //!              INSERT shorthand: a non-NULL value is merged into the
 //!              metadata pairs.
 //! Commands:    INSERT INTO logs(logs) VALUES ('flush' | 'optimize' |
-//!              'prune:<ts>') — the same FTS5 idiom as metrics.
+//!              'optimize:<max_entries>' | 'prune:<ts>') — the same
+//!              FTS5 idiom as metrics. The bounded optimize form lets
+//!              embedded hosts cap one maintenance turn.
 //! Read path:   flushed blocks and the in-memory buffer are merged, so
 //!              entries are queryable immediately after INSERT and
 //!              durable (as durable as the enclosing transaction) after
@@ -453,16 +455,27 @@ impl LogsTab {
         Ok(count as i64)
     }
 
-    /// Hidden-column command insert ('flush' | 'optimize' | 'prune:<ts>').
+    /// Hidden-column command insert ('flush' | 'optimize' |
+    /// 'optimize:<max_entries>' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "flush" {
             // Drain the buffer into one RAW block (+ terms). Durable as
             // soon as the enclosing SQLite transaction commits.
             self.shared.engine.flush().map_err(module_err)?;
         } else if cmd == "optimize" {
-            // Two-tier compaction: raw → zstd-columnar, plus merge of
-            // small compressed blocks (span-capped) — one atomic swap.
+            // Unbounded manual maintenance: raw compression plus eligible
+            // size-tiered compressed merges in one atomic swap.
             self.shared.engine.optimize().map_err(module_err)?;
+        } else if let Some(value) = cmd.strip_prefix("optimize:") {
+            let max_entries: usize = value.trim().parse().map_err(|_| {
+                module_err(format!(
+                    "optimize: expected 'optimize:<positive max entries>', got {cmd:?}"
+                ))
+            })?;
+            self.shared
+                .engine
+                .optimize_budgeted(max_entries)
+                .map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             // Retention: whole-block deletes by ts_max, term rows
             // removed in the same operation.
@@ -473,7 +486,8 @@ impl LogsTab {
             self.shared.engine.prune(ts).map_err(module_err)?;
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'optimize', 'prune:<ts>'"
+                "unknown command {cmd:?}; supported: 'flush', 'optimize', \
+                 'optimize:<max_entries>', 'prune:<ts>'"
             )));
         }
         Ok(0)
@@ -840,7 +854,7 @@ impl UpdateVTab<'_> for LogsTab {
 /// rows mid-txn. On ROLLBACK those rows vanish — the journal removes
 /// their index entries (no dangling locs) and returns any pre-txn
 /// buffered entries the flush drained back to the buffer. All commands
-/// ('flush', 'optimize', 'prune:<ts>') are journaled and roll back
+/// ('flush', 'optimize', 'optimize:<entries>', 'prune:<ts>') are journaled and roll back
 /// fully. vtab_tx.rs supplies the savepoint callbacks missing from
 /// rusqlite so failed statements and explicit ROLLBACK TO are covered.
 /// R4 ADDITION — writer gate brackets the journal exactly as in

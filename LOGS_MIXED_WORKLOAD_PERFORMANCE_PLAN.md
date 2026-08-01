@@ -274,19 +274,62 @@ the shared behavior.
 
 ## Session 6 — Reduce compaction amplification
 
-- [ ] Report raw compression separately from compressed-block merging.
-- [ ] Measure how often entries in a small tail are rewritten across repeated
+- [x] Report raw compression separately from compressed-block merging.
+- [x] Measure how often entries in a small tail are rewritten across repeated
       optimize calls.
-- [ ] Evaluate size-tiered merging or a minimum output-fill rule so a raw
+- [x] Evaluate size-tiered merging or a minimum output-fill rule so a raw
       block is compressed once and compressed tails merge only when the
       resulting block is sufficiently full.
-- [ ] Evaluate incremental optimize work budgets based on raw backlog/bytes,
+- [x] Evaluate incremental optimize work budgets based on raw backlog/bytes,
       not an arbitrary unconditional timer interval.
-- [ ] Preserve the one-hour merge-span cap, level partitioning, atomic swaps,
+- [x] Preserve the one-hour merge-span cap, level partitioning, atomic swaps,
       retention behavior, and recovery compatibility.
 
 Exit criterion: lower bytes rewritten per ingested byte and bounded optimize
 pause time without a material query or compression-ratio regression.
+
+The extension now separates first compression of raw blocks from optional
+compressed-block merging. Raw arrivals never append directly to an existing
+compressed tail in the same call. Compressed cohorts merge only when the
+output is at least half full and at least twice the largest source. A bounded
+125% target ceiling lets two equal half-full cohorts consolidate instead of
+remaining permanently stranded just above 8,192. The one-hour time-span cap
+and level partitions are applied before this size-tier planning, and every
+selected group still publishes through one atomic `replace_blocks` swap.
+
+Direct callers can use `optimize:<max source entries>`. `timeless_stats`
+separately reports raw and merge groups, blocks, entries, source/output bytes,
+and time, plus exact actionable raw/merge backlog and deferred tails. The POC
+timer asks for that backlog, samples candidate payload bytes, and derives an
+entry budget targeting at most 32 MiB of source data. The timer is only a
+wake-up: it does no work when the extension reports no actionable cohort.
+
+The deterministic repeated-maintenance benchmark (`128 × 2,048` realistic
+mixed-severity arrivals, explicit flush + optimize after every arrival)
+compares parent `bfd2619` with this session:
+
+| measurement | parent | Session 6 | change |
+|---|---:|---:|---:|
+| source entries rewritten / ingested | 7.755x | **2.414x** | **68.9% lower** |
+| source bytes rewritten / raw bytes | 1.180x | **1.052x** | **10.8% lower** |
+| aggregate optimize time | 1,901.30ms | **737.06ms** | **61.2% lower** |
+| optimize p50 / p95 / max | 15.13 / 22.19 / 25.05ms | **3.15 / 13.18 / 21.36ms** | **79% / 41% / 15% lower** |
+| final compressed payload | 3.158 B/entry | 3.225 B/entry | 2.1% larger |
+| final blocks | 37 | 62 | intentionally more time-local blocks |
+| metadata-only error count p95 | 0.035ms | 0.038ms | +0.003ms |
+| decoded service+level count p95 | 44.14ms | 49.05ms | 11.1% slower |
+| bounded latest-100 p95 | 4.88ms | **0.73ms** | **85.1% faster** |
+
+The existing one-shot 1M-entry realistic benchmark remains 8.9 bytes/entry
+and 13.5x smaller than the plain table; raw grouping is unchanged. The
+stricter repeated-maintenance case pays only 2.1% payload overhead. Its one
+decoded full-range shape moved 11%, while the time-local block generations
+made latest-100 materially faster. This meets the no-material-regression gate.
+The core fixtures independently pin the former 14.1x tiny-tail case at 2.2x,
+the 125% ceiling, exact query results, oldest-first budget progress, and zero
+budget rejection. CLI section 43 pins the public SQL commands and counters.
+
+Exit criterion: **met.**
 
 ## Session 7 — API scheduling and final comparison
 

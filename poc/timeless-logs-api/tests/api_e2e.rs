@@ -107,9 +107,7 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
                 .method("POST")
                 .uri("/select/logsql/query")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "query=level%3Aerror+%7C+stats+count%28*%29",
-                ))
+                .body(Body::from("query=level%3Aerror+%7C+stats+count%28*%29"))
                 .unwrap(),
         )
         .await
@@ -126,6 +124,39 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert_eq!(stats.native_count_decoded_blocks, 0);
     assert_eq!(stats.native_count_decoded_entries, 0);
     assert_eq!(stats.native_count_payload_bytes_read, 0);
+
+    // The API maintenance tick asks the extension for its exact actionable
+    // backlog, derives a bounded source-byte budget, and invokes the public
+    // incremental optimize command. It does not reproduce compaction policy.
+    assert_eq!(stats.optimize_pending_raw_blocks, 4);
+    assert_eq!(stats.optimize_pending_raw_entries, 8_192);
+    assert_eq!(stats.optimize_merge_ready_entries, 0);
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.raw_blocks, 0);
+    assert_eq!(stats.compressed_blocks, 4);
+    assert_eq!(stats.optimize_count, 1);
+    assert_eq!(stats.optimize_budgeted_count, 1);
+    assert_eq!(stats.optimize_budget_entries, 8_192);
+    assert_eq!(stats.optimize_raw_groups, 4);
+    assert_eq!(stats.optimize_raw_blocks, 4);
+    assert_eq!(stats.optimize_raw_entries, 8_192);
+    assert!(stats.optimize_raw_input_bytes > 0);
+    assert!(stats.optimize_raw_output_bytes > 0);
+    assert!(stats.optimize_raw_total_ns > 0);
+    assert_eq!(stats.optimize_merge_groups, 0);
+    assert_eq!(stats.optimize_pending_raw_entries, 0);
+    assert_eq!(stats.optimize_merge_ready_entries, 0);
+    assert_eq!(stats.optimize_merge_deferred_blocks, 4);
+    assert_eq!(stats.optimize_merge_deferred_entries, 8_192);
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    assert_eq!(
+        storage.stats().await.unwrap().optimize_count,
+        1,
+        "a timer wake-up must not optimize permanently deferred tails"
+    );
 
     // Manual flush is an ordered durability barrier, not the ingest path.
     let response = app

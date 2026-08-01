@@ -9,9 +9,11 @@ The storage contract is fixed:
 - The extension's hard-coded 8,192-entry automatic flush is unchanged.
 - The API never flushes at a request or producer-batch boundary.
 - A one-second low-volume timer sends the existing `flush` command.
-- A 30-second maintenance timer sends the existing `optimize` command only
-  when raw blocks exist. `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` can defer it
-  for isolated benchmarks without changing the production default.
+- A 30-second maintenance timer reads the extension's exact actionable
+  raw/merge backlog and invokes public `optimize:<entries>` with a budget
+  derived from a 32 MiB source-byte target. It does no work for deferred
+  singleton/underfilled tails. `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` can
+  defer the wake-up for isolated benchmarks without changing the default.
 - Graceful shutdown sends an ordered `flush` after all accepted batches.
 
 `204` means the parsed batch was admitted to the bounded SQLite-writer queue,
@@ -114,10 +116,18 @@ from 7,637 metadata rows (2,910,678 entries, zero payload reads), while all
 407 row queries—including substring—used bounded execution.
 
 The POC still uses the unchanged storage mechanism. No alternate buffer size,
-block layout, partition scheme, or compaction policy was introduced to hide
-the result. Session 5 closes the whole-workload embedded-memory gate without
-changing buffer, block, flush, compaction, or durability policy. Session 6 is
-the separate compaction-amplification investigation.
+block layout, partition scheme, or durability policy was introduced to hide
+the result. Session 5 closes the whole-workload embedded-memory gate.
+
+Session 6 changes shared extension compaction policy, not API storage. Raw
+compression and compressed merges are disjoint, merge generations require
+half-full output plus 2x growth, and a bounded 125% target ceiling prevents
+equal half-full tiers from becoming stranded. Public stats expose both phases
+and actionable/deferred backlog. In the deterministic repeated-maintenance
+benchmark, entry rewrite amplification fell from 7.755x to 2.414x, aggregate
+optimize time fell 61.2%, optimize p95 fell 40.6%, and compressed payload grew
+only 2.1%. The API merely schedules that public capability from observed
+backlog bytes.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).
