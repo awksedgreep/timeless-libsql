@@ -1,5 +1,16 @@
 [workspace]
-members = ["crates/timeless-codec", "crates/timeless-core", "crates/timeless-ext", "crates/dbhealth-ext"]
+members = [
+    "crates/timeless-codec",
+    "crates/timeless-core",
+    "crates/timeless-ext",
+    "crates/dbhealth-ext",
+    "crates/timeless-api",
+]
+# timelessd is a detached workspace for the same reason as tools/bench: it is
+# the SQLite HOST and needs rusqlite's `load_extension` + bundled SQLite,
+# while timeless-ext is the guest and needs the mutually-exclusive
+# `loadable_extension` feature. Cargo correctly refuses to unify both ABIs.
+exclude = ["crates/timelessd"]
 # dbhealth-ext is built EXPLICITLY (cargo build -p dbhealth-ext): in a
 # combined invocation cargo unifies features and timeless-ext's
 # entrypoints would collide with dbhealth's own sqlite3_extension_init.

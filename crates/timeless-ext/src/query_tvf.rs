@@ -3634,6 +3634,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ("raw_blocks", Value::Integer(raw_blocks as i64)),
                     ("buffered_entries", Value::Integer(buffered as i64)),
                     (
+                        "entries",
+                        Value::Integer(shared.engine.entry_count() as i64),
+                    ),
+                    (
                         "bytes_on_disk",
                         Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
                     ),
@@ -3654,6 +3658,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ("blocks", Value::Integer(blocks as i64)),
                     ("raw_blocks", Value::Integer(raw_blocks as i64)),
                     ("buffered_spans", Value::Integer(buffered as i64)),
+                    ("spans", Value::Integer(shared.engine.span_count() as i64)),
                     (
                         "bytes_on_disk",
                         Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),

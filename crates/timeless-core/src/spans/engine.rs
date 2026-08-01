@@ -947,6 +947,18 @@ impl SpanBlockEngine {
         self.stats_with_after_index(|| {})
     }
 
+    /// Total queryable spans (persisted block metadata + live buffer),
+    /// without reading or decoding a block.
+    pub fn span_count(&self) -> usize {
+        let persisted = {
+            let index = self.index_lock();
+            index.iter().fold(0usize, |count, entry| {
+                count.saturating_add(entry.meta.entry_count as usize)
+            })
+        };
+        persisted.saturating_add(self.buffered_count())
+    }
+
     /// Queryable start_ts range (blocks + buffer), payload-free. Same
     /// lock discipline as stats(): index scope dropped before the buffer
     /// is read (R7 — flush acquires buffer then index).

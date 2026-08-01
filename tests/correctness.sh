@@ -410,6 +410,13 @@ for table, _, _, row_count_sql, _ in maintenance_cases:
     assert scalar(db, row_count_sql) == 3, (
         f"{table}: maintenance rollback state changed after flush/reopen"
     )
+
+# Public metadata-only totals must include persisted blocks and the live
+# buffer, and must survive connection recovery without decoding payloads.
+log_stats = dict(db.execute("SELECT key, value FROM timeless_stats('logs_maint')"))
+trace_stats = dict(db.execute("SELECT key, value FROM timeless_stats('traces_maint')"))
+assert log_stats["entries"] == 3, log_stats
+assert trace_stats["spans"] == 3, trace_stats
 db.close()
 
 print("PASS: statement, savepoint, auto-flush, and maintenance rollback are atomic")
