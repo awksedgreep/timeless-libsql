@@ -183,6 +183,16 @@ impl ShadowBlockStore {
 }
 
 impl BlockStore for ShadowBlockStore {
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        // Every engine query runs inside the host virtual-table SELECT on the
+        // same connection used by read_block(). SQLite keeps that statement's
+        // read snapshot stable across WAL commits; in rollback-journal mode
+        // its shared lock likewise keeps deleted rows readable until the
+        // statement finishes. The engine may therefore retain row ids and
+        // stream one payload at a time after releasing publication guards.
+        true
+    }
+
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
         let conn = Self::conn()?;
         self.insert_block(&conn, block)

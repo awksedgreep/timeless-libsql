@@ -77,10 +77,16 @@ from 162.3K to 225.5K entries/s with one query worker and from 85.5K to
 starve it; the logs cursor also releases its permit before metadata JSON
 rendering. Both measured runs had zero HTTP errors and drained to zero.
 
+Session 3 then moves payload decoding, filtering, sorting, and JSON rendering
+past the publication boundary. SQLite's read snapshot keeps captured block
+locations readable while the extension streams one payload at a time, so this
+does not retain every candidate payload in memory. With one and two query
+workers the API reaches 479.7K and 463.3K completed entries/s respectively.
+
 The POC still uses the unchanged storage mechanism. No alternate buffer size,
 block layout, partition scheme, or compaction policy was introduced to hide
-the result. The next measured change is shrinking the engine read critical
-section.
+the result. The next measured change is bounded `ORDER BY`/`LIMIT` pushdown;
+the current cursor still materializes millions of rows that SQLite discards.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

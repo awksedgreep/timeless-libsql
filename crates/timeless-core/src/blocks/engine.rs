@@ -82,6 +82,13 @@ pub struct BlockEngineProfileSnapshot {
     pub flush_store_ns: u64,
     pub query_count: u64,
     pub query_total_ns: u64,
+    pub query_snapshot_ns: u64,
+    pub query_materialize_ns: u64,
+    pub query_snapshot_payload_bytes: u64,
+    pub query_snapshot_payload_max_bytes: u64,
+    pub query_snapshot_buffered_entries: u64,
+    pub query_stable_location_snapshots: u64,
+    pub query_payload_bytes_read: u64,
     pub query_candidate_blocks: u64,
     pub query_decoded_entries: u64,
     pub query_returned_entries: u64,
@@ -106,6 +113,13 @@ struct BlockEngineProfile {
     flush_store_ns: AtomicU64,
     query_count: AtomicU64,
     query_total_ns: AtomicU64,
+    query_snapshot_ns: AtomicU64,
+    query_materialize_ns: AtomicU64,
+    query_snapshot_payload_bytes: AtomicU64,
+    query_snapshot_payload_max_bytes: AtomicU64,
+    query_snapshot_buffered_entries: AtomicU64,
+    query_stable_location_snapshots: AtomicU64,
+    query_payload_bytes_read: AtomicU64,
     query_candidate_blocks: AtomicU64,
     query_decoded_entries: AtomicU64,
     query_returned_entries: AtomicU64,
@@ -132,6 +146,13 @@ impl BlockEngineProfile {
             flush_store_ns: load(&self.flush_store_ns),
             query_count: load(&self.query_count),
             query_total_ns: load(&self.query_total_ns),
+            query_snapshot_ns: load(&self.query_snapshot_ns),
+            query_materialize_ns: load(&self.query_materialize_ns),
+            query_snapshot_payload_bytes: load(&self.query_snapshot_payload_bytes),
+            query_snapshot_payload_max_bytes: load(&self.query_snapshot_payload_max_bytes),
+            query_snapshot_buffered_entries: load(&self.query_snapshot_buffered_entries),
+            query_stable_location_snapshots: load(&self.query_stable_location_snapshots),
+            query_payload_bytes_read: load(&self.query_payload_bytes_read),
             query_candidate_blocks: load(&self.query_candidate_blocks),
             query_decoded_entries: load(&self.query_decoded_entries),
             query_returned_entries: load(&self.query_returned_entries),
@@ -171,6 +192,15 @@ pub struct LogQuery {
     /// are skipped, and blocks without the `tg:` marker (pre-F6 data,
     /// trigram-capped blocks, disabled index) are never skipped.
     pub message_like_prune: Option<String>,
+}
+
+struct LogQuerySnapshot {
+    payloads: Vec<Vec<u8>>,
+    locations: Vec<BlockLoc>,
+    buffered: Vec<LogEntry>,
+    candidate_blocks: u64,
+    payload_bytes: u64,
+    stable_locations: bool,
 }
 
 /// One entry in the engine's in-memory block index: the store-persisted
@@ -1118,7 +1148,107 @@ impl BlockEngine {
     ///   4. merge in matching BUFFERED entries (queryable-before-flush),
     ///   5. sort by ts.
     pub fn query(&self, q: &LogQuery) -> Result<Vec<LogEntry>, String> {
+        self.query_after_snapshot(q, || {})
+    }
+
+    /// Query with a synchronous notification at the ownership boundary.
+    ///
+    /// `after_snapshot` runs after candidate payload ownership (stable store
+    /// locations or conservative owned bytes) and the matching buffer
+    /// generation have been captured under the transition read guard, but
+    /// before any payload is decoded or results are sorted.
+    /// The SQLite extension uses this point to release its cross-connection
+    /// read permit, allowing a waiting writer to publish while CPU-only result
+    /// materialization continues. Callbacks must stay short and must not call
+    /// back into this engine.
+    pub fn query_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        after_snapshot: F,
+    ) -> Result<Vec<LogEntry>, String>
+    where
+        F: FnOnce(),
+    {
         let started = Instant::now();
+        let snapshot_started = Instant::now();
+        let snapshot = self.snapshot_query(q)?;
+        let snapshot_ns = elapsed_ns(snapshot_started);
+        after_snapshot();
+
+        let materialize_started = Instant::now();
+        let candidate_blocks = snapshot.candidate_blocks;
+        let buffered_entries = snapshot.buffered.len() as u64;
+        let snapshot_payload_bytes = snapshot.payload_bytes;
+        let stable_locations = snapshot.stable_locations;
+        let mut payload_bytes_read = snapshot_payload_bytes;
+        let mut decoded_entries = 0u64;
+        let mut out: Vec<LogEntry> = Vec::new();
+        for bytes in snapshot.payloads {
+            let entries = decode_block(&bytes)?;
+            decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
+            for entry in entries {
+                if entry_matches(&entry, q) {
+                    out.push(entry);
+                }
+            }
+        }
+        for loc in snapshot.locations {
+            let bytes = self.store.read_block(&loc)?;
+            payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
+            let entries = decode_block(&bytes)?;
+            decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
+            for entry in entries {
+                if entry_matches(&entry, q) {
+                    out.push(entry);
+                }
+            }
+        }
+        out.extend(snapshot.buffered);
+        // Stable sort: entries with equal ts keep block order, buffered
+        // entries land after flushed ones — deterministic either way.
+        out.sort_by_key(|e| e.ts);
+        let materialize_ns = elapsed_ns(materialize_started);
+
+        self.profile.query_count.fetch_add(1, Ordering::Relaxed);
+        self.profile
+            .query_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.profile
+            .query_snapshot_ns
+            .fetch_add(snapshot_ns, Ordering::Relaxed);
+        self.profile
+            .query_materialize_ns
+            .fetch_add(materialize_ns, Ordering::Relaxed);
+        self.profile
+            .query_snapshot_payload_bytes
+            .fetch_add(snapshot_payload_bytes, Ordering::Relaxed);
+        self.profile
+            .query_snapshot_payload_max_bytes
+            .fetch_max(snapshot_payload_bytes, Ordering::Relaxed);
+        self.profile
+            .query_snapshot_buffered_entries
+            .fetch_add(buffered_entries, Ordering::Relaxed);
+        if stable_locations {
+            self.profile
+                .query_stable_location_snapshots
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.profile
+            .query_payload_bytes_read
+            .fetch_add(payload_bytes_read, Ordering::Relaxed);
+        self.profile
+            .query_candidate_blocks
+            .fetch_add(candidate_blocks, Ordering::Relaxed);
+        self.profile
+            .query_decoded_entries
+            .fetch_add(decoded_entries, Ordering::Relaxed);
+        self.profile
+            .query_returned_entries
+            .fetch_add(out.len() as u64, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    fn snapshot_query(&self, q: &LogQuery) -> Result<LogQuerySnapshot, String> {
         let _transition = self.transition_read();
         let mut terms: Vec<String> = Vec::new();
         if let Some(lvl) = q.level {
@@ -1163,40 +1293,37 @@ impl BlockEngine {
             }
         }
         let candidate_blocks = locs.len() as u64;
-        let mut decoded_entries = 0u64;
-        let mut out: Vec<LogEntry> = Vec::new();
-        for (loc, _meta) in &locs {
-            let bytes = self.store.read_block(loc)?;
-            let entries = decode_block(&bytes)?;
-            decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
-            for entry in entries {
-                if entry_matches(&entry, q) {
-                    out.push(entry);
-                }
+        let stable_locations = self.store.query_snapshot_keeps_locations_readable();
+        let mut payloads = Vec::new();
+        let mut locations = Vec::new();
+        let mut payload_bytes = 0u64;
+        if stable_locations {
+            locations = locs.into_iter().map(|(loc, _meta)| loc).collect();
+        } else {
+            payloads.reserve(locs.len());
+            for (loc, _meta) in &locs {
+                let bytes = self.store.read_block(loc)?;
+                payload_bytes = payload_bytes.saturating_add(bytes.len() as u64);
+                payloads.push(bytes);
             }
         }
-        for entry in self.buffer_lock().iter() {
-            if entry_matches(entry, q) {
-                out.push(entry.clone());
-            }
-        }
-        // Stable sort: entries with equal ts keep block order, buffered
-        // entries land after flushed ones — deterministic either way.
-        out.sort_by_key(|e| e.ts);
-        self.profile.query_count.fetch_add(1, Ordering::Relaxed);
-        self.profile
-            .query_total_ns
-            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
-        self.profile
-            .query_candidate_blocks
-            .fetch_add(candidate_blocks, Ordering::Relaxed);
-        self.profile
-            .query_decoded_entries
-            .fetch_add(decoded_entries, Ordering::Relaxed);
-        self.profile
-            .query_returned_entries
-            .fetch_add(out.len() as u64, Ordering::Relaxed);
-        Ok(out)
+        // Buffer membership is part of the protected generation. Filter while
+        // borrowing it so the snapshot owns only matching entries, never an
+        // avoidable clone of the complete ingest buffer.
+        let buffered = self
+            .buffer_lock()
+            .iter()
+            .filter(|entry| entry_matches(entry, q))
+            .cloned()
+            .collect();
+        Ok(LogQuerySnapshot {
+            payloads,
+            locations,
+            buffered,
+            candidate_blocks,
+            payload_bytes,
+            stable_locations,
+        })
     }
 
     /// F4 bucket kernel (FEATURE_PLAN.md): count entries per bucket,

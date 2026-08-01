@@ -856,12 +856,6 @@ unsafe impl VTabCursor for LogsCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         // Route block reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
-        let _read = self
-            .shared
-            .write_gate
-            .acquire_read(self.db as usize, &self.table_name)
-            .map_err(module_err)?;
-
         // argv slots were claimed in canonical order (level, ts lo,
         // ts hi, index keys), so the mask alone tells us which
         // positional arg is which.
@@ -934,23 +928,26 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         let entries = if impossible {
             Vec::new()
         } else {
+            let read = self
+                .shared
+                .write_gate
+                .acquire_read(self.db as usize, &self.table_name)
+                .map_err(module_err)?;
             self.shared
                 .engine
-                .query(&LogQuery {
-                    ts_min,
-                    ts_max,
-                    level,
-                    metadata_eq,
-                    message_contains: None,
-                    message_like_prune,
-                })
+                .query_after_snapshot(
+                    &LogQuery {
+                        ts_min,
+                        ts_max,
+                        level,
+                        metadata_eq,
+                        message_contains: None,
+                        message_like_prune,
+                    },
+                    move || drop(read),
+                )
                 .map_err(module_err)?
         };
-
-        // The engine result owns every entry needed by the cursor. Release
-        // publication protection before CPU-only metadata JSON rendering so
-        // a waiting writer does not pay that avoidable tail.
-        drop(_read);
 
         self.rows = entries
             .into_iter()

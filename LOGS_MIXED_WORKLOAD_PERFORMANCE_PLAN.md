@@ -153,20 +153,29 @@ with exact query results and no new HTTP errors after retry.
 
 ## Session 3 — Shrink the engine read critical section
 
-- [ ] Separate protected snapshot work from CPU-only query work.
-- [ ] Under the transition guard, resolve candidate locations, obtain the
+- [x] Separate protected snapshot work from CPU-only query work.
+- [x] Under the transition guard, resolve candidate locations, obtain the
       payload ownership needed to survive optimize/prune, and snapshot the
       matching buffer generation.
-- [ ] Release the guard before safe decoding, per-entry filtering, and final
+- [x] Release the guard before safe decoding, per-entry filtering, and final
       result ordering.
-- [ ] Measure the extra memory of owned payload snapshots. If it is excessive,
+- [x] Measure the extra memory of owned payload snapshots. If it is excessive,
       evaluate generation pins or deferred block reclamation rather than
       accepting unbounded duplication.
-- [ ] Preserve rollback, prune, optimize, and cross-connection publication
+- [x] Preserve rollback, prune, optimize, and cross-connection publication
       tests under forced interleavings.
 
-Exit criterion: query CPU no longer blocks the writer, and peak memory stays
-within an explicit measured bound.
+The first implementation owned every candidate payload and was rejected after
+one query retained 304,952,873 bytes. The final SQLite path uses the host
+SELECT's stable database snapshot: it retains block locations, releases both
+guards, then streams one old row version at a time. Stores without snapshot
+isolation retain the conservative owned-payload fallback. Forced tests prove
+flush, optimize, and prune can publish after snapshot while the exact captured
+generation remains readable.
+
+Exit criterion: query CPU no longer blocks the writer, and snapshot ownership
+does not accumulate payload bytes on SQLite. Whole-result materialization is
+measured separately and is the blocking memory issue for Session 4.
 
 ## Session 4 — Push bounded query intent into the extension
 

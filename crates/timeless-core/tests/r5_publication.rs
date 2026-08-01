@@ -147,6 +147,67 @@ struct PausingBlockStore {
     pause: Arc<ReadPause>,
 }
 
+/// Test double for a store with MVCC-style stable row versions. Replaced
+/// blocks stay physically readable after publication, matching the contract
+/// ShadowBlockStore gets from the host SQLite read transaction.
+struct StableLocationBlockStore {
+    inner: MemBlockStore,
+}
+
+impl BlockStore for StableLocationBlockStore {
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        true
+    }
+
+    fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
+        self.inner.put_block(block)
+    }
+
+    fn put_blocks(&self, blocks: &[EncodedBlock]) -> Result<Vec<BlockLoc>, String> {
+        self.inner.put_blocks(blocks)
+    }
+
+    fn replace_blocks(
+        &self,
+        add: &[EncodedBlock],
+        _remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        let locs = self.inner.put_blocks(add)?;
+        on_committed(&locs);
+        Ok(locs)
+    }
+
+    fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
+        self.inner.read_block(loc)
+    }
+
+    fn delete_blocks(&self, _locs: &[BlockLoc]) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+        self.inner.scan()
+    }
+
+    fn query_terms(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.inner.query_terms(terms, ts_min, ts_max)
+    }
+
+    fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
+        self.inner.save_meta(key, value)
+    }
+
+    fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner.load_meta(key)
+    }
+}
+
 impl BlockStore for PausingBlockStore {
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
         self.inner.put_block(block)
@@ -526,6 +587,188 @@ fn logs_query_cannot_read_deleted_location_during_prune() {
 
     let rows = query.join().unwrap().unwrap();
     prune.join().unwrap().unwrap();
+    assert_eq!(rows, vec![log_entry(1, "one")]);
+}
+
+#[test]
+fn logs_flush_can_publish_after_query_snapshot_before_materialization() {
+    let engine = Arc::new(
+        BlockEngine::new(
+            Box::new(MemBlockStore::new()),
+            BlockEngineConfig {
+                flush_threshold: 1000,
+                ..BlockEngineConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    engine.push(log_entry(1, "one")).unwrap();
+    engine.flush().unwrap();
+    engine.push(log_entry(2, "two")).unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        query_engine.query_after_snapshot(&log_query(), move || {
+            snapshot_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        })
+    });
+    snapshot_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let flush_engine = Arc::clone(&engine);
+    let flush = thread::spawn(move || {
+        let result = flush_engine.flush();
+        done_tx.send(()).unwrap();
+        result
+    });
+    let flush_overtook_materialization = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+
+    let rows = query.join().unwrap().unwrap();
+    flush.join().unwrap().unwrap();
+    assert!(
+        flush_overtook_materialization,
+        "flush remained blocked after the query owned its block and buffer generation"
+    );
+    assert_eq!(rows, vec![log_entry(1, "one"), log_entry(2, "two")]);
+}
+
+#[test]
+fn logs_optimize_can_publish_after_query_snapshot_before_materialization() {
+    let engine = Arc::new(
+        BlockEngine::new(
+            Box::new(MemBlockStore::new()),
+            BlockEngineConfig {
+                flush_threshold: 1000,
+                ..BlockEngineConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    engine.push(log_entry(1, "one")).unwrap();
+    engine.flush().unwrap();
+    engine.push(log_entry(2, "two")).unwrap();
+    engine.flush().unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        query_engine.query_after_snapshot(&log_query(), move || {
+            snapshot_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        })
+    });
+    snapshot_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let optimize_engine = Arc::clone(&engine);
+    let optimize = thread::spawn(move || {
+        let result = optimize_engine.optimize();
+        done_tx.send(()).unwrap();
+        result
+    });
+    let optimize_overtook_materialization = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+
+    let rows = query.join().unwrap().unwrap();
+    optimize.join().unwrap().unwrap();
+    assert!(
+        optimize_overtook_materialization,
+        "optimize remained blocked after the query owned its payload snapshot"
+    );
+    assert_eq!(rows, vec![log_entry(1, "one"), log_entry(2, "two")]);
+}
+
+#[test]
+fn logs_stable_store_streams_locations_without_owning_all_payloads() {
+    let engine = Arc::new(
+        BlockEngine::new(
+            Box::new(StableLocationBlockStore {
+                inner: MemBlockStore::new(),
+            }),
+            BlockEngineConfig {
+                flush_threshold: 1000,
+                ..BlockEngineConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    engine.push(log_entry(1, "one")).unwrap();
+    engine.flush().unwrap();
+    engine.push(log_entry(2, "two")).unwrap();
+    engine.flush().unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        query_engine.query_after_snapshot(&log_query(), move || {
+            snapshot_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        })
+    });
+    snapshot_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let optimize_engine = Arc::clone(&engine);
+    let optimize = thread::spawn(move || {
+        let result = optimize_engine.optimize();
+        done_tx.send(()).unwrap();
+        result
+    });
+    let optimize_overtook_materialization = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+
+    let rows = query.join().unwrap().unwrap();
+    optimize.join().unwrap().unwrap();
+    assert!(optimize_overtook_materialization);
+    assert_eq!(rows, vec![log_entry(1, "one"), log_entry(2, "two")]);
+    let profile = engine.profile();
+    assert_eq!(profile.query_stable_location_snapshots, 1);
+    assert_eq!(profile.query_snapshot_payload_bytes, 0);
+    assert_eq!(profile.query_snapshot_payload_max_bytes, 0);
+    assert!(profile.query_payload_bytes_read > 0);
+}
+
+#[test]
+fn logs_prune_can_publish_after_query_snapshot_before_materialization() {
+    let engine = Arc::new(
+        BlockEngine::new(Box::new(MemBlockStore::new()), BlockEngineConfig::default()).unwrap(),
+    );
+    engine.push(log_entry(1, "one")).unwrap();
+    engine.flush().unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        query_engine.query_after_snapshot(&log_query(), move || {
+            snapshot_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        })
+    });
+    snapshot_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let prune_engine = Arc::clone(&engine);
+    let prune = thread::spawn(move || {
+        let result = prune_engine.prune(10);
+        done_tx.send(()).unwrap();
+        result
+    });
+    let prune_overtook_materialization = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+
+    let rows = query.join().unwrap().unwrap();
+    prune.join().unwrap().unwrap();
+    assert!(
+        prune_overtook_materialization,
+        "prune remained blocked after the query owned its payload snapshot"
+    );
     assert_eq!(rows, vec![log_entry(1, "one")]);
 }
 

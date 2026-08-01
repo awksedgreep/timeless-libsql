@@ -136,6 +136,19 @@ pub struct EncodedBlock {
 /// the atomicity (and the reason replace/delete can drop term rows "in
 /// the same operation" without any manifest machinery).
 pub trait BlockStore: Send + Sync {
+    /// Whether block locations returned during a query remain readable from
+    /// the same logical read snapshot after a concurrent writer replaces or
+    /// deletes their current rows.
+    ///
+    /// The conservative default is false: the engine owns candidate payload
+    /// bytes before releasing its transition guard. SQLite-backed virtual
+    /// tables override this because the host SELECT pins its database
+    /// snapshot; they can release the guard and stream old row versions one
+    /// block at a time without retaining every payload in Rust memory.
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        false
+    }
+
     /// Persist one block and its terms. Same-operation term insert:
     /// a block is never visible without its posting-list rows.
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String>;

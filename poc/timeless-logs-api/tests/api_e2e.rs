@@ -84,6 +84,12 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert_eq!(stats.query_decoded_entries, 410);
     assert_eq!(stats.query_returned_entries, 410);
     assert!(stats.query_total_ns > 0);
+    assert!(stats.query_snapshot_ns > 0);
+    assert!(stats.query_materialize_ns > 0);
+    assert_eq!(stats.query_snapshot_payload_bytes, 0);
+    assert_eq!(stats.query_snapshot_payload_max_bytes, 0);
+    assert_eq!(stats.query_stable_location_snapshots, 1);
+    assert!(stats.query_payload_bytes_read > 0);
     assert!(stats.read_permit_count > 0);
     assert_eq!(stats.waiting_writers, 0);
 

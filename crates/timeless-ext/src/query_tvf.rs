@@ -3692,6 +3692,34 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(profile.query_total_ns as i64),
                     ),
                     (
+                        "query_snapshot_ns",
+                        Value::Integer(profile.query_snapshot_ns as i64),
+                    ),
+                    (
+                        "query_materialize_ns",
+                        Value::Integer(profile.query_materialize_ns as i64),
+                    ),
+                    (
+                        "query_snapshot_payload_bytes",
+                        Value::Integer(profile.query_snapshot_payload_bytes as i64),
+                    ),
+                    (
+                        "query_snapshot_payload_max_bytes",
+                        Value::Integer(profile.query_snapshot_payload_max_bytes as i64),
+                    ),
+                    (
+                        "query_snapshot_buffered_entries",
+                        Value::Integer(profile.query_snapshot_buffered_entries as i64),
+                    ),
+                    (
+                        "query_stable_location_snapshots",
+                        Value::Integer(profile.query_stable_location_snapshots as i64),
+                    ),
+                    (
+                        "query_payload_bytes_read",
+                        Value::Integer(profile.query_payload_bytes_read as i64),
+                    ),
+                    (
                         "query_candidate_blocks",
                         Value::Integer(profile.query_candidate_blocks as i64),
                     ),
