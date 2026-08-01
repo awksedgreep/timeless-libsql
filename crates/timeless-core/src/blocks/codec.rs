@@ -92,7 +92,9 @@ const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = 38;
 
 fn known_codec(codec: u8) -> bool {
-    codec == CODEC_RAW || codec == CODEC_ZSTD || codec == CODEC_COLUMNAR
+    codec == CODEC_RAW
+        || codec == CODEC_ZSTD
+        || codec == CODEC_COLUMNAR
         || codec == CODEC_COLUMNAR_V2
 }
 
@@ -156,8 +158,7 @@ pub fn encode_block(
             [
                 encode_i64(&ts_values, zstd_level)?.to_bytes(),
                 encode_u8(&col_lvl_raw, zstd_level)?.to_bytes(),
-                encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?
-                    .to_bytes(),
+                encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?.to_bytes(),
                 col_meta,
             ]
         }
@@ -379,7 +380,12 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     Ok(out)
 }
 
-const COLUMN_NAMES: [&str; 4] = ["ts column", "level column", "message column", "metadata column"];
+const COLUMN_NAMES: [&str; 4] = [
+    "ts column",
+    "level column",
+    "message column",
+    "metadata column",
+];
 
 /// The metadata pair serialization — u16 pair count, then per pair u16
 /// key length (keys are short identifiers; >64KB keys are rejected as
@@ -587,8 +593,8 @@ pub(crate) fn decode_pairs_column(
             let mut out: Vec<Vec<(String, String)>> = vec![Vec::new(); n];
             for key in &keys {
                 let bm = r.take(bitmap_len(n), &format!("{what} presence bitmap"))?;
-                let present = decode_bitmap(bm, n)
-                    .map_err(|e| format!("{what} column, key {key:?}: {e}"))?;
+                let present =
+                    decode_bitmap(bm, n).map_err(|e| format!("{what} column, key {key:?}: {e}"))?;
                 let n_present = present.iter().filter(|&&b| b).count();
                 let frame = r.framed_column(&format!("{what} value column"))?;
                 let values = decode_str(frame, n_present)

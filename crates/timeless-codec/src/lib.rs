@@ -291,7 +291,8 @@ fn pco_compress<T: pco::data_types::Number>(nums: &[T]) -> Result<Vec<u8>, Strin
 }
 
 fn pco_decompress<T: pco::data_types::Number>(bytes: &[u8], what: &str) -> Result<Vec<T>, String> {
-    pco::standalone::simple_decompress(bytes).map_err(|e| format!("pco decompress of {what} failed: {e}"))
+    pco::standalone::simple_decompress(bytes)
+        .map_err(|e| format!("pco decompress of {what} failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -344,15 +345,25 @@ pub fn encode_i64(values: &[i64], zstd_level: i32) -> Result<ColumnEnc, String> 
     // Ties go to zstd: decode is faster and the dependency is already
     // paid for by every other column.
     if pco_sample.len() < zstd_sample.len() {
-        let payload = if sample_is_all { pco_sample } else { pco_compress(&deltas)? };
-        Ok(ColumnEnc { encoding: ENC_I64_DELTA_PCO, payload })
+        let payload = if sample_is_all {
+            pco_sample
+        } else {
+            pco_compress(&deltas)?
+        };
+        Ok(ColumnEnc {
+            encoding: ENC_I64_DELTA_PCO,
+            payload,
+        })
     } else {
         let payload = if sample_is_all {
             zstd_sample
         } else {
             zstd_compress(&i64s_to_le_bytes(&deltas), zstd_level)?
         };
-        Ok(ColumnEnc { encoding: ENC_I64_DELTA_ZSTD, payload })
+        Ok(ColumnEnc {
+            encoding: ENC_I64_DELTA_ZSTD,
+            payload,
+        })
     }
 }
 
@@ -364,7 +375,10 @@ pub fn decode_i64(bytes: &[u8], n: usize) -> Result<Vec<i64>, String> {
         ENC_I64_DELTA_ZSTD => {
             let raw = zstd_decompress(payload, "i64 column")?;
             if raw.len() % 8 != 0 {
-                return Err(format!("i64 column: {} bytes is not a multiple of 8", raw.len()));
+                return Err(format!(
+                    "i64 column: {} bytes is not a multiple of 8",
+                    raw.len()
+                ));
             }
             raw.chunks_exact(8)
                 .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
@@ -373,7 +387,10 @@ pub fn decode_i64(bytes: &[u8], n: usize) -> Result<Vec<i64>, String> {
         other => return Err(format!("i64 column: unknown encoding id {other}")),
     };
     if deltas.len() != n {
-        return Err(format!("i64 column: decoded {} values, expected {n}", deltas.len()));
+        return Err(format!(
+            "i64 column: decoded {} values, expected {n}",
+            deltas.len()
+        ));
     }
     // Invert the delta pre-pass.
     let mut out = Vec::with_capacity(n);
@@ -420,15 +437,25 @@ pub fn encode_f64(values: &[f64], zstd_level: i32) -> Result<ColumnEnc, String> 
     let zstd_sample = zstd_compress(&f64s_to_le_bytes(sample), zstd_level)?;
 
     if pco_sample.len() < zstd_sample.len() {
-        let payload = if sample_is_all { pco_sample } else { pco_compress(values)? };
-        Ok(ColumnEnc { encoding: ENC_F64_PCO, payload })
+        let payload = if sample_is_all {
+            pco_sample
+        } else {
+            pco_compress(values)?
+        };
+        Ok(ColumnEnc {
+            encoding: ENC_F64_PCO,
+            payload,
+        })
     } else {
         let payload = if sample_is_all {
             zstd_sample
         } else {
             zstd_compress(&f64s_to_le_bytes(values), zstd_level)?
         };
-        Ok(ColumnEnc { encoding: ENC_F64_ZSTD, payload })
+        Ok(ColumnEnc {
+            encoding: ENC_F64_ZSTD,
+            payload,
+        })
     }
 }
 
@@ -440,7 +467,10 @@ pub fn decode_f64(bytes: &[u8], n: usize) -> Result<Vec<f64>, String> {
         ENC_F64_ZSTD => {
             let raw = zstd_decompress(payload, "f64 column")?;
             if raw.len() % 8 != 0 {
-                return Err(format!("f64 column: {} bytes is not a multiple of 8", raw.len()));
+                return Err(format!(
+                    "f64 column: {} bytes is not a multiple of 8",
+                    raw.len()
+                ));
             }
             raw.chunks_exact(8)
                 .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
@@ -449,7 +479,10 @@ pub fn decode_f64(bytes: &[u8], n: usize) -> Result<Vec<f64>, String> {
         other => return Err(format!("f64 column: unknown encoding id {other}")),
     };
     if out.len() != n {
-        return Err(format!("f64 column: decoded {} values, expected {n}", out.len()));
+        return Err(format!(
+            "f64 column: decoded {} values, expected {n}",
+            out.len()
+        ));
     }
     Ok(out)
 }
@@ -567,13 +600,15 @@ where
         // Payload: [u32 dict_count][u32 dict_zstd_len][dict_zstd][codes_zstd].
         // codes_zstd runs to the end of the payload — its length is
         // implied by the frame, no second length field needed.
-        let mut payload =
-            Vec::with_capacity(8 + dict_zstd.len() + codes_zstd.len());
+        let mut payload = Vec::with_capacity(8 + dict_zstd.len() + codes_zstd.len());
         payload.extend_from_slice(&(table.len() as u32).to_le_bytes());
         payload.extend_from_slice(&(dict_zstd.len() as u32).to_le_bytes());
         payload.extend_from_slice(&dict_zstd);
         payload.extend_from_slice(&codes_zstd);
-        Ok(ColumnEnc { encoding: ENC_STR_DICT, payload })
+        Ok(ColumnEnc {
+            encoding: ENC_STR_DICT,
+            payload,
+        })
     } else {
         // ── Concat strategy (codec-2 message format, verbatim) ──────
         let mut concat = Vec::new();
@@ -708,9 +743,15 @@ pub fn encode_u8(values: &[u8], zstd_level: i32) -> Result<ColumnEnc, String> {
 
     let zstd_payload = zstd_compress(values, zstd_level)?;
     if rle.len() <= zstd_payload.len() {
-        Ok(ColumnEnc { encoding: ENC_U8_RLE, payload: rle })
+        Ok(ColumnEnc {
+            encoding: ENC_U8_RLE,
+            payload: rle,
+        })
     } else {
-        Ok(ColumnEnc { encoding: ENC_U8_ZSTD, payload: zstd_payload })
+        Ok(ColumnEnc {
+            encoding: ENC_U8_ZSTD,
+            payload: zstd_payload,
+        })
     }
 }
 
@@ -830,7 +871,7 @@ mod tests {
         rt_i64(&(0..1000).collect::<Vec<i64>>()); // all distinct, sorted
         rt_i64(&[-5, -1, -1000, 3, 0, -7]); // negatives, unsorted
         rt_i64(&[i64::MIN, i64::MAX, 0, i64::MIN + 1, i64::MAX - 1, -1]); // extremes (wrapping deltas)
-        // ms-jitter-ish timestamps (what the ts columns actually look like)
+                                                                          // ms-jitter-ish timestamps (what the ts columns actually look like)
         let mut ts = Vec::new();
         let mut t = 1_700_000_000_000i64;
         for i in 0..5000 {
@@ -870,7 +911,16 @@ mod tests {
         rt_f64_bits(&[3.25]);
         rt_f64_bits(&[1.5; 512]); // all identical
         rt_f64_bits(&(0..1000).map(|i| i as f64 * 0.1).collect::<Vec<_>>());
-        rt_f64_bits(&[-1.5, 7.25, -0.0, 0.0, f64::MIN, f64::MAX, f64::INFINITY, f64::NEG_INFINITY]);
+        rt_f64_bits(&[
+            -1.5,
+            7.25,
+            -0.0,
+            0.0,
+            f64::MIN,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ]);
     }
 
     #[test]
@@ -906,16 +956,17 @@ mod tests {
         rt_str(&[], None);
         rt_str(&["solo"], None);
         rt_str(&["", "", ""], None); // empty strings are values too
-        // Unicode: multi-byte, combining, RTL, emoji.
-        rt_str(&["héllo wörld", "日本語のログ", "🚀🔥", "مرحبا", "a\u{0301}"], None);
+                                     // Unicode: multi-byte, combining, RTL, emoji.
+        rt_str(
+            &["héllo wörld", "日本語のログ", "🚀🔥", "مرحبا", "a\u{0301}"],
+            None,
+        );
     }
 
     #[test]
     fn str_dictionary_fires_on_low_cardinality() {
         // 3 distinct over 3000 rows = ratio 0.001 → dictionary.
-        let services: Vec<&str> = (0..3000)
-            .map(|i| ["api", "web", "auth"][i % 3])
-            .collect();
+        let services: Vec<&str> = (0..3000).map(|i| ["api", "web", "auth"][i % 3]).collect();
         rt_str(&services, Some(ENC_STR_DICT));
     }
 
@@ -963,7 +1014,12 @@ mod tests {
             (vec![], 16usize),
             (vec![0xAB; 16], 16),
             ([[7u8; 16], [7u8; 16], [9u8; 16]].concat(), 16),
-            ((0..25u8).flat_map(|i| [i, i ^ 0x5A, 0, 255, i, 1, 2, 3]).collect::<Vec<u8>>(), 8),
+            (
+                (0..25u8)
+                    .flat_map(|i| [i, i ^ 0x5A, 0, 255, i, 1, 2, 3])
+                    .collect::<Vec<u8>>(),
+                8,
+            ),
         ] {
             let n = data.len() / width;
             let enc = encode_fixed_bytes(&data, width, LVL).unwrap();
@@ -1004,7 +1060,9 @@ mod tests {
     fn reader_framed_column_walks_back_to_back_frames() {
         // Two encode_str frames packed with no outer length table —
         // the shredded-metadata consumption pattern.
-        let a = encode_str(["x", "y"].into_iter(), 2, LVL).unwrap().to_bytes();
+        let a = encode_str(["x", "y"].into_iter(), 2, LVL)
+            .unwrap()
+            .to_bytes();
         let b = encode_str(["z"].into_iter(), 1, LVL).unwrap().to_bytes();
         let mut buf = a.clone();
         buf.extend_from_slice(&b);
@@ -1036,6 +1094,7 @@ mod tests {
         garbage[last] ^= 0xFF;
         let _ = decode_i64(&garbage, 3); // any Result is fine; no panic
         assert!(decode_str(&[ENC_STR_DICT, 1, 0, 0, 0, 7], 1).is_err());
-        assert!(decode_u8(&[ENC_U8_RLE, 5, 0, 0, 0, 255, 255, 255, 255, 7], 3).is_err()); // run > n
+        assert!(decode_u8(&[ENC_U8_RLE, 5, 0, 0, 0, 255, 255, 255, 255, 7], 3).is_err());
+        // run > n
     }
 }

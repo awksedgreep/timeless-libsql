@@ -84,7 +84,7 @@ Key properties carried over from timeless_metrics:
 | Tier | Interface | Expected rate | Scope |
 |------|-----------|---------------|-------|
 | 1 | `INSERT INTO metrics(name, ts, value, labels) VALUES ...` (prepared, big txns) | ~0.5–2M pts/s (measure in spike!) | POC — compatibility floor |
-| 2 | `INSERT INTO metrics(metrics, batch) VALUES ('ingest', :blob)` — packed columnar blob, FTS5 command idiom | target ≥8M pts/s | POC — hero benchmark runs on this |
+| 2 | `INSERT INTO metrics(metrics) VALUES (:blob)` — packed columnar blob, dispatched by version byte | target ≥8M pts/s | POC — hero benchmark runs on this |
 | 3 | `sqlite3_bind_pointer` / carray-style zero-copy (in-process only) | ~native 16M pts/s | Deferred unless Tier 2 disappoints |
 
 Durability semantics MUST be identical across tiers (same engine buffers, same
@@ -113,7 +113,11 @@ is not protobuf territory.
 ### Command surface (FTS5 idiom)
 
 - `INSERT INTO metrics(metrics) VALUES ('flush')` — force chunk flush
-- `INSERT INTO metrics(metrics, batch) VALUES ('ingest', ?)` — Tier 2
+- `INSERT INTO metrics(metrics) VALUES (?)` — Tier 2 named batch (`0x01`)
+- `INSERT INTO metrics(metrics, name, labels) VALUES ('resolve', ?, ?)` —
+  resolve a durable catalog id, returned by `last_insert_rowid()`
+- `INSERT INTO metrics(metrics) VALUES (?)` — resolved-id batch (`0x02`):
+  `{version:u8, flags:u8, reserved:u16, n:u32, sid:i64[n], ts:i64[n], value_bits:u64[n]}`
 - (later: 'optimize' for merge compaction, 'stats')
 
 ## Query interface tiers & the PromQL layering contract (added 2026-07-24)
@@ -147,7 +151,7 @@ VM versions and must remain hot-iterable, not frozen into a storage engine.
 | Tier | Interface | Semantics | Scope |
 |------|-----------|-----------|-------|
 | Q1 | raw range scan: all samples for matching series in `[from, to]` (what xFilter + chunk pruning already give) | none — evaluator does everything | POC. Sufficient for embedded deployments; this is the waist itself |
-| Q2 | mechanical reduction kernels, opt-in accelerators behind the same waist: (a) last-sample-per-grid-point (`start`, `step`, `lookback`) — covers instant selectors, the dominant query shape; (b) sliding-window sum/min/max/count/avg per series; (c) matcher evaluation in the engine (posting lists — same v2 item as label pushdown) | zero — each kernel is bit-for-bit verifiable against the Elixir evaluator, which stays as fallback | **(a)+(b) SHIPPED 2026-07-26** as `query_grid_last`/`query_window_agg` (engine) and the `timeless_grid`/`timeless_window` TVFs (SQL) — property-tested bit-exact vs a naive reference and vs plain-SQL evaluation in cli.sh §22; label-equality matcher included via `find_series`. (c) posting lists remain v2 |
+| Q2 | mechanical reduction kernels, opt-in accelerators behind the same waist: (a) last-sample-per-grid-point (`start`, `step`, `lookback`) — covers instant selectors, the dominant query shape; (b) sliding-window sum/min/max/count/avg per series; (c) matcher evaluation in the engine (posting lists — same v2 item as label pushdown) | zero — each kernel is bit-for-bit verifiable against the Elixir evaluator, which stays as fallback | **(a)+(b) SHIPPED 2026-07-26** as `query_grid_last`/`query_window_agg` (engine) and the `timeless_grid`/`timeless_window` TVFs (SQL) — property-tested bit-exact vs a naive reference and vs plain-SQL evaluation in cli.sh §22; label-equality matcher included via `find_series`. `timeless_window_batches` added 2026-07-31 as the same kernel with one versioned blob per series; its callback-safe batch path amortizes transition and SQLite shadow-row reads. (c) posting lists remain v2 |
 | Q3 | rate/counter math, vector matching, histogram_quantile, MetricsQL functions | — | NEVER in the engine. Cross-series, semantics-heavy, referee-sensitive |
 
 **When Q2 stops being optional:** embedded (in-process) deployments ship raw
@@ -620,7 +624,8 @@ decode speaks 1/2/4/5; raw flush stays 1; codec 3 still reserved.
       variant, 200x friendly; see RESULTS.md)
 - [x] Post-POC (2026-07-22): Prometheus text ingest shipped. The hidden
       BLOB column now sub-dispatches on its FIRST byte: 0x01 = batch v0
-      (unchanged), 0x00/0x02–0x08 = reserved future batch versions (loud
+      (unchanged), 0x02 = resolved-series batch v1 (added 2026-07-31), and
+      0x00/0x03–0x08 = reserved future batch versions (loud
       "unknown blob format" error, never mis-parsed as text), anything
       else = Prometheus text exposition body → engine.ingest_prometheus.
       SQL surface unchanged: INSERT INTO metrics(metrics) VALUES

@@ -3,11 +3,10 @@
 
 use std::collections::HashMap;
 
-use timeless_core::Engine;
+use timeless_core::{Engine, Labels};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("timeless_f1_test_{name}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("timeless_f1_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -22,8 +21,9 @@ fn overview_matches_naive_walk() {
     // overlap, one flushed only, one buffered only.
     let mut sids = Vec::new();
     for (metric, host) in [("cpu", "a"), ("cpu", "b"), ("mem", "a")] {
-        let labels: HashMap<String, String> =
-            [("host".to_string(), host.to_string())].into_iter().collect();
+        let labels: HashMap<String, String> = [("host".to_string(), host.to_string())]
+            .into_iter()
+            .collect();
         sids.push(engine.resolve_cached(metric, &labels).unwrap());
     }
     for ts in 0..500 {
@@ -73,6 +73,25 @@ fn overview_matches_naive_walk() {
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted);
+
+    // The selective discovery path must return the same catalog row as the
+    // full overview without walking unrelated metric/chunk candidates.
+    let filter: Labels = [("host".to_string(), "a".to_string())]
+        .into_iter()
+        .collect();
+    let filtered = engine.series_overview_matching("cpu", &filter);
+    assert_eq!(filtered.len(), 1);
+    let expected = overview
+        .iter()
+        .find(|row| row.name == "cpu" && row.labels == filter)
+        .unwrap();
+    let actual = &filtered[0];
+    assert_eq!(actual.series_id, expected.series_id);
+    assert_eq!(actual.min_ts, expected.min_ts);
+    assert_eq!(actual.max_ts, expected.max_ts);
+    assert_eq!(actual.disk_points, expected.disk_points);
+    assert_eq!(actual.chunks, expected.chunks);
+    assert_eq!(actual.buffered, expected.buffered);
 
     engine.shutdown().unwrap();
 }

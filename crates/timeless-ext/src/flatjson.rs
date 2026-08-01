@@ -22,13 +22,19 @@ use timeless_core::Labels;
 /// (sorted) order, minimal escaping. Canonical form means equal label
 /// sets always render byte-identical, so it is safe to compare/GROUP BY.
 pub(crate) fn labels_to_json(labels: &Labels) -> String {
-    pairs_to_json_iter(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())), labels.len())
+    pairs_to_json_iter(
+        labels.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        labels.len(),
+    )
 }
 
 /// Same canonical serialization for a SORTED slice of (key, value)
 /// pairs — the logs engine's metadata shape.
 pub(crate) fn pairs_to_json(pairs: &[(String, String)]) -> String {
-    pairs_to_json_iter(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())), pairs.len())
+    pairs_to_json_iter(
+        pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        pairs.len(),
+    )
 }
 
 fn pairs_to_json_iter<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>, len: usize) -> String {
@@ -95,7 +101,9 @@ impl JsonCursor {
         match self.bump() {
             Some(c) if c == want => Ok(()),
             Some(c) => Err(format!("labels JSON: expected '{want}', found '{c}'")),
-            None => Err(format!("labels JSON: expected '{want}', found end of input")),
+            None => Err(format!(
+                "labels JSON: expected '{want}', found end of input"
+            )),
         }
     }
 
@@ -122,9 +130,7 @@ impl JsonCursor {
                             let d = self
                                 .bump()
                                 .and_then(|c| c.to_digit(16))
-                                .ok_or_else(|| {
-                                    "labels JSON: \\u needs 4 hex digits".to_string()
-                                })?;
+                                .ok_or_else(|| "labels JSON: \\u needs 4 hex digits".to_string())?;
                             code = code * 16 + d;
                         }
                         // Surrogate halves are not valid chars on their
@@ -190,9 +196,7 @@ pub(crate) fn parse_labels_json(input: &str) -> Result<HashMap<String, String>, 
             match cur.bump() {
                 Some(',') => continue,
                 Some('}') => break,
-                Some(c) => {
-                    return Err(format!("labels JSON: expected ',' or '}}', found '{c}'"))
-                }
+                Some(c) => return Err(format!("labels JSON: expected ',' or '}}', found '{c}'")),
                 None => return Err("labels JSON: unexpected end of input".into()),
             }
         }
@@ -321,10 +325,9 @@ mod matcher_tests {
 
     #[test]
     fn operators_parse() {
-        let m = parse_matchers_json(
-            r#"{ "a": {"neq": "x"}, "b": {"re": "w.*"}, "c": {"nre": ""} }"#,
-        )
-        .unwrap();
+        let m =
+            parse_matchers_json(r#"{ "a": {"neq": "x"}, "b": {"re": "w.*"}, "c": {"nre": ""} }"#)
+                .unwrap();
         assert_eq!(
             m,
             vec![

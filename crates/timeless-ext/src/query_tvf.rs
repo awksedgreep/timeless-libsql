@@ -31,6 +31,56 @@
 //! Label discovery for UI builders:
 //!
 //!   SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
+//!   SELECT labels FROM timeless_series(
+//!     'metrics', 'cpu_usage', '{"host":{"re":"web-.*"}}');
+//!   SELECT value FROM timeless_label_values(
+//!     'metrics', 'cpu_usage', 'host', '{"env":{"neq":"dev"}}');
+//!
+//! The optional discovery filters use the same matcher contract and are
+//! applied before catalog rows cross SQLite. The original one-argument
+//! timeless_series and three-argument timeless_label_values calls remain
+//! unchanged.
+//!
+//! The raw narrow waist is available without scanning unrelated series:
+//!
+//!   SELECT series_id, labels, ts, value FROM timeless_raw(
+//!     'metrics', 'cpu_usage', '{"host":"pvm1"}', :start, :stop);
+//!
+//! Embedded hosts can amortize host-language/SQLite row crossings with the
+//! series-batch form. `points` is u32 LE count, then i64 LE timestamps and
+//! f64-bit LE values:
+//!
+//!   SELECT series_id, labels, points FROM timeless_raw_batches(
+//!     'metrics', 'cpu_usage', '{"host":"pvm1"}', :start, :stop);
+//!
+//! Very wide fanout queries can cross SQLite only once with the frame form:
+//!
+//!   SELECT frame FROM timeless_raw_frame(
+//!     'metrics', 'cpu_usage', NULL, :start, :stop);
+//!
+//! `frame` is `TRF1`, u32 LE series count, u64 LE total point count, then
+//! columnar series IDs, per-series point counts, timestamps, and f64 value
+//! bits. Empty series are omitted and each point slice retains raw query order.
+//!
+//! Scalar reductions stay below the SQLite/host materialization boundary:
+//!
+//!   SELECT series_id, labels, value FROM timeless_aggregate(
+//!     'metrics', 'cpu_usage', '{"env":"prod"}', :start, :stop, 'avg');
+//!
+//! Supported operations are avg, sum, min, max, and count. Bounds are
+//! inclusive, empty series emit no row, and count is returned as a SQLite
+//! INTEGER. Sum/avg use persisted per-chunk sums for fully covered chunks and
+//! decode only boundary chunks; consequently their documented accumulation
+//! order is chunk-local then chunk-index order, not a flat SQL SUM scan.
+//!
+//! Latest-point selection also stays below the materialization boundary:
+//!
+//!   SELECT series_id, labels, ts, value FROM timeless_latest(
+//!     'metrics', 'cpu_usage', '{"env":"prod"}', :start, :stop);
+//!
+//! Bounds are inclusive and empty series emit no row. The greatest timestamp
+//! wins; duplicate maximum timestamps retain the first point in stable raw
+//! engine order. Candidate chunks are searched newest-first.
 //!
 //! F9 — both kernel TVFs take an optional trailing fill argument:
 //! 'none' (default, sparse) or 'null' (dense: every grid point emitted
@@ -42,6 +92,29 @@
 //!   SELECT labels, ts, value FROM timeless_window(
 //!     'metrics', 'cpu_usage', NULL,
 //!     :start, :stop, :step, :window, 'avg');   -- sum|min|max|count|avg
+//!
+//! Embedded hosts can request one versioned bucket blob per series instead of
+//! crossing the SQLite boundary once per grid point:
+//!
+//!   SELECT series_id, labels, buckets FROM timeless_window_batches(
+//!     'metrics', 'cpu_usage', NULL,
+//!     :start, :stop, :step, :window, 'avg');
+//!
+//! `buckets` is `TWB1`, u32 LE count, i64 LE timestamps, a packed validity
+//! bitmap (one bit per timestamp, low bit first), then f64-bit LE values. The
+//! bitmap preserves `fill='null'`; sparse calls naturally contain only set
+//! bits. Unknown magic/version and malformed lengths must be rejected by the
+//! decoder rather than guessed.
+//!
+//! Stored rollups have an analogous all-aggregates batch form:
+//!
+//!   SELECT series_id, labels, buckets FROM timeless_rollup_batches(
+//!     'metrics', 'cpu_usage', NULL, 300, :start, :stop);
+//!
+//! `buckets` is `TRB1`, u32 LE count, then eight 8-byte LE columns:
+//! bucket timestamp (i64), exact count (u64), avg bits, sum bits, min bits,
+//! max bits, last-sample timestamp (i64), and last-value bits. `avg` remains
+//! derived at read time; the other fields preserve the stored rollup contract.
 //!
 //! Rows are (labels TEXT — canonical JSON, ts INTEGER — grid point,
 //! value REAL), ordered by series then grid ts. Grid points with no
@@ -55,6 +128,7 @@
 //! fresh connection recovers the engine the same way xConnect would.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::ffi::{c_int, CStr};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -70,11 +144,22 @@ use timeless_core::{AggFn, Engine, Labels};
 use crate::flatjson::{labels_to_json, parse_labels_json, parse_matchers_json, MatcherSpec};
 use crate::logs_vtab::LogsTab;
 use crate::metrics_vtab::MetricsTab;
-use crate::traces_vtab::TracesTab;
 use crate::shared::{self, DbGuard, SharedEngine};
+use crate::traces_vtab::TracesTab;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
+}
+
+fn read_permit<'a, E>(
+    shared: &'a SharedEngine<E>,
+    db: *mut ffi::sqlite3,
+    table: &str,
+) -> Result<shared::ReadPermit<'a>> {
+    shared
+        .write_gate
+        .acquire_read(db as usize, table)
+        .map_err(module_err)
 }
 
 /// F8: one compiled non-equality matcher. Equality keys never appear
@@ -146,7 +231,7 @@ fn compile_filter(module: &str, txt: &str) -> Result<(Labels, Vec<(String, Label
 /// extrapolation, no staleness), exact nearest-rank percentiles (pNN),
 /// and explicit-parameter trimmed means (tavg:N). Definitions pinned
 /// in FEATURE_PLAN.md F7.
-fn parse_window_op(name: Option<&str>) -> Result<timeless_core::WindowOp> {
+fn parse_window_op(module: &str, name: Option<&str>) -> Result<timeless_core::WindowOp> {
     use timeless_core::WindowOp;
     let name = name.unwrap_or("<missing>");
     Ok(match name {
@@ -160,29 +245,29 @@ fn parse_window_op(name: Option<&str>) -> Result<timeless_core::WindowOp> {
         "rate" => WindowOp::Rate,
         _ => {
             if let Some(q) = name.strip_prefix('p') {
-                let q: f64 = q.parse().map_err(|_| {
-                    module_err(format!("timeless_window: bad percentile {name:?}"))
-                })?;
+                let q: f64 = q
+                    .parse()
+                    .map_err(|_| module_err(format!("{module}: bad percentile {name:?}")))?;
                 if !(q > 0.0 && q <= 100.0) {
                     return Err(module_err(format!(
-                        "timeless_window: percentile must be in (0, 100], got {name:?}"
+                        "{module}: percentile must be in (0, 100], got {name:?}"
                     )));
                 }
                 return Ok(WindowOp::Percentile(q));
             }
             if let Some(q) = name.strip_prefix("tavg:") {
-                let q: f64 = q.parse().map_err(|_| {
-                    module_err(format!("timeless_window: bad trim fraction {name:?}"))
-                })?;
+                let q: f64 = q
+                    .parse()
+                    .map_err(|_| module_err(format!("{module}: bad trim fraction {name:?}")))?;
                 if !(0.0..50.0).contains(&q) {
                     return Err(module_err(format!(
-                        "timeless_window: trim fraction must be in [0, 50), got {name:?}"
+                        "{module}: trim fraction must be in [0, 50), got {name:?}"
                     )));
                 }
                 return Ok(WindowOp::TrimmedMean(q));
             }
             return Err(module_err(format!(
-                "timeless_window: unknown agg {name:?}; expected one of: sum, min, max, \
+                "{module}: unknown agg {name:?}; expected one of: sum, min, max, \
                  count, avg, delta, increase, rate, pNN (e.g. p95), tavg:N"
             )));
         }
@@ -195,18 +280,32 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     db.create_module(c"timeless_grid", &GRID, None::<()>)?;
     const WINDOW: Module<WindowTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_window", &WINDOW, None::<()>)?;
+    const WINDOW_BATCHES: Module<WindowBatchTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_window_batches", &WINDOW_BATCHES, None::<()>)?;
     const SERIES: Module<SeriesTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_series", &SERIES, None::<()>)?;
     const STATS: Module<StatsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_stats", &STATS, None::<()>)?;
     const ROLLUP: Module<RollupTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_rollup", &ROLLUP, None::<()>)?;
+    const ROLLUP_BATCHES: Module<RollupBatchTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_rollup_batches", &ROLLUP_BATCHES, None::<()>)?;
     const LOG_BUCKETS: Module<LogBucketsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_log_buckets", &LOG_BUCKETS, None::<()>)?;
     const TRACE_BUCKETS: Module<TraceBucketsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_trace_buckets", &TRACE_BUCKETS, None::<()>)?;
     const LABEL_VALUES: Module<LabelValuesTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_label_values", &LABEL_VALUES, None::<()>)
+    db.create_module(c"timeless_label_values", &LABEL_VALUES, None::<()>)?;
+    const RAW: Module<RawTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_raw", &RAW, None::<()>)?;
+    const RAW_BATCHES: Module<RawBatchTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_raw_batches", &RAW_BATCHES, None::<()>)?;
+    const RAW_FRAME: Module<RawFrameTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_raw_frame", &RAW_FRAME, None::<()>)?;
+    const AGGREGATE: Module<AggregateTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_aggregate", &AGGREGATE, None::<()>)?;
+    const LATEST: Module<LatestTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_latest", &LATEST, None::<()>)
 }
 
 // Output columns (both modules).
@@ -261,15 +360,29 @@ mod matcher_semantics_tests {
         assert_eq!(eq.len(), 1);
         assert_eq!(eq.get("host").map(String::as_str), Some("web-1"));
         assert_eq!(m.len(), 2);
-        assert!(matchers_pass(&labels(&[("env", "prod"), ("dc", "us-east")]), &m));
-        assert!(!matchers_pass(&labels(&[("env", "dev"), ("dc", "us-east")]), &m));
-        assert!(!matchers_pass(&labels(&[("env", "prod"), ("dc", "eu-1")]), &m));
+        assert!(matchers_pass(
+            &labels(&[("env", "prod"), ("dc", "us-east")]),
+            &m
+        ));
+        assert!(!matchers_pass(
+            &labels(&[("env", "dev"), ("dc", "us-east")]),
+            &m
+        ));
+        assert!(!matchers_pass(
+            &labels(&[("env", "prod"), ("dc", "eu-1")]),
+            &m
+        ));
     }
 
     #[test]
     fn invalid_regex_names_pattern_and_label() {
-        let err = compile_filter("t", r#"{"host": {"re": "["}}"#).unwrap_err().to_string();
-        assert!(err.contains("invalid regex") && err.contains("host"), "{err}");
+        let err = compile_filter("t", r#"{"host": {"re": "["}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invalid regex") && err.contains("host"),
+            "{err}"
+        );
     }
 }
 
@@ -333,7 +446,10 @@ fn decode_args(
         }
     }
     let find = |name: &str| -> Option<usize> {
-        names.iter().position(|n| *n == name).and_then(|i| slot_of[i])
+        names
+            .iter()
+            .position(|n| *n == name)
+            .and_then(|i| slot_of[i])
     };
 
     let get_text = |s: usize, what: &str| -> Result<String> {
@@ -462,7 +578,11 @@ fn run_kernel(
     let _bind = DbGuard::bind(db);
     let shared: Arc<SharedEngine<Engine>> =
         MetricsTab::shared_engine_for(db, &ka.database, &ka.table)?;
-    shared.engine.refresh_authoritative_state().map_err(module_err)?;
+    let _read = read_permit(&shared, db, &ka.table)?;
+    shared
+        .engine
+        .refresh_authoritative_state()
+        .map_err(module_err)?;
 
     // Candidate snapshot, then sequential per-series kernels — the
     // rayon-free discipline every vtab callback must follow (see
@@ -521,8 +641,9 @@ fn run_kernel(
 // timeless_grid
 // ---------------------------------------------------------------------------
 
-const GRID_ARGS: &[&str] =
-    &["tbl", "metric", "filter", "start", "stop", "step", "lookback", "fill"];
+const GRID_ARGS: &[&str] = &[
+    "tbl", "metric", "filter", "start", "stop", "step", "lookback", "fill",
+];
 // All required except filter (bit 2) and fill (bit 7).
 const GRID_REQUIRED: c_int = 0b0111_1011;
 
@@ -547,9 +668,11 @@ unsafe impl<'vtab> VTab<'vtab> for GridTab {
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            Cow::Borrowed(c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
+            Cow::Borrowed(
+                c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
-                            stop HIDDEN, step HIDDEN, lookback HIDDEN, fill HIDDEN)"),
+                            stop HIDDEN, step HIDDEN, lookback HIDDEN, fill HIDDEN)",
+            ),
             GridTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -611,10 +734,12 @@ unsafe impl<'vtab> VTab<'vtab> for WindowTab {
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            Cow::Borrowed(c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
+            Cow::Borrowed(
+                c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
                             stop HIDDEN, step HIDDEN, window HIDDEN, agg HIDDEN, \
-                            fill HIDDEN)"),
+                            fill HIDDEN)",
+            ),
             WindowTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -637,12 +762,1174 @@ impl KernelVTab for WindowTab {
     const REQUIRED: c_int = WINDOW_REQUIRED;
 
     fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<(String, i64, Option<f64>)>> {
-        let op = parse_window_op(ka.agg_name.as_deref())?;
+        let op = parse_window_op(Self::MODULE, ka.agg_name.as_deref())?;
         run_kernel(db, ka, |engine, sid| {
             engine
                 .query_window_op_by_id(sid, ka.start, ka.stop, ka.step, ka.width, op)
                 .map_err(module_err)
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_window_batches — one packed grid/window blob per matched series
+// ---------------------------------------------------------------------------
+
+const WINDOW_BATCH_MAGIC: &[u8; 4] = b"TWB1";
+
+#[repr(C)]
+pub(crate) struct WindowBatchTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for WindowBatchTab {
+    type Aux = ();
+    type Cursor = WindowBatchCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(series_id INTEGER, labels TEXT, buckets BLOB, \
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
+                            stop HIDDEN, step HIDDEN, window HIDDEN, agg HIDDEN, fill HIDDEN)",
+            ),
+            WindowBatchTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, 3, WINDOW_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<WindowBatchCursor<'vtab>> {
+        Ok(WindowBatchCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct WindowBatchCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(i64, Labels, Vec<u8>)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab WindowBatchTab>,
+}
+
+unsafe impl VTabCursor for WindowBatchCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_window_batches";
+        let ka = decode_args(M, WINDOW_ARGS, WINDOW_REQUIRED, idx_num, args)?;
+        let op = parse_window_op(M, ka.agg_name.as_deref())?;
+
+        let _bind = DbGuard::bind(self.db);
+        let shared: Arc<SharedEngine<Engine>> =
+            MetricsTab::shared_engine_for(self.db, &ka.database, &ka.table)?;
+        let _read = read_permit(&shared, self.db, &ka.table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = shared.engine.series_read();
+            reg.find_series(&ka.metric, &ka.filter)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .filter(|(_, labels)| matchers_pass(labels, &ka.matchers))
+                .collect()
+        };
+
+        let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
+        let batch = shared
+            .engine
+            .query_window_op_batch_by_id(&series_ids, ka.start, ka.stop, ka.step, ka.width, op)
+            .map_err(module_err)?;
+
+        let mut rows = Vec::new();
+        for ((sid, labels), (result_sid, points)) in candidates.into_iter().zip(batch) {
+            debug_assert_eq!(sid, result_sid);
+            if points.is_empty() {
+                continue;
+            }
+
+            let packed = encode_window_points(&points, &ka)?;
+            rows.push((sid, labels, packed));
+        }
+        rows.sort_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
+        self.rows = rows;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (sid, labels, buckets) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(sid),
+            1 => {
+                let json = labels_to_json(labels);
+                ctx.set_result(&json)
+            }
+            2 => ctx.set_result(buckets),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+fn encode_window_points(points: &[(i64, f64)], ka: &KernelArgs) -> Result<Vec<u8>> {
+    let count = if ka.fill {
+        let span = (ka.stop as i128) - (ka.start as i128);
+        usize::try_from(span / ka.step as i128 + 1)
+            .map_err(|_| module_err("timeless_window_batches: grid is too large".into()))?
+    } else {
+        points.len()
+    };
+    let n: u32 = count
+        .try_into()
+        .map_err(|_| module_err("timeless_window_batches: too many buckets".into()))?;
+    let bitmap_bytes = count
+        .checked_add(7)
+        .ok_or_else(|| module_err("timeless_window_batches: bitmap size overflow".into()))?
+        / 8;
+    let column_bytes = count
+        .checked_mul(8)
+        .ok_or_else(|| module_err("timeless_window_batches: column size overflow".into()))?;
+    let capacity = 8usize
+        .checked_add(column_bytes)
+        .and_then(|v| v.checked_add(bitmap_bytes))
+        .and_then(|v| v.checked_add(column_bytes))
+        .ok_or_else(|| module_err("timeless_window_batches: blob size overflow".into()))?;
+
+    let mut timestamps = Vec::with_capacity(column_bytes);
+    let mut bitmap = vec![0u8; bitmap_bytes];
+    let mut values = Vec::with_capacity(column_bytes);
+
+    if ka.fill {
+        let mut point_index = 0usize;
+        let mut t = ka.start;
+        for index in 0..count {
+            timestamps.extend_from_slice(&t.to_le_bytes());
+            if point_index < points.len() && points[point_index].0 == t {
+                bitmap[index / 8] |= 1 << (index % 8);
+                values.extend_from_slice(&points[point_index].1.to_bits().to_le_bytes());
+                point_index += 1;
+            } else {
+                values.extend_from_slice(&0u64.to_le_bytes());
+            }
+            if index + 1 < count {
+                t = t.checked_add(ka.step).ok_or_else(|| {
+                    module_err("timeless_window_batches: grid timestamp overflow".into())
+                })?;
+            }
+        }
+    } else {
+        for (index, (timestamp, _)) in points.iter().enumerate() {
+            timestamps.extend_from_slice(&timestamp.to_le_bytes());
+            bitmap[index / 8] |= 1 << (index % 8);
+        }
+        for (_, value) in points {
+            values.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(WINDOW_BATCH_MAGIC);
+    out.extend_from_slice(&n.to_le_bytes());
+    out.extend_from_slice(&timestamps);
+    out.extend_from_slice(&bitmap);
+    out.extend_from_slice(&values);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod window_batch_tests {
+    use super::*;
+
+    fn args(fill: bool) -> KernelArgs {
+        KernelArgs {
+            database: "main".into(),
+            table: "metrics".into(),
+            metric: "cpu".into(),
+            filter: Labels::new(),
+            matchers: Vec::new(),
+            start: 10,
+            stop: 30,
+            step: 10,
+            width: 10,
+            agg_name: Some("avg".into()),
+            fill,
+        }
+    }
+
+    #[test]
+    fn sparse_window_blob_is_versioned_columnar_and_bit_exact() {
+        let blob = encode_window_points(&[(10, 1.5), (30, -2.25)], &args(false)).unwrap();
+        assert_eq!(&blob[..4], b"TWB1");
+        assert_eq!(u32::from_le_bytes(blob[4..8].try_into().unwrap()), 2);
+        assert_eq!(i64::from_le_bytes(blob[8..16].try_into().unwrap()), 10);
+        assert_eq!(i64::from_le_bytes(blob[16..24].try_into().unwrap()), 30);
+        assert_eq!(blob[24], 0b0000_0011);
+        assert_eq!(f64::from_le_bytes(blob[25..33].try_into().unwrap()), 1.5);
+        assert_eq!(f64::from_le_bytes(blob[33..41].try_into().unwrap()), -2.25);
+        assert_eq!(blob.len(), 41);
+    }
+
+    #[test]
+    fn dense_window_blob_marks_null_grid_points_in_the_bitmap() {
+        let blob = encode_window_points(&[(10, 1.5), (30, -2.25)], &args(true)).unwrap();
+        assert_eq!(u32::from_le_bytes(blob[4..8].try_into().unwrap()), 3);
+        assert_eq!(i64::from_le_bytes(blob[8..16].try_into().unwrap()), 10);
+        assert_eq!(i64::from_le_bytes(blob[16..24].try_into().unwrap()), 20);
+        assert_eq!(i64::from_le_bytes(blob[24..32].try_into().unwrap()), 30);
+        assert_eq!(blob[32], 0b0000_0101);
+        assert_eq!(f64::from_le_bytes(blob[33..41].try_into().unwrap()), 1.5);
+        assert_eq!(f64::from_le_bytes(blob[41..49].try_into().unwrap()), 0.0);
+        assert_eq!(f64::from_le_bytes(blob[49..57].try_into().unwrap()), -2.25);
+        assert_eq!(blob.len(), 57);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_aggregate — one chunk-aware scalar reduction per matched series
+// ---------------------------------------------------------------------------
+
+const AGGREGATE_ARGS: &[&str] = &["tbl", "metric", "filter", "start", "stop", "agg"];
+const AGGREGATE_REQUIRED: c_int = 0b11_1011; // all except filter
+const AGGREGATE_FIRST_ARG: c_int = 3;
+
+#[derive(Clone, Copy)]
+enum AggregateValue {
+    Real(f64),
+    Integer(i64),
+}
+
+#[repr(C)]
+pub(crate) struct AggregateTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for AggregateTab {
+    type Aux = ();
+    type Cursor = AggregateCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(series_id INTEGER, labels TEXT, value, \
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
+                            stop HIDDEN, agg HIDDEN)",
+            ),
+            AggregateTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, AGGREGATE_FIRST_ARG, AGGREGATE_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<AggregateCursor<'vtab>> {
+        Ok(AggregateCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct AggregateCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(i64, Labels, AggregateValue)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab AggregateTab>,
+}
+
+unsafe impl VTabCursor for AggregateCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_aggregate";
+        let slots = named_slots(M, AGGREGATE_ARGS, AGGREGATE_REQUIRED, idx_num)?;
+        let text = |i: usize, what: &str| -> Result<String> {
+            let v: Option<String> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let int = |i: usize, what: &str| -> Result<i64> {
+            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let metric = text(1, "metric")?;
+        let filter_text: Option<String> = match slots[2] {
+            None => None,
+            Some(slot) => args.get(slot)?,
+        };
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(txt) => compile_filter(M, txt)?,
+        };
+        let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        let agg = match text(5, "agg")?.as_str() {
+            "avg" => AggFn::Avg,
+            "sum" => AggFn::Sum,
+            "min" => AggFn::Min,
+            "max" => AggFn::Max,
+            "count" => AggFn::Count,
+            other => {
+                return Err(module_err(format!(
+                    "{M}: unknown agg {other:?}; expected one of: avg, sum, min, max, count"
+                )))
+            }
+        };
+        if start > stop {
+            self.rows.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = shared.engine.series_read();
+            reg.find_series(&metric, &eq)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .filter(|(_, labels)| matchers_pass(labels, &matchers))
+                .collect()
+        };
+
+        let mut rows = Vec::new();
+        for (sid, labels) in candidates {
+            let Some(summary) = shared
+                .engine
+                .query_aggregate_summary_by_id(sid, start, stop)
+                .map_err(module_err)?
+            else {
+                continue;
+            };
+            let value =
+                if agg == AggFn::Count {
+                    AggregateValue::Integer(i64::try_from(summary.count()).map_err(|_| {
+                        module_err(format!("{M}: count exceeds SQLite INTEGER range"))
+                    })?)
+                } else {
+                    AggregateValue::Real(summary.value(agg))
+                };
+            rows.push((sid, labels, value));
+        }
+        rows.sort_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
+        self.rows = rows;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (sid, labels, value) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(sid),
+            1 => {
+                let json = labels_to_json(labels);
+                ctx.set_result(&json)
+            }
+            2 => match value {
+                AggregateValue::Real(value) => ctx.set_result(value),
+                AggregateValue::Integer(value) => ctx.set_result(value),
+            },
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_latest — one newest point per matched series
+// ---------------------------------------------------------------------------
+
+const LATEST_ARGS: &[&str] = &["tbl", "metric", "filter", "start", "stop"];
+const LATEST_REQUIRED: c_int = 0b1_1011; // all except filter
+const LATEST_FIRST_ARG: c_int = 4;
+
+#[repr(C)]
+pub(crate) struct LatestTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for LatestTab {
+    type Aux = ();
+    type Cursor = LatestCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(series_id INTEGER, labels TEXT, ts INTEGER, value REAL, \
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, stop HIDDEN)",
+            ),
+            LatestTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, LATEST_FIRST_ARG, LATEST_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<LatestCursor<'vtab>> {
+        Ok(LatestCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LatestCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(i64, Labels, i64, f64)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab LatestTab>,
+}
+
+unsafe impl VTabCursor for LatestCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_latest";
+        let slots = named_slots(M, LATEST_ARGS, LATEST_REQUIRED, idx_num)?;
+        let text = |i: usize, what: &str| -> Result<String> {
+            let v: Option<String> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let int = |i: usize, what: &str| -> Result<i64> {
+            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let metric = text(1, "metric")?;
+        let filter_text: Option<String> = match slots[2] {
+            None => None,
+            Some(slot) => args.get(slot)?,
+        };
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(txt) => compile_filter(M, txt)?,
+        };
+        let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        if start > stop {
+            self.rows.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = shared.engine.series_read();
+            reg.find_series(&metric, &eq)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .filter(|(_, labels)| matchers_pass(labels, &matchers))
+                .collect()
+        };
+
+        let mut rows = Vec::new();
+        for (sid, labels) in candidates {
+            let Some((ts, value)) = shared
+                .engine
+                .query_latest_by_id(sid, start, stop)
+                .map_err(module_err)?
+            else {
+                continue;
+            };
+            rows.push((sid, labels, ts, value));
+        }
+        rows.sort_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
+        self.rows = rows;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (sid, labels, ts, value) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(sid),
+            1 => {
+                let json = labels_to_json(labels);
+                ctx.set_result(&json)
+            }
+            2 => ctx.set_result(ts),
+            3 => ctx.set_result(value),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_raw — the matcher-aware Q1 narrow waist
+// ---------------------------------------------------------------------------
+
+const RAW_ARGS: &[&str] = &["tbl", "metric", "filter", "start", "stop"];
+const RAW_REQUIRED: c_int = 0b1_1011; // all except filter
+const RAW_FIRST_ARG: c_int = 4;
+
+#[repr(C)]
+pub(crate) struct RawTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for RawTab {
+    type Aux = ();
+    type Cursor = RawCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(series_id INTEGER, labels TEXT, ts INTEGER, value REAL, \
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, stop HIDDEN)",
+            ),
+            RawTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, RAW_FIRST_ARG, RAW_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<RawCursor<'vtab>> {
+        Ok(RawCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct RawCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(i64, String, i64, f64)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab RawTab>,
+}
+
+unsafe impl VTabCursor for RawCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_raw";
+        let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
+        let text = |i: usize, what: &str| -> Result<String> {
+            let v: Option<String> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let int = |i: usize, what: &str| -> Result<i64> {
+            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let metric = text(1, "metric")?;
+        let filter_text: Option<String> = match slots[2] {
+            None => None,
+            Some(slot) => args.get(slot)?,
+        };
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(txt) => compile_filter(M, txt)?,
+        };
+        let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        if start > stop {
+            self.rows.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = shared.engine.series_read();
+            reg.find_series(&metric, &eq)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .filter(|(_, labels)| matchers_pass(labels, &matchers))
+                .collect()
+        };
+
+        let mut rows = Vec::new();
+        for (sid, labels) in candidates {
+            let labels_json = labels_to_json(&labels);
+            for (ts, value) in shared
+                .engine
+                .query_range_by_id(sid, start, stop)
+                .map_err(module_err)?
+            {
+                rows.push((sid, labels_json.clone(), ts, value));
+            }
+        }
+        rows.sort_by(|a, b| (&a.1, a.2, a.0).cmp(&(&b.1, b.2, b.0)));
+        self.rows = rows;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (sid, labels, ts, value) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(sid),
+            1 => ctx.set_result(labels),
+            2 => ctx.set_result(ts),
+            3 => ctx.set_result(value),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_raw_batches — one packed point blob per matched series
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+pub(crate) struct RawBatchTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for RawBatchTab {
+    type Aux = ();
+    type Cursor = RawBatchCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(series_id INTEGER, labels TEXT, points BLOB, \
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, stop HIDDEN)",
+            ),
+            RawBatchTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, 3, RAW_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<RawBatchCursor<'vtab>> {
+        Ok(RawBatchCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct RawBatchCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(i64, Labels, Vec<u8>)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab RawBatchTab>,
+}
+
+unsafe impl VTabCursor for RawBatchCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_raw_batches";
+        let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
+        let text = |i: usize, what: &str| -> Result<String> {
+            let v: Option<String> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let int = |i: usize, what: &str| -> Result<i64> {
+            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let metric = text(1, "metric")?;
+        let filter_text: Option<String> = match slots[2] {
+            None => None,
+            Some(slot) => args.get(slot)?,
+        };
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(txt) => compile_filter(M, txt)?,
+        };
+        let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        if start > stop {
+            self.rows.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = shared.engine.series_read();
+            reg.find_series(&metric, &eq)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .filter(|(_, labels)| matchers_pass(labels, &matchers))
+                .collect()
+        };
+
+        let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
+        let batch = shared
+            .engine
+            .query_range_batch_by_id(&series_ids, start, stop)
+            .map_err(module_err)?;
+
+        let mut rows = Vec::new();
+        for ((sid, labels), (result_sid, points)) in candidates.into_iter().zip(batch) {
+            debug_assert_eq!(sid, result_sid);
+            if !points.is_empty() {
+                rows.push((sid, labels, encode_raw_points(&points)?));
+            }
+        }
+        rows.sort_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
+        self.rows = rows;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (sid, labels, points) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(sid),
+            1 => {
+                let json = labels_to_json(labels);
+                ctx.set_result(&json)
+            }
+            2 => ctx.set_result(points),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+fn encode_raw_points(points: &[(i64, f64)]) -> Result<Vec<u8>> {
+    let n: u32 = points
+        .len()
+        .try_into()
+        .map_err(|_| module_err("timeless_raw_batches: too many points for one series".into()))?;
+    let capacity = 4usize
+        .checked_add(points.len().checked_mul(16).ok_or_else(|| {
+            module_err("timeless_raw_batches: point blob size overflows this host".into())
+        })?)
+        .ok_or_else(|| module_err("timeless_raw_batches: point blob size overflow".into()))?;
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(&n.to_le_bytes());
+    for (ts, _) in points {
+        out.extend_from_slice(&ts.to_le_bytes());
+    }
+    for (_, value) in points {
+        out.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// timeless_raw_frame — one packed blob for every matched non-empty series
+// ---------------------------------------------------------------------------
+
+const RAW_FRAME_MAGIC: &[u8; 4] = b"TRF1";
+
+#[repr(C)]
+pub(crate) struct RawFrameTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for RawFrameTab {
+    type Aux = ();
+    type Cursor = RawFrameCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(frame BLOB, tbl HIDDEN, metric HIDDEN, filter HIDDEN, \
+                            start HIDDEN, stop HIDDEN)",
+            ),
+            RawFrameTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, 1, RAW_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<RawFrameCursor<'vtab>> {
+        Ok(RawFrameCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct RawFrameCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<Vec<u8>>,
+    pos: usize,
+    phantom: PhantomData<&'vtab RawFrameTab>,
+}
+
+unsafe impl VTabCursor for RawFrameCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_raw_frame";
+        let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
+        let text = |i: usize, what: &str| -> Result<String> {
+            let v: Option<String> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let int = |i: usize, what: &str| -> Result<i64> {
+            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&text(0, "tbl")?);
+        let metric = text(1, "metric")?;
+        let filter_text: Option<String> = match slots[2] {
+            None => None,
+            Some(slot) => args.get(slot)?,
+        };
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(txt) => compile_filter(M, txt)?,
+        };
+        let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        if start > stop {
+            self.rows.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        let series_ids: Vec<i64> = {
+            let reg = shared.engine.series_read();
+            reg.find_series(&metric, &eq)
+                .into_iter()
+                .filter(|sid| {
+                    reg.info_for(*sid)
+                        .is_some_and(|info| matchers_pass(&info.labels, &matchers))
+                })
+                .collect()
+        };
+
+        let batch = shared
+            .engine
+            .query_range_batch_by_id(&series_ids, start, stop)
+            .map_err(module_err)?;
+        let frame = encode_raw_frame(&batch)?;
+        self.rows = if frame.is_empty() {
+            Vec::new()
+        } else {
+            vec![frame]
+        };
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(&self.rows[self.pos]),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+fn encode_raw_frame(batch: &[(i64, Vec<(i64, f64)>)]) -> Result<Vec<u8>> {
+    let non_empty: Vec<_> = batch
+        .iter()
+        .filter(|(_, points)| !points.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let series_count: u32 = non_empty
+        .len()
+        .try_into()
+        .map_err(|_| module_err("timeless_raw_frame: too many series".into()))?;
+    let total_points = non_empty.iter().try_fold(0usize, |total, (_, points)| {
+        let _: u32 = points
+            .len()
+            .try_into()
+            .map_err(|_| module_err("timeless_raw_frame: too many points in one series".into()))?;
+        total
+            .checked_add(points.len())
+            .ok_or_else(|| module_err("timeless_raw_frame: total point count overflow".into()))
+    })?;
+    let total_points_u64: u64 = total_points
+        .try_into()
+        .map_err(|_| module_err("timeless_raw_frame: total point count overflow".into()))?;
+    let series_bytes = non_empty
+        .len()
+        .checked_mul(12)
+        .ok_or_else(|| module_err("timeless_raw_frame: series columns overflow".into()))?;
+    let point_bytes = total_points
+        .checked_mul(16)
+        .ok_or_else(|| module_err("timeless_raw_frame: point columns overflow".into()))?;
+    let capacity = 16usize
+        .checked_add(series_bytes)
+        .and_then(|size| size.checked_add(point_bytes))
+        .ok_or_else(|| module_err("timeless_raw_frame: blob size overflow".into()))?;
+
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(RAW_FRAME_MAGIC);
+    out.extend_from_slice(&series_count.to_le_bytes());
+    out.extend_from_slice(&total_points_u64.to_le_bytes());
+    for (series_id, _) in &non_empty {
+        out.extend_from_slice(&series_id.to_le_bytes());
+    }
+    for (_, points) in &non_empty {
+        let count = u32::try_from(points.len()).expect("point count checked above");
+        out.extend_from_slice(&count.to_le_bytes());
+    }
+    for (_, points) in &non_empty {
+        for (timestamp, _) in points.iter() {
+            out.extend_from_slice(&timestamp.to_le_bytes());
+        }
+    }
+    for (_, points) in &non_empty {
+        for (_, value) in points.iter() {
+            out.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+    debug_assert_eq!(out.len(), capacity);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod raw_frame_tests {
+    use super::*;
+
+    #[test]
+    fn frame_is_versioned_columnar_omits_empty_series_and_preserves_bits() {
+        let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+        let frame = encode_raw_frame(&[
+            (9, vec![(10, 1.5), (20, nan)]),
+            (10, Vec::new()),
+            (12, vec![(30, -2.25)]),
+        ])
+        .unwrap();
+
+        assert_eq!(&frame[..4], b"TRF1");
+        assert_eq!(u32::from_le_bytes(frame[4..8].try_into().unwrap()), 2);
+        assert_eq!(u64::from_le_bytes(frame[8..16].try_into().unwrap()), 3);
+        assert_eq!(i64::from_le_bytes(frame[16..24].try_into().unwrap()), 9);
+        assert_eq!(i64::from_le_bytes(frame[24..32].try_into().unwrap()), 12);
+        assert_eq!(u32::from_le_bytes(frame[32..36].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(frame[36..40].try_into().unwrap()), 1);
+        assert_eq!(i64::from_le_bytes(frame[40..48].try_into().unwrap()), 10);
+        assert_eq!(i64::from_le_bytes(frame[48..56].try_into().unwrap()), 20);
+        assert_eq!(i64::from_le_bytes(frame[56..64].try_into().unwrap()), 30);
+        assert_eq!(
+            u64::from_le_bytes(frame[64..72].try_into().unwrap()),
+            1.5f64.to_bits()
+        );
+        assert_eq!(
+            u64::from_le_bytes(frame[72..80].try_into().unwrap()),
+            nan.to_bits()
+        );
+        assert_eq!(
+            u64::from_le_bytes(frame[80..88].try_into().unwrap()),
+            (-2.25f64).to_bits()
+        );
+        assert_eq!(frame.len(), 88);
+    }
+
+    #[test]
+    fn frame_emits_no_row_payload_when_every_series_is_empty() {
+        assert!(encode_raw_frame(&[(1, Vec::new())]).unwrap().is_empty());
     }
 }
 
@@ -727,7 +2014,13 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
 // ---------------------------------------------------------------------------
 
 const ROLLUP_ARGS: &[&str] = &[
-    "tbl", "metric", "filter", "resolution", "start", "stop", "agg",
+    "tbl",
+    "metric",
+    "filter",
+    "resolution",
+    "start",
+    "stop",
+    "agg",
 ];
 // All required except filter (bit 2).
 const ROLLUP_REQUIRED: c_int = 0b111_1011;
@@ -758,9 +2051,11 @@ unsafe impl<'vtab> VTab<'vtab> for RollupTab {
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            Cow::Borrowed(c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
+            Cow::Borrowed(
+                c"CREATE TABLE x(labels TEXT, ts INTEGER, value REAL, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, resolution HIDDEN, \
-                            start HIDDEN, stop HIDDEN, agg HIDDEN)"),
+                            start HIDDEN, stop HIDDEN, agg HIDDEN)",
+            ),
             RollupTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -828,6 +2123,234 @@ impl KernelVTab for RollupTab {
                 })
                 .collect())
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// timeless_rollup_batches — all rollup aggregates in one blob per series
+// ---------------------------------------------------------------------------
+
+const ROLLUP_BATCH_ARGS: &[&str] = &["tbl", "metric", "filter", "resolution", "start", "stop"];
+const ROLLUP_BATCH_REQUIRED: c_int = 0b11_1011; // all except filter
+const ROLLUP_BATCH_MAGIC: &[u8; 4] = b"TRB1";
+
+#[repr(C)]
+pub(crate) struct RollupBatchTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for RollupBatchTab {
+    type Aux = ();
+    type Cursor = RollupBatchCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(series_id INTEGER, labels TEXT, buckets BLOB, \
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, resolution HIDDEN, \
+                            start HIDDEN, stop HIDDEN)",
+            ),
+            RollupBatchTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, 3, ROLLUP_BATCH_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<RollupBatchCursor<'vtab>> {
+        Ok(RollupBatchCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct RollupBatchCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<(i64, Labels, Vec<u8>)>,
+    pos: usize,
+    phantom: PhantomData<&'vtab RollupBatchTab>,
+}
+
+unsafe impl VTabCursor for RollupBatchCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_rollup_batches";
+        let ka = decode_args(M, ROLLUP_BATCH_ARGS, ROLLUP_BATCH_REQUIRED, idx_num, args)?;
+
+        let _bind = DbGuard::bind(self.db);
+        let shared: Arc<SharedEngine<Engine>> =
+            MetricsTab::shared_engine_for(self.db, &ka.database, &ka.table)?;
+        let _read = read_permit(&shared, self.db, &ka.table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+
+        let candidates: Vec<(i64, Labels)> = {
+            let reg = shared.engine.series_read();
+            reg.find_series(&ka.metric, &ka.filter)
+                .into_iter()
+                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
+                .filter(|(_, labels)| matchers_pass(labels, &ka.matchers))
+                .collect()
+        };
+        let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
+        let batch = shared
+            .engine
+            .query_rollup_batch_by_id(&series_ids, ka.width, ka.start, ka.stop)
+            .map_err(module_err)?;
+
+        let mut rows = Vec::new();
+        for ((series_id, labels), (result_id, buckets)) in candidates.into_iter().zip(batch) {
+            debug_assert_eq!(series_id, result_id);
+            if buckets.is_empty() {
+                continue;
+            }
+            rows.push((series_id, labels, encode_rollup_buckets(&buckets)?));
+        }
+        rows.sort_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
+        self.rows = rows;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let (series_id, labels, buckets) = &self.rows[self.pos];
+        match col {
+            0 => ctx.set_result(series_id),
+            1 => {
+                let json = labels_to_json(labels);
+                ctx.set_result(&json)
+            }
+            2 => ctx.set_result(buckets),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+fn encode_rollup_buckets(buckets: &[timeless_core::RollupBucket]) -> Result<Vec<u8>> {
+    let count = buckets.len();
+    let n: u32 = count
+        .try_into()
+        .map_err(|_| module_err("timeless_rollup_batches: too many buckets".into()))?;
+    let column_bytes = count
+        .checked_mul(8)
+        .ok_or_else(|| module_err("timeless_rollup_batches: column size overflow".into()))?;
+    let capacity = 8usize
+        .checked_add(
+            column_bytes
+                .checked_mul(8)
+                .ok_or_else(|| module_err("timeless_rollup_batches: blob size overflow".into()))?,
+        )
+        .ok_or_else(|| module_err("timeless_rollup_batches: blob size overflow".into()))?;
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(ROLLUP_BATCH_MAGIC);
+    out.extend_from_slice(&n.to_le_bytes());
+    for bucket in buckets {
+        out.extend_from_slice(&bucket.bucket_ts.to_le_bytes());
+    }
+    for bucket in buckets {
+        out.extend_from_slice(&bucket.count.to_le_bytes());
+    }
+    for bucket in buckets {
+        out.extend_from_slice(&(bucket.sum / bucket.count as f64).to_bits().to_le_bytes());
+    }
+    for bucket in buckets {
+        out.extend_from_slice(&bucket.sum.to_bits().to_le_bytes());
+    }
+    for bucket in buckets {
+        out.extend_from_slice(&bucket.min.to_bits().to_le_bytes());
+    }
+    for bucket in buckets {
+        out.extend_from_slice(&bucket.max.to_bits().to_le_bytes());
+    }
+    for bucket in buckets {
+        out.extend_from_slice(&bucket.last_ts.to_le_bytes());
+    }
+    for bucket in buckets {
+        out.extend_from_slice(&bucket.last_val.to_bits().to_le_bytes());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod rollup_batch_tests {
+    use super::*;
+    use timeless_core::RollupBucket;
+
+    #[test]
+    fn blob_is_versioned_columnar_and_preserves_counts_and_float_bits() {
+        let buckets = vec![
+            RollupBucket {
+                bucket_ts: -300,
+                count: (1u64 << 53) + 7,
+                sum: f64::from_bits(0x7ff8_0000_0000_0042),
+                min: -0.0,
+                max: f64::INFINITY,
+                last_ts: -1,
+                last_val: f64::from_bits(0x8000_0000_0000_0001),
+            },
+            RollupBucket {
+                bucket_ts: 0,
+                count: 2,
+                sum: 3.0,
+                min: 1.0,
+                max: 2.0,
+                last_ts: 9,
+                last_val: 2.0,
+            },
+        ];
+        let blob = encode_rollup_buckets(&buckets).unwrap();
+        assert_eq!(&blob[..4], b"TRB1");
+        assert_eq!(u32::from_le_bytes(blob[4..8].try_into().unwrap()), 2);
+        let col = |index: usize| 8 + index * 16;
+        let u64_at = |base: usize, index: usize| {
+            u64::from_le_bytes(
+                blob[base + index * 8..base + index * 8 + 8]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(u64_at(col(0), 0) as i64, -300);
+        assert_eq!(u64_at(col(1), 0), (1u64 << 53) + 7);
+        assert_eq!(u64_at(col(3), 0), buckets[0].sum.to_bits());
+        assert_eq!(u64_at(col(4), 0), buckets[0].min.to_bits());
+        assert_eq!(u64_at(col(5), 0), buckets[0].max.to_bits());
+        assert_eq!(u64_at(col(6), 0) as i64, -1);
+        assert_eq!(u64_at(col(7), 0), buckets[0].last_val.to_bits());
+        assert_eq!(blob.len(), 8 + 2 * 8 * 8);
     }
 }
 
@@ -904,9 +2427,11 @@ unsafe impl<'vtab> VTab<'vtab> for LogBucketsTab {
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            Cow::Borrowed(c"CREATE TABLE x(bucket_ts INTEGER, group_key TEXT, n INTEGER, \
+            Cow::Borrowed(
+                c"CREATE TABLE x(bucket_ts INTEGER, group_key TEXT, n INTEGER, \
                             tbl HIDDEN, group_by HIDDEN, filter HIDDEN, start HIDDEN, \
-                            stop HIDDEN, step HIDDEN)"),
+                            stop HIDDEN, step HIDDEN)",
+            ),
             LogBucketsTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -961,13 +2486,11 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
         let mut level = None;
         let mut metadata_eq: Vec<(String, String)> = Vec::new();
         if let Some(txt) = filter_json.filter(|t| !t.is_empty()) {
-            for (k, v) in parse_labels_json(&txt)
-                .map_err(|e| module_err(format!("{M}: filter: {e}")))?
+            for (k, v) in
+                parse_labels_json(&txt).map_err(|e| module_err(format!("{M}: filter: {e}")))?
             {
                 if k == "level" {
-                    level = Some(
-                        timeless_core::level_from_name(&v).map_err(module_err)?,
-                    );
+                    level = Some(timeless_core::level_from_name(&v).map_err(module_err)?);
                 } else {
                     metadata_eq.push((k, v));
                 }
@@ -976,6 +2499,7 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
         let q = timeless_core::LogQuery {
             ts_min: start,
             ts_max: stop,
@@ -1043,11 +2567,13 @@ unsafe impl<'vtab> VTab<'vtab> for TraceBucketsTab {
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            Cow::Borrowed(c"CREATE TABLE x(bucket_ts INTEGER, service TEXT, spans INTEGER, \
+            Cow::Borrowed(
+                c"CREATE TABLE x(bucket_ts INTEGER, service TEXT, spans INTEGER, \
                             errors INTEGER, dur_sum INTEGER, dur_min INTEGER, dur_max INTEGER, \
                             dur_p50 INTEGER, dur_p95 INTEGER, dur_p99 INTEGER, \
                             tbl HIDDEN, service_filter HIDDEN, start HIDDEN, stop HIDDEN, \
-                            step HIDDEN)"),
+                            step HIDDEN)",
+            ),
             TraceBucketsTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -1102,6 +2628,7 @@ unsafe impl VTabCursor for TraceBucketsCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = TracesTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
         let q = timeless_core::SpanQuery {
             ts_min: start,
             ts_max: stop,
@@ -1183,7 +2710,9 @@ fn detect_module(database: &str, table: &str) -> Result<TimelessModule> {
     let blocks = format!("{table}_blocks");
     let mut stmt = conn.prepare(&sql)?;
     let found: Vec<String> = stmt
-        .query_map(rusqlite::params![chunks, trace_blocks, blocks], |r| r.get(0))?
+        .query_map(rusqlite::params![chunks, trace_blocks, blocks], |r| {
+            r.get(0)
+        })?
         .collect::<std::result::Result<_, _>>()?;
     if found.iter().any(|n| n == &chunks) {
         Ok(TimelessModule::Metrics)
@@ -1249,15 +2778,17 @@ fn require_tbl(module: &str, idx_num: c_int, args: &Filters<'_>) -> Result<(Stri
     Ok(split_spec(&spec))
 }
 
-/// timeless_series('metrics') — the series catalog, from the in-memory
-/// registry + chunk index only (no chunk decompression).
+/// timeless_series('metrics' [, metric [, filter]]) — the series catalog,
+/// from the in-memory registry + chunk index only (no chunk decompression).
 #[repr(C)]
 pub(crate) struct SeriesTab {
     base: ffi::sqlite3_vtab,
     db: *mut ffi::sqlite3,
 }
 
-const SERIES_COL_TBL: c_int = 8;
+const SERIES_FIRST_ARG: c_int = 8;
+const SERIES_ARGS: &[&str] = &["tbl", "metric", "filter"];
+const SERIES_REQUIRED: c_int = 0b001;
 
 unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
     type Aux = ();
@@ -1274,9 +2805,12 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            Cow::Borrowed(c"CREATE TABLE x(name TEXT, labels TEXT, series_id INTEGER, \
+            Cow::Borrowed(
+                c"CREATE TABLE x(name TEXT, labels TEXT, series_id INTEGER, \
                             min_ts INTEGER, max_ts INTEGER, points INTEGER, \
-                            chunks INTEGER, buffered INTEGER, tbl HIDDEN)"),
+                            chunks INTEGER, buffered INTEGER, tbl HIDDEN, \
+                            metric HIDDEN, filter HIDDEN)",
+            ),
             SeriesTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -1285,7 +2819,7 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_tbl(info, SERIES_COL_TBL)
+        best_index_args(info, SERIES_FIRST_ARG, SERIES_ARGS.len() as c_int)
     }
 
     fn open(&mut self) -> Result<SeriesCursor<'vtab>> {
@@ -1310,7 +2844,30 @@ pub(crate) struct SeriesCursor<'vtab> {
 
 unsafe impl VTabCursor for SeriesCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
-        let (database, table) = require_tbl("timeless_series", idx_num, args)?;
+        const M: &str = "timeless_series";
+        let slots = named_slots(M, SERIES_ARGS, SERIES_REQUIRED, idx_num)?;
+        let get = |slot: usize, what: &str| -> Result<String> {
+            let value: Option<String> = args.get(slot)?;
+            value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
+        };
+        let (database, table) = split_spec(&get(slots[0].unwrap(), "tbl")?);
+        let metric: Option<String> = match slots[1] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
+        let filter_text: Option<String> = match slots[2] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
+        if metric.is_none() && filter_text.as_deref().is_some_and(|text| !text.is_empty()) {
+            return Err(module_err(format!(
+                "{M}: filter requires metric — call as {M}(tbl, metric, filter)"
+            )));
+        }
+        let (eq, matchers) = match filter_text.as_deref() {
+            None | Some("") => (Labels::new(), Vec::new()),
+            Some(text) => compile_filter(M, text)?,
+        };
         let _bind = DbGuard::bind(self.db);
         let module = detect_module(&database, &table)?;
         if module != TimelessModule::Metrics {
@@ -1321,8 +2878,27 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
             )));
         }
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        shared.engine.refresh_authoritative_state().map_err(module_err)?;
-        self.rows = shared.engine.series_overview();
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        self.rows = match metric {
+            Some(metric) => {
+                let series_ids: Vec<i64> = {
+                    let reg = shared.engine.series_read();
+                    reg.find_series(&metric, &eq)
+                        .into_iter()
+                        .filter(|series_id| {
+                            reg.info_for(*series_id)
+                                .is_some_and(|info| matchers_pass(&info.labels, &matchers))
+                        })
+                        .collect()
+                };
+                shared.engine.series_overview_by_ids(&series_ids)
+            }
+            None => shared.engine.series_overview(),
+        };
         self.pos = 0;
         Ok(())
     }
@@ -1367,7 +2943,8 @@ pub(crate) struct LabelValuesTab {
 }
 
 const LABEL_VALUES_FIRST_ARG: c_int = 1;
-const LABEL_VALUES_ARGS: &[&str] = &["tbl", "metric", "key"];
+const LABEL_VALUES_ARGS: &[&str] = &["tbl", "metric", "key", "filter"];
+const LABEL_VALUES_REQUIRED: c_int = 0b0111;
 
 unsafe impl<'vtab> VTab<'vtab> for LabelValuesTab {
     type Aux = ();
@@ -1384,7 +2961,10 @@ unsafe impl<'vtab> VTab<'vtab> for LabelValuesTab {
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            Cow::Borrowed(c"CREATE TABLE x(value TEXT, tbl HIDDEN, metric HIDDEN, key HIDDEN)"),
+            Cow::Borrowed(
+                c"CREATE TABLE x(value TEXT, tbl HIDDEN, metric HIDDEN, key HIDDEN, \
+                                 filter HIDDEN)",
+            ),
             LabelValuesTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
@@ -1393,7 +2973,11 @@ unsafe impl<'vtab> VTab<'vtab> for LabelValuesTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, LABEL_VALUES_FIRST_ARG, LABEL_VALUES_ARGS.len() as c_int)
+        best_index_args(
+            info,
+            LABEL_VALUES_FIRST_ARG,
+            LABEL_VALUES_ARGS.len() as c_int,
+        )
     }
 
     fn open(&mut self) -> Result<LabelValuesCursor<'vtab>> {
@@ -1419,19 +3003,18 @@ pub(crate) struct LabelValuesCursor<'vtab> {
 unsafe impl VTabCursor for LabelValuesCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         const M: &str = "timeless_label_values";
-        if idx_num != 0b111 {
-            return Err(module_err(format!(
-                "{M}: missing required argument(s) — call as {M}({})",
-                LABEL_VALUES_ARGS.join(", ")
-            )));
-        }
+        let slots = named_slots(M, LABEL_VALUES_ARGS, LABEL_VALUES_REQUIRED, idx_num)?;
         let get = |s: usize, what: &str| -> Result<String> {
             let v: Option<String> = args.get(s)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
-        let (database, table) = split_spec(&get(0, "tbl")?);
-        let metric = get(1, "metric")?;
-        let key = get(2, "key")?;
+        let (database, table) = split_spec(&get(slots[0].unwrap(), "tbl")?);
+        let metric = get(slots[1].unwrap(), "metric")?;
+        let key = get(slots[2].unwrap(), "key")?;
+        let filter_text: Option<String> = match slots[3] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
 
         let _bind = DbGuard::bind(self.db);
         let module = detect_module(&database, &table)?;
@@ -1443,8 +3026,32 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
             )));
         }
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        shared.engine.refresh_authoritative_state().map_err(module_err)?;
-        self.rows = shared.engine.series_read().label_values(&metric, &key);
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        self.rows = match filter_text.as_deref() {
+            None | Some("") => shared.engine.series_read().label_values(&metric, &key),
+            Some(text) => {
+                let (eq, matchers) = compile_filter(M, text)?;
+                let reg = shared.engine.series_read();
+                let mut values = HashSet::new();
+                for series_id in reg.find_series(&metric, &eq) {
+                    let Some(info) = reg.info_for(series_id) else {
+                        continue;
+                    };
+                    if matchers_pass(&info.labels, &matchers) {
+                        if let Some(value) = info.labels.get(&key) {
+                            values.insert(value.clone());
+                        }
+                    }
+                }
+                let mut values: Vec<String> = values.into_iter().collect();
+                values.sort();
+                values
+            }
+        };
         self.pos = 0;
         Ok(())
     }
@@ -1560,20 +3167,27 @@ unsafe impl VTabCursor for StatsCursor<'_> {
         {
             // F2 retention (native ts units), NULL when unset.
             let conn = shared::current_conn().map_err(module_err)?;
-            let retention = crate::shadow_meta::load_retention(&conn, &database, &table)
-                .map_err(module_err)?;
+            let retention =
+                crate::shadow_meta::load_retention(&conn, &database, &table).map_err(module_err)?;
             rows.push(("retention", opt_ts(retention)));
         }
         match module {
             TimelessModule::Metrics => {
                 let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-                shared.engine.refresh_authoritative_state().map_err(module_err)?;
+                let _read = read_permit(&shared, self.db, &table)?;
+                shared
+                    .engine
+                    .refresh_authoritative_state()
+                    .map_err(module_err)?;
                 let info = shared.engine.info();
                 rows.extend([
                     ("series", Value::Integer(info.series_count as i64)),
                     ("chunks", Value::Integer(info.chunk_count as i64)),
                     ("disk_points", Value::Integer(info.disk_points as i64)),
-                    ("buffered_points", Value::Integer(info.buffered_points as i64)),
+                    (
+                        "buffered_points",
+                        Value::Integer(info.buffered_points as i64),
+                    ),
                     ("bytes_on_disk", Value::Integer(info.total_bytes as i64)),
                     ("bytes_per_point", Value::Real(info.bytes_per_point)),
                     ("buffer_memory", Value::Integer(info.buffer_memory as i64)),
@@ -1585,10 +3199,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let conn = shared::current_conn().map_err(module_err)?;
                 let tiers = crate::shadow_meta::load_meta_text(&conn, &database, &table, "rollups")
                     .map_err(module_err)?;
-                rows.push((
-                    "rollup_tiers",
-                    tiers.map_or(Value::Null, Value::Text),
-                ));
+                rows.push(("rollup_tiers", tiers.map_or(Value::Null, Value::Text)));
                 let sql = format!(
                     "SELECT COUNT(*) FROM {} WHERE resolution > 0",
                     crate::sql_ident::qualified_shadow(&database, &table, "chunks")
@@ -1600,6 +3211,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
             }
             TimelessModule::Logs => {
                 let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
+                let _read = read_permit(&shared, self.db, &table)?;
                 let (blocks, raw_blocks, buffered) = shared.engine.stats();
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
@@ -1610,13 +3222,17 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         "bytes_on_disk",
                         Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
                     ),
-                    ("terms", Value::Integer(count_rows(&database, &table, "terms")?)),
+                    (
+                        "terms",
+                        Value::Integer(count_rows(&database, &table, "terms")?),
+                    ),
                     ("ts_min", opt_ts(ts_min)),
                     ("ts_max", opt_ts(ts_max)),
                 ]);
             }
             TimelessModule::Traces => {
                 let shared = TracesTab::shared_engine_for(self.db, &database, &table)?;
+                let _read = read_permit(&shared, self.db, &table)?;
                 let (blocks, raw_blocks, buffered) = shared.engine.stats();
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
@@ -1627,7 +3243,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         "bytes_on_disk",
                         Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
                     ),
-                    ("terms", Value::Integer(count_rows(&database, &table, "terms")?)),
+                    (
+                        "terms",
+                        Value::Integer(count_rows(&database, &table, "terms")?),
+                    ),
                     (
                         "trace_index_rows",
                         Value::Integer(count_rows(&database, &table, "trace_blocks")?),

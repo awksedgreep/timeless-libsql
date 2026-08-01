@@ -65,7 +65,10 @@ fn periodic_series_every_point_survives() {
     let bytes = disk_bytes(&dir);
     println!(
         "PERIODIC (best case): {} points, {} bytes ON DISK = {:.3} bytes/point ({:.0}x vs 16B)",
-        N, bytes, bytes as f64 / N as f64, 16.0 / (bytes as f64 / N as f64)
+        N,
+        bytes,
+        bytes as f64 / N as f64,
+        16.0 / (bytes as f64 / N as f64)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -110,9 +113,7 @@ fn random_walk_every_point_survives() {
 
     let engine = new_engine(&dir);
     let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
-    let rows = engine
-        .query_range_by_id(sid, 0, i64::MAX)
-        .unwrap();
+    let rows = engine.query_range_by_id(sid, 0, i64::MAX).unwrap();
     assert_eq!(rows.len(), N as usize, "row count after recovery");
     for (i, (ts, val)) in rows.iter().enumerate() {
         assert_eq!(*ts, points[i].0, "timestamp mismatch at {i}");
@@ -122,7 +123,10 @@ fn random_walk_every_point_survives() {
     let bytes = disk_bytes(&dir);
     println!(
         "RANDOM WALK (honest): {} points, {} bytes ON DISK = {:.3} bytes/point ({:.0}x vs 16B)",
-        N, bytes, bytes as f64 / N as f64, 16.0 / (bytes as f64 / N as f64)
+        N,
+        bytes,
+        bytes as f64 / N as f64,
+        16.0 / (bytes as f64 / N as f64)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

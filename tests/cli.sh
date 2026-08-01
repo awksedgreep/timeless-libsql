@@ -45,7 +45,8 @@
 #       sqlite3) — flushed + buffered data visible across connections
 #       without reopen, writer-gate busy timeout, retry after commit,
 #       drop/recreate sanity
-#   22. Q2 reduction-kernel TVFs (timeless_grid / timeless_window):
+#   22. Q2 reduction-kernel TVFs (timeless_grid / timeless_window /
+#       timeless_window_batches):
 #       results identical to a plain-SQL evaluator over the raw vtab
 #       (recursive-CTE grid + correlated subqueries), buffered-point
 #       visibility, label filter, arg validation, TVF-first recovery
@@ -56,6 +57,22 @@
 # ROLLBACK, however, is now REAL (R5 fixed): sections 6/6b/6c assert
 # that rolled-back buffered writes AND rolled-back intra-txn flushes
 # leave no trace, in memory or on disk.
+# Section 34 covers the timeless_metrics embedding waist: durable series-id
+# resolution, resolved batch v1, and matcher-aware timeless_raw reads.
+# Section 35 covers the chunk-aware timeless_aggregate TVF, including direct
+# SQL oracles, integer count, buffered/rollback visibility, and reopen.
+# Section 36 covers the newest-first timeless_latest TVF: inclusive bounds,
+# duplicate ties, matcher/empty omission, transaction and cross-connection
+# visibility, compaction, retention, and reopen.
+# Section 37 covers authoritative catalog-generation publication: commit,
+# rollback, compact, prune, external-process invalidation, two live
+# connections, and reopen.
+# Section 38 covers matcher-aware catalog discovery: regex/negative/absent
+# semantics, filtered label values and raw reads, rollback, two connections,
+# direct-SQL errors, and reopen.
+# Section 39 pins the cross-connection transaction visibility gate: an
+# intra-transaction flush must report a retryable busy conflict to another
+# connection, never expose an index location whose shadow row is invisible.
 
 set -euo pipefail
 
@@ -1067,12 +1084,18 @@ assert B.execute("SELECT count(*) FROM m").fetchone()[0] == 0
 A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 100, 1.5)")
 A.execute("INSERT INTO m(m) VALUES ('flush')")
 print("a", B.execute("SELECT name, ts, value FROM m").fetchall())
+print("a_agg", B.execute(
+    "SELECT value FROM timeless_aggregate('m','cpu',NULL,0,500,'sum')"
+).fetchone()[0])
 
 # (b) BUFFERED (unflushed) data is visible too: one shared buffer.
 # This is the accepted telemetry semantics, asserted on purpose so a
 # future change to it is a deliberate decision, not an accident.
 A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 200, 2.5)")
 print("b", B.execute("SELECT count(*) FROM m WHERE name = 'cpu'").fetchone()[0])
+print("b_agg", B.execute(
+    "SELECT value FROM timeless_aggregate('m','cpu',NULL,0,500,'sum')"
+).fetchone()[0])
 
 # (c) A's open write txn locks B's writes out, BOUNDED. On stock
 # SQLite the failure is SQLite's own "database is locked" (file write
@@ -1115,8 +1138,12 @@ PYEOF
 ) || { fail "section 21 python driver crashed"; py_out=""; }
 check_eq "(a) B sees A's flushed rows without reopen" \
   "$(grep '^a ' <<<"$py_out")" "a [('cpu', 100, 1.5)]"
+check_eq "(a aggregate) B reduces A's flushed rows without reopen" \
+  "$(grep '^a_agg ' <<<"$py_out")" "a_agg 1.5"
 check_eq "(b) B sees A's BUFFERED point (shared-buffer semantics)" \
   "$(grep '^b ' <<<"$py_out")" "b 2"
+check_eq "(b aggregate) B reduces A's buffered point" \
+  "$(grep '^b_agg ' <<<"$py_out")" "b_agg 4.0"
 check_eq "(c) second writer fails BOUNDED with a lock error (gate unit-tested in shared.rs)" \
   "$(grep '^c ' <<<"$py_out")" "c busy-after-bounded-wait"
 check_eq "(d) B's retry succeeds after A commits" \
@@ -1181,6 +1208,14 @@ SELECT 'ref', 'min', h.labels, g.t,
     AND ts <= g.t AND ts > g.t - 30) AS v
 FROM h, g WHERE v IS NOT NULL ORDER BY h.labels, g.t;
 
+.print -- packed window batches: sparse and dense/null forms
+SELECT 'batch_sparse', labels, hex(buckets)
+  FROM timeless_window_batches('m', 'cpu', NULL, 100, 140, 20, 30, 'sum')
+  ORDER BY labels;
+SELECT 'batch_dense', labels, hex(buckets)
+  FROM timeless_window_batches('m', 'cpu', NULL, 100, 140, 20, 30, 'sum', 'null')
+  ORDER BY labels;
+
 .print -- label filter + metric isolation
 SELECT 'filtered', labels, ts, value
   FROM timeless_grid('m', 'cpu', '{"host":"b"}', 100, 140, 10, 15) ORDER BY ts;
@@ -1202,6 +1237,14 @@ for agg in sum count min; do
     check_eq "window $agg TVF == SQL reference" "$tvf_w" "$ref_w"
   fi
 done
+check_eq "packed sparse window blobs preserve timestamps and value bits" \
+  "$(grep '^batch_sparse|' <<<"$got")" \
+'batch_sparse|{"host":"a"}|5457423103000000640000000000000078000000000000008C0000000000000007000000000000F03F00000000000008400000000000001C40
+batch_sparse|{"host":"b"}|545742310200000078000000000000008C000000000000000300000000000025400000000000403440'
+check_eq "packed dense window blobs mark empty grid points in the validity bitmap" \
+  "$(grep '^batch_dense|' <<<"$got")" \
+'batch_dense|{"host":"a"}|5457423103000000640000000000000078000000000000008C0000000000000007000000000000F03F00000000000008400000000000001C40
+batch_dense|{"host":"b"}|5457423103000000640000000000000078000000000000008C0000000000000006000000000000000000000000000025400000000000403440'
 check_eq "label filter restricts to host b" \
   "$(grep '^filtered|' <<<"$got")" \
 'filtered|{"host":"b"}|110|10.5
@@ -1224,6 +1267,10 @@ err=$(sqlite3 "$Q2DB" ".load $EXT" \
   "SELECT * FROM timeless_grid('nope', 'cpu', NULL, 0, 100, 10, 10);" 2>&1 || true)
 check_eq "unknown table fails with a no-such-table error" \
   "$(grep -c 'no such table' <<<"$err")" "1"
+err=$(sqlite3 "$Q2DB" ".load $EXT" \
+  "SELECT * FROM timeless_window_batches('m', 'cpu', NULL, 100, 140, 20, 30, 'bogus');" 2>&1 || true)
+check_eq "packed window errors name their own public module" \
+  "$(grep -c 'timeless_window_batches: unknown agg' <<<"$err")" "1"
 
 # Fresh-connection recovery: the TVF must build the engine itself (no
 # prior vtab query on this connection) and still see flushed data.
@@ -1447,6 +1494,51 @@ stats|rollup_chunks|2'
 got=$(sqlite3 "$F3DB" ".load $EXT" \
   "SELECT COUNT(*) FROM timeless_rollup('m', 'cpu', NULL, 60, 0, 99999, 'count');")
 check_eq "reopen: rollup index recovered from shadow rows" "$got" "16"
+# The packed public API returns the complete stored bucket contract once per
+# series. Decode it independently and compare every exposed aggregate with the
+# long-lived row TVF; this also pins the version and exact payload length.
+packed=$(python3 - "$EXT" "$F3DB" <<'PY'
+import sqlite3, struct, sys
+
+ext, db = sys.argv[1:]
+conn = sqlite3.connect(db)
+conn.enable_load_extension(True)
+conn.load_extension(ext)
+conn.enable_load_extension(False)
+sid, labels, blob = conn.execute(
+    "SELECT series_id, labels, buckets FROM timeless_rollup_batches("
+    "'m', 'cpu', NULL, 60, 0, 99999)"
+).fetchone()
+assert blob[:4] == b"TRB1"
+n, = struct.unpack_from("<I", blob, 4)
+assert len(blob) == 8 + n * 64
+columns = [blob[8 + i*n*8:8 + (i+1)*n*8] for i in range(8)]
+timestamps = list(struct.unpack(f"<{n}q", columns[0]))
+counts = list(struct.unpack(f"<{n}Q", columns[1]))
+avg, sums, mins, maxs = [list(struct.unpack(f"<{n}d", col)) for col in columns[2:6]]
+last_ts = list(struct.unpack(f"<{n}q", columns[6]))
+last = list(struct.unpack(f"<{n}d", columns[7]))
+packed_values = {
+    "avg": avg, "sum": sums, "min": mins, "max": maxs, "last": last
+}
+for agg, values in packed_values.items():
+    rows = conn.execute(
+        "SELECT ts, value FROM timeless_rollup('m','cpu',NULL,60,0,99999,?) ORDER BY ts",
+        (agg,),
+    ).fetchall()
+    assert [row[0] for row in rows] == timestamps
+    assert [struct.pack("<d", row[1]) for row in rows] == [struct.pack("<d", v) for v in values]
+count_rows = conn.execute(
+    "SELECT ts, value FROM timeless_rollup('m','cpu',NULL,60,0,99999,'count') ORDER BY ts"
+).fetchall()
+assert [row[0] for row in count_rows] == timestamps
+assert [int(row[1]) for row in count_rows] == counts
+assert all(bucket <= sample < bucket + 60 for bucket, sample in zip(timestamps, last_ts))
+print(f"packed|{sid}|{labels}|{n}|ok")
+PY
+)
+check_eq "packed rollup blob == all six row aggregates" "$packed" \
+  'packed|1|{"host":"a"}|16|ok'
 # Error paths.
 err=$(sqlite3 "$F3DB" ".load $EXT" \
   "SELECT * FROM timeless_rollup('m', 'cpu', NULL, 60, 0, 1, 'median');" 2>&1 || true)
@@ -1932,6 +2024,603 @@ check_eq "label discovery (cookbook)" \
 'lv|a
 lv|b
 lv|c'
+
+# ---------------------------------------------------------------------------
+echo "== section 34: embedding waist + resolved-series batch =="
+E34DB="$TMP/embed34.db"
+E34BLOB="$TMP/resolved_v1.blob"
+python3 - "$E34BLOB" <<'PY'
+import struct, sys
+out = bytearray(struct.pack('<BBHI', 2, 0, 0, 3))
+out += struct.pack('<qqq', 1, 2, 1)
+out += struct.pack('<qqq', 10, 10, 20)
+out += struct.pack('<ddd', 1.5, 2.5, 3.5)
+open(sys.argv[1], 'wb').write(out)
+PY
+got=$(sqlite3 "$E34DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE em USING timeless_metrics;
+INSERT INTO em(em,name,labels) VALUES ('resolve','cpu','{"host":"web-1","env":"prod"}');
+SELECT 'sid1', last_insert_rowid();
+INSERT INTO em(em,name,labels) VALUES ('resolve','cpu','{"host":"db-1"}');
+SELECT 'sid2', last_insert_rowid();
+INSERT INTO em(em) VALUES (readfile('$E34BLOB'));
+INSERT INTO em(em) VALUES ('flush');
+SELECT 'raw', series_id, labels, ts, value
+  FROM timeless_raw('em','cpu','{"host":{"re":"web-.*"}}',0,30)
+ ORDER BY ts;
+SELECT 'raw_batch', series_id, length(points), hex(substr(points,1,4))
+  FROM timeless_raw_batches('em','cpu','{"host":{"re":"web-.*"}}',0,30);
+SELECT 'raw_frame', length(frame), hex(substr(frame,1,16))
+  FROM timeless_raw_frame('em','cpu','{"host":{"re":"web-.*"}}',0,30);
+SELECT 'empty_frame', COUNT(*)
+  FROM timeless_raw_frame('em','cpu','{"host":"missing"}',0,30);
+SELECT 'catalog', name, labels, series_id FROM timeless_series('em') ORDER BY series_id;
+SQL
+)
+check_eq "resolve command returns durable catalog ids" \
+  "$(grep '^sid' <<<"$got")" $'sid1|1\nsid2|2'
+check_eq "resolved batch + matcher-aware raw waist" \
+  "$(grep '^raw|' <<<"$got")" \
+'raw|1|{"env":"prod","host":"web-1"}|10|1.5
+raw|1|{"env":"prod","host":"web-1"}|20|3.5'
+check_eq "raw batch emits one packed blob per series" \
+  "$(grep '^raw_batch|' <<<"$got")" 'raw_batch|1|36|02000000'
+check_eq "raw frame emits one versioned columnar blob for all non-empty series" \
+  "$(grep -E '^(raw_frame|empty_frame)\|' <<<"$got")" \
+$'raw_frame|60|54524631010000000200000000000000\nempty_frame|0'
+check_eq "resolved empty-series catalog is queryable" \
+  "$(grep '^catalog|' <<<"$got")" \
+'catalog|cpu|{"env":"prod","host":"web-1"}|1
+catalog|cpu|{"host":"db-1"}|2'
+
+got=$(sqlite3 "$E34DB" <<SQL
+.load $EXT
+SELECT 'reopen_frame', length(frame), hex(substr(frame,1,16))
+  FROM timeless_raw_frame('em','cpu',NULL,0,30);
+SQL
+)
+check_eq "raw frame survives a new-process reopen" "$got" \
+  'reopen_frame|88|54524631020000000300000000000000'
+
+# ---------------------------------------------------------------------------
+echo "== section 35: native scalar aggregate TVF =="
+E35DB="$TMP/aggregate35.db"
+E35NAN="$TMP/aggregate35_nan.blob"
+python3 - "$E35NAN" <<'PY'
+import math, struct, sys
+series = [(b'nan_metric', b'{"host":"mixed"}'),
+          (b'nan_metric', b'{"host":"all-nan"}')]
+header = struct.pack('<BBHII', 1, 0, 0, len(series), 5)
+table = b''.join(struct.pack('<I', len(name)) + name +
+                 struct.pack('<I', len(labels)) + labels
+                 for name, labels in series)
+indexes = struct.pack('<5I', 0, 0, 0, 1, 1)
+timestamps = struct.pack('<5q', 0, 1, 2, 0, 1)
+values = struct.pack('<5d', math.nan, 2.0, 4.0, math.nan, math.nan)
+open(sys.argv[1], 'wb').write(header + table + indexes + timestamps + values)
+PY
+got=$(sqlite3 "$E35DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE ag USING timeless_metrics;
+INSERT INTO ag(ag,name,labels) VALUES ('resolve','cpu','{"host":"empty"}');
+INSERT INTO ag(name, labels, ts, value) VALUES
+  ('cpu', '{"host":"a","env":"prod"}', -10, 1.0),
+  ('cpu', '{"host":"a","env":"prod"}',  10, 3.0),
+  ('cpu', '{"host":"a","env":"prod"}',   0, 2.0),
+  ('cpu', '{"host":"a","env":"prod"}',  10, 5.0),
+  ('cpu', '{"host":"b","env":"dev"}',    0, -4.0),
+  ('cpu', '{"host":"b","env":"dev"}',   20, 6.0);
+INSERT INTO ag(ag) VALUES (readfile('$E35NAN'));
+SELECT 'buffered', labels, typeof(value), value
+  FROM timeless_aggregate('ag','cpu',NULL,-10,20,'count') ORDER BY labels;
+BEGIN;
+INSERT INTO ag(name, labels, ts, value)
+  VALUES ('cpu', '{"host":"a","env":"prod"}', 30, 100.0);
+SELECT 'txn', value FROM timeless_aggregate('ag','cpu','{"host":"a"}',-10,30,'sum');
+ROLLBACK;
+SELECT 'rollback', value FROM timeless_aggregate('ag','cpu','{"host":"a"}',-10,30,'sum');
+INSERT INTO ag(ag) VALUES ('flush');
+SELECT 'native', 'avg', labels, value
+  FROM timeless_aggregate('ag','cpu',NULL,-10,20,'avg')
+UNION ALL
+SELECT 'native', 'sum', labels, value
+  FROM timeless_aggregate('ag','cpu',NULL,-10,20,'sum')
+UNION ALL
+SELECT 'native', 'min', labels, value
+  FROM timeless_aggregate('ag','cpu',NULL,-10,20,'min')
+UNION ALL
+SELECT 'native', 'max', labels, value
+  FROM timeless_aggregate('ag','cpu',NULL,-10,20,'max')
+UNION ALL
+SELECT 'native', 'count', labels, value
+  FROM timeless_aggregate('ag','cpu',NULL,-10,20,'count')
+ORDER BY 2, 3;
+SELECT 'partial', labels, value
+  FROM timeless_aggregate('ag','cpu','{"host":"a"}',0,10,'sum');
+SELECT 'regex', labels, value
+  FROM timeless_aggregate('ag','cpu','{"env":{"neq":"prod"}}',-10,20,'max');
+SELECT 'empty_range', COUNT(*)
+  FROM timeless_aggregate('ag','cpu',NULL,100,200,'avg');
+SELECT 'empty_series', COUNT(*)
+  FROM timeless_aggregate('ag','cpu','{"host":"empty"}',-10,20,'avg');
+
+WITH expected AS (
+  SELECT labels, AVG(value) AS value FROM ag
+   WHERE name='cpu' AND ts BETWEEN -10 AND 20 GROUP BY labels
+), actual AS (
+  SELECT labels, value FROM timeless_aggregate('ag','cpu',NULL,-10,20,'avg')
+), delta AS (
+  SELECT * FROM expected EXCEPT SELECT * FROM actual
+  UNION ALL
+  SELECT * FROM actual EXCEPT SELECT * FROM expected
+)
+SELECT 'oracle_avg', COUNT(*) FROM delta;
+WITH expected AS (
+  SELECT labels, SUM(value) AS value FROM ag
+   WHERE name='cpu' AND ts BETWEEN -10 AND 20 GROUP BY labels
+), actual AS (
+  SELECT labels, value FROM timeless_aggregate('ag','cpu',NULL,-10,20,'sum')
+), delta AS (
+  SELECT * FROM expected EXCEPT SELECT * FROM actual
+  UNION ALL
+  SELECT * FROM actual EXCEPT SELECT * FROM expected
+)
+SELECT 'oracle_sum', COUNT(*) FROM delta;
+SELECT 'nan', 'avg', labels, value IS NULL, COALESCE(value, '-')
+  FROM timeless_aggregate('ag','nan_metric',NULL,0,2,'avg')
+UNION ALL
+SELECT 'nan', 'sum', labels, value IS NULL, COALESCE(value, '-')
+  FROM timeless_aggregate('ag','nan_metric',NULL,0,2,'sum')
+UNION ALL
+SELECT 'nan', 'min', labels, value IS NULL, COALESCE(value, '-')
+  FROM timeless_aggregate('ag','nan_metric',NULL,0,2,'min')
+UNION ALL
+SELECT 'nan', 'max', labels, value IS NULL, COALESCE(value, '-')
+  FROM timeless_aggregate('ag','nan_metric',NULL,0,2,'max')
+UNION ALL
+SELECT 'nan', 'count', labels, value IS NULL, COALESCE(value, '-')
+  FROM timeless_aggregate('ag','nan_metric',NULL,0,2,'count')
+ORDER BY 2, 3;
+SQL
+)
+check_eq "aggregate sees buffered rows and count stays SQLite INTEGER" \
+  "$(grep '^buffered|' <<<"$got")" \
+'buffered|{"env":"dev","host":"b"}|integer|2
+buffered|{"env":"prod","host":"a"}|integer|4'
+check_eq "aggregate transaction visibility rolls back exactly" \
+  "$(grep -E '^(txn|rollback)\|' <<<"$got")" \
+$'txn|111.0\nrollback|11.0'
+check_eq "all native scalar operations and duplicate timestamps" \
+  "$(grep '^native|' <<<"$got")" \
+'native|avg|{"env":"dev","host":"b"}|1.0
+native|avg|{"env":"prod","host":"a"}|2.75
+native|count|{"env":"dev","host":"b"}|2
+native|count|{"env":"prod","host":"a"}|4
+native|max|{"env":"dev","host":"b"}|6.0
+native|max|{"env":"prod","host":"a"}|5.0
+native|min|{"env":"dev","host":"b"}|-4.0
+native|min|{"env":"prod","host":"a"}|1.0
+native|sum|{"env":"dev","host":"b"}|2.0
+native|sum|{"env":"prod","host":"a"}|11.0'
+check_eq "aggregate bounds, matcher, and empty omission" \
+  "$(grep -E '^(partial|regex|empty_)' <<<"$got")" \
+'partial|{"env":"prod","host":"a"}|10.0
+regex|{"env":"dev","host":"b"}|6.0
+empty_range|0
+empty_series|0'
+check_eq "aggregate matches flat SQL avg/sum oracle on the pinned dataset" \
+  "$(grep '^oracle_' <<<"$got")" $'oracle_avg|0\noracle_sum|0'
+check_eq "aggregate NaN contract: count includes, sum/avg propagate, min/max ignore" \
+  "$(grep '^nan|' <<<"$got")" \
+'nan|avg|{"host":"all-nan"}|1|-
+nan|avg|{"host":"mixed"}|1|-
+nan|count|{"host":"all-nan"}|0|2
+nan|count|{"host":"mixed"}|0|3
+nan|max|{"host":"all-nan"}|1|-
+nan|max|{"host":"mixed"}|0|4.0
+nan|min|{"host":"all-nan"}|1|-
+nan|min|{"host":"mixed"}|0|2.0
+nan|sum|{"host":"all-nan"}|1|-
+nan|sum|{"host":"mixed"}|1|-'
+
+got=$(sqlite3 "$E35DB" <<SQL
+.load $EXT
+SELECT 'reopen', labels, typeof(value), value
+  FROM timeless_aggregate('ag','cpu',NULL,-10,20,'count') ORDER BY labels;
+SQL
+)
+check_eq "aggregate survives a new-process reopen" "$got" \
+'reopen|{"env":"dev","host":"b"}|integer|2
+reopen|{"env":"prod","host":"a"}|integer|4'
+
+err=$(sqlite3 "$E35DB" ".load $EXT" \
+  "SELECT * FROM timeless_aggregate('ag','cpu',NULL,0,10,'median');" 2>&1 || true)
+check_eq "unknown aggregate rejected with the supported set" \
+  "$(grep -c 'expected one of: avg, sum, min, max, count' <<<"$err")" "1"
+err=$(sqlite3 "$E35DB" ".load $EXT" \
+  "SELECT * FROM timeless_aggregate('ag','cpu',NULL,0,10);" 2>&1 || true)
+check_eq "missing aggregate argument reports the call shape" \
+  "$(grep -c 'tbl, metric, filter, start, stop, agg' <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
+echo "== section 36: newest-first latest-point TVF =="
+E36DB="$TMP/latest36.db"
+got=$(sqlite3 "$E36DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE latest USING timeless_metrics;
+INSERT INTO latest(latest,name,labels) VALUES ('resolve','cpu','{"host":"empty"}');
+INSERT INTO latest(name, labels, ts, value) VALUES
+  ('cpu', '{"host":"a","env":"prod"}', 10, 1.0),
+  ('cpu', '{"host":"a","env":"prod"}', 30, 3.0),
+  ('cpu', '{"host":"b","env":"dev"}',  20, 2.0);
+SELECT 'buffered', labels, ts, value
+  FROM timeless_latest('latest','cpu',NULL,0,100) ORDER BY labels;
+BEGIN;
+INSERT INTO latest(name, labels, ts, value)
+  VALUES ('cpu', '{"host":"a","env":"prod"}', 40, 9.0);
+SELECT 'txn', ts, value
+  FROM timeless_latest('latest','cpu','{"host":"a"}',0,100);
+ROLLBACK;
+SELECT 'rollback', ts, value
+  FROM timeless_latest('latest','cpu','{"host":"a"}',0,100);
+INSERT INTO latest(latest) VALUES ('flush');
+
+-- A later-created chunk with a smaller min_ts sorts first in engine order;
+-- its first ts=30 duplicate is therefore the pinned winner.
+INSERT INTO latest(name, labels, ts, value) VALUES
+  ('cpu', '{"host":"a","env":"prod"}', 30, 4.0),
+  ('cpu', '{"host":"a","env":"prod"}',  5, 0.5);
+INSERT INTO latest(latest) VALUES ('flush');
+INSERT INTO latest(name, labels, ts, value) VALUES
+  ('cpu', '{"host":"a","env":"prod"}', 30, 5.0),
+  ('cpu', '{"host":"a","env":"prod"}', 40, 6.0);
+SELECT 'tie', labels, ts, value
+  FROM timeless_latest('latest','cpu','{"host":"a"}',0,30);
+SELECT 'newest', labels, ts, value
+  FROM timeless_latest('latest','cpu','{"host":"a"}',0,100);
+SELECT 'bounded', labels, ts, value
+  FROM timeless_latest('latest','cpu','{"host":"a"}',6,29);
+SELECT 'matcher', labels, ts, value
+  FROM timeless_latest('latest','cpu','{"env":{"neq":"prod"}}',0,100);
+SELECT 'empty_range', COUNT(*)
+  FROM timeless_latest('latest','cpu',NULL,100,200);
+SELECT 'reverse_range', COUNT(*)
+  FROM timeless_latest('latest','cpu',NULL,10,9);
+SELECT 'empty_series', COUNT(*)
+  FROM timeless_latest('latest','cpu','{"host":"empty"}',0,100);
+INSERT INTO latest(latest) VALUES ('flush');
+INSERT INTO latest(latest) VALUES ('compact');
+SELECT 'compact', labels, ts, value
+  FROM timeless_latest('latest','cpu','{"host":"a"}',0,100);
+SQL
+)
+check_eq "latest sees buffered rows and transaction rollback exactly" \
+  "$(grep -E '^(buffered|txn|rollback)\|' <<<"$got")" \
+'buffered|{"env":"dev","host":"b"}|20|2.0
+buffered|{"env":"prod","host":"a"}|30|3.0
+txn|40|9.0
+rollback|30|3.0'
+check_eq "latest preserves duplicate ties, bounds, matchers, and omission" \
+  "$(grep -E '^(tie|newest|bounded|matcher|empty_|reverse_)' <<<"$got")" \
+'tie|{"env":"prod","host":"a"}|30|4.0
+newest|{"env":"prod","host":"a"}|40|6.0
+bounded|{"env":"prod","host":"a"}|10|1.0
+matcher|{"env":"dev","host":"b"}|20|2.0
+empty_range|0
+reverse_range|0
+empty_series|0'
+check_eq "latest survives compaction" "$(grep '^compact|' <<<"$got")" \
+  'compact|{"env":"prod","host":"a"}|40|6.0'
+
+got=$(sqlite3 "$E36DB" <<SQL
+.load $EXT
+SELECT 'reopen', labels, ts, value
+  FROM timeless_latest('latest','cpu',NULL,0,100) ORDER BY labels;
+SQL
+)
+check_eq "latest survives a new-process reopen" "$got" \
+'reopen|{"env":"dev","host":"b"}|20|2.0
+reopen|{"env":"prod","host":"a"}|40|6.0'
+
+# Simulate a database created before max_ts_val existed. Reopen must add the
+# nullable column and old rows must take the exact decode fallback.
+sqlite3 "$E36DB" "ALTER TABLE latest_chunks DROP COLUMN max_ts_val;"
+got=$(sqlite3 "$E36DB" <<SQL
+.load $EXT
+SELECT 'migrated', labels, ts, value
+  FROM timeless_latest('latest','cpu',NULL,0,100) ORDER BY labels;
+SELECT 'column', COUNT(*) FROM pragma_table_info('latest_chunks') WHERE name='max_ts_val';
+SQL
+)
+check_eq "latest migrates legacy schema and decodes legacy chunks" "$got" \
+'migrated|{"env":"dev","host":"b"}|20|2.0
+migrated|{"env":"prod","host":"a"}|40|6.0
+column|1'
+
+E36RET="$TMP/latest36_retention.db"
+got=$(sqlite3 "$E36RET" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE r USING timeless_metrics(retention='10s');
+INSERT INTO r(name,labels,ts,value) VALUES ('cpu','{"host":"a"}',0,1.0);
+INSERT INTO r(r) VALUES ('flush');
+INSERT INTO r(name,labels,ts,value) VALUES ('cpu','{"host":"a"}',100,2.0);
+INSERT INTO r(r) VALUES ('flush');
+SELECT 'retention', ts, value FROM timeless_latest('r','cpu',NULL,0,200);
+SELECT 'pruned', COUNT(*) FROM timeless_latest('r','cpu',NULL,0,50);
+SQL
+)
+check_eq "latest follows automatic retention" "$got" $'retention|100|2.0\npruned|0'
+
+E36PUB="$TMP/latest36_publication.db"
+got=$(EXT_PATH="$EXT" DB_PATH="$E36PUB" python3 - <<'PY'
+import os, sqlite3
+
+db = os.environ["DB_PATH"]
+ext = os.environ["EXT_PATH"]
+c1 = sqlite3.connect(db, timeout=10)
+c2 = sqlite3.connect(db, timeout=10)
+for conn in (c1, c2):
+    conn.enable_load_extension(True)
+    conn.load_extension(ext)
+c1.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
+c1.commit()
+c1.execute("INSERT INTO m(name,labels,ts,value) VALUES ('cpu','{\"host\":\"a\"}',10,1.0)")
+# Publish the transaction but deliberately do not flush: B must see the shared,
+# pre-durable buffer without ever seeing transaction-private shadow rows.
+c1.commit()
+row = c2.execute(
+    "SELECT labels,ts,value FROM timeless_latest('m','cpu',NULL,0,100)"
+).fetchone()
+print("publication|%s|%d|%.1f" % row)
+c1.close()
+c2.close()
+PY
+)
+check_eq "latest publishes committed buffered writes across live connections" "$got" \
+  'publication|{"host":"a"}|10|1.0'
+
+err=$(sqlite3 "$E36DB" ".load $EXT" \
+  "SELECT * FROM timeless_latest('latest','cpu',NULL,0);" 2>&1 || true)
+check_eq "missing latest argument reports the call shape" \
+  "$(grep -c 'tbl, metric, filter, start, stop' <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
+echo "== section 37: authoritative catalog publication and invalidation =="
+E37DB="$TMP/catalog37.db"
+got=$(EXT_PATH="$EXT" DB_PATH="$E37DB" python3 - <<'PY'
+import os, sqlite3, subprocess
+
+db = os.environ["DB_PATH"]
+ext = os.environ["EXT_PATH"]
+
+def connect():
+    conn = sqlite3.connect(db, timeout=10)
+    conn.isolation_level = None
+    conn.enable_load_extension(True)
+    conn.load_extension(ext)
+    return conn
+
+def rows(conn, name=None):
+    if name is None:
+        return conn.execute(
+            "SELECT name,ts,value FROM m ORDER BY name,ts,value"
+        ).fetchall()
+    return conn.execute(
+        "SELECT name,ts,value FROM m WHERE name=? ORDER BY ts,value", (name,)
+    ).fetchall()
+
+A = connect()
+B = connect()
+A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
+# Establish B's committed empty generation before A publishes anything.
+assert B.execute("SELECT count(*) FROM timeless_series('m')").fetchone()[0] == 0
+
+A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',10,1.0)")
+A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',20,2.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+print("commit", rows(B, "cpu"))
+
+# Capture occurs in xSync, but rollback must never publish that token. This
+# transaction also mutates both series buffers and the durable chunk catalog.
+A.execute("BEGIN")
+A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',30,99.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+A.execute("INSERT INTO m(m) VALUES ('prune:25')")
+A.execute("ROLLBACK")
+print("rollback", rows(B, "cpu"))
+
+# Compaction rewrites rowids while preserving the shared engine's exact view.
+A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',30,3.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+A.execute("INSERT INTO m(m) VALUES ('compact')")
+print("compact", rows(B, "cpu"), B.execute("SELECT count(*) FROM m_chunks").fetchone()[0])
+
+# Prune deletes an independent old-series chunk and publishes the new token.
+A.execute("INSERT INTO m(name,ts,value) VALUES ('old',1,8.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+A.execute("INSERT INTO m(m) VALUES ('prune:5')")
+print("prune", rows(B))
+
+# A different process has a different engine registry. Its committed token
+# must invalidate this process's published fast path and force a safe reload.
+sql = ".load %s\nINSERT INTO m(name,ts,value) VALUES ('mem',40,4.0);\nINSERT INTO m(m) VALUES ('flush');\n" % ext
+subprocess.run(["sqlite3", db], input=sql, text=True, check=True,
+               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+print("external", rows(B))
+
+A.close()
+B.close()
+C = connect()
+print("reopen", rows(C), C.execute("SELECT count(*) FROM m_chunks").fetchone()[0])
+C.close()
+PY
+) || { fail "section 37 python driver crashed"; got=""; }
+check_eq "catalog commit publishes to an already-open reader" \
+  "$(grep '^commit ' <<<"$got")" \
+  "commit [('cpu', 10, 1.0), ('cpu', 20, 2.0)]"
+check_eq "catalog rollback discards the prepared generation" \
+  "$(grep '^rollback ' <<<"$got")" \
+  "rollback [('cpu', 10, 1.0), ('cpu', 20, 2.0)]"
+check_eq "catalog compaction publication preserves rows and swaps chunks" \
+  "$(grep '^compact ' <<<"$got")" \
+  "compact [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0)] 1"
+check_eq "catalog prune publication removes only the old chunk" \
+  "$(grep '^prune ' <<<"$got")" \
+  "prune [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0)]"
+check_eq "external-process generation invalidates the local fast path" \
+  "$(grep '^external ' <<<"$got")" \
+  "external [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0), ('mem', 40, 4.0)]"
+check_eq "catalog publication state survives reopen" \
+  "$(grep '^reopen ' <<<"$got")" \
+  "reopen [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0), ('mem', 40, 4.0)] 2"
+
+# ---------------------------------------------------------------------------
+echo "== section 38: matcher and discovery pushdown =="
+E38DB="$TMP/matcher38.db"
+got=$(EXT_PATH="$EXT" DB_PATH="$E38DB" python3 - <<'PY'
+import os, sqlite3
+
+db = os.environ["DB_PATH"]
+ext = os.environ["EXT_PATH"]
+
+def connect():
+    conn = sqlite3.connect(db, timeout=10)
+    conn.isolation_level = None
+    conn.enable_load_extension(True)
+    conn.load_extension(ext)
+    return conn
+
+def values(rows):
+    return "|".join(row[0] for row in rows)
+
+A = connect()
+B = connect()
+A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
+A.executemany("INSERT INTO m(name,labels,ts,value) VALUES ('cpu',?,?,?)", [
+    ('{"code":"a","env":"prod","host":"web-1"}', 10, 1.0),
+    ('{"code":"é","env":"dev","host":"web-2"}', 10, 2.0),
+    ('{"host":"db-1"}', 10, 3.0),
+    ('{"env":"","host":"empty"}', 10, 4.0),
+])
+
+# The second live connection sees buffered catalog rows through matcher-aware
+# discovery before any flush.
+print("buffered|" + values(B.execute(
+    "SELECT labels FROM timeless_series('m','cpu','{\"host\":{\"re\":\"web-.*\"}}') ORDER BY labels"
+)))
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+
+print("combined|" + values(B.execute(
+    "SELECT labels FROM timeless_series('m','cpu','{\"host\":{\"re\":\"web-.*\"},\"env\":{\"neq\":\"dev\"}}') ORDER BY labels"
+)))
+print("absent|" + values(B.execute(
+    "SELECT labels FROM timeless_series('m','cpu','{\"env\":{\"re\":\"\"}}') ORDER BY labels"
+)))
+print("label_values|" + values(B.execute(
+    "SELECT value FROM timeless_label_values('m','cpu','host','{\"env\":{\"neq\":\"dev\"}}')"
+)))
+print("raw|%d" % B.execute(
+    "SELECT count(*) FROM timeless_raw_batches('m','cpu','{\"host\":{\"re\":\"web-.*\"},\"env\":{\"neq\":\"dev\"}}',0,20)"
+).fetchone()[0])
+
+A.execute("BEGIN")
+A.execute("INSERT INTO m(name,labels,ts,value) VALUES ('cpu','{\"host\":\"tmp\"}',20,9.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+A.execute("ROLLBACK")
+print("rollback|%d" % B.execute(
+    "SELECT count(*) FROM timeless_series('m','cpu','{\"host\":\"tmp\"}')"
+).fetchone()[0])
+
+A.close()
+B.close()
+C = connect()
+print("reopen|%d" % C.execute(
+    "SELECT count(*) FROM timeless_series('m','cpu','{\"host\":{\"re\":\"web-.*\"}}')"
+).fetchone()[0])
+C.close()
+PY
+) || { fail "section 38 python driver crashed"; got=""; }
+check_eq "filtered discovery sees buffered rows across live connections" \
+  "$(grep '^buffered|' <<<"$got")" \
+  'buffered|{"code":"a","env":"prod","host":"web-1"}|{"code":"é","env":"dev","host":"web-2"}'
+check_eq "regex and negative matchers combine before catalog rows cross SQL" \
+  "$(grep '^combined|' <<<"$got")" \
+  'combined|{"code":"a","env":"prod","host":"web-1"}'
+check_eq "absent labels match the empty-string discovery contract" \
+  "$(grep '^absent|' <<<"$got")" \
+  $'absent|{"env":"","host":"empty"}|{"host":"db-1"}'
+check_eq "filtered label values omit absent keys and stay sorted" \
+  "$(grep '^label_values|' <<<"$got")" 'label_values|db-1|empty|web-1'
+check_eq "selective matchers reach raw chunks and rollback/reopen stay exact" \
+  "$(grep -E '^(raw|rollback|reopen)\|' <<<"$got")" \
+  $'raw|1\nrollback|0\nreopen|2'
+
+err=$(sqlite3 "$E38DB" ".load $EXT" \
+  "SELECT * FROM timeless_series('m','cpu','{\"host\":{\"re\":\"[\"}}');" 2>&1 || true)
+check_eq "direct discovery rejects an invalid regex with label context" \
+  "$(grep -c 'invalid regex.*host' <<<"$err")" "1"
+
+# ---------------------------------------------------------------------------
+echo "== section 39: reader gate hides transaction-private chunk rows =="
+E39DB="$TMP/read_gate39.db"
+got=$(EXT_PATH="$EXT" DB_PATH="$E39DB" python3 - <<'PY'
+import os, sqlite3
+
+db = os.environ["DB_PATH"]
+ext = os.environ["EXT_PATH"]
+
+def connect():
+    conn = sqlite3.connect(db, timeout=10)
+    conn.isolation_level = None
+    conn.enable_load_extension(True)
+    conn.load_extension(ext)
+    return conn
+
+def rows(conn):
+    return conn.execute(
+        "SELECT ts,value FROM timeless_raw('m','cpu',NULL,0,100) ORDER BY ts,value"
+    ).fetchall()
+
+A = connect()
+B = connect()
+A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
+A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',10,1.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+assert rows(B) == [(10, 1.0)]
+
+# The shared engine now indexes row 20, but only A's transaction can see its
+# shadow-table row. Before the read gate, B followed that location and failed
+# with `chunk row ... Query returned no rows`.
+A.execute("BEGIN")
+A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',20,2.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+try:
+    rows(B)
+    print("during|UNEXPECTED-SUCCESS")
+except sqlite3.OperationalError as error:
+    print("during|" + str(error))
+A.execute("ROLLBACK")
+print("rollback|" + repr(rows(B)))
+
+A.execute("BEGIN")
+A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',30,3.0)")
+A.execute("INSERT INTO m(m) VALUES ('flush')")
+A.execute("COMMIT")
+print("commit|" + repr(rows(B)))
+
+A.close()
+B.close()
+PY
+) || { fail "section 39 python driver crashed"; got=""; }
+check_eq "reader reports a retryable transaction conflict, never a dangling row" \
+  "$(grep -c '^during|.*active write transaction.*retry.*SQLITE_BUSY' <<<"$got")" "1"
+check_eq "rollback restores the reader's committed chunk view" \
+  "$(grep '^rollback|' <<<"$got")" \
+  'rollback|[(10, 1.0)]'
+check_eq "commit publishes the replacement view before the reader retries" \
+  "$(grep '^commit|' <<<"$got")" \
+  'commit|[(10, 1.0), (30, 3.0)]'
 
 # ---------------------------------------------------------------------------
 echo

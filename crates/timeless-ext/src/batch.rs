@@ -29,9 +29,10 @@ impl<'a> BatchReader<'a> {
     /// usize arithmetic (u32 lengths can't overflow on 64-bit, but the
     /// habit is free and the compiler removes it when provably safe).
     pub(crate) fn take(&mut self, n: usize, what: &str) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or_else(|| {
-            module_err(format!("batch blob: length overflow reading {what}"))
-        })?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| module_err(format!("batch blob: length overflow reading {what}")))?;
         if end > self.buf.len() {
             return Err(module_err(format!(
                 "batch blob truncated: need {n} byte(s) for {what} at offset {}, \

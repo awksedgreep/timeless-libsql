@@ -24,8 +24,8 @@ use std::marker::PhantomData;
 use rusqlite::ffi;
 use rusqlite::types::ValueRef;
 use rusqlite::vtab::{
-    Context, CreateVTab, Filters, IndexInfo, Inserts, Module, TransactionVTab, UpdateVTab,
-    Updates, VTab, VTabConnection, VTabCursor, VTabKind,
+    Context, CreateVTab, Filters, IndexInfo, Inserts, Module, TransactionVTab, UpdateVTab, Updates,
+    VTab, VTabConnection, VTabCursor, VTabKind,
 };
 use rusqlite::{Connection, Result};
 
@@ -105,7 +105,10 @@ impl SpikeTab {
 
         // This string tells SQLite what columns the vtab exposes. Only the
         // column list matters; the table name "x" is a placeholder.
-        Ok((Cow::Borrowed(c"CREATE TABLE x(ts INTEGER, value REAL)"), vtab))
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(ts INTEGER, value REAL)"),
+            vtab,
+        ))
     }
 }
 
@@ -226,7 +229,12 @@ struct SpikeCursor<'vtab> {
 
 unsafe impl VTabCursor for SpikeCursor<'_> {
     /// Called at the start of every scan (re-entrant read: Spike B again).
-    fn filter(&mut self, _idx_num: c_int, _idx_str: Option<&str>, _args: &Filters<'_>) -> Result<()> {
+    fn filter(
+        &mut self,
+        _idx_num: c_int,
+        _idx_str: Option<&str>,
+        _args: &Filters<'_>,
+    ) -> Result<()> {
         let host = unsafe { Connection::from_handle(self.db) }?;
         let mut stmt = host.prepare(&format!(
             "SELECT rowid, ts, value FROM \"{}\" ORDER BY rowid",

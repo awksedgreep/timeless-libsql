@@ -901,23 +901,21 @@ impl SpanBlockEngine {
         for s in &spans {
             let k = (s.start_ts as i128 - start as i128) / step as i128;
             let bucket_ts = (start as i128 + k * step as i128) as i64;
-            let entry = stats
-                .entry((bucket_ts, s.service.clone()))
-                .or_insert((
-                    TraceBucketStat {
-                        bucket_ts,
-                        service: s.service.clone(),
-                        spans: 0,
-                        errors: 0,
-                        dur_sum: 0,
-                        dur_min: i64::MAX,
-                        dur_max: i64::MIN,
-                        dur_p50: 0,
-                        dur_p95: 0,
-                        dur_p99: 0,
-                    },
-                    Vec::new(),
-                ));
+            let entry = stats.entry((bucket_ts, s.service.clone())).or_insert((
+                TraceBucketStat {
+                    bucket_ts,
+                    service: s.service.clone(),
+                    spans: 0,
+                    errors: 0,
+                    dur_sum: 0,
+                    dur_min: i64::MAX,
+                    dur_max: i64::MIN,
+                    dur_p50: 0,
+                    dur_p95: 0,
+                    dur_p99: 0,
+                },
+                Vec::new(),
+            ));
             entry.0.spans += 1;
             if s.status == 2 {
                 entry.0.errors += 1;
@@ -955,12 +953,14 @@ impl SpanBlockEngine {
     pub fn ts_range(&self) -> (Option<i64>, Option<i64>) {
         let (mut mn, mut mx) = {
             let index = self.index_lock();
-            index.iter().fold((None, None), |(mn, mx): (Option<i64>, Option<i64>), e| {
-                (
-                    Some(mn.map_or(e.meta.ts_min, |m: i64| m.min(e.meta.ts_min))),
-                    Some(mx.map_or(e.meta.ts_max, |m: i64| m.max(e.meta.ts_max))),
-                )
-            })
+            index
+                .iter()
+                .fold((None, None), |(mn, mx): (Option<i64>, Option<i64>), e| {
+                    (
+                        Some(mn.map_or(e.meta.ts_min, |m: i64| m.min(e.meta.ts_min))),
+                        Some(mx.map_or(e.meta.ts_max, |m: i64| m.max(e.meta.ts_max))),
+                    )
+                })
         };
         for e in self.buffer_lock().iter() {
             mn = Some(mn.map_or(e.start_ts, |m| m.min(e.start_ts)));

@@ -54,8 +54,8 @@ use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_block_store::{self, ShadowBlockStore};
 use crate::shadow_meta;
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
-use crate::table_args;
 use crate::sql_ident;
+use crate::table_args;
 use crate::vtab_tx::{self, SavepointVTab};
 
 /// Register the "timeless_logs" module on a freshly-loaded connection.
@@ -103,9 +103,10 @@ fn load_message_index(
     database: &str,
     table: &str,
 ) -> std::result::Result<bool, String> {
-    Ok(shadow_meta::load_meta_text(conn, database, table, "message_index")?
-        .as_deref()
-        == Some("trigram"))
+    Ok(
+        shadow_meta::load_meta_text(conn, database, table, "message_index")?.as_deref()
+            == Some("trigram"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -179,9 +180,9 @@ impl LogsTab {
             )
             .map_err(module_err)
         })?;
-        shared
-            .engine
-            .set_retention(shadow_meta::load_retention(&host, database, table).map_err(module_err)?);
+        shared.engine.set_retention(
+            shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
+        );
         Ok(shared)
     }
 
@@ -251,15 +252,20 @@ impl LogsTab {
                     }
                 }
             }
-            let keys =
-                parse_index_keys_value(&table, keys_value.as_deref().unwrap_or(""))
-                    .map_err(module_err)?;
+            let keys = parse_index_keys_value(&table, keys_value.as_deref().unwrap_or(""))
+                .map_err(module_err)?;
             store
                 .save_meta("index_keys", keys.join(",").as_bytes())
                 .map_err(module_err)?;
             if let Some(native) = retention {
-                shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
-                    .map_err(module_err)?;
+                shadow_meta::save_meta_text(
+                    &host,
+                    &database,
+                    &table,
+                    "retention",
+                    &native.to_string(),
+                )
+                .map_err(module_err)?;
             }
             if message_index == Some(true) {
                 shadow_meta::save_meta_text(&host, &database, &table, "message_index", "trigram")
@@ -294,8 +300,7 @@ impl LogsTab {
         // calling connection by the DbGuard above, safe because THIS
         // thread already holds the connection mutex recursively) —
         // every later xConnect just bumps the Arc, no re-recovery.
-        let message_trigrams =
-            load_message_index(&host, &database, &table).map_err(module_err)?;
+        let message_trigrams = load_message_index(&host, &database, &table).map_err(module_err)?;
         let key = shared::registry_key(handle, database_name, &table, instance_id);
         let index_keys_for_engine = index_keys.clone();
         let shared_engine = shared::get_or_create(&key, move || {
@@ -317,7 +322,8 @@ impl LogsTab {
         // Declared schema, built at runtime: fixed columns + one HIDDEN
         // TEXT column per index key + the hidden command column named
         // after the table (FTS5 idiom).
-        let mut schema = String::from("CREATE TABLE x(ts INTEGER, level TEXT, message TEXT, metadata TEXT");
+        let mut schema =
+            String::from("CREATE TABLE x(ts INTEGER, level TEXT, message TEXT, metadata TEXT");
         for key in &index_keys {
             schema.push_str(&format!(", \"{}\" TEXT HIDDEN", escape_double_quote(key)));
         }
@@ -444,9 +450,10 @@ impl LogsTab {
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             // Retention: whole-block deletes by ts_max, term rows
             // removed in the same operation.
-            let ts: i64 = ts_str.trim().parse().map_err(|_| {
-                module_err(format!("prune: expected 'prune:<ts>', got {cmd:?}"))
-            })?;
+            let ts: i64 = ts_str
+                .trim()
+                .parse()
+                .map_err(|_| module_err(format!("prune: expected 'prune:<ts>', got {cmd:?}")))?;
             self.shared.engine.prune(ts).map_err(module_err)?;
         } else {
             return Err(module_err(format!(
@@ -595,6 +602,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             base: ffi::sqlite3_vtab_cursor::default(),
             shared: Arc::clone(&self.shared),
             db: self.db,
+            table_name: self.table_name.clone(),
             index_keys: self.index_keys.clone(),
             rows: Vec::new(),
             pos: 0,
@@ -713,7 +721,8 @@ impl UpdateVTab<'_> for LogsTab {
 
         // push() canonicalizes (sorts) metadata, validates, and
         // auto-flushes at the threshold.
-        self.shared.engine
+        self.shared
+            .engine
             .push(LogEntry {
                 ts,
                 level,
@@ -829,6 +838,7 @@ pub struct LogsCursor<'vtab> {
     shared: Arc<SharedEngine<BlockEngine>>,
     /// The connection driving this scan (bound in filter()).
     db: *mut ffi::sqlite3,
+    table_name: String,
     index_keys: Vec<String>,
     rows: Vec<OutRow>,
     pos: usize,
@@ -839,14 +849,14 @@ unsafe impl VTabCursor for LogsCursor<'_> {
     /// Decode the pushed constraints per the best_index bitmask, run
     /// one engine query (sequential block reads — no rayon anywhere on
     /// this path, per the Session 3 deadlock lesson), materialize rows.
-    fn filter(
-        &mut self,
-        idx_num: c_int,
-        _idx_str: Option<&str>,
-        args: &Filters<'_>,
-    ) -> Result<()> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         // Route block reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
+        let _read = self
+            .shared
+            .write_gate
+            .acquire_read(self.db as usize, &self.table_name)
+            .map_err(module_err)?;
 
         // argv slots were claimed in canonical order (level, ts lo,
         // ts hi, index keys), so the mask alone tells us which
@@ -920,7 +930,8 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         let entries = if impossible {
             Vec::new()
         } else {
-            self.shared.engine
+            self.shared
+                .engine
                 .query(&LogQuery {
                     ts_min,
                     ts_max,

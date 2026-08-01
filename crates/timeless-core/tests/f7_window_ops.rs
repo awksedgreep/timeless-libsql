@@ -36,8 +36,7 @@ impl Rng {
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("timeless_f7_test_{name}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("timeless_f7_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -79,7 +78,11 @@ fn naive_increase(win: &[(i64, f64)]) -> f64 {
 }
 
 fn sorted_nanless(win: &[(i64, f64)]) -> Vec<f64> {
-    let mut v: Vec<f64> = win.iter().map(|&(_, x)| x).filter(|x| !x.is_nan()).collect();
+    let mut v: Vec<f64> = win
+        .iter()
+        .map(|&(_, x)| x)
+        .filter(|x| !x.is_nan())
+        .collect();
     v.sort_unstable_by(f64::total_cmp);
     v
 }
@@ -179,11 +182,7 @@ fn window_op_edges() {
     for (ts, v) in [(1, 10.0), (2, f64::NAN), (3, 30.0), (4, 20.0)] {
         engine.write_point(sid, ts, v);
     }
-    let one = |op| {
-        engine
-            .query_window_op_by_id(sid, 4, 4, 1, 10, op)
-            .unwrap()
-    };
+    let one = |op| engine.query_window_op_by_id(sid, 4, 4, 1, 10, op).unwrap();
     // p50 over NaN-excluded sort [10, 20, 30]: rank ceil(1.5)=2 → 20.
     assert_eq!(one(WindowOp::Percentile(50.0)), vec![(4, 20.0)]);
     // p99.9 on 3 values → rank 3 → 30. p1 → rank 1 → 10.
@@ -278,7 +277,9 @@ fn trace_duration_percentiles_match_naive() {
                 .map(|s| s.duration_ns)
                 .collect();
             durs.sort_unstable();
-            let rank = |p: f64| durs[((p / 100.0 * durs.len() as f64).ceil() as usize).clamp(1, durs.len()) - 1];
+            let rank = |p: f64| {
+                durs[((p / 100.0 * durs.len() as f64).ceil() as usize).clamp(1, durs.len()) - 1]
+            };
             assert_eq!(b.dur_p50, rank(50.0), "p50 @ {} {}", b.bucket_ts, b.service);
             assert_eq!(b.dur_p95, rank(95.0), "p95 @ {} {}", b.bucket_ts, b.service);
             assert_eq!(b.dur_p99, rank(99.0), "p99 @ {} {}", b.bucket_ts, b.service);

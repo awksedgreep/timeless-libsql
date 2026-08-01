@@ -79,7 +79,9 @@ impl BlockStore for MemBlockStore {
     ) -> Result<Vec<BlockLoc>, String> {
         let locs: Vec<BlockLoc> = {
             let mut inner = self.lock();
-            add.iter().map(|b| Self::insert_one(&mut inner, b)).collect()
+            add.iter()
+                .map(|b| Self::insert_one(&mut inner, b))
+                .collect()
             // lock released before on_committed: the callback re-locks
             // the ENGINE's index, and holding our lock across it would
             // invite ordering deadlocks in tests for no benefit.

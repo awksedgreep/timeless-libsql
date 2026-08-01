@@ -19,13 +19,13 @@ use std::time::Duration;
 use super::codec::{
     decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
 };
-use crate::blocks::codec::{PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS};
 use super::engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery};
 use super::mem::MemSpanStore;
 use super::{
     kind_from_name, status_from_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore,
     SpanEntry,
 };
+use crate::blocks::codec::{PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS};
 
 /// Deterministic 16-byte trace id from a small seed (t repeated).
 fn tid(t: u8) -> [u8; 16] {
@@ -344,16 +344,19 @@ fn span_codec_round_trips_all_codecs() {
 /// Strategy byte of a codec-5 span block's attributes column (10th
 /// column: header has 10 u32 lengths at offset 22, columns from 62).
 fn attributes_strategy_byte(bytes: &[u8]) -> u8 {
-    let len = |i: usize| {
-        u32::from_le_bytes(bytes[22 + i * 4..26 + i * 4].try_into().unwrap()) as usize
-    };
+    let len =
+        |i: usize| u32::from_le_bytes(bytes[22 + i * 4..26 + i * 4].try_into().unwrap()) as usize;
     bytes[62 + (0..9).map(len).sum::<usize>()]
 }
 
 fn rt_spans_v2(entries: &[SpanEntry], expect_strategy: u8, label: &str) {
     let (bytes, meta) = encode_span_block(entries, CODEC_COLUMNAR_V2, 7).unwrap();
     assert_eq!(meta.codec, CODEC_COLUMNAR_V2);
-    assert_eq!(attributes_strategy_byte(&bytes), expect_strategy, "{label}: strategy byte");
+    assert_eq!(
+        attributes_strategy_byte(&bytes),
+        expect_strategy,
+        "{label}: strategy byte"
+    );
     let back = decode_span_block(&bytes).unwrap();
     assert_eq!(&back, entries, "{label}: round-trip");
 }
@@ -372,11 +375,24 @@ fn span_codec5_shreds_hostile_attribute_shapes_exactly() {
     );
 
     // All spans empty attributes; single span; all same pairs.
-    rt_spans_v2(&[span(1, 1, None, "a", "api", 1, 1, 100, &[])], PAIRS_SHREDDED, "single, empty");
+    rt_spans_v2(
+        &[span(1, 1, None, "a", "api", 1, 1, 100, &[])],
+        PAIRS_SHREDDED,
+        "single, empty",
+    );
     let same: Vec<SpanEntry> = (0..300)
         .map(|i| {
-            span(1, i as u8, None, "op", "api", 1, 1, 1000 + i,
-                 &[("http.method", "GET"), ("http.status", "200")])
+            span(
+                1,
+                i as u8,
+                None,
+                "op",
+                "api",
+                1,
+                1,
+                1000 + i,
+                &[("http.method", "GET"), ("http.status", "200")],
+            )
         })
         .collect();
     rt_spans_v2(&same, PAIRS_SHREDDED, "all same pairs");
@@ -388,8 +404,17 @@ fn span_codec5_key_explosion_falls_back_to_legacy() {
     // (see the cap rationale in blocks/codec.rs), still exact.
     let entries: Vec<SpanEntry> = (0..(SHRED_MAX_KEYS as i64 + 1))
         .map(|i| {
-            span(1, i as u8, None, "op", "api", 1, 1, i,
-                 &[(&format!("key-{i:03}") as &str, "v")])
+            span(
+                1,
+                i as u8,
+                None,
+                "op",
+                "api",
+                1,
+                1,
+                i,
+                &[(&format!("key-{i:03}") as &str, "v")],
+            )
         })
         .collect();
     rt_spans_v2(&entries, PAIRS_LEGACY, "key explosion");
@@ -492,8 +517,7 @@ fn kind_and_status_names_are_strict() {
 fn flush_writes_status_pure_blocks_with_single_status_term() {
     let store = SpyStore::new();
     let put_terms = Arc::clone(&store.put_terms);
-    let engine =
-        SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+    let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
 
     // Interleave all three statuses in one buffer — an unpartitioned
     // flush would write ONE block carrying all three status: terms.
@@ -502,7 +526,11 @@ fn flush_writes_status_pure_blocks_with_single_status_term() {
         let e = span(
             (i % 5) as u8,
             i as u8,
-            if i % 5 == 0 { None } else { Some((i - 1) as u8) },
+            if i % 5 == 0 {
+                None
+            } else {
+                Some((i - 1) as u8)
+            },
             "op",
             "api",
             (i % 5) as u8,
@@ -559,8 +587,7 @@ fn flush_writes_status_pure_blocks_with_single_status_term() {
 fn trace_query_reads_only_blocks_containing_the_trace() {
     let store = SpyStore::new();
     let reads = Arc::clone(&store.reads);
-    let engine =
-        SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+    let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
 
     // Three flushes → three (ok-pure) blocks, each holding different
     // traces; trace 7 lives ONLY in the middle block.
@@ -639,12 +666,26 @@ fn optimize_merges_within_status_partition_only() {
                 .push(span(f * 2, i as u8, None, "op", "api", 1, 1, base + i, &[]))
                 .unwrap();
             engine
-                .push(span(f * 2 + 1, i as u8, None, "op", "api", 1, 2, base + i, &[]))
+                .push(span(
+                    f * 2 + 1,
+                    i as u8,
+                    None,
+                    "op",
+                    "api",
+                    1,
+                    2,
+                    base + i,
+                    &[],
+                ))
                 .unwrap();
         }
         engine.flush().unwrap();
     }
-    assert_eq!(engine.stats().0, 6, "3 flushes x 2 statuses = 6 pure blocks");
+    assert_eq!(
+        engine.stats().0,
+        6,
+        "3 flushes x 2 statuses = 6 pure blocks"
+    );
 
     // Partitioned optimize: 3 ok → 1, 3 error → 1, never across.
     let (removed, written) = engine.optimize().unwrap();
@@ -675,8 +716,7 @@ fn optimize_merges_within_status_partition_only() {
     // status: posting lists. Misclassifying the two pure blocks as
     // mixed would put them in one bucket and a second optimize would
     // merge them (2,1); correct derivation leaves both alone (0,0).
-    let engine2 =
-        SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+    let engine2 = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
     assert_eq!(
         engine2.optimize().unwrap(),
         (0, 0),
@@ -739,10 +779,13 @@ fn recovery_rebuilds_index_and_trace_lookups() {
 
     // "Reopen": fresh engine over the same store sees everything, and
     // the trace + term paths work from recovered state alone.
-    let engine2 =
-        SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+    let engine2 = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
     assert_eq!(engine2.query(&full_range_query()).unwrap(), want);
-    assert_eq!(engine2.stats().0, 2, "ok + error partitions, one block each");
+    assert_eq!(
+        engine2.stats().0,
+        2,
+        "ok + error partitions, one block each"
+    );
     let q = SpanQuery {
         trace_id: Some(tid(3)),
         ..full_range_query()
@@ -756,22 +799,45 @@ fn recovery_rebuilds_index_and_trace_lookups() {
 fn prune_deletes_blocks_buffer_and_trace_rows() {
     let store = SpyStore::new();
     let inner = Arc::clone(&store.inner);
-    let engine =
-        SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+    let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
     for i in 0..10 {
         engine
-            .push(span(1, i as u8, None, "old", "api", 1, 1, 1_000 + i as i64, &[]))
+            .push(span(
+                1,
+                i as u8,
+                None,
+                "old",
+                "api",
+                1,
+                1,
+                1_000 + i as i64,
+                &[],
+            ))
             .unwrap();
     }
     engine.flush().unwrap();
     for i in 0..10 {
         engine
-            .push(span(2, i as u8, None, "new", "api", 1, 1, 9_000 + i as i64, &[]))
+            .push(span(
+                2,
+                i as u8,
+                None,
+                "new",
+                "api",
+                1,
+                1,
+                9_000 + i as i64,
+                &[],
+            ))
             .unwrap();
     }
     engine.flush().unwrap();
-    engine.push(span(3, 0, None, "old-buffered", "api", 1, 1, 500, &[])).unwrap();
-    engine.push(span(4, 0, None, "new-buffered", "api", 1, 1, 9_500, &[])).unwrap();
+    engine
+        .push(span(3, 0, None, "old-buffered", "api", 1, 1, 500, &[]))
+        .unwrap();
+    engine
+        .push(span(4, 0, None, "new-buffered", "api", 1, 1, 9_500, &[]))
+        .unwrap();
     assert_eq!(inner.trace_index_rows(), 2);
 
     assert_eq!(engine.prune(5_000).unwrap(), 1); // one whole block gone
@@ -791,17 +857,34 @@ fn prune_deletes_blocks_buffer_and_trace_rows() {
 fn push_validates_and_canonicalizes_attributes() {
     let engine =
         SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
-    assert!(engine.push(span(1, 1, None, "op", "s", 5, 1, 1, &[])).is_err());
-    assert!(engine.push(span(1, 1, None, "op", "s", 1, 3, 1, &[])).is_err());
+    assert!(engine
+        .push(span(1, 1, None, "op", "s", 5, 1, 1, &[]))
+        .is_err());
+    assert!(engine
+        .push(span(1, 1, None, "op", "s", 1, 3, 1, &[]))
+        .is_err());
 
     // Unsorted + duplicate keys: sorted, last duplicate wins.
     engine
-        .push(span(1, 1, None, "op", "s", 1, 1, 1, &[("z", "1"), ("a", "2"), ("z", "3")]))
+        .push(span(
+            1,
+            1,
+            None,
+            "op",
+            "s",
+            1,
+            1,
+            1,
+            &[("z", "1"), ("a", "2"), ("z", "3")],
+        ))
         .unwrap();
     let got = engine.query(&full_range_query()).unwrap();
     assert_eq!(
         got[0].attributes,
-        vec![("a".to_string(), "2".to_string()), ("z".to_string(), "3".to_string())]
+        vec![
+            ("a".to_string(), "2".to_string()),
+            ("z".to_string(), "3".to_string())
+        ]
     );
 }
 
@@ -816,10 +899,14 @@ fn push_validates_and_canonicalizes_attributes() {
 fn txn_rollback_discards_buffered_spans() {
     let engine =
         SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
-    engine.push(span(1, 1, None, "pre", "s", 0, 0, 10, &[])).unwrap();
+    engine
+        .push(span(1, 1, None, "pre", "s", 0, 0, 10, &[]))
+        .unwrap();
 
     engine.txn_begin();
-    engine.push(span(1, 2, None, "txn", "s", 0, 2, 20, &[])).unwrap();
+    engine
+        .push(span(1, 2, None, "txn", "s", 0, 2, 20, &[]))
+        .unwrap();
     assert_eq!(engine.buffered_count(), 2);
     engine.txn_rollback();
 
@@ -833,11 +920,17 @@ fn txn_rollback_discards_buffered_spans() {
 fn txn_rollback_restores_pretxn_spans_drained_by_intra_txn_flush() {
     let engine =
         SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
-    engine.push(span(1, 1, None, "pre-1", "s", 0, 1, 10, &[])).unwrap();
-    engine.push(span(2, 2, None, "pre-2", "s", 0, 2, 20, &[])).unwrap();
+    engine
+        .push(span(1, 1, None, "pre-1", "s", 0, 1, 10, &[]))
+        .unwrap();
+    engine
+        .push(span(2, 2, None, "pre-2", "s", 0, 2, 20, &[]))
+        .unwrap();
 
     engine.txn_begin();
-    engine.push(span(3, 3, None, "txn-1", "s", 0, 0, 30, &[])).unwrap();
+    engine
+        .push(span(3, 3, None, "txn-1", "s", 0, 0, 30, &[]))
+        .unwrap();
     engine.flush().unwrap(); // drains all 3 into status-pure blocks
     assert_eq!(engine.buffered_count(), 0);
     engine.txn_rollback();
@@ -857,9 +950,13 @@ fn txn_rollback_restores_pretxn_spans_drained_by_intra_txn_flush() {
 fn txn_rollback_undoes_optimize_index_swap() {
     let engine =
         SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
-    engine.push(span(1, 1, None, "a", "s", 0, 1, 10, &[])).unwrap();
+    engine
+        .push(span(1, 1, None, "a", "s", 0, 1, 10, &[]))
+        .unwrap();
     engine.flush().unwrap();
-    engine.push(span(1, 2, None, "b", "s", 0, 1, 20, &[])).unwrap();
+    engine
+        .push(span(1, 2, None, "b", "s", 0, 1, 20, &[]))
+        .unwrap();
     engine.flush().unwrap();
     assert_eq!(engine.stats(), (2, 2, 0));
 
@@ -878,9 +975,13 @@ fn txn_rollback_undoes_optimize_index_swap() {
 fn txn_rollback_undoes_prune_removals_and_buffer_retain() {
     let engine =
         SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
-    engine.push(span(1, 1, None, "a", "s", 0, 1, 10, &[])).unwrap();
+    engine
+        .push(span(1, 1, None, "a", "s", 0, 1, 10, &[]))
+        .unwrap();
     engine.flush().unwrap();
-    engine.push(span(2, 3, None, "buf", "s", 0, 0, 5, &[])).unwrap();
+    engine
+        .push(span(2, 3, None, "buf", "s", 0, 0, 5, &[]))
+        .unwrap();
     assert_eq!(engine.stats(), (1, 1, 1));
 
     engine.txn_begin();
@@ -898,9 +999,13 @@ fn txn_add_then_remove_in_one_txn_cancels() {
     let engine =
         SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
     engine.txn_begin();
-    engine.push(span(3, 4, None, "t1", "s", 0, 1, 30, &[])).unwrap();
+    engine
+        .push(span(3, 4, None, "t1", "s", 0, 1, 30, &[]))
+        .unwrap();
     engine.flush().unwrap();
-    engine.push(span(3, 5, None, "t2", "s", 0, 1, 40, &[])).unwrap();
+    engine
+        .push(span(3, 5, None, "t2", "s", 0, 1, 40, &[]))
+        .unwrap();
     engine.flush().unwrap();
     engine.optimize().unwrap();
     assert_eq!(engine.stats().0, 1);

@@ -112,7 +112,9 @@ const COLUMN_NAMES: [&str; N_COLUMNS] = [
 ];
 
 fn known_codec(codec: u8) -> bool {
-    codec == CODEC_RAW || codec == CODEC_ZSTD || codec == CODEC_COLUMNAR
+    codec == CODEC_RAW
+        || codec == CODEC_ZSTD
+        || codec == CODEC_COLUMNAR
         || codec == CODEC_COLUMNAR_V2
 }
 
@@ -180,10 +182,14 @@ pub fn encode_span_block(
         for (k, v) in &e.attributes {
             let (kb, vb) = (k.as_bytes(), v.as_bytes());
             if kb.len() > u16::MAX as usize {
-                return Err(format!("encode_span_block: attribute key {k:?} longer than 64KB"));
+                return Err(format!(
+                    "encode_span_block: attribute key {k:?} longer than 64KB"
+                ));
             }
             if vb.len() > u32::MAX as usize {
-                return Err(format!("encode_span_block: attribute value for {k:?} too long"));
+                return Err(format!(
+                    "encode_span_block: attribute value for {k:?} too long"
+                ));
             }
             col_attr.extend_from_slice(&(kb.len() as u16).to_le_bytes());
             col_attr.extend_from_slice(kb);
@@ -397,7 +403,14 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
     };
 
     // ── Fixed-width columns: validate lengths up front ───────────────
-    for (idx, want) in [(0usize, n * 16), (1, n * 8), (5, n), (6, n), (7, n * 8), (8, n * 8)] {
+    for (idx, want) in [
+        (0usize, n * 16),
+        (1, n * 8),
+        (5, n),
+        (6, n),
+        (7, n * 8),
+        (8, n * 8),
+    ] {
         if cols[idx].len() != want {
             return Err(format!(
                 "span block: {} is {} bytes, expected {want} for {n} spans",
@@ -444,12 +457,18 @@ pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
             let len = sr.u16(COLUMN_NAMES[col])? as usize;
             let b = sr.take(len, COLUMN_NAMES[col])?;
             let s = std::str::from_utf8(b).map_err(|_| {
-                format!("span block: span {i}: {} is not valid UTF-8", COLUMN_NAMES[col])
+                format!(
+                    "span block: span {i}: {} is not valid UTF-8",
+                    COLUMN_NAMES[col]
+                )
             })?;
             out.push(s.to_owned());
         }
         if sr.remaining() != 0 {
-            return Err(format!("span block: trailing bytes in {}", COLUMN_NAMES[col]));
+            return Err(format!(
+                "span block: trailing bytes in {}",
+                COLUMN_NAMES[col]
+            ));
         }
         Ok(out)
     };

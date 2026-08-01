@@ -4,20 +4,20 @@
 
 use std::collections::HashMap;
 
-use timeless_core::{
-    BlockEngine, BlockEngineConfig, Engine, LogEntry, LogQuery, MemBlockStore,
-};
+use timeless_core::{BlockEngine, BlockEngineConfig, Engine, LogEntry, LogQuery, MemBlockStore};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("timeless_f2_test_{name}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("timeless_f2_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
 fn count_points(engine: &Engine, sid: i64) -> usize {
-    engine.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap().len()
+    engine
+        .query_range_by_id(sid, i64::MIN, i64::MAX)
+        .unwrap()
+        .len()
 }
 
 /// Retention prunes old chunks at flush boundaries, keyed to DATA time,
@@ -167,7 +167,7 @@ fn block_engine_retention() {
         level: None,
         metadata_eq: vec![],
         message_contains: None,
-            message_like_prune: None,
+        message_like_prune: None,
     };
     let rows = engine.query(&q).unwrap();
     assert_eq!(

@@ -8,8 +8,7 @@ use timeless_core::waist::{self, Matcher};
 use timeless_core::{Engine, Labels};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("timeless_m1_test_{name}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("timeless_m1_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -43,7 +42,9 @@ fn setup(name: &str) -> (Engine, Vec<(i64, Labels)>) {
     let empty_range = engine
         .resolve_cached(
             "cpu",
-            &[("host".to_string(), "z".to_string())].into_iter().collect(),
+            &[("host".to_string(), "z".to_string())]
+                .into_iter()
+                .collect(),
         )
         .unwrap();
     engine.write_point(empty_range, 99_999, 1.0); // outside [1000, 2000]
@@ -99,10 +100,10 @@ fn query_multi_matches_naive() {
         vec![],
         vec![eq("host", "a")],
         vec![eq("host", "a"), eq("env", "prod")],
-        vec![neq("env", "prod")],          // matches dev AND absent-env
-        vec![neq("env", "")],              // matches exactly series WITH env
+        vec![neq("env", "prod")], // matches dev AND absent-env
+        vec![neq("env", "")],     // matches exactly series WITH env
         vec![eq("host", "b"), neq("env", "prod")], // the absent-env series
-        vec![eq("host", "nope")],          // no matches
+        vec![eq("host", "nope")], // no matches
     ];
     for matchers in cases {
         let mut got = waist::query_multi(&engine, "cpu", &matchers, 1000, 2000).unwrap();
@@ -136,7 +137,11 @@ fn waist_shapes_and_escape_hatch() {
     // "regex" that keeps host=a), fetch by ids — identical to the
     // matcher path.
     let enumerated = waist::list_series(&engine, "cpu");
-    assert_eq!(enumerated.len(), 5, "list_series shows ALL series (even empty-in-range)");
+    assert_eq!(
+        enumerated.len(),
+        5,
+        "list_series shows ALL series (even empty-in-range)"
+    );
     let ids: Vec<i64> = enumerated
         .iter()
         .filter(|(_, l)| l.get("host").map(String::as_str) == Some("a"))

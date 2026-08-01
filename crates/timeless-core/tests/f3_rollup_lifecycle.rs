@@ -45,6 +45,7 @@ impl ChunkStore for MemChunkStore {
             let meta = ChunkMeta {
                 min_ts: cp.min_ts,
                 max_ts: cp.max_ts,
+                max_ts_val: Some(cp.max_ts_val),
                 point_count: cp.point_count,
                 min_val: cp.min_val,
                 max_val: cp.max_val,
@@ -147,6 +148,7 @@ impl ChunkStore for MemChunkStore {
             let meta = ChunkMeta {
                 min_ts: cp.min_ts,
                 max_ts: cp.max_ts,
+                max_ts_val: None,
                 point_count: cp.bucket_count,
                 min_val: 0.0,
                 max_val: 0.0,
@@ -236,8 +238,14 @@ fn rollup_produce_query_watermark_retention() {
 
     let engine = new_engine(Box::new(Shared(store.clone())));
     engine.set_rollups(vec![
-        RollupTier { resolution: 60, retention: 0 },
-        RollupTier { resolution: 300, retention: 500 },
+        RollupTier {
+            resolution: 60,
+            retention: 0,
+        },
+        RollupTier {
+            resolution: 300,
+            retention: 500,
+        },
     ]);
     let sid = engine.resolve_cached("cpu", &labels()).unwrap();
     for i in 0..100 {
@@ -249,7 +257,9 @@ fn rollup_produce_query_watermark_retention() {
 
     // Query matches naive bucket math over the raw samples.
     let raw = engine.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
-    let rolled = engine.query_rollup_by_id(sid, 60, i64::MIN, i64::MAX).unwrap();
+    let rolled = engine
+        .query_rollup_by_id(sid, 60, i64::MIN, i64::MAX)
+        .unwrap();
     assert!(!rolled.is_empty());
     for b in &rolled {
         let members: Vec<f64> = raw
@@ -272,12 +282,26 @@ fn rollup_produce_query_watermark_retention() {
         .unwrap();
     assert_eq!(rolled.len(), rolled2.len(), "rollup index recovered");
 
+    // The packed-TVF primitive retains requested series order and exactly
+    // matches the established single-series read, including empty ids.
+    let batch = engine2
+        .query_rollup_batch_by_id(&[sid + 10_000, sid], 60, i64::MIN, i64::MAX)
+        .unwrap();
+    assert_eq!(batch[0], (sid + 10_000, Vec::new()));
+    assert_eq!(batch[1], (sid, rolled2.clone()));
+
     // Per-tier retention: advance raw far enough that the 300s tier's
     // 500-unit retention prunes its old chunk, while the 60s tier
     // (retention 0 = forever) keeps everything.
     engine2.set_rollups(vec![
-        RollupTier { resolution: 60, retention: 0 },
-        RollupTier { resolution: 300, retention: 500 },
+        RollupTier {
+            resolution: 60,
+            retention: 0,
+        },
+        RollupTier {
+            resolution: 300,
+            retention: 500,
+        },
     ]);
     engine2.write_point(sid, 5000, 1.0);
     engine2.flush_all().unwrap();
@@ -300,7 +324,10 @@ fn rollup_produce_query_watermark_retention() {
 fn rollups_survive_raw_retention() {
     let engine = new_engine(Box::new(MemChunkStore::new()));
     engine.set_retention(Some(1_000));
-    engine.set_rollups(vec![RollupTier { resolution: 60, retention: 0 }]);
+    engine.set_rollups(vec![RollupTier {
+        resolution: 60,
+        retention: 0,
+    }]);
     let sid = engine.resolve_cached("cpu", &labels()).unwrap();
 
     // Three raw windows, rolled as they settle.
@@ -316,7 +343,11 @@ fn rollups_survive_raw_retention() {
     engine.flush_all().unwrap();
 
     let raw = engine.query_range_by_id(sid, 0, 5_000).unwrap();
-    assert!(raw.is_empty(), "old raw pruned by retention ({} left)", raw.len());
+    assert!(
+        raw.is_empty(),
+        "old raw pruned by retention ({} left)",
+        raw.len()
+    );
 
     let rolled = engine.query_rollup_by_id(sid, 60, 0, 5_000).unwrap();
     assert!(
@@ -332,7 +363,10 @@ fn rollups_survive_raw_retention() {
 #[test]
 fn rollup_rollback_restores_index() {
     let engine = new_engine(Box::new(MemChunkStore::new()));
-    engine.set_rollups(vec![RollupTier { resolution: 60, retention: 0 }]);
+    engine.set_rollups(vec![RollupTier {
+        resolution: 60,
+        retention: 0,
+    }]);
     let sid = engine.resolve_cached("cpu", &labels()).unwrap();
     for i in 0..50 {
         engine.write_point(sid, 1000 + i * 10, i as f64);

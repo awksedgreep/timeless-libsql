@@ -38,7 +38,7 @@
 //!    engine worker thread calling the store would find no binding
 //!    instead of deadlocking on the host connection's mutex).
 //!
-//! 3. WRITER SERIALIZATION ([`WriterGate`]). Each engine keeps ONE
+//! 3. TRANSACTION ACCESS SERIALIZATION ([`WriterGate`]). Each engine keeps ONE
 //!    transaction journal (R5), so only one connection may be inside a
 //!    write transaction on a given table at a time. The gate is
 //!    acquired in xBegin — which SQLite fires only at the FIRST WRITE
@@ -86,21 +86,18 @@
 //! transactions CAN coexist). Its timeout path is unit-tested below
 //! rather than through SQL, because stock SQLite cannot reach it.
 //!
-//! ── SHARED-BUFFER SEMANTICS (documented, accepted) ──────────────────
-//! One engine per table means one in-memory buffer per table: points
-//! connection A has inserted but not yet committed are visible to
-//! connection B's queries IMMEDIATELY (a dirty read of buffered
-//! telemetry). If A rolls back, B stops seeing them. This is the
-//! deliberate trade: buffered points were already documented as
-//! pre-durable (lost on crash), so exposing them pre-commit keeps the
-//! same mental model — FLUSHED data remains fully transactional. One
-//! sharp edge inherited from that trade: if A performs an intra-
-//! transaction 'flush' and lingers before COMMIT, the shared index
-//! briefly points at chunk rows other connections cannot see yet, so a
-//! concurrent query on B can fail with a "row read" error until A
-//! commits — the same bounded window SQLITE_BUSY users already live
-//! with. (In autocommit — the normal telemetry path — the window is a
-//! single statement.)
+//! ── SHARED-BUFFER SEMANTICS ─────────────────────────────────────────
+//! One engine per table means one in-memory buffer per table: committed but
+//! unflushed points written by connection A are immediately visible to
+//! connection B even though they remain pre-durable. While A has any active
+//! write transaction, new readers on other connections receive a bounded
+//! busy-style conflict and retry after A commits or rolls back. A reader that
+//! starts first holds a short read permit while it materializes engine
+//! results, so a writer cannot make the shared index transactional
+//! underneath it. This closes the former window where an intra-txn
+//! flush made the shared index point at rows another connection could
+//! not yet see (surfacing as `chunk row ... Query returned no rows`).
+//! The same writer connection may still read its own transaction.
 //!
 //! ── WHY :memory: / temp DATABASES ARE NOT SHARED ─────────────────────
 //! sqlite3_db_filename() returns an empty string for ":memory:" and
@@ -204,24 +201,53 @@ pub(crate) fn current_conn() -> Result<Connection, String> {
 /// Deliberately NOT a MutexGuard held across callbacks: guard lifetimes
 /// cannot span separate FFI entries. Instead the lock protects a plain
 /// holder token and a Condvar wakes waiters on release.
-pub(crate) struct WriterGate {
+#[derive(Default)]
+struct GateState {
     /// Some(conn_id) while that connection's write txn holds the gate.
-    holder: Mutex<Option<usize>>,
+    writer: Option<usize>,
+    /// Engine reads currently materializing on connections that started
+    /// before a writer. The permit never survives a vtab xFilter callback.
+    readers: usize,
+}
+
+pub(crate) struct WriterGate {
+    state: Mutex<GateState>,
     released: Condvar,
+}
+
+/// Short read-side permit. It prevents a writer from publishing
+/// transaction-private chunk locations while this callback materializes its
+/// result. Reads on the active writer connection need no permit because that
+/// connection can see its own shadow rows and SQLite serializes its callbacks.
+pub(crate) struct ReadPermit<'a> {
+    gate: &'a WriterGate,
+    active: bool,
+}
+
+impl Drop for ReadPermit<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self.gate.lock();
+        debug_assert!(state.readers > 0);
+        state.readers -= 1;
+        self.gate.released.notify_all();
+    }
 }
 
 impl WriterGate {
     fn new() -> Self {
         WriterGate {
-            holder: Mutex::new(None),
+            state: Mutex::new(GateState::default()),
             released: Condvar::new(),
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<usize>> {
-        // Poisoned = a panic while holding; the Option is always valid,
+    fn lock(&self) -> MutexGuard<'_, GateState> {
+        // Poisoned = a panic while holding; GateState remains structurally valid,
         // so continue (matching the lock style used across the repo).
-        self.holder.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Acquire for `conn_id`, waiting up to WRITE_GATE_TIMEOUT for the
@@ -242,37 +268,72 @@ impl WriterGate {
         table: &str,
         timeout: Duration,
     ) -> Result<(), String> {
-        let mut holder = self.lock();
-        if *holder == Some(conn_id) {
+        let mut state = self.lock();
+        if state.writer == Some(conn_id) {
             return Ok(()); // re-entrant: same connection, same txn
         }
         let deadline = Instant::now() + timeout;
-        while holder.is_some() {
+        while state.writer.is_some() || state.readers > 0 {
             let now = Instant::now();
             if now >= deadline {
                 return Err(format!(
-                    "table {table:?} is locked by another connection's write \
-                     transaction (timed out after {:?} waiting for it to commit \
-                     or roll back — retry, as for SQLITE_BUSY)",
-                    timeout
+                    "table {table:?} is busy (timed out after {:?} waiting for {} \
+                     writer and {} active reader(s) — retry, as for SQLITE_BUSY)",
+                    timeout,
+                    if state.writer.is_some() {
+                        "another"
+                    } else {
+                        "no"
+                    },
+                    state.readers
                 ));
             }
             let (g, _) = self
                 .released
-                .wait_timeout(holder, deadline - now)
+                .wait_timeout(state, deadline - now)
                 .unwrap_or_else(|e| e.into_inner());
-            holder = g;
+            state = g;
         }
-        *holder = Some(conn_id);
+        state.writer = Some(conn_id);
         Ok(())
+    }
+
+    /// Acquire a short result-materialization permit. If another connection
+    /// already owns the write transaction, fail immediately with a clear
+    /// busy-style conflict: waiting inside xFilter could deadlock rollback-
+    /// journal SQLite because the SELECT may already hold a shared file lock
+    /// that the writer needs to commit. Callers may retry normally.
+    pub(crate) fn acquire_read(
+        &self,
+        conn_id: usize,
+        table: &str,
+    ) -> Result<ReadPermit<'_>, String> {
+        let mut state = self.lock();
+        match state.writer {
+            Some(writer) if writer == conn_id => Ok(ReadPermit {
+                gate: self,
+                active: false,
+            }),
+            Some(_) => Err(format!(
+                "table {table:?} read is blocked by another connection's active write \
+                 transaction — retry, as for SQLITE_BUSY"
+            )),
+            None => {
+                state.readers += 1;
+                Ok(ReadPermit {
+                    gate: self,
+                    active: true,
+                })
+            }
+        }
     }
 
     /// Release, but only if `conn_id` is actually the holder — commit
     /// and rollback paths can call this unconditionally.
     pub(crate) fn release(&self, conn_id: usize) {
-        let mut holder = self.lock();
-        if *holder == Some(conn_id) {
-            *holder = None;
+        let mut state = self.lock();
+        if state.writer == Some(conn_id) {
+            state.writer = None;
             self.released.notify_all();
         }
     }
@@ -588,7 +649,7 @@ mod tests {
         let err = g.acquire_timeout(2, "metrics", SHORT).unwrap_err();
         assert!(t0.elapsed() >= SHORT, "returned before the bounded wait");
         assert!(
-            err.contains("locked by another connection"),
+            err.contains("table \"metrics\" is busy"),
             "unexpected message: {err}"
         );
         // Holder unaffected by the failed acquire; release frees it.
@@ -603,6 +664,45 @@ mod tests {
         g.release(2); // stray release (e.g. lone xCommit) must not unlock
         assert!(g.acquire_timeout(3, "t", SHORT).is_err());
         g.release(1);
+    }
+
+    #[test]
+    fn read_permit_blocks_a_writer_until_materialization_finishes() {
+        let gate = Arc::new(WriterGate::new());
+        let permit = gate.acquire_read(1, "metrics").unwrap();
+
+        let writer_gate = Arc::clone(&gate);
+        let writer = thread::spawn(move || {
+            writer_gate.acquire_timeout(2, "metrics", Duration::from_secs(10))?;
+            writer_gate.release(2);
+            Ok::<(), String>(())
+        });
+
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !writer.is_finished(),
+            "writer crossed an active read permit"
+        );
+        drop(permit);
+        writer.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn other_connection_read_gets_busy_during_write_transaction() {
+        let gate = WriterGate::new();
+        gate.acquire_timeout(1, "metrics", SHORT).unwrap();
+
+        let err = match gate.acquire_read(2, "metrics") {
+            Ok(_) => panic!("other connection acquired a read permit during a write"),
+            Err(err) => err,
+        };
+        assert!(err.contains("active write transaction"), "{err}");
+
+        // The writer connection can read its own transactional rows.
+        let own = gate.acquire_read(1, "metrics").unwrap();
+        assert!(!own.active);
+        drop(own);
+        gate.release(1);
     }
 
     #[test]

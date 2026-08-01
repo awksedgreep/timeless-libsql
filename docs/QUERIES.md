@@ -1,10 +1,12 @@
 # The query cookbook
 
 Recipes for the query surface: the raw vtabs, the kernel TVFs
-(`timeless_grid`, `timeless_window`, `timeless_rollup`), the bucket
-TVFs, and the catalog TVFs. **Every recipe here is executed by
-`tests/cli.sh` §33** against a fixed dataset with hand-verified
-expected output — if a recipe rots, the suite fails.
+(`timeless_aggregate`, `timeless_latest`, `timeless_grid`, `timeless_window`,
+`timeless_window_batches`, `timeless_raw_frame`, `timeless_rollup`,
+`timeless_rollup_batches`), the bucket TVFs, and the catalog TVFs. Every recipe is
+executed by `tests/cli.sh` against a fixed dataset with hand-verified output
+(cookbook recipes in §33, aggregate contract in §35, latest contract in §36),
+so drift fails the suite.
 
 Conventions used throughout:
 
@@ -33,9 +35,31 @@ SELECT labels, ts, value
 SELECT labels, ts, value
   FROM timeless_window('metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
 
+-- the same kernel, packed into one versioned blob per series for embedded hosts
+SELECT series_id, labels, buckets
+  FROM timeless_window_batches(
+    'metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
+
 -- pre-aggregated tier read (declared via rollups='60@0' on the vtab)
 SELECT labels, ts, value
   FROM timeless_rollup('metrics', 'cpu_usage', NULL, 60, :t0, :t1, 'avg');
+
+-- every rollup field in one versioned blob per matched series
+SELECT series_id, labels, buckets
+  FROM timeless_rollup_batches(
+    'metrics', 'cpu_usage', NULL, 60, :t0, :t1);
+
+-- one scalar reduction per matched series over inclusive bounds
+SELECT series_id, labels, value
+  FROM timeless_aggregate('metrics', 'cpu_usage', NULL, :t0, :t1, 'avg');
+
+-- newest point per matched series over inclusive bounds
+SELECT series_id, labels, ts, value
+  FROM timeless_latest('metrics', 'cpu_usage', NULL, :t0, :t1);
+
+-- every raw series in one versioned columnar frame for wide embedded reads
+SELECT frame
+  FROM timeless_raw_frame('metrics', 'cpu_usage', NULL, :t0, :t1);
 
 -- label filters: plain string = equality; {"neq"|"re"|"nre": ...} match
 -- against the whole value (anchored); absent label matches as ""
@@ -45,6 +69,11 @@ SELECT labels, ts, value FROM timeless_grid('metrics', 'cpu_usage',
 -- discovery: what metrics/series/labels exist? (no chunk reads)
 SELECT * FROM timeless_series('metrics');
 SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
+-- optional metric/matcher arguments filter before catalog rows cross SQLite
+SELECT labels FROM timeless_series('metrics', 'cpu_usage',
+  '{"host": {"re": "web-.*"}, "env": {"neq": "dev"}}');
+SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host',
+  '{"env": {"neq": "dev"}}');
 SELECT * FROM timeless_stats('metrics');
 
 -- logs/traces frequency + latency dashboards
@@ -53,6 +82,136 @@ SELECT bucket_ts, group_key, n
 SELECT bucket_ts, service, n, dur_p50, dur_p95, dur_p99
   FROM timeless_trace_buckets('traces', NULL, :t0, :t1, 60000000000);
 ```
+
+## Scalar aggregate without raw materialization
+
+```sql
+SELECT series_id, labels, value
+  FROM timeless_aggregate(
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1, 'avg');
+-- operations: avg | sum | min | max | count
+```
+
+Bounds are inclusive. Each non-empty matched series produces one row; empty
+series and empty ranges produce none. `count` is a SQLite INTEGER. Fully
+covered chunks use their persisted count/sum/min/max metadata and only partial
+boundary chunks are decoded. As a result, `sum` and `avg` use chunk-local
+left-to-right accumulation followed by chunk-index order; a completely flat
+SQL scan can differ by normal floating-point rounding.
+
+NaN handling is explicit: every NaN is included in `count`; any NaN propagates
+through `sum` and `avg` and surfaces as SQL `NULL`; `min` and `max` ignore NaNs
+when a numeric value exists and otherwise return `NULL`. Label matchers have
+the same equality/anchored-regex/negative semantics as the other metric TVFs.
+
+## Latest point without raw materialization
+
+```sql
+SELECT series_id, labels, ts, value
+  FROM timeless_latest(
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+```
+
+Bounds are inclusive and every non-empty matched series emits at most one row.
+The greatest timestamp wins. If several points share that timestamp, the first
+point in stable raw engine order wins: chunk-index order, then in-chunk order,
+then buffered insertion order. The engine searches candidate chunks by newest
+possible timestamp and stops when an older chunk cannot change the winner.
+
+New chunks persist the first value at their maximum timestamp as nullable
+metadata, avoiding decompression for the common unbounded-latest query. On
+reopen, databases created by an older extension add the column automatically;
+old rows keep `NULL` and use the exact decode fallback until compaction.
+
+## Packed raw frame
+
+`timeless_raw_frame` accepts the same table, metric, matcher filter, and
+inclusive bounds as `timeless_raw_batches`, but returns one row for the whole
+non-empty result set:
+
+```sql
+SELECT frame
+  FROM timeless_raw_frame(
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+```
+
+The versioned little-endian frame is:
+
+```text
+"TRF1" | series_count:u32 | total_points:u64 |
+series_ids:i64[series_count] | point_counts:u32[series_count] |
+timestamps:i64[total_points] | value_bits:u64[total_points]
+```
+
+The point counts partition both point columns into consecutive per-series
+slices. Empty series are omitted, timestamps retain the stable raw-query order
+inside each slice, and IEEE-754 value bits are preserved. Series slice order
+is unspecified, just like SQL rows without `ORDER BY`; use the IDs to attach
+catalog labels. Reject unknown magic, a length inconsistent with either header
+count, or point counts whose sum differs from `total_points`.
+
+The row-oriented `timeless_raw` and one-row-per-series
+`timeless_raw_batches` interfaces remain available. `TRF1` is additive and
+changes neither shadow-table storage nor replication-visible formats.
+
+## Packed window batches
+
+`timeless_window_batches` accepts the same arguments and returns the same
+per-series grid as `timeless_window`, but crosses SQLite once per series rather
+than once per grid point:
+
+```sql
+SELECT series_id, labels, buckets
+  FROM timeless_window_batches(
+    'metrics', 'cpu_usage', '{"env":"prod"}',
+    :t0, :t1, 60, 300, 'avg');
+```
+
+The `buckets` blob is versioned and little-endian:
+
+```text
+"TWB1" | count:u32 | timestamps:i64[count] |
+validity_bitmap:u8[ceil(count/8)] | value_bits:u64[count]
+```
+
+Validity bit `i` is bit `(i % 8)` of byte `(i / 8)`. Sparse calls contain
+only present points, so every bit is set. With trailing `fill='null'`, every
+grid timestamp is encoded and a clear bit represents SQL `NULL`; the matching
+value slot is zero and must be ignored. Reject unknown magic and lengths that
+do not match the count. The row-oriented TVF remains the convenient SQL form;
+the packed form is for host-language and remote boundaries where row crossings
+are measurable.
+
+## Packed rollup batches
+
+`timeless_rollup_batches` takes the table, metric, filter, resolution, and
+inclusive query bounds used by `timeless_rollup`, but returns every aggregate
+at once. One row is emitted per non-empty matched series:
+
+```sql
+SELECT series_id, labels, buckets
+  FROM timeless_rollup_batches(
+    'metrics', 'cpu_usage', '{"env":"prod"}', 300, :t0, :t1);
+```
+
+The versioned little-endian blob is:
+
+```text
+"TRB1" | count:u32 |
+bucket_ts:i64[count] | count:u64[count] | avg_bits:u64[count] |
+sum_bits:u64[count] | min_bits:u64[count] | max_bits:u64[count] |
+last_ts:i64[count] | last_value_bits:u64[count]
+```
+
+`avg` is computed from the stored sum and count at read time, just as it is in
+the row TVF. Count stays integer-exact instead of passing through SQLite REAL;
+the float columns preserve their IEEE-754 bits. `last_ts` exposes the timestamp
+used to choose the stored last value and lets direct users retain the complete
+rollup contract. Reject unknown magic and any length other than `8 + count *
+64` bytes. The on-disk rollup payload and replication-visible shadow rows are
+unchanged; `TRB1` is only the public query envelope. The row-oriented
+`timeless_rollup` remains available for ordinary SQL and single-aggregate
+queries.
 
 ## Gap-fill
 

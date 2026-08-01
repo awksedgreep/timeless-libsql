@@ -1,11 +1,11 @@
 use crate::store::{
-    ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk, StoredSeries, ENC_PCO,
-    ENC_RAW,
+    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk, StoredSeries,
+    ENC_PCO, ENC_RAW,
 };
 
+use crate::rollup::{decode_rollup_payload, encode_rollup_payload, ENC_ROLLUP_V1};
 use crate::rollup::{rollup_buckets, RollupBucket, RollupTier};
 use crate::store::{EncodedRollupChunk, StoredRollupChunk};
-use crate::rollup::{decode_rollup_payload, encode_rollup_payload, ENC_ROLLUP_V1};
 use dashmap::DashMap;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -579,8 +579,10 @@ pub struct Engine {
     /// chunk-index reload when nothing has been committed since — the
     /// per-query cost drops from O(series + chunks) SQL to one cached
     /// single-row SELECT. Own-process mutations do NOT update this, so
-    /// the first refresh after a local flush/compact/prune/new-series
-    /// does one (redundant but harmless) reload.
+    /// SQL hosts may publish the exact transaction generation through
+    /// txn_commit_published(), avoiding a redundant reload after local
+    /// flush/compact/prune/new-series work. Other hosts leave it stale and
+    /// retain the always-correct reload fallback.
     catalog_gen: Mutex<Option<(i64, i64)>>,
     /// F3 rollup index: (partition, resolution, min_ts, seq) → meta for
     /// every persisted rollup chunk. Separate from the raw index ON
@@ -816,9 +818,28 @@ impl Engine {
     /// permanent — drop the journal. Contents are cleared lazily by the
     /// next txn_begin; only the flag needs to flip here.
     pub fn txn_commit(&self) {
+        self.txn_commit_published(None);
+    }
+
+    /// Commit and, when supplied by an authoritative transactional host,
+    /// publish the exact store generation captured during that transaction's
+    /// xSync phase. Engine memory already contains every committed mutation,
+    /// so this token lets the next reader prove that a full catalog/index
+    /// reload would be redundant.
+    ///
+    /// `generation` must have been read from the same transaction after its
+    /// final mutation and while it still excluded other writers. Passing
+    /// `None` preserves the conservative stale-token behavior. The token is
+    /// installed before txn_active becomes false, so a racing refresher sees
+    /// either the active journal or the published generation, never an
+    /// inactive transaction paired with the old token.
+    pub fn txn_commit_published(&self, generation: Option<(i64, i64)>) {
         let mut j = self.txn_lock(); // serialize against in-flight recorders
         while let Some(frame) = j.frames.pop() {
             j.spares.push(frame);
+        }
+        if let Some(generation) = generation {
+            *self.catalog_gen_lock() = Some(generation);
         }
         self.txn_active.store(false, Ordering::SeqCst);
     }
@@ -1926,13 +1947,15 @@ impl Engine {
 
         let min_ts = ts_slice[0];
         let max_ts = ts_slice[ts_slice.len() - 1];
+        let max_ts_index = ts_slice.partition_point(|ts| *ts < max_ts);
+        let max_ts_val = val_slice[max_ts_index];
         let point_count = ts_slice.len() as u32;
-        let (mut min_val, mut max_val, mut sum_val) = (val_slice[0], val_slice[0], 0.0f64);
+        let (mut min_val, mut max_val, mut sum_val) = (f64::NAN, f64::NAN, 0.0f64);
         for &v in val_slice {
-            if v < min_val {
+            if min_val.is_nan() || v < min_val {
                 min_val = v;
             }
-            if v > max_val {
+            if max_val.is_nan() || v > max_val {
                 max_val = v;
             }
             sum_val += v;
@@ -1942,6 +1965,7 @@ impl Engine {
             series_id: key.series_id,
             min_ts,
             max_ts,
+            max_ts_val,
             point_count,
             min_val,
             max_val,
@@ -2255,6 +2279,77 @@ impl Engine {
         self.query_range_by_id_inner(series_id, t_start, t_end)
     }
 
+    /// Query an ordered batch of series without Rayon. This is the
+    /// callback-safe packed-raw primitive: one transition guard and one store
+    /// batch read replace a separate chunk lookup for every series. Results
+    /// retain input series-id order, including empty vectors, and preserve the
+    /// exact stable timestamp ordering of `query_range_by_id`.
+    pub fn query_range_batch_by_id(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        if t_start > t_end {
+            return Ok(series_ids.iter().map(|&sid| (sid, Vec::new())).collect());
+        }
+
+        let _transition = self.transition_read();
+        let matching: Vec<Vec<ChunkMeta>> = {
+            let index = self.index_read();
+            series_ids
+                .iter()
+                .map(|&series_id| {
+                    let pk = PartitionKey { series_id };
+                    index
+                        .range((pk, i64::MIN, u64::MIN)..)
+                        .take_while(|((key, _, _), _)| key == &pk)
+                        .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
+                        .map(|(_, meta)| meta.clone())
+                        .collect()
+                })
+                .collect()
+        };
+        let locs: Vec<ChunkLoc> = matching
+            .iter()
+            .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
+            .collect();
+        let chunk_bytes = self.store.read_chunks(&locs)?;
+        if chunk_bytes.len() != locs.len() {
+            return Err(format!(
+                "batch chunk read returned {} payloads for {} locations",
+                chunk_bytes.len(),
+                locs.len()
+            ));
+        }
+
+        let mut payloads = chunk_bytes.into_iter();
+        let mut result = Vec::with_capacity(series_ids.len());
+        for (&series_id, chunks) in series_ids.iter().zip(matching) {
+            let mut points = Vec::new();
+            for meta in chunks {
+                let bytes = payloads
+                    .next()
+                    .ok_or_else(|| "batch chunk payload order underflow".to_string())?;
+                points.extend(Self::decode_chunk_data(&meta, &bytes, t_start, t_end)?);
+            }
+
+            let pk = PartitionKey { series_id };
+            if let Some(buffer) = self.partitions.get(&pk) {
+                for index in 0..buffer.timestamps.len() {
+                    let timestamp = buffer.timestamps[index];
+                    if timestamp >= t_start && timestamp <= t_end {
+                        points.push((timestamp, buffer.values[index]));
+                    }
+                }
+            }
+            points.sort_by_key(|&(timestamp, _)| timestamp);
+            result.push((series_id, points));
+        }
+        debug_assert!(payloads.next().is_none());
+        Ok(result)
+    }
+
     fn query_range_by_id_inner(
         &self,
         series_id: i64,
@@ -2291,6 +2386,124 @@ impl Engine {
         Ok(results)
     }
 
+    /// Return the newest point in an inclusive range without materializing the
+    /// series history.
+    ///
+    /// This is the callback-safe primitive used by SQLite extensions. Candidate
+    /// chunks are visited by descending possible timestamp and the walk stops
+    /// once an older chunk cannot change the result. Duplicate timestamps retain
+    /// `query_range_by_id` semantics: the first point in its stable engine order
+    /// wins (chunk-index order, then in-chunk order, then buffered insertion
+    /// order).
+    pub fn query_latest_by_id(
+        &self,
+        series_id: i64,
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<Option<(i64, f64)>> {
+        if t_start > t_end {
+            return Ok(None);
+        }
+        let _transition = self.transition_read();
+        self.query_latest_by_id_inner(series_id, t_start, t_end)
+    }
+
+    fn query_latest_by_id_inner(
+        &self,
+        series_id: i64,
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<Option<(i64, f64)>> {
+        let pk = PartitionKey { series_id };
+
+        // Preserve each chunk's position in query_range_by_id's pre-sort
+        // stream. We may read chunks newest-first, but this rank resolves an
+        // equal-timestamp tie exactly as the stable range sort does.
+        let mut chunks: Vec<(usize, ChunkMeta)> = {
+            let index = self.index_read();
+            index
+                .range((pk, i64::MIN, u64::MIN)..)
+                .take_while(|((k, _, _), _)| k == &pk)
+                .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
+                .enumerate()
+                .map(|(rank, (_, meta))| (rank, meta.clone()))
+                .collect()
+        };
+
+        // Highest possible in-range timestamp first. The stable secondary rank
+        // is not required for correctness, but makes the read order deterministic.
+        chunks.sort_by(|(rank_a, a), (rank_b, b)| {
+            b.max_ts
+                .min(t_end)
+                .cmp(&a.max_ts.min(t_end))
+                .then_with(|| rank_a.cmp(rank_b))
+        });
+
+        // (timestamp, value, source rank). Buffered points follow every chunk
+        // in query_range_by_id, so usize::MAX is their source rank.
+        let mut best: Option<(i64, f64, usize)> = None;
+        if let Some(buf) = self.partitions.get(&pk) {
+            for i in 0..buf.timestamps.len() {
+                let ts = buf.timestamps[i];
+                if ts < t_start || ts > t_end {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|(best_ts, _, _)| ts > *best_ts) {
+                    best = Some((ts, buf.values[i], usize::MAX));
+                }
+            }
+        }
+
+        for (rank, meta) in chunks {
+            let possible_ts = meta.max_ts.min(t_end);
+            if best
+                .as_ref()
+                .is_some_and(|(best_ts, _, _)| possible_ts < *best_ts)
+            {
+                break;
+            }
+
+            let chunk_best = if meta.max_ts <= t_end {
+                meta.max_ts_val.map(|value| (meta.max_ts, value))
+            } else {
+                None
+            };
+            let chunk_best = match chunk_best {
+                Some(point) => Some(point),
+                None => {
+                    let points = self.read_chunk_data(&meta, t_start, t_end)?;
+                    let mut decoded_best: Option<(i64, f64)> = None;
+                    for (ts, value) in points {
+                        // Do not replace on equality: the first point within a
+                        // chunk is also first after the stable range sort.
+                        if decoded_best
+                            .as_ref()
+                            .is_none_or(|(best_ts, _)| ts > *best_ts)
+                        {
+                            decoded_best = Some((ts, value));
+                        }
+                    }
+                    decoded_best
+                }
+            };
+
+            let Some((ts, value)) = chunk_best else {
+                continue;
+            };
+            let replace = match best {
+                None => true,
+                Some((best_ts, _, best_rank)) => {
+                    ts > best_ts || (ts == best_ts && rank < best_rank)
+                }
+            };
+            if replace {
+                best = Some((ts, value, rank));
+            }
+        }
+
+        Ok(best.map(|(ts, value, _)| (ts, value)))
+    }
+
     /// Aggregate query by metric + labels. Returns per-series aggregates.
     pub fn query_aggregate_labeled(
         &self,
@@ -2312,8 +2525,8 @@ impl Engine {
         candidates
             .into_par_iter()
             .map(|(sid, labels)| {
-                let value = self.query_aggregate_by_id(sid, t_start, t_end, agg)?;
-                Ok(value.map(|val| (labels, val)))
+                let summary = self.query_aggregate_summary_by_id_inner(sid, t_start, t_end)?;
+                Ok(summary.map(|summary| (labels, summary.value(agg))))
             })
             .filter_map(|result: EngineResult<Option<(Labels, f64)>>| match result {
                 Ok(Some(value)) => Some(Ok(value)),
@@ -2323,13 +2536,28 @@ impl Engine {
             .collect()
     }
 
-    fn query_aggregate_by_id(
+    /// Compute the chunk-aware scalar summary for one series without Rayon.
+    ///
+    /// This is the callback-safe primitive used by SQLite extensions. Fully
+    /// covered chunks use their persisted count/sum/min/max metadata; only
+    /// boundary chunks are decoded. The public wrapper holds the transition
+    /// read guard for the complete operation.
+    pub fn query_aggregate_summary_by_id(
         &self,
         series_id: i64,
         t_start: i64,
         t_end: i64,
-        agg: AggFn,
-    ) -> EngineResult<Option<f64>> {
+    ) -> EngineResult<Option<AggregateSummary>> {
+        let _transition = self.transition_read();
+        self.query_aggregate_summary_by_id_inner(series_id, t_start, t_end)
+    }
+
+    fn query_aggregate_summary_by_id_inner(
+        &self,
+        series_id: i64,
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<Option<AggregateSummary>> {
         let pk = PartitionKey { series_id };
 
         let mut total_count: u64 = 0;
@@ -2348,7 +2576,11 @@ impl Engine {
         };
 
         for meta in &chunks {
-            if meta.min_ts >= t_start && meta.max_ts <= t_end {
+            if meta.min_ts >= t_start
+                && meta.max_ts <= t_end
+                && !meta.min_val.is_nan()
+                && !meta.max_val.is_nan()
+            {
                 total_count += meta.point_count as u64;
                 total_sum += meta.sum_val;
                 global_min = Some(match global_min {
@@ -2360,6 +2592,10 @@ impl Engine {
                     None => meta.max_val,
                 });
             } else {
+                // Boundary chunks must be decoded for bounds. Full chunks
+                // with NaN min/max are decoded as well: current writers store
+                // numeric extrema when any exist, but older chunks could have
+                // inherited a leading NaN in their metadata.
                 let points = self.read_chunk_data(meta, t_start, t_end)?;
                 for &(_, val) in &points {
                     total_count += 1;
@@ -2397,12 +2633,11 @@ impl Engine {
         if total_count == 0 {
             return Ok(None);
         }
-        Ok(Some(match agg {
-            AggFn::Avg => total_sum / total_count as f64,
-            AggFn::Sum => total_sum,
-            AggFn::Min => global_min.unwrap(),
-            AggFn::Max => global_max.unwrap(),
-            AggFn::Count => total_count as f64,
+        Ok(Some(AggregateSummary {
+            count: total_count,
+            sum: total_sum,
+            min: global_min.unwrap(),
+            max: global_max.unwrap(),
         }))
     }
 
@@ -2482,9 +2717,7 @@ impl Engine {
             WindowOp::Agg(agg) => Some(match agg {
                 AggFn::Count => win.len() as f64,
                 AggFn::Sum => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v),
-                AggFn::Avg => {
-                    win.iter().fold(0.0f64, |acc, &(_, v)| acc + v) / win.len() as f64
-                }
+                AggFn::Avg => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v) / win.len() as f64,
                 AggFn::Min => win[1..]
                     .iter()
                     .fold(win[0].1, |acc, &(_, v)| f64::min(acc, v)),
@@ -2638,7 +2871,95 @@ impl Engine {
         let _transition = self.transition_read();
         let samples =
             self.query_range_by_id_inner(series_id, start.saturating_sub(window), stop)?;
-        Ok(Self::window_op_walk(&samples, start, stop, step, window, op))
+        Ok(Self::window_op_walk(
+            &samples, start, stop, step, window, op,
+        ))
+    }
+
+    /// Evaluate one window operation for an ordered batch of series without
+    /// Rayon. This is the callback-safe host/SQLite primitive: validation and
+    /// the transition read guard are paid once, while results retain the input
+    /// series-id order (including empty vectors).
+    pub fn query_window_op_batch_by_id(
+        &self,
+        series_ids: &[i64],
+        start: i64,
+        stop: i64,
+        step: i64,
+        window: i64,
+        op: WindowOp,
+    ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        match op {
+            WindowOp::Percentile(q) if !(q > 0.0 && q <= 100.0) => {
+                return Err(format!("percentile must be in (0, 100], got {q}"));
+            }
+            WindowOp::TrimmedMean(q) if !(0.0..50.0).contains(&q) => {
+                return Err(format!("trim fraction must be in [0, 50), got {q}"));
+            }
+            _ => {}
+        }
+        if Self::validate_window(start, stop, step, window)? == 0 {
+            return Ok(series_ids.iter().map(|&sid| (sid, Vec::new())).collect());
+        }
+
+        let _transition = self.transition_read();
+        let range_start = start.saturating_sub(window);
+        let matching: Vec<Vec<ChunkMeta>> = {
+            let index = self.index_read();
+            series_ids
+                .iter()
+                .map(|&sid| {
+                    let pk = PartitionKey { series_id: sid };
+                    index
+                        .range((pk, i64::MIN, u64::MIN)..)
+                        .take_while(|((key, _, _), _)| key == &pk)
+                        .filter(|(_, meta)| meta.min_ts <= stop && meta.max_ts >= range_start)
+                        .map(|(_, meta)| meta.clone())
+                        .collect()
+                })
+                .collect()
+        };
+        let locs: Vec<ChunkLoc> = matching
+            .iter()
+            .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
+            .collect();
+        let chunk_bytes = self.store.read_chunks(&locs)?;
+        if chunk_bytes.len() != locs.len() {
+            return Err(format!(
+                "batch chunk read returned {} payloads for {} locations",
+                chunk_bytes.len(),
+                locs.len()
+            ));
+        }
+
+        let mut payloads = chunk_bytes.into_iter();
+        let mut result = Vec::with_capacity(series_ids.len());
+        for (&sid, chunks) in series_ids.iter().zip(matching) {
+            let mut samples = Vec::new();
+            for meta in chunks {
+                let bytes = payloads
+                    .next()
+                    .ok_or_else(|| "batch chunk payload order underflow".to_string())?;
+                samples.extend(Self::decode_chunk_data(&meta, &bytes, range_start, stop)?);
+            }
+
+            let pk = PartitionKey { series_id: sid };
+            if let Some(buf) = self.partitions.get(&pk) {
+                for index in 0..buf.timestamps.len() {
+                    let timestamp = buf.timestamps[index];
+                    if timestamp >= range_start && timestamp <= stop {
+                        samples.push((timestamp, buf.values[index]));
+                    }
+                }
+            }
+            samples.sort_by_key(|&(timestamp, _)| timestamp);
+            result.push((
+                sid,
+                Self::window_op_walk(&samples, start, stop, step, window, op),
+            ));
+        }
+        debug_assert!(payloads.next().is_none());
+        Ok(result)
     }
 
     /// Q2(b), single series, rayon-free — safe from vtab callbacks.
@@ -2657,7 +2978,14 @@ impl Engine {
         let _transition = self.transition_read();
         let samples =
             self.query_range_by_id_inner(series_id, start.saturating_sub(window), stop)?;
-        Ok(Self::window_op_walk(&samples, start, stop, step, window, WindowOp::Agg(agg)))
+        Ok(Self::window_op_walk(
+            &samples,
+            start,
+            stop,
+            step,
+            window,
+            WindowOp::Agg(agg),
+        ))
     }
 
     /// Q2(a): last sample per grid point, all matching series, parallel.
@@ -2738,7 +3066,8 @@ impl Engine {
             .map(|(sid, labels)| {
                 let samples =
                     self.query_range_by_id_inner(sid, start.saturating_sub(window), stop)?;
-                let points = Self::window_op_walk(&samples, start, stop, step, window, WindowOp::Agg(agg));
+                let points =
+                    Self::window_op_walk(&samples, start, stop, step, window, WindowOp::Agg(agg));
                 Ok(if points.is_empty() {
                     None
                 } else {
@@ -2762,7 +3091,9 @@ impl Engine {
         rollups.clear();
         for chunk in stored {
             let key = (
-                PartitionKey { series_id: chunk.series_id },
+                PartitionKey {
+                    series_id: chunk.series_id,
+                },
                 chunk.resolution,
                 chunk.meta.min_ts,
                 self.next_chunk_seq(),
@@ -2836,7 +3167,9 @@ impl Engine {
             let r = tier.resolution;
             // Eligible buckets: B + R - 1 <= high_water - R (one full
             // bucket of settle). produce_to is that last coverage end.
-            let Some(limit) = high_water.checked_sub(r) else { continue };
+            let Some(limit) = high_water.checked_sub(r) else {
+                continue;
+            };
             let last_bucket = match limit.checked_sub(r - 1) {
                 Some(x) => x.div_euclid(r) * r,
                 None => continue,
@@ -2895,7 +3228,9 @@ impl Engine {
         let mut rollups = self.rollup_write();
         for (chunk, loc) in batch.iter().zip(locs) {
             let key = (
-                PartitionKey { series_id: chunk.series_id },
+                PartitionKey {
+                    series_id: chunk.series_id,
+                },
                 chunk.resolution,
                 chunk.min_ts,
                 self.next_chunk_seq(),
@@ -2903,6 +3238,7 @@ impl Engine {
             let meta = ChunkMeta {
                 min_ts: chunk.min_ts,
                 max_ts: chunk.max_ts,
+                max_ts_val: None,
                 point_count: chunk.bucket_count,
                 min_val: 0.0,
                 max_val: 0.0,
@@ -2956,6 +3292,79 @@ impl Engine {
         Ok(out)
     }
 
+    /// Read one explicit rollup tier for an ordered series batch. This is the
+    /// callback-safe packed-TVF primitive: one transition guard and one store
+    /// batch read replace a separate SQLite chunk lookup per series. Results
+    /// retain the input series-id order, including empty vectors.
+    pub fn query_rollup_batch_by_id(
+        &self,
+        series_ids: &[i64],
+        resolution: i64,
+        start: i64,
+        stop: i64,
+    ) -> EngineResult<Vec<(i64, Vec<RollupBucket>)>> {
+        if resolution <= 0 {
+            return Err(format!("resolution must be positive, got {resolution}"));
+        }
+
+        let _transition = self.transition_read();
+        let matching: Vec<Vec<ChunkMeta>> = {
+            let rollups = self.rollup_read();
+            series_ids
+                .iter()
+                .map(|&series_id| {
+                    let pk = PartitionKey { series_id };
+                    rollups
+                        .range(
+                            (pk, resolution, i64::MIN, u64::MIN)
+                                ..=(pk, resolution, i64::MAX, u64::MAX),
+                        )
+                        .filter(|(_, meta)| meta.min_ts <= stop && meta.max_ts >= start)
+                        .map(|(_, meta)| meta.clone())
+                        .collect()
+                })
+                .collect()
+        };
+        let locs: Vec<ChunkLoc> = matching
+            .iter()
+            .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
+            .collect();
+        let chunk_bytes = self
+            .store
+            .read_chunks(&locs)
+            .map_err(|err| format!("rollup chunk read failed: {err}"))?;
+        if chunk_bytes.len() != locs.len() {
+            return Err(format!(
+                "batch rollup read returned {} payloads for {} locations",
+                chunk_bytes.len(),
+                locs.len()
+            ));
+        }
+
+        let mut payloads = chunk_bytes.into_iter();
+        let mut result = Vec::with_capacity(series_ids.len());
+        for (&series_id, chunks) in series_ids.iter().zip(matching) {
+            let mut buckets = Vec::new();
+            for _meta in chunks {
+                let bytes = payloads
+                    .next()
+                    .ok_or_else(|| "batch rollup payload order underflow".to_string())?;
+                let payload = &bytes.data[bytes.ts_range.clone()];
+                buckets.extend(
+                    decode_rollup_payload(payload)?
+                        .into_iter()
+                        .filter(|bucket| {
+                            bucket.bucket_ts <= stop
+                                && bucket.bucket_ts.saturating_add(resolution - 1) >= start
+                        }),
+                );
+            }
+            result.push((series_id, buckets));
+        }
+        debug_assert!(payloads.next().is_none());
+        Ok(result)
+    }
+
     /// Per-tier retention: drop rollup chunks whose coverage ended
     /// before `cutoff`. Mirrors delete_before's structure (transition
     /// exclusive, journaled removals, rows deleted in the caller's
@@ -3000,6 +3409,15 @@ impl Engine {
         t_end: i64,
     ) -> Result<Vec<(i64, f64)>, String> {
         let bytes = self.store.read_chunk(&meta.loc)?;
+        Self::decode_chunk_data(meta, &bytes, t_start, t_end)
+    }
+
+    fn decode_chunk_data(
+        meta: &ChunkMeta,
+        bytes: &ChunkBytes,
+        t_start: i64,
+        t_end: i64,
+    ) -> Result<Vec<(i64, f64)>, String> {
         let (ts_data, val_data) = (bytes.ts(), bytes.val());
 
         let (timestamps, values): (Vec<i64>, Vec<f64>) = if meta.encoding == ENC_RAW {
@@ -3162,6 +3580,19 @@ impl Engine {
 
     // ── Authoritative state recovery/refresh ─────────────────────────
 
+    /// Read the authoritative store token for transaction publication.
+    /// SQLite hosts call this from xSync, while the calling connection still
+    /// sees its own final transactional state and excludes other writers.
+    /// Non-authoritative stores return None and keep the reload fallback.
+    pub fn capture_catalog_generation(&self) -> EngineResult<Option<(i64, i64)>> {
+        if !self.authoritative_series {
+            return Ok(None);
+        }
+        self.store
+            .catalog_generation()
+            .map_err(|err| format!("failed to capture catalog generation: {err}"))
+    }
+
     fn validate_chunk_series(
         registry: &SeriesRegistry,
         chunks: &[StoredChunk],
@@ -3255,7 +3686,9 @@ impl Engine {
         let mut new_rollups = BTreeMap::new();
         for chunk in rollup_chunks {
             let key = (
-                PartitionKey { series_id: chunk.series_id },
+                PartitionKey {
+                    series_id: chunk.series_id,
+                },
                 chunk.resolution,
                 chunk.meta.min_ts,
                 self.next_chunk_seq(),
@@ -3289,9 +3722,10 @@ impl Engine {
         {
             let index = self.index_read();
             for ((pk, _, _), meta) in index.iter() {
-                let entry = chunk_agg
-                    .entry(pk.series_id)
-                    .or_insert((meta.min_ts, meta.max_ts, 0, 0));
+                let entry =
+                    chunk_agg
+                        .entry(pk.series_id)
+                        .or_insert((meta.min_ts, meta.max_ts, 0, 0));
                 entry.0 = entry.0.min(meta.min_ts);
                 entry.1 = entry.1.max(meta.max_ts);
                 entry.2 += meta.point_count as u64;
@@ -3302,8 +3736,7 @@ impl Engine {
         let mut buf_agg: HashMap<i64, (usize, i64, i64)> = HashMap::new();
         for entry in self.partitions.iter() {
             let buf = entry.value();
-            let (Some(&mn), Some(&mx)) =
-                (buf.timestamps.iter().min(), buf.timestamps.iter().max())
+            let (Some(&mn), Some(&mx)) = (buf.timestamps.iter().min(), buf.timestamps.iter().max())
             else {
                 continue;
             };
@@ -3337,6 +3770,101 @@ impl Engine {
                 }
             })
             .collect();
+        out.sort_by(|a, b| (&a.name, a.series_id).cmp(&(&b.name, b.series_id)));
+        out
+    }
+
+    /// Catalog rows for one metric and an indexed equality subset.
+    ///
+    /// Unlike `series_overview`, this walks chunk-index ranges and buffers
+    /// only for candidate series. SQL discovery TVFs apply regex/negative
+    /// matchers to these rows before crossing the host boundary, so a
+    /// selective catalog query does not pay O(all chunks) first.
+    pub fn series_overview_matching(
+        &self,
+        metric_name: &str,
+        label_filter: &Labels,
+    ) -> Vec<SeriesOverview> {
+        let _transition = self.transition_read();
+        let series_ids = self.series_read().find_series(metric_name, label_filter);
+        self.series_overview_by_ids_inner(&series_ids)
+    }
+
+    /// Catalog rows for an already selected series-id set. This lets an SQL
+    /// host apply regex/negative matchers to registry labels before it asks
+    /// the engine to aggregate chunk and buffer metadata.
+    pub fn series_overview_by_ids(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
+        let _transition = self.transition_read();
+        self.series_overview_by_ids_inner(series_ids)
+    }
+
+    fn series_overview_by_ids_inner(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
+        let candidates: Vec<(i64, String, Labels)> = {
+            let reg = self.series_read();
+            series_ids
+                .iter()
+                .copied()
+                .filter_map(|series_id| {
+                    reg.info_for(series_id)
+                        .map(|info| (series_id, info.metric_name.clone(), info.labels.clone()))
+                })
+                .collect()
+        };
+
+        let mut chunk_agg: HashMap<i64, (i64, i64, u64, usize)> = HashMap::new();
+        {
+            let index = self.index_read();
+            for (series_id, _, _) in &candidates {
+                let pk = PartitionKey {
+                    series_id: *series_id,
+                };
+                for ((_, _, _), meta) in index
+                    .range((pk, i64::MIN, u64::MIN)..)
+                    .take_while(|((key, _, _), _)| key == &pk)
+                {
+                    let entry =
+                        chunk_agg
+                            .entry(*series_id)
+                            .or_insert((meta.min_ts, meta.max_ts, 0, 0));
+                    entry.0 = entry.0.min(meta.min_ts);
+                    entry.1 = entry.1.max(meta.max_ts);
+                    entry.2 += meta.point_count as u64;
+                    entry.3 += 1;
+                }
+            }
+        }
+
+        let mut out = Vec::with_capacity(candidates.len());
+        for (series_id, name, labels) in candidates {
+            let chunks = chunk_agg.get(&series_id);
+            let buffered = self.partitions.get(&PartitionKey { series_id });
+            let buffer_count = buffered.as_ref().map_or(0, |buf| buf.timestamps.len());
+            let buffer_min = buffered
+                .as_ref()
+                .and_then(|buf| buf.timestamps.iter().min().copied());
+            let buffer_max = buffered
+                .as_ref()
+                .and_then(|buf| buf.timestamps.iter().max().copied());
+            let min_ts = match (chunks.map(|c| c.0), buffer_min) {
+                (Some(chunk), Some(buffer)) => Some(chunk.min(buffer)),
+                (chunk, buffer) => chunk.or(buffer),
+            };
+            let max_ts = match (chunks.map(|c| c.1), buffer_max) {
+                (Some(chunk), Some(buffer)) => Some(chunk.max(buffer)),
+                (chunk, buffer) => chunk.or(buffer),
+            };
+
+            out.push(SeriesOverview {
+                series_id,
+                name,
+                labels,
+                min_ts,
+                max_ts,
+                disk_points: chunks.map_or(0, |chunk| chunk.2),
+                chunks: chunks.map_or(0, |chunk| chunk.3),
+                buffered: buffer_count,
+            });
+        }
         out.sort_by(|a, b| (&a.name, a.series_id).cmp(&(&b.name, b.series_id)));
         out
     }
@@ -3474,6 +4002,37 @@ pub enum AggFn {
     Min,
     Max,
     Count,
+}
+
+/// Chunk-aware statistics for one non-empty series range.
+///
+/// `sum` follows the engine's persisted-chunk accumulation order: points are
+/// folded left-to-right within a chunk, then chunk sums and buffered points are
+/// folded in index/insertion order. Callers that compare against a completely
+/// flat point scan should use an explicit floating-point tolerance for
+/// `sum`/`avg`; count is integer-exact and min/max preserve the engine rules.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AggregateSummary {
+    count: u64,
+    sum: f64,
+    min: f64,
+    max: f64,
+}
+
+impl AggregateSummary {
+    pub fn count(self) -> u64 {
+        self.count
+    }
+
+    pub fn value(self, agg: AggFn) -> f64 {
+        match agg {
+            AggFn::Avg => self.sum / self.count as f64,
+            AggFn::Sum => self.sum,
+            AggFn::Min => self.min,
+            AggFn::Max => self.max,
+            AggFn::Count => self.count as f64,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

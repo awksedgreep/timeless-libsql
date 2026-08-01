@@ -6,7 +6,7 @@
 //! is named after the table — the FTS5 command idiom):
 //!
 //!   CREATE TABLE x(name TEXT, ts INTEGER, value REAL, labels TEXT,
-//!                  "<table>" HIDDEN)
+//!                  series_id INTEGER HIDDEN, "<table>" HIDDEN)
 //!
 //! Write path:  INSERT INTO metrics(name, ts, value, labels) VALUES (...)
 //!              → resolve series → in-memory partition buffer (Tier 1).
@@ -20,12 +20,15 @@
 //!   BLOB, first byte 0x01
 //!         → Tier 2 batch-blob-v0 ingest (PLAN.md "Batch blob format
 //!           v0"; 0x01 is the v0 version byte).
+//!   BLOB, first byte 0x02
+//!         → resolved-series batch v1 ingest (durable series ids +
+//!           timestamp/value columns).
 //!   BLOB, first byte anything else printable
 //!         → Prometheus text exposition body — a raw scrape:
 //!             INSERT INTO metrics(metrics) VALUES (readfile('scrape'));
 //!           Valid exposition text can only start with a metric-name
 //!           byte, '#', or whitespace, so it can never collide with the
-//!           batch version byte. Bytes 0x00 and 0x02–0x08 are RESERVED
+//!           batch version byte. Bytes 0x00 and 0x03–0x08 are RESERVED
 //!           for future batch versions and rejected loudly ("unknown
 //!           blob format") so a future v1 blob fed to an old build fails
 //!           instead of being mis-parsed as text.
@@ -75,10 +78,10 @@ use timeless_core::{Engine, Labels};
 use crate::batch::BatchReader;
 use crate::flatjson::{labels_to_json, parse_labels_json};
 use crate::shadow_meta;
-use crate::table_args;
 use crate::shadow_store::{self, ShadowTableStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
 use crate::sql_ident;
+use crate::table_args;
 use crate::vtab_tx::{self, SavepointVTab};
 
 /// Register the "timeless_metrics" module on a freshly-loaded connection.
@@ -148,6 +151,12 @@ pub struct MetricsTab {
     /// per-connection — exactly the granularity a "who holds it" flag
     /// needs — and it lets the insert hot path skip the gate mutex.
     gate_held: bool,
+    /// Exact authoritative token captured in xSync after this transaction's
+    /// final shadow-table mutation. xCommit publishes it together with the
+    /// already-updated shared engine state, preventing the next reader from
+    /// redundantly reloading the complete series and chunk catalogs. xRollback
+    /// discards it, so an aborted transaction can never publish its token.
+    pending_catalog_generation: Option<(i64, i64)>,
     /// Synthetic rowid source for inserts (see insert()).
     rowid_counter: i64,
 }
@@ -178,7 +187,6 @@ impl MetricsTab {
         // proven by the spike): from_handle borrows without owning.
         let host = unsafe { Connection::from_handle(handle) }?;
         if is_create {
-
             // Retention plan (PLAN.md "Pruning & retention"): incremental
             // auto-vacuum lets maintenance return freed pages to the OS in
             // small slices instead of a full VACUUM rewrite. The pragma
@@ -194,6 +202,7 @@ impl MetricsTab {
             // imports and validates the legacy registry blob.
             host.execute_batch(&shadow_store::series_ddl(&database, &table))?;
         }
+        shadow_store::ensure_max_ts_val_column(&host, &database, &table)?;
         let instance_id =
             shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
         // xConnect: the shadow tables already exist in the reopened db.
@@ -249,8 +258,14 @@ impl MetricsTab {
                 }
             }
             if let Some(native) = retention {
-                shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
-                    .map_err(module_err)?;
+                shadow_meta::save_meta_text(
+                    &host,
+                    &database,
+                    &table,
+                    "retention",
+                    &native.to_string(),
+                )
+                .map_err(module_err)?;
             }
             if let Some((_, spec)) = &rollups {
                 shadow_meta::save_meta_text(&host, &database, &table, "rollups", spec)
@@ -264,12 +279,17 @@ impl MetricsTab {
             )
         };
         shared_engine.engine.set_retention(retention);
-        shared_engine.engine.set_rollups(rollups.unwrap_or_default());
+        shared_engine
+            .engine
+            .set_rollups(rollups.unwrap_or_default());
 
-        // Declared schema. The hidden 5th column is named after the table
+        // Declared schema. `series_id` is an embedding fast path: callers
+        // may resolve once and write by durable catalog id. The final hidden
+        // column is named after the table
         // itself so `INSERT INTO metrics(metrics) VALUES('flush')` works.
         let schema = format!(
-            "CREATE TABLE x(name TEXT, ts INTEGER, value REAL, labels TEXT, \"{}\" HIDDEN)",
+            "CREATE TABLE x(name TEXT, ts INTEGER, value REAL, labels TEXT, \
+             series_id INTEGER HIDDEN, \"{}\" HIDDEN)",
             escape_double_quote(&table)
         );
         let schema = CString::new(schema)
@@ -285,6 +305,7 @@ impl MetricsTab {
                 shared: shared_engine,
                 key,
                 gate_held: false,
+                pending_catalog_generation: None,
                 rowid_counter: 0,
             },
         ))
@@ -309,6 +330,7 @@ impl MetricsTab {
         let instance_id =
             shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
         host.execute_batch(&shadow_store::series_ddl(database, table))?;
+        shadow_store::ensure_max_ts_val_column(&host, database, table)?;
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
         let shared = shared::get_or_create(&key, || {
             let store = ShadowTableStore::new(database, table);
@@ -322,9 +344,9 @@ impl MetricsTab {
             )
             .map_err(module_err)
         })?;
-        shared
-            .engine
-            .set_retention(shadow_meta::load_retention(&host, database, table).map_err(module_err)?);
+        shared.engine.set_retention(
+            shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
+        );
         shared.engine.set_rollups(
             load_rollups(&host, database, table)
                 .map_err(module_err)?
@@ -373,7 +395,8 @@ impl MetricsTab {
             // COMPACT_MIN_AGE_SECS recent-window rule) so narrow
             // dashboard queries keep cheap small chunks; for the POC we
             // want compaction observable immediately.
-            self.shared.engine
+            self.shared
+                .engine
                 .compact_partitions(i64::MAX)
                 .map_err(module_err)?;
             // F3: compaction is the natural rollup moment (both are
@@ -453,7 +476,9 @@ impl MetricsTab {
                 BTreeMap::new()
             } else {
                 let txt = std::str::from_utf8(labels_bytes).map_err(|_| {
-                    module_err(format!("batch blob: series {i}: labels are not valid UTF-8"))
+                    module_err(format!(
+                        "batch blob: series {i}: labels are not valid UTF-8"
+                    ))
                 })?;
                 parse_labels_json(txt)
                     .map_err(|e| module_err(format!("batch blob: series {i}: {e}")))?
@@ -506,8 +531,7 @@ impl MetricsTab {
         // explicitly, exactly as PLAN.md says).
         let mut raw: Vec<u8> = Vec::with_capacity(n_points * 24);
         for i in 0..n_points {
-            let idx =
-                u32::from_le_bytes(idx_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+            let idx = u32::from_le_bytes(idx_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
             let sid = sids[idx]; // idx proven in-range in step 4
             let ts = i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap());
             // Values are opaque 8-byte payloads here: round-tripping the
@@ -518,8 +542,76 @@ impl MetricsTab {
             raw.extend_from_slice(&ts.to_ne_bytes());
             raw.extend_from_slice(&val_bits.to_ne_bytes());
         }
-        self.shared.engine.write_batch_raw(&raw).map_err(module_err)?;
+        self.shared
+            .engine
+            .write_batch_raw(&raw)
+            .map_err(module_err)?;
 
+        Ok(n_points as i64)
+    }
+
+    /// Resolved-series batch v1 (version byte 0x02). This is the embedded
+    /// host fast path: resolve each durable catalog id once, then send only
+    /// columnar ids/timestamps/value bits on subsequent batches.
+    ///
+    /// Layout, little-endian:
+    ///   version:u8=2, flags:u8=0, reserved:u16=0, n_points:u32,
+    ///   series_id:i64[n], ts:i64[n], value_bits:u64[n].
+    fn ingest_resolved_batch(&mut self, blob: &[u8]) -> Result<i64> {
+        let mut r = BatchReader::new(blob);
+        let version = r.u8("version")?;
+        if version != 0x02 {
+            return Err(module_err(format!(
+                "resolved batch: unsupported version 0x{version:02x}"
+            )));
+        }
+        let flags = r.u8("flags")?;
+        if flags != 0 {
+            return Err(module_err(format!(
+                "resolved batch: unknown flags 0x{flags:02x}; must be 0"
+            )));
+        }
+        r.skip(2, "reserved header bytes")?;
+        let n_points = r.u32("n_points")? as usize;
+        let column_bytes = n_points
+            .checked_mul(8)
+            .ok_or_else(|| module_err("resolved batch: point count overflows this host".into()))?;
+        let sid_bytes = r.take(column_bytes, "series id column")?;
+        let ts_bytes = r.take(column_bytes, "timestamp column")?;
+        let val_bytes = r.take(column_bytes, "value column")?;
+        if r.remaining() != 0 {
+            return Err(module_err(format!(
+                "resolved batch: {} trailing byte(s) after value column",
+                r.remaining()
+            )));
+        }
+
+        // Validate all ids before mutating any partition buffer.
+        {
+            let registry = self.shared.engine.series_read();
+            for (i, bytes) in sid_bytes.chunks_exact(8).enumerate() {
+                let sid = i64::from_le_bytes(bytes.try_into().unwrap());
+                if registry.info_for(sid).is_none() {
+                    return Err(module_err(format!(
+                        "resolved batch: point {i}: unknown series id {sid}; batch rejected"
+                    )));
+                }
+            }
+        }
+
+        let mut raw = Vec::with_capacity(n_points * 24);
+        for i in 0..n_points {
+            let sid = i64::from_le_bytes(sid_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+            let ts = i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+            let val_bits = u64::from_le_bytes(val_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+            raw.extend_from_slice(&sid.to_ne_bytes());
+            raw.extend_from_slice(&ts.to_ne_bytes());
+            raw.extend_from_slice(&val_bits.to_ne_bytes());
+        }
+        self.shared
+            .engine
+            .write_batch_raw(&raw)
+            .map_err(module_err)?;
         Ok(n_points as i64)
     }
 
@@ -662,6 +754,7 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
             // The cursor re-binds this connection in filter(): its
             // chunk reads must run on the connection driving the scan.
             db: self.db,
+            table_name: self.table_name.clone(),
             rows: Vec::new(),
             pos: 0,
             phantom: PhantomData,
@@ -711,7 +804,8 @@ impl CreateVTab<'_> for MetricsTab {
 impl UpdateVTab<'_> for MetricsTab {
     /// INSERT. argv layout: [0] NULL, [1] requested rowid, then the
     /// declared columns from index 2:
-    ///   2 = name, 3 = ts, 4 = value, 5 = labels, 6 = hidden command.
+    ///   2 = name, 3 = ts, 4 = value, 5 = labels,
+    ///   6 = hidden series_id, 7 = hidden command.
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
         // Route this callback's store operations (flush/compact/prune
         // rows, registry saves) to the calling connection...
@@ -728,20 +822,23 @@ impl UpdateVTab<'_> for MetricsTab {
         // raw ValueRef — args.get::<String> would stringify blobs):
         //   TEXT → maintenance command ('flush', 'compact', ...)
         //   BLOB → binary payload, sub-dispatched on the FIRST BYTE:
-        //          0x01        = batch blob v0 (0x01 is its version byte)
-        //          0x00, 0x02–0x08 = RESERVED future batch versions →
+        //          0x01        = named batch blob v0
+        //          0x02        = resolved-series batch v1
+        //          0x00, 0x03–0x08 = RESERVED future batch versions →
         //                        loud error, never mis-parsed as text
         //          anything else = Prometheus text exposition body (valid
         //                        exposition starts with a name byte, '#',
         //                        or whitespace — all ≥ 0x09)
         //   NULL → ordinary Tier 1 data row (fall through below)
-        match args.iter().nth(6) {
+        match args.iter().nth(7) {
             Some(ValueRef::Blob(blob)) => {
                 return match blob.first().copied() {
                     Some(0x01) => self.ingest_batch(blob),
-                    Some(v @ (0x00 | 0x02..=0x08)) => Err(module_err(format!(
+                    Some(0x02) => self.ingest_resolved_batch(blob),
+                    Some(v @ (0x00 | 0x03..=0x08)) => Err(module_err(format!(
                         "unknown blob format: version byte 0x{v:02x} \
-                         (this build speaks batch v0 = 0x01 and Prometheus text)"
+                         (this build speaks named batch 0x01, resolved batch 0x02, \
+                          and Prometheus text)"
                     ))),
                     Some(_) => self.ingest_prometheus_text(blob),
                     None => Err(module_err(
@@ -755,15 +852,26 @@ impl UpdateVTab<'_> for MetricsTab {
             Some(_) => {
                 // TEXT (or something coercible to it — anything else gets
                 // rusqlite's clear InvalidType error) is a command.
-                let cmd: String = args.get(6)?;
+                let cmd: String = args.get(7)?;
+                if cmd == "resolve" {
+                    let name: Option<String> = args.get(2)?;
+                    let name =
+                        name.ok_or_else(|| module_err("resolve requires name (TEXT)".into()))?;
+                    let labels_json: Option<String> = args.get(5)?;
+                    let labels: HashMap<String, String> = match labels_json {
+                        Some(txt) => parse_labels_json(&txt).map_err(module_err)?,
+                        None => HashMap::new(),
+                    };
+                    return self
+                        .shared
+                        .engine
+                        .resolve_cached(&name, &labels)
+                        .map_err(module_err);
+                }
                 return self.run_command(&cmd);
             }
         }
 
-        let name: Option<String> = args.get(2)?;
-        let Some(name) = name else {
-            return Err(module_err("name is required (TEXT)".into()));
-        };
         let ts: Option<i64> = args.get(3)?;
         let Some(ts) = ts else {
             return Err(module_err("ts is required (INTEGER)".into()));
@@ -772,18 +880,28 @@ impl UpdateVTab<'_> for MetricsTab {
         let Some(value) = value else {
             return Err(module_err("value is required (REAL)".into()));
         };
-        // labels: optional flat JSON object; NULL means "no labels".
-        let labels_json: Option<String> = args.get(5)?;
-        let labels: HashMap<String, String> = match labels_json {
-            Some(txt) => parse_labels_json(&txt).map_err(module_err)?,
-            None => HashMap::new(),
+        let requested_sid: Option<i64> = args.get(6)?;
+        let sid = match requested_sid {
+            Some(sid) => {
+                if self.shared.engine.series_read().info_for(sid).is_none() {
+                    return Err(module_err(format!("unknown series_id {sid}")));
+                }
+                sid
+            }
+            None => {
+                let name: Option<String> = args.get(2)?;
+                let name = name.ok_or_else(|| module_err("name is required (TEXT)".into()))?;
+                let labels_json: Option<String> = args.get(5)?;
+                let labels: HashMap<String, String> = match labels_json {
+                    Some(txt) => parse_labels_json(&txt).map_err(module_err)?,
+                    None => HashMap::new(),
+                };
+                self.shared
+                    .engine
+                    .resolve_cached(&name, &labels)
+                    .map_err(module_err)?
+            }
         };
-
-        let sid = self
-            .shared
-            .engine
-            .resolve_cached(&name, &labels)
-            .map_err(module_err)?;
         self.shared.engine.write_point(sid, ts, value);
 
         // Vtab rowids here are SYNTHETIC: points live in partition
@@ -863,12 +981,30 @@ impl UpdateVTab<'_> for MetricsTab {
 impl TransactionVTab<'_> for MetricsTab {
     fn begin(&mut self) -> Result<()> {
         let _bind = DbGuard::bind(self.db);
+        self.pending_catalog_generation = None;
         self.acquire_write_gate()?;
         if let Err(err) = self.shared.engine.refresh_authoritative_state() {
             self.release_write_gate();
             return Err(module_err(err));
         }
         self.shared.engine.txn_begin();
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        let _bind = DbGuard::bind(self.db);
+        if self.gate_held {
+            // xSync is the prepare phase: all virtual-table writes are done,
+            // the caller sees its own uncommitted shadow rows, and SQLite's
+            // write transaction still excludes another writer. Capturing now
+            // avoids the post-commit race that reading the token in xCommit
+            // would introduce. A later commit publishes it; rollback drops it.
+            self.pending_catalog_generation = self
+                .shared
+                .engine
+                .capture_catalog_generation()
+                .map_err(module_err)?;
+        }
         Ok(())
     }
 
@@ -880,7 +1016,8 @@ impl TransactionVTab<'_> for MetricsTab {
         // case) must not touch a journal that may belong to ANOTHER
         // connection's in-flight transaction.
         if self.gate_held {
-            self.shared.engine.txn_commit();
+            let generation = self.pending_catalog_generation.take();
+            self.shared.engine.txn_commit_published(generation);
             self.release_write_gate();
         }
         Ok(())
@@ -890,6 +1027,7 @@ impl TransactionVTab<'_> for MetricsTab {
         let _bind = DbGuard::bind(self.db);
         // Same holder-only rule as commit().
         if self.gate_held {
+            self.pending_catalog_generation = None;
             self.shared.engine.txn_rollback();
             self.release_write_gate();
         }
@@ -926,6 +1064,7 @@ impl SavepointVTab for MetricsTab {
 
 /// One output row, fully materialized at filter() time.
 struct OutRow {
+    series_id: i64,
     name: String,
     ts: i64,
     value: f64,
@@ -939,6 +1078,7 @@ pub struct MetricsCursor<'vtab> {
     /// The connection driving this scan — filter() binds it so the
     /// engine's chunk reads run on the caller (see shared.rs).
     db: *mut ffi::sqlite3,
+    table_name: String,
     rows: Vec<OutRow>,
     pos: usize,
     /// Ties the cursor lifetime to its vtab so Rust prevents use-after-free.
@@ -979,6 +1119,7 @@ impl MetricsCursor<'_> {
             let labels_json = labels_to_json(&labels);
             for (ts, value) in points {
                 out.push(OutRow {
+                    series_id: sid,
                     name: metric.to_string(),
                     ts,
                     value,
@@ -993,14 +1134,14 @@ impl MetricsCursor<'_> {
 unsafe impl VTabCursor for MetricsCursor<'_> {
     /// Start of a scan: decode the pushed-down constraints per the
     /// best_index bitmask, materialize all matching rows, iterate.
-    fn filter(
-        &mut self,
-        idx_num: c_int,
-        _idx_str: Option<&str>,
-        args: &Filters<'_>,
-    ) -> Result<()> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         // Route chunk reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
+        let _read = self
+            .shared
+            .write_gate
+            .acquire_read(self.db as usize, &self.table_name)
+            .map_err(module_err)?;
         self.shared
             .engine
             .refresh_authoritative_state()
@@ -1063,9 +1204,7 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
         // Deterministic output order: ts ascending, then name/labels as
         // tie-breakers (points inside one series are already ts-sorted,
         // but rows from different series interleave).
-        rows.sort_by(|a, b| {
-            (a.ts, &a.name, &a.labels_json).cmp(&(b.ts, &b.name, &b.labels_json))
-        });
+        rows.sort_by(|a, b| (a.ts, &a.name, &a.labels_json).cmp(&(b.ts, &b.name, &b.labels_json)));
 
         self.rows = rows;
         self.pos = 0;
@@ -1088,7 +1227,8 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
             1 => ctx.set_result(&row.ts),
             2 => ctx.set_result(&row.value),
             3 => ctx.set_result(&row.labels_json),
-            // 4 = the hidden command column: always NULL when read.
+            4 => ctx.set_result(&row.series_id),
+            // 5 = the hidden command column: always NULL when read.
             _ => ctx.set_result(&Null),
         }
     }

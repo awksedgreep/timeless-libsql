@@ -40,7 +40,7 @@ fn full_range_query() -> LogQuery {
         level: None,
         metadata_eq: Vec::new(),
         message_contains: None,
-            message_like_prune: None,
+        message_like_prune: None,
     }
 }
 
@@ -173,7 +173,12 @@ fn codec_round_trips_all_codecs() {
     // round-trip is the proof that existing codec-2/4 databases remain
     // decodable.
     let entries = vec![
-        entry(1000, 1, "hello world", &[("service", "api"), ("path", "/x")]),
+        entry(
+            1000,
+            1,
+            "hello world",
+            &[("service", "api"), ("path", "/x")],
+        ),
         entry(1001, 3, "boom 💥 unicode", &[]),
         entry(1005, 0, "", &[("k", "")]), // empty message + empty value
     ];
@@ -212,16 +217,19 @@ fn codec_rejects_garbage() {
 /// container header (4 u32 column lengths at offset 22, columns start
 /// at 38) to the 4th column's first byte.
 fn metadata_strategy_byte(bytes: &[u8]) -> u8 {
-    let len = |i: usize| {
-        u32::from_le_bytes(bytes[22 + i * 4..26 + i * 4].try_into().unwrap()) as usize
-    };
+    let len =
+        |i: usize| u32::from_le_bytes(bytes[22 + i * 4..26 + i * 4].try_into().unwrap()) as usize;
     bytes[38 + len(0) + len(1) + len(2)]
 }
 
 fn rt_v2(entries: &[LogEntry], expect_strategy: u8, label: &str) {
     let (bytes, meta) = encode_block(entries, CODEC_COLUMNAR_V2, 7).unwrap();
     assert_eq!(meta.codec, CODEC_COLUMNAR_V2);
-    assert_eq!(metadata_strategy_byte(&bytes), expect_strategy, "{label}: strategy byte");
+    assert_eq!(
+        metadata_strategy_byte(&bytes),
+        expect_strategy,
+        "{label}: strategy byte"
+    );
     let back = decode_block(&bytes).unwrap();
     assert_eq!(&back, entries, "{label}: round-trip");
 }
@@ -382,7 +390,7 @@ fn raw_optimize_query_round_trip_is_exact() {
     // Substring filter (scan-only path).
     let q = LogQuery {
         message_contains: Some("number 42".into()),
-            message_like_prune: None,
+        message_like_prune: None,
         ..full_range_query()
     };
     assert_eq!(engine.query(&q).unwrap(), vec![expect[42].clone()]);
@@ -437,8 +445,11 @@ impl BlockStore for SharedStore {
 #[test]
 fn optimize_writes_codec_5_blocks_that_decode_exactly() {
     let shared = Arc::new(MemBlockStore::new());
-    let engine =
-        BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&["service"])).unwrap();
+    let engine = BlockEngine::new(
+        Box::new(SharedStore(Arc::clone(&shared))),
+        config(&["service"]),
+    )
+    .unwrap();
 
     let mut expect = Vec::new();
     for i in 0..200i64 {
@@ -654,7 +665,12 @@ fn flush_writes_level_pure_blocks_with_single_level_term() {
     // would have written ONE block carrying all four level: terms.
     let mut expect = Vec::new();
     for i in 0..40i64 {
-        let e = entry(1_000 + i, (i % 4) as u8, &format!("m{i}"), &[("service", "api")]);
+        let e = entry(
+            1_000 + i,
+            (i % 4) as u8,
+            &format!("m{i}"),
+            &[("service", "api")],
+        );
         expect.push(e.clone());
         engine.push(e).unwrap();
     }
@@ -665,7 +681,11 @@ fn flush_writes_level_pure_blocks_with_single_level_term() {
     assert_eq!(recorded.len(), 4, "one block per level present");
     for terms in recorded.iter() {
         let lt = level_terms_of(terms);
-        assert_eq!(lt.len(), 1, "level-pure block must emit one level: term, got {terms:?}");
+        assert_eq!(
+            lt.len(),
+            1,
+            "level-pure block must emit one level: term, got {terms:?}"
+        );
         // Non-level terms still present (metadata indexing unchanged).
         assert!(terms.iter().any(|t| t == "service:api"));
     }
@@ -926,8 +946,7 @@ fn merge_respects_ts_span_cap() {
     assert_eq!(written, 2, "cap must split the merge into two blocks");
 
     // And with an uncapped config the same layout merges into ONE.
-    let engine2 =
-        BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    let engine2 = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
     for base in [0i64, 50, 1_000] {
         for i in 0..10 {
             engine2.push(entry(base + i, 1, "m", &[])).unwrap();
@@ -950,8 +969,8 @@ fn optimize_leaves_lone_small_zstd_blocks_alone() {
     }
     engine.flush().unwrap();
     assert_eq!(engine.optimize().unwrap(), (1, 1)); // raw → zstd
-    // Second optimize: the lone small zstd block is NOT rewritten
-    // (write amplification for zero gain).
+                                                    // Second optimize: the lone small zstd block is NOT rewritten
+                                                    // (write amplification for zero gain).
     assert_eq!(engine.optimize().unwrap(), (0, 0));
 }
 
@@ -972,7 +991,10 @@ fn buffered_and_flushed_entries_merge_sorted() {
 
     let got = engine.query(&full_range_query()).unwrap();
     let msgs: Vec<&str> = got.iter().map(|e| e.message.as_str()).collect();
-    assert_eq!(msgs, ["flushed-10", "buffered-20", "flushed-30", "buffered-40"]);
+    assert_eq!(
+        msgs,
+        ["flushed-10", "buffered-20", "flushed-30", "buffered-40"]
+    );
 
     // Filters apply to buffered entries too.
     let q = LogQuery {
@@ -1070,11 +1092,7 @@ fn recovery_rebuilds_index_from_scan() {
     // "Reopen": a fresh engine over the same store must see everything
     // (buffered entries are gone — that is the documented POC contract,
     // same as metrics: durability begins at flush).
-    let engine2 = BlockEngine::new(
-        Box::new(SharedStore(store)),
-        config(&["service"]),
-    )
-    .unwrap();
+    let engine2 = BlockEngine::new(Box::new(SharedStore(store)), config(&["service"])).unwrap();
     assert_eq!(engine2.query(&full_range_query()).unwrap(), want);
     // prune/optimize planning works off the recovered index too.
     assert_eq!(engine2.stats().0, 1);
@@ -1092,7 +1110,10 @@ fn push_validates_level_and_canonicalizes_metadata() {
     let got = engine.query(&full_range_query()).unwrap();
     assert_eq!(
         got[0].metadata,
-        vec![("a".to_string(), "2".to_string()), ("z".to_string(), "3".to_string())]
+        vec![
+            ("a".to_string(), "2".to_string()),
+            ("z".to_string(), "3".to_string())
+        ]
     );
 }
 

@@ -1140,10 +1140,7 @@ impl BlockEngine {
             };
             *counts.entry((bucket_ts, group)).or_insert(0) += 1;
         }
-        Ok(counts
-            .into_iter()
-            .map(|((b, g), n)| (b, g, n))
-            .collect())
+        Ok(counts.into_iter().map(|((b, g), n)| (b, g, n)).collect())
     }
 
     /// (persisted blocks, raw blocks, buffered entries) — for stats or
@@ -1158,12 +1155,14 @@ impl BlockEngine {
     pub fn ts_range(&self) -> (Option<i64>, Option<i64>) {
         let (mut mn, mut mx) = {
             let index = self.index_lock();
-            index.iter().fold((None, None), |(mn, mx): (Option<i64>, Option<i64>), e| {
-                (
-                    Some(mn.map_or(e.meta.ts_min, |m: i64| m.min(e.meta.ts_min))),
-                    Some(mx.map_or(e.meta.ts_max, |m: i64| m.max(e.meta.ts_max))),
-                )
-            })
+            index
+                .iter()
+                .fold((None, None), |(mn, mx): (Option<i64>, Option<i64>), e| {
+                    (
+                        Some(mn.map_or(e.meta.ts_min, |m: i64| m.min(e.meta.ts_min))),
+                        Some(mx.map_or(e.meta.ts_max, |m: i64| m.max(e.meta.ts_max))),
+                    )
+                })
         };
         for e in self.buffer_lock().iter() {
             mn = Some(mn.map_or(e.ts, |m| m.min(e.ts)));

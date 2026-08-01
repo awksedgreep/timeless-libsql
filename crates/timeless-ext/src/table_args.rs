@@ -40,7 +40,10 @@ pub(crate) fn parse_retention(value: &str, native_per_second: i64) -> Result<i64
     }
     let (digits, per_unit) = match value.as_bytes().last() {
         Some(b's') => (&value[..value.len() - 1], native_per_second),
-        Some(b'm') => (&value[..value.len() - 1], native_per_second.saturating_mul(60)),
+        Some(b'm') => (
+            &value[..value.len() - 1],
+            native_per_second.saturating_mul(60),
+        ),
         Some(b'h') => (
             &value[..value.len() - 1],
             native_per_second.saturating_mul(3600),
@@ -62,7 +65,9 @@ pub(crate) fn parse_retention(value: &str, native_per_second: i64) -> Result<i64
         .checked_mul(per_unit)
         .ok_or_else(|| format!("retention {value:?} overflows the table's ts unit range"))?;
     if native <= 0 {
-        return Err(format!("retention {value:?} overflows the table's ts unit range"));
+        return Err(format!(
+            "retention {value:?} overflows the table's ts unit range"
+        ));
     }
     Ok(native)
 }
@@ -142,7 +147,7 @@ mod tests {
         assert_eq!(parse_retention("30d", 1).unwrap(), 30 * 86_400);
         assert_eq!(parse_retention("90s", 1).unwrap(), 90);
         assert_eq!(parse_retention("1200", 1).unwrap(), 1200); // bare = native
-        // logs: ms native
+                                                               // logs: ms native
         assert_eq!(parse_retention("7d", 1_000).unwrap(), 7 * 86_400 * 1_000);
         // traces: ns native
         assert_eq!(

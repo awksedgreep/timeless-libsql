@@ -95,7 +95,9 @@ impl SpanBlockStore for MemSpanStore {
     ) -> Result<Vec<BlockLoc>, String> {
         let locs: Vec<BlockLoc> = {
             let mut inner = self.lock();
-            add.iter().map(|b| Self::insert_one(&mut inner, b)).collect()
+            add.iter()
+                .map(|b| Self::insert_one(&mut inner, b))
+                .collect()
             // lock released before on_committed — same deadlock-shyness
             // as MemBlockStore (the callback re-locks the engine index).
         };

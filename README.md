@@ -142,6 +142,10 @@ INSERT INTO metrics(metrics) VALUES ('rollup');  -- also runs at 'compact'
 SELECT labels, ts, value                         -- explicit tier reads
   FROM timeless_rollup('metrics', 'cpu_usage', NULL, 300, :t0, :t1, 'avg');
 --                                           agg: avg|sum|min|max|count|last
+
+SELECT series_id, labels, buckets                -- all fields, one row/series
+  FROM timeless_rollup_batches(
+    'metrics', 'cpu_usage', NULL, 300, :t0, :t1);
 ```
 
 Buckets are `[B, B+R)` with exactly-documented aggregate math
@@ -149,7 +153,9 @@ Buckets are `[B, B+R)` with exactly-documented aggregate math
 settle (one bucket-width margin) and are append-only. Tier reads are
 explicit — no silent substitution for raw. On the 1M-point bench, the
 1-minute tier answers the per-bucket average in **4.1ms** vs 34.5ms for
-the GROUP BY over raw, and building the whole tier costs 80ms.
+the GROUP BY over raw, and building the whole tier costs 80ms. The packed
+`timeless_rollup_batches` form keeps the row TVF intact while avoiding six
+separate scans for hosts that need the complete rollup record.
 
 ### Metrics
 
@@ -167,6 +173,8 @@ SELECT name, ts, value, labels FROM metrics
 
 Aggregation is plain SQL — `avg(value)`, `min`, `max`, `GROUP BY` all work;
 the vtab prunes chunks by name and ts range before SQLite ever sees a row.
+For a scalar result per series, `timeless_aggregate` is the chunk-aware fast
+path and avoids shipping raw samples through SQLite.
 
 Three ingest paths, one durability contract (same buffers, same flush):
 
@@ -190,11 +198,51 @@ curl -s target:9100/metrics -o /tmp/scrape.prom && sqlite3 metrics.db \
 The scraping loop stays external by design (cron, curl, your app); the
 vtab is passive.
 
-**Query kernels** — two table-valued functions evaluate the dominant
+Embedded hosts can resolve a durable series id once and omit metric/label
+strings from steady-state writes:
+
+```sql
+INSERT INTO metrics(metrics, name, labels)
+  VALUES ('resolve', 'cpu_usage', '{"host":"pvm1"}');
+SELECT last_insert_rowid();                     -- durable series_id
+
+INSERT INTO metrics(series_id, ts, value)
+  VALUES (:series_id, 1753000015, 43.1);
+```
+
+The corresponding resolved batch begins with version byte `0x02`, followed
+by `flags:u8=0`, `reserved:u16=0`, `n_points:u32 LE`, then columnar
+`series_id:i64[n]`, `timestamp:i64[n]`, and `value_bits:u64[n]` arrays, all
+little-endian. The entire id set is validated before any point is buffered.
+Named batch `0x01` remains the portable path when the caller has no durable
+id cache.
+
+**Query kernels** — table-valued functions evaluate the dominant
 dashboard shapes inside the engine, so remote deployments (sqld, HTTP)
 ship grid points instead of every raw sample:
 
 ```sql
+-- Matcher-aware raw narrow waist (one row per sample):
+SELECT series_id, labels, ts, value
+  FROM timeless_raw('metrics', 'cpu_usage', '{"host":"pvm1"}', :t0, :t1);
+
+-- Same waist, one packed point blob per series for embedded hosts:
+SELECT series_id, labels, points
+  FROM timeless_raw_batches('metrics', 'cpu_usage', '{"host":"pvm1"}', :t0, :t1);
+
+-- Wide fanout form: every non-empty series in one versioned columnar frame:
+SELECT frame
+  FROM timeless_raw_frame('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+
+-- one scalar reduction per matched series; inclusive [:t0, :t1]
+-- aggregate: avg | sum | min | max | count
+SELECT series_id, labels, value
+  FROM timeless_aggregate('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1, 'avg');
+
+-- newest point per matched series; inclusive bounds
+SELECT series_id, labels, ts, value
+  FROM timeless_latest('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+
 -- last sample per grid point, per series (instant-selector shape):
 --                 table      metric       label filter    start  stop   step lookback
 SELECT labels, ts, value
@@ -207,7 +255,45 @@ SELECT labels, ts, value
 --   robust:      tavg:N (trimmed mean, drop N% from each tail)
 SELECT labels, ts, value
   FROM timeless_window('metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
+
+-- Same result, one versioned bucket blob per series for embedded/remote hosts:
+SELECT series_id, labels, buckets
+  FROM timeless_window_batches(
+    'metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
 ```
+
+`timeless_window_batches` uses `TWB1 | count:u32 LE | timestamps:i64 LE[] |
+validity bitmap | value_bits:u64 LE[]`. The bitmap also preserves the optional
+`fill='null'` shape. See [the query cookbook](docs/QUERIES.md#packed-window-batches)
+for the exact byte contract. The row-oriented `timeless_window` API remains
+unchanged.
+
+`timeless_raw_frame` uses `TRF1 | series_count:u32 LE | total_points:u64 LE |
+series_ids:i64 LE[] | point_counts:u32 LE[] | timestamps:i64 LE[] |
+value_bits:u64 LE[]`. Counts partition the point columns by series; empty
+series are omitted and series slice order is unspecified. It complements,
+rather than replaces, the row-oriented and per-series batch raw APIs. See
+[the packed-raw contract](docs/QUERIES.md#packed-raw-frame).
+
+Rollup hosts can likewise use `timeless_rollup_batches`, whose `TRB1` blob
+contains bucket timestamps, exact integer counts, all six aggregate values,
+and stored last-sample timestamps in one row per series. See
+[the packed-rollup contract](docs/QUERIES.md#packed-rollup-batches).
+
+`timeless_aggregate` emits no row for an empty series/range and returns
+`count` as a SQLite INTEGER. Fully covered chunks use persisted statistics;
+only boundary chunks are decoded. `sum`/`avg` therefore accumulate points
+left-to-right within each chunk, then chunk sums in index order, so a flat SQL
+scan can differ by floating-point rounding. Count is exact. NaNs count as
+stored points, make `sum`/`avg` SQL `NULL`, and are ignored by `min`/`max`
+unless every value is NaN, in which case those are `NULL` too.
+
+`timeless_latest` emits at most one row per matched series and no row for an
+empty range. The greatest timestamp wins; duplicate maximum timestamps keep
+the first point in the raw engine's stable order. New chunks persist that
+point as metadata, so the usual unbounded-latest query does not decompress
+history. Databases created by older versions are upgraded additively: legacy
+chunks use the decode fallback until compaction rewrites them.
 
 **Counter kernels are raw window folds, NOT PromQL**: `increase` uses
 the standard reset-adjustment rule but does **no** boundary
@@ -279,6 +365,13 @@ SELECT * FROM timeless_stats('metrics');   -- key/value health rows; works for
 SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
                                            -- sorted distinct label values —
                                            -- the dropdown-population query
+
+-- Optional discovery filters use the same matcher JSON and are applied
+-- before unrelated catalog rows cross SQLite:
+SELECT labels FROM timeless_series('metrics', 'cpu_usage',
+  '{"host":{"re":"web-.*"},"env":{"neq":"dev"}}');
+SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host',
+  '{"env":{"neq":"dev"}}');
 ```
 
 For worked recipes — reset-corrected counter math in pure SQL, top-k
@@ -411,9 +504,13 @@ process, never corrupt. Proven by `kill -9` crash rounds
 watermark present, no index row dangling.
 
 **Multi-connection:** all connections in one process share one engine per
-(db file, table) via a process-global registry — one connection's inserts
-are queryable from another immediately, writers serialized by a bounded
-per-table gate. This is what makes `sqld`'s connection pool work:
+(db file, table) via a process-global registry. Committed buffered inserts are
+queryable from another connection without a flush, and writers are serialized
+by a bounded per-table gate. A connection can read its own active write
+transaction; another connection selecting during that transaction receives a
+retryable busy-style error (`active write transaction`; retry as for
+`SQLITE_BUSY`) instead of observing transaction-private shadow rows. This is
+what makes `sqld`'s connection pool work safely:
 
 ```sh
 sqld --extensions-path ./ext-dir   # sha256 trusted.lst; loads into every connection
@@ -514,10 +611,21 @@ cargo test -p timeless-codec -p timeless-core   # unit + property tests
 cd tools/bench
 cargo run --release --bin oracle -- ../../target/release/libtimeless_ext.dylib
 cargo run --release --bin bench  -- ../../target/release/libtimeless_ext.dylib
+cargo run --release --bin query-read -- ../../target/release/libtimeless_ext.dylib
 ```
+
+`query-read` is the direct-SQL read baseline used by
+[QUERY_PERFORMANCE_PLAN.md](QUERY_PERFORMANCE_PLAN.md). It covers exact,
+narrow, and full raw fan-out; host-side aggregate/latest fallbacks; grid,
+window, and rollup kernels; and the first read after publishing a flush.
 
 See [TESTING.md](TESTING.md) for the full guide and the rules for fair
 benchmark numbers.
+
+Rust hosts that provide their own loadable-extension entry points can call
+`timeless_ext::register_telemetry(&connection)` to register the three
+telemetry tables and query TVFs. The embedding surface deliberately excludes
+the development spike and separately packaged dbhealth modules.
 
 ## Status & limits
 

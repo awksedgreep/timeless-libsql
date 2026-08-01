@@ -15,18 +15,17 @@ pub mod store;
 pub mod waist;
 
 pub use blocks::{
-    level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta,
-    BlockStore, EncodedBlock, LogEntry, LogQuery, MemBlockStore,
-};
-pub use spans::{
-    kind_from_name, kind_name, status_from_name, status_name, EncodedSpanBlock, MemSpanStore,
-    SpanBlockEngine, SpanBlockStore, SpanEngineConfig, SpanEntry, SpanQuery,
-    TraceBucketStat,
+    level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta, BlockStore,
+    EncodedBlock, LogEntry, LogQuery, MemBlockStore,
 };
 pub use engine::*;
 pub use rollup::{
     decode_rollup_payload, encode_rollup_payload, parse_ladder, rollup_buckets, RollupBucket,
     RollupTier, ENC_ROLLUP_V1,
+};
+pub use spans::{
+    kind_from_name, kind_name, status_from_name, status_name, EncodedSpanBlock, MemSpanStore,
+    SpanBlockEngine, SpanBlockStore, SpanEngineConfig, SpanEntry, SpanQuery, TraceBucketStat,
 };
 pub use store::{
     ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, FsStore,

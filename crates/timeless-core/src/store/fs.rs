@@ -688,6 +688,7 @@ impl FsStore {
             meta: ChunkMeta {
                 min_ts,
                 max_ts,
+                max_ts_val: None,
                 point_count,
                 min_val,
                 max_val,
@@ -749,6 +750,7 @@ impl FsStore {
                 meta: ChunkMeta {
                     min_ts,
                     max_ts,
+                    max_ts_val: None,
                     point_count,
                     min_val,
                     max_val,
@@ -1011,6 +1013,7 @@ mod tests {
             series_id,
             min_ts: ts,
             max_ts: ts,
+            max_ts_val: ts as f64,
             point_count: 1,
             min_val: ts as f64,
             max_val: ts as f64,

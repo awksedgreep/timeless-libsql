@@ -180,7 +180,9 @@ pub fn parse_ladder(spec: &str) -> Result<Vec<RollupTier>, String> {
             .parse()
             .map_err(|_| format!("rollup tier {part:?}: bad retention"))?;
         if resolution <= 0 {
-            return Err(format!("rollup resolution must be positive, got {resolution}"));
+            return Err(format!(
+                "rollup resolution must be positive, got {resolution}"
+            ));
         }
         if retention < 0 {
             return Err(format!("rollup retention must be >= 0, got {retention}"));
@@ -246,8 +248,14 @@ mod tests {
         assert_eq!(
             parse_ladder("300:100,3600:0").unwrap(),
             vec![
-                RollupTier { resolution: 300, retention: 100 },
-                RollupTier { resolution: 3600, retention: 0 },
+                RollupTier {
+                    resolution: 300,
+                    retention: 100
+                },
+                RollupTier {
+                    resolution: 3600,
+                    retention: 0
+                },
             ]
         );
         assert!(parse_ladder("0:5").is_err());

@@ -71,9 +71,24 @@ fn assert_buckets_bit_eq(kernel: &[RollupBucket], naive: &[RollupBucket], what: 
     for (k, n) in kernel.iter().zip(naive) {
         assert_eq!(k.bucket_ts, n.bucket_ts, "{what}: bucket_ts");
         assert_eq!(k.count, n.count, "{what}: count @ {}", k.bucket_ts);
-        assert_eq!(k.sum.to_bits(), n.sum.to_bits(), "{what}: sum @ {}", k.bucket_ts);
-        assert_eq!(k.min.to_bits(), n.min.to_bits(), "{what}: min @ {}", k.bucket_ts);
-        assert_eq!(k.max.to_bits(), n.max.to_bits(), "{what}: max @ {}", k.bucket_ts);
+        assert_eq!(
+            k.sum.to_bits(),
+            n.sum.to_bits(),
+            "{what}: sum @ {}",
+            k.bucket_ts
+        );
+        assert_eq!(
+            k.min.to_bits(),
+            n.min.to_bits(),
+            "{what}: min @ {}",
+            k.bucket_ts
+        );
+        assert_eq!(
+            k.max.to_bits(),
+            n.max.to_bits(),
+            "{what}: max @ {}",
+            k.bucket_ts
+        );
         assert_eq!(k.last_ts, n.last_ts, "{what}: last_ts @ {}", k.bucket_ts);
         assert_eq!(
             k.last_val.to_bits(),

@@ -37,12 +37,13 @@
 //! compiler derives Send + Sync — the `unsafe impl Send for HostHandle`
 //! that used to live here is deleted, not relocated.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use timeless_core::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk,
-    ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
+    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, ResolvedSeries,
+    StoredChunk, StoredRollupChunk, StoredSeries,
 };
 
 use crate::{shared, sql_ident};
@@ -73,6 +74,7 @@ CREATE TABLE IF NOT EXISTS {chunks} (
   series_id   INTEGER NOT NULL,
   ts_min      INTEGER NOT NULL,
   ts_max      INTEGER NOT NULL,
+  max_ts_val,
   point_count INTEGER NOT NULL,
   min_val     REAL NOT NULL,
   max_val     REAL NOT NULL,
@@ -110,6 +112,29 @@ CREATE TABLE IF NOT EXISTS {series} (
     )
 }
 
+/// Add the latest-point metadata column to databases created by an older
+/// extension. It is nullable by design: legacy chunks retain NULL and use the
+/// engine's decode fallback until compaction rewrites them.
+pub(crate) fn ensure_max_ts_val_column(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> rusqlite::Result<()> {
+    let chunks = sql_ident::qualified_shadow(database, table, "chunks");
+    let probe = format!("SELECT max_ts_val FROM {chunks} LIMIT 0");
+    if conn.prepare(&probe).is_ok() {
+        return Ok(());
+    }
+
+    let alter = format!("ALTER TABLE {chunks} ADD COLUMN max_ts_val");
+    match conn.execute_batch(&alter) {
+        Ok(()) => Ok(()),
+        // Another connection may have won the schema-upgrade race. Re-probe
+        // before surfacing the original ALTER error.
+        Err(alter_error) => conn.prepare(&probe).map(|_| ()).map_err(|_| alter_error),
+    }
+}
+
 /// Statements to remove the shadow tables again (vtab xDestroy).
 pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
     let chunks = sql_ident::qualified_shadow(database, table, "chunks");
@@ -128,6 +153,7 @@ pub(crate) struct ShadowTableStore {
     // name is baked in — SQLite cannot parameterize identifiers.)
     insert_sql: String,
     read_sql: String,
+    chunks_ident: String,
     scan_sql: String,
     stats_sql: String,
     save_registry_sql: String,
@@ -163,17 +189,18 @@ impl ShadowTableStore {
         let series = sql_ident::qualified_shadow(database, table, "series");
         ShadowTableStore {
             insert_sql: format!(
-                "INSERT INTO {chunks} (series_id, ts_min, ts_max, point_count, \
+                "INSERT INTO {chunks} (series_id, ts_min, ts_max, max_ts_val, point_count, \
                  min_val, max_val, sum_val, encoding, resolution, ts_data, val_data) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)"
             ),
             read_sql: format!("SELECT ts_data, val_data FROM {chunks} WHERE id = ?1"),
+            chunks_ident: chunks.clone(),
             // scan() deliberately does NOT select the blob columns: it runs
             // at every reopen and only needs metadata for the index.
             scan_sql: format!(
                 // resolution = 0: the RAW index only — rollup rows (F3)
                 // have their own scan and their own in-memory index.
-                "SELECT id, series_id, ts_min, ts_max, point_count, \
+                "SELECT id, series_id, ts_min, ts_max, max_ts_val, point_count, \
                  min_val, max_val, sum_val, encoding FROM {chunks} \
                  WHERE resolution = 0"
             ),
@@ -366,6 +393,7 @@ impl ShadowTableStore {
                 cp.series_id,
                 cp.min_ts,
                 cp.max_ts,
+                Self::stat_to_sql(cp.max_ts_val),
                 cp.point_count,
                 Self::stat_to_sql(cp.min_val),
                 Self::stat_to_sql(cp.max_val),
@@ -457,6 +485,70 @@ impl ChunkStore for ShadowTableStore {
         })
     }
 
+    fn read_chunks(&self, locs: &[ChunkLoc]) -> Result<Vec<ChunkBytes>, String> {
+        if locs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut rowids = Vec::with_capacity(locs.len());
+        for loc in locs {
+            match loc {
+                ChunkLoc::Row { rowid } => rowids.push(*rowid),
+                other => return Err(format!("ShadowTableStore cannot read {other:?}")),
+            }
+        }
+
+        // Rowids originate in this store, so inlining them is injection-safe
+        // and avoids SQLite's host-parameter ceiling for high-cardinality
+        // fan-out. Reorder below because an IN scan has no order contract.
+        let ids = rowids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, ts_data, val_data FROM {} WHERE id IN ({ids})",
+            self.chunks_ident
+        );
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&sql)
+            .map_err(|e| format!("prepare batch chunk read failed: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("batch chunk read failed: {e}"))?;
+        let mut by_id = HashMap::with_capacity(rowids.len());
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("batch chunk read row failed: {e}"))?
+        {
+            let rowid: i64 = row.get(0).map_err(|e| e.to_string())?;
+            let ts: Vec<u8> = row.get(1).map_err(|e| e.to_string())?;
+            let val: Vec<u8> = row.get(2).map_err(|e| e.to_string())?;
+            let ts_len = ts.len();
+            let val_len = val.len();
+            let mut buf = ts;
+            buf.extend_from_slice(&val);
+            by_id.insert(
+                rowid,
+                ChunkBytes {
+                    data: Arc::new(buf),
+                    ts_range: 0..ts_len,
+                    val_range: ts_len..ts_len + val_len,
+                },
+            );
+        }
+
+        rowids
+            .into_iter()
+            .map(|rowid| {
+                by_id
+                    .remove(&rowid)
+                    .ok_or_else(|| format!("chunk row {rowid} disappeared during batch read"))
+            })
+            .collect()
+    }
+
     /// Batched delete. Per-loc error strings mirror FsStore's contract;
     /// a rowid that no longer exists is simply not matched by the IN list
     /// (missing units are non-fatal per the trait, and SQLite gives us no
@@ -507,7 +599,8 @@ impl ChunkStore for ShadowTableStore {
         {
             let get_stat = |i: usize, what: &str| -> Result<f64, String> {
                 Self::stat_from_sql(
-                    r.get_ref(i).map_err(|e| format!("chunk scan {what}: {e}"))?,
+                    r.get_ref(i)
+                        .map_err(|e| format!("chunk scan {what}: {e}"))?,
                     what,
                 )
             };
@@ -516,14 +609,18 @@ impl ChunkStore for ShadowTableStore {
                 meta: ChunkMeta {
                     min_ts: r.get(2).map_err(|e| e.to_string())?,
                     max_ts: r.get(3).map_err(|e| e.to_string())?,
-                    point_count: r.get::<_, i64>(4).map_err(|e| e.to_string())? as u32,
-                    min_val: get_stat(5, "min_val")?,
-                    max_val: get_stat(6, "max_val")?,
-                    sum_val: get_stat(7, "sum_val")?,
+                    max_ts_val: match r.get_ref(4).map_err(|e| e.to_string())? {
+                        rusqlite::types::ValueRef::Null => None,
+                        value => Some(Self::stat_from_sql(value, "max_ts_val")?),
+                    },
+                    point_count: r.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
+                    min_val: get_stat(6, "min_val")?,
+                    max_val: get_stat(7, "max_val")?,
+                    sum_val: get_stat(8, "sum_val")?,
                     loc: ChunkLoc::Row {
                         rowid: r.get(0).map_err(|e| e.to_string())?,
                     },
-                    encoding: r.get::<_, i64>(8).map_err(|e| e.to_string())? as u8,
+                    encoding: r.get::<_, i64>(9).map_err(|e| e.to_string())? as u8,
                 },
             });
         }
@@ -575,6 +672,7 @@ impl ChunkStore for ShadowTableStore {
                     meta: ChunkMeta {
                         min_ts: r.get(3)?,
                         max_ts: r.get(4)?,
+                        max_ts_val: None,
                         point_count: r.get::<_, i64>(5)? as u32,
                         min_val: 0.0,
                         max_val: 0.0,

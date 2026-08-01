@@ -102,6 +102,10 @@ Inserts don't compress immediately — they land in an **in-memory buffer**:
 
 - Buffered rows are **immediately queryable**. `SELECT` sees them right away;
   you never have to flush just to read your own writes.
+- After commit, other connections in the same process see buffered rows through
+  the shared engine without a flush. During your active write transaction they
+  receive a retryable busy-style error instead of seeing uncommitted shadow
+  rows; retry the `SELECT` as you would `SQLITE_BUSY`.
 - Buffered rows are **not yet durable**. If the process exits, buffered
   (unflushed) rows are gone. Flushed rows are safe — this is a hard
   guarantee, proven with `kill -9` crash testing. You lose at most the

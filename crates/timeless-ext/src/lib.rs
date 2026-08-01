@@ -21,7 +21,10 @@
 //! process-global registry; store SQL is routed to the calling
 //! connection through a thread-local, and write transactions are
 //! serialized per table by a 5s-bounded writer gate (busy-style error
-//! on contention). See shared.rs for the full design + semantics notes.
+//! on contention). Short read permits prevent cross-connection readers
+//! from following transaction-private shadow locations; a read that arrives
+//! during another connection's write transaction gets a retryable busy-style
+//! error. See shared.rs for the full design + semantics notes.
 //!
 //! Usage:
 //!   .load target/release/libtimeless_ext
@@ -47,8 +50,8 @@ mod shadow_meta;
 mod shadow_span_store;
 mod shadow_store;
 mod shared;
-mod sql_ident;
 mod spike;
+mod sql_ident;
 mod table_args;
 mod traces_vtab;
 mod vtab_tx;
@@ -77,6 +80,20 @@ use rusqlite::{Connection, Result};
 /// entry points from (its .so registers health and nothing else).
 pub fn register_dbhealth(db: &Connection) -> Result<()> {
     health_vtab::register(db)
+}
+
+/// Register the telemetry virtual tables and query functions on an existing
+/// SQLite connection.
+///
+/// This is the embedding API used by hosts which link `timeless-ext` as a Rust
+/// library and provide their own loadable-extension entry points. It deliberately
+/// excludes the development-only `timeless_spike` module and the separately
+/// packaged dbhealth modules.
+pub fn register_telemetry(db: &Connection) -> Result<()> {
+    metrics_vtab::register(db)?;
+    logs_vtab::register(db)?;
+    traces_vtab::register(db)?;
+    query_tvf::register(db)
 }
 
 #[cfg(feature = "entrypoints")]
@@ -122,10 +139,7 @@ pub unsafe extern "C" fn sqlite3_timeless_ext_init(
 #[cfg(feature = "entrypoints")]
 fn extension_init(db: Connection) -> Result<bool> {
     spike::register(&db)?;
-    metrics_vtab::register(&db)?;
-    logs_vtab::register(&db)?;
-    traces_vtab::register(&db)?;
-    query_tvf::register(&db)?;
+    register_telemetry(&db)?;
     // false = loaded per-connection (fine here; sqld preloads into every
     // connection anyway).
     Ok(false)

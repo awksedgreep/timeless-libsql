@@ -51,6 +51,10 @@ impl ChunkLoc {
 pub struct ChunkMeta {
     pub min_ts: i64,
     pub max_ts: i64,
+    /// Value of the first point at `max_ts` in stable chunk order. New
+    /// stores persist it so latest-point queries can avoid decompression;
+    /// legacy formats leave it absent and use the decode fallback.
+    pub max_ts_val: Option<f64>,
     pub point_count: u32,
     pub min_val: f64,
     pub max_val: f64,
@@ -65,6 +69,7 @@ pub struct EncodedChunk {
     pub series_id: i64,
     pub min_ts: i64,
     pub max_ts: i64,
+    pub max_ts_val: f64,
     pub point_count: u32,
     pub min_val: f64,
     pub max_val: f64,
@@ -81,6 +86,7 @@ impl EncodedChunk {
         ChunkMeta {
             min_ts: self.min_ts,
             max_ts: self.max_ts,
+            max_ts_val: Some(self.max_ts_val),
             point_count: self.point_count,
             min_val: self.min_val,
             max_val: self.max_val,
@@ -178,6 +184,13 @@ pub trait ChunkStore: Send + Sync {
 
     /// Read one chunk's stored ts/val bytes.
     fn read_chunk(&self, loc: &ChunkLoc) -> Result<ChunkBytes, String>;
+
+    /// Read several chunks in input order. Backends may override this to
+    /// amortize transport and statement overhead; the default preserves the
+    /// original one-at-a-time behavior.
+    fn read_chunks(&self, locs: &[ChunkLoc]) -> Result<Vec<ChunkBytes>, String> {
+        locs.iter().map(|loc| self.read_chunk(loc)).collect()
+    }
 
     /// Remove storage units (unit locs). Returns per-unit error strings;
     /// a missing unit is reported, not fatal.

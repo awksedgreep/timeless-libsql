@@ -89,8 +89,18 @@ fn engine_with(trigrams: bool, reads: Arc<AtomicUsize>) -> BlockEngine {
 }
 
 const WORDS: &[&str] = &[
-    "timeout", "TIMEOUT", "connection", "refused", "declined", "μs-latency",
-    "ok", "xtimeouty", "time", "out", "%literal%", "under_score",
+    "timeout",
+    "TIMEOUT",
+    "connection",
+    "refused",
+    "declined",
+    "μs-latency",
+    "ok",
+    "xtimeouty",
+    "time",
+    "out",
+    "%literal%",
+    "under_score",
 ];
 
 fn hostile_messages(rng: &mut Rng, n: usize, salt: &str) -> Vec<String> {
@@ -145,16 +155,16 @@ fn pruning_is_sound() {
 
     let patterns = [
         "%timeout%",
-        "%TIMEOUT%",          // case folding
-        "%time%out%",         // multiple runs
+        "%TIMEOUT%",  // case folding
+        "%time%out%", // multiple runs
         "%xtimeouty%",
-        "%μs-latency%",       // multi-byte UTF-8
+        "%μs-latency%",         // multi-byte UTF-8
         "%refused connection%", // absent adjacency (words never adjacent in that order? maybe)
-        "%r3-1%",             // salt hits one flush round
-        "%zzz-not-there%",    // no matches at all
-        "%ab%",               // runs too short to prune
-        "timeout%",           // anchored
-        "%_eclined%",         // underscore wildcard
+        "%r3-1%",               // salt hits one flush round
+        "%zzz-not-there%",      // no matches at all
+        "%ab%",                 // runs too short to prune
+        "timeout%",             // anchored
+        "%_eclined%",           // underscore wildcard
     ];
     for pattern in patterns {
         let base = LogQuery {
@@ -229,7 +239,10 @@ fn pruning_actually_prunes() {
     };
     let hits = engine.query(&q).unwrap();
     let pruned_reads = reads.load(Ordering::Relaxed);
-    assert_eq!(hits.iter().filter(|e| e.message.contains("xyzzy")).count(), 200);
+    assert_eq!(
+        hits.iter().filter(|e| e.message.contains("xyzzy")).count(),
+        200
+    );
     assert_eq!(
         pruned_reads, 1,
         "only the needle block should decode (got {pruned_reads} reads)"
@@ -242,7 +255,11 @@ fn pruning_actually_prunes() {
             ..q
         })
         .unwrap();
-    assert_eq!(reads.load(Ordering::Relaxed), 5, "full scan reads all blocks");
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        5,
+        "full scan reads all blocks"
+    );
     assert_eq!(unpruned.len(), 1000);
 }
 

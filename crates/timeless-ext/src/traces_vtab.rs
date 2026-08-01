@@ -60,8 +60,8 @@ use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::shadow_meta;
 use crate::shadow_span_store::{self, ShadowSpanStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
-use crate::table_args;
 use crate::sql_ident;
+use crate::table_args;
 use crate::vtab_tx::{self, SavepointVTab};
 
 /// Register the "timeless_traces" module on a freshly-loaded connection.
@@ -207,9 +207,9 @@ impl TracesTab {
             )
             .map_err(module_err)
         })?;
-        shared
-            .engine
-            .set_retention(shadow_meta::load_retention(&host, database, table).map_err(module_err)?);
+        shared.engine.set_retention(
+            shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
+        );
         Ok(shared)
     }
 
@@ -290,8 +290,14 @@ impl TracesTab {
                 }
             }
             if let Some(native) = retention {
-                shadow_meta::save_meta_text(&host, &database, &table, "retention", &native.to_string())
-                    .map_err(module_err)?;
+                shadow_meta::save_meta_text(
+                    &host,
+                    &database,
+                    &table,
+                    "retention",
+                    &native.to_string(),
+                )
+                .map_err(module_err)?;
             }
             retention
         } else {
@@ -584,6 +590,7 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             base: ffi::sqlite3_vtab_cursor::default(),
             shared: Arc::clone(&self.shared),
             db: self.db,
+            table_name: self.table_name.clone(),
             rows: Vec::new(),
             pos: 0,
             phantom: PhantomData,
@@ -732,7 +739,8 @@ impl UpdateVTab<'_> for TracesTab {
 
         // push() canonicalizes (sorts) attributes, validates, and
         // auto-flushes at the threshold.
-        self.shared.engine
+        self.shared
+            .engine
             .push(SpanEntry {
                 trace_id,
                 span_id,
@@ -847,6 +855,7 @@ pub struct TracesCursor<'vtab> {
     shared: Arc<SharedEngine<SpanBlockEngine>>,
     /// The connection driving this scan (bound in filter()).
     db: *mut ffi::sqlite3,
+    table_name: String,
     rows: Vec<OutRow>,
     pos: usize,
     phantom: PhantomData<&'vtab TracesTab>,
@@ -856,14 +865,14 @@ unsafe impl VTabCursor for TracesCursor<'_> {
     /// Decode the pushed constraints per the best_index bitmask, run
     /// one engine query (sequential block reads — no rayon anywhere on
     /// this path, per the Session 3 deadlock lesson), materialize rows.
-    fn filter(
-        &mut self,
-        idx_num: c_int,
-        _idx_str: Option<&str>,
-        args: &Filters<'_>,
-    ) -> Result<()> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         // Route block reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
+        let _read = self
+            .shared
+            .write_gate
+            .acquire_read(self.db as usize, &self.table_name)
+            .map_err(module_err)?;
 
         // argv slots were claimed in canonical order (trace, service,
         // kind, status, name, ts lo, ts hi) — the mask alone tells us
@@ -966,7 +975,8 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         let entries = if impossible {
             Vec::new()
         } else {
-            self.shared.engine
+            self.shared
+                .engine
                 .query(&SpanQuery {
                     ts_min,
                     ts_max,

@@ -10,7 +10,7 @@ name = "bench"
 version = "0.3.0"
 edition = "2021"
 
-# Five binaries, one crate: the Session 4 metrics bench (bench), the
+# Benchmark binaries share one crate: the Session 4 metrics bench (bench), the
 # Session 5 logs bench (bench-logs), the Session 6 traces bench
 # (bench-traces), the Session 7 codec bake-off (bench-codec) and the
 # hardening-session plain-table oracle property test (oracle) share
@@ -34,6 +34,10 @@ path = "src/bench_codec.rs"
 [[bin]]
 name = "oracle"
 path = "src/oracle.rs"
+
+[[bin]]
+name = "query-read"
+path = "src/bin/query_read.rs"
 
 [dependencies]
 # bundled         = compile SQLite in, ignore the system library

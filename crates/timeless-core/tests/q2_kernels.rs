@@ -10,11 +10,10 @@
 
 use std::collections::HashMap;
 
-use timeless_core::{AggFn, Engine};
+use timeless_core::{AggFn, Engine, WindowOp};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("timeless_q2_test_{name}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("timeless_q2_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -137,8 +136,9 @@ fn kernels_match_naive_reference() {
     let n_series = 5usize;
     let mut sids = Vec::new();
     for s in 0..n_series {
-        let labels: HashMap<String, String> =
-            [("host".to_string(), format!("h{s}"))].into_iter().collect();
+        let labels: HashMap<String, String> = [("host".to_string(), format!("h{s}"))]
+            .into_iter()
+            .collect();
         sids.push(engine.resolve_cached("q2.metric", &labels).unwrap());
     }
 
@@ -212,8 +212,9 @@ fn labeled_wrappers_match_by_id() {
 
     let mut by_labels = Vec::new();
     for s in 0..4 {
-        let labels: HashMap<String, String> =
-            [("host".to_string(), format!("h{s}"))].into_iter().collect();
+        let labels: HashMap<String, String> = [("host".to_string(), format!("h{s}"))]
+            .into_iter()
+            .collect();
         let sid = engine.resolve_cached("q2.labeled", &labels).unwrap();
         let mut ts = 1000i64;
         for _ in 0..300 {
@@ -226,7 +227,14 @@ fn labeled_wrappers_match_by_id() {
 
     let (start, stop, step, lookback, window) = (900i64, 6000i64, 30i64, 45i64, 120i64);
     let grid = engine
-        .query_grid_last("q2.labeled", &Default::default(), start, stop, step, lookback)
+        .query_grid_last(
+            "q2.labeled",
+            &Default::default(),
+            start,
+            stop,
+            step,
+            lookback,
+        )
         .unwrap();
     assert_eq!(grid.len(), 4, "all four series produce grid rows");
     for (labels, points) in &grid {
@@ -263,6 +271,23 @@ fn labeled_wrappers_match_by_id() {
             .query_window_agg_by_id(*sid, start, stop, step, window, AggFn::Avg)
             .unwrap();
         assert_bit_eq(points, &expect, &format!("labeled window host {host}"));
+    }
+
+    let sids: Vec<i64> = by_labels.iter().map(|(_, sid)| *sid).collect();
+    let batch = engine
+        .query_window_op_batch_by_id(&sids, start, stop, step, window, WindowOp::Agg(AggFn::Avg))
+        .unwrap();
+    assert_eq!(batch.len(), sids.len());
+    for ((result_sid, points), expected_sid) in batch.iter().zip(&sids) {
+        assert_eq!(result_sid, expected_sid, "batch retains input series order");
+        let expect = engine
+            .query_window_agg_by_id(*expected_sid, start, stop, step, window, AggFn::Avg)
+            .unwrap();
+        assert_bit_eq(
+            points,
+            &expect,
+            &format!("batched window sid {expected_sid}"),
+        );
     }
     engine.shutdown().unwrap();
 }

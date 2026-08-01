@@ -129,7 +129,9 @@ fn db_file_path(db: *mut ffi::sqlite3, database_name: &str) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    let path = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+    let path = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
     if path.is_empty() {
         None
     } else {
@@ -139,10 +141,7 @@ fn db_file_path(db: *mut ffi::sqlite3, database_name: &str) -> Option<String> {
 
 /// Database-level gauges: memory, page counts, bloat, file sizes.
 /// Valid from ANY connection (the scheduler's included).
-fn gauge_points(
-    db: *mut ffi::sqlite3,
-    database_name: &str,
-) -> Result<Vec<(&'static str, f64)>> {
+fn gauge_points(db: *mut ffi::sqlite3, database_name: &str) -> Result<Vec<(&'static str, f64)>> {
     let mut points: Vec<(&'static str, f64)> = Vec::with_capacity(16);
     points.push((
         "cache_used_bytes",
@@ -547,9 +546,16 @@ impl HealthTab {
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 match name.as_str() {
                     "flush_every" => {
-                        flush_every = value.parse::<u32>().ok().filter(|n| *n >= 1).ok_or_else(
-                            || module_err(format!("flush_every: expected N >= 1, got {value:?}")),
-                        )?;
+                        flush_every =
+                            value
+                                .parse::<u32>()
+                                .ok()
+                                .filter(|n| *n >= 1)
+                                .ok_or_else(|| {
+                                    module_err(format!(
+                                        "flush_every: expected N >= 1, got {value:?}"
+                                    ))
+                                })?;
                     }
                     "every" => {
                         every_secs = value.parse::<u64>().map_err(|_| {
@@ -603,7 +609,12 @@ impl HealthTab {
             )
             .map_err(module_err)?;
         } else {
-            let fe = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_FLUSH_EVERY)?;
+            let fe = load_meta_relaxed(
+                &host,
+                &inner.database_name,
+                &inner.table_name,
+                META_FLUSH_EVERY,
+            )?;
             let ev = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_EVERY)?;
             flush_every = fe
                 .as_deref()
@@ -616,7 +627,12 @@ impl HealthTab {
             // Best-effort view refresh: databases created by older
             // builds get the current report/trends definitions on open
             // (ignored on read-only connections; old views keep working).
-            let ver = load_meta_relaxed(&host, &inner.database_name, &inner.table_name, META_VIEWS_VER)?;
+            let ver = load_meta_relaxed(
+                &host,
+                &inner.database_name,
+                &inner.table_name,
+                META_VIEWS_VER,
+            )?;
             if ver.as_deref() != Some(VIEWS_VERSION) {
                 let refreshed = host
                     .execute_batch(&format!(
@@ -639,12 +655,18 @@ impl HealthTab {
             // standard readers work next time. Ignore failures (the
             // connection may be read-only; relaxed reads cover us).
             let _ = shadow_meta::save_meta_text(
-                &host, &inner.database_name, &inner.table_name,
-                META_FLUSH_EVERY, &flush_every.to_string(),
+                &host,
+                &inner.database_name,
+                &inner.table_name,
+                META_FLUSH_EVERY,
+                &flush_every.to_string(),
             );
             let _ = shadow_meta::save_meta_text(
-                &host, &inner.database_name, &inner.table_name,
-                META_EVERY, &every_secs.to_string(),
+                &host,
+                &inner.database_name,
+                &inner.table_name,
+                META_EVERY,
+                &every_secs.to_string(),
             );
         }
 
@@ -778,7 +800,10 @@ impl CreateVTab<'_> for HealthTab {
         );
         let _bind = DbGuard::bind(self.inner.db);
         let host = unsafe { Connection::from_handle(self.inner.db) }?;
-        host.execute_batch(&drop_views_ddl(&self.inner.database_name, &self.inner.table_name))?;
+        host.execute_batch(&drop_views_ddl(
+            &self.inner.database_name,
+            &self.inner.table_name,
+        ))?;
         self.inner.destroy()
     }
 }
