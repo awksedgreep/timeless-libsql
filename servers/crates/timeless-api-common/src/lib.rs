@@ -13,16 +13,203 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+use rusqlite::backup::Backup;
 use rusqlite::{params, Connection, OptionalExtension};
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const DATA_SCHEMA_VERSION: i64 = 1;
 pub const REQUIRED_EXTENSION_DATA_ABI: u64 = 1;
 pub const MINIMUM_EXTENSION_VERSION: &str = "0.3.0";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BackupRequest {
+    pub destination: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct BackupReport {
+    pub signal: String,
+    pub destination: String,
+    pub bytes: u64,
+    pub pages: i32,
+    pub schema_version: i64,
+    pub checkpoint_log_frames: i64,
+    pub checkpointed_frames: i64,
+    pub completed_unix_seconds: u64,
+    pub elapsed_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointReport {
+    pub log_frames: i64,
+    pub checkpointed_frames: i64,
+}
+
+/// Checkpoint every committed WAL frame or fail. A busy result is not a
+/// successful maintenance boundary: callers must never label a partially
+/// checkpointed database as a release backup.
+pub fn checkpoint_wal(conn: &Connection, signal: &str) -> Result<CheckpointReport, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|error| format!("checkpoint {signal} WAL: {error}"))?;
+        if busy == 0 && log_frames == checkpointed_frames {
+            return Ok(CheckpointReport {
+                log_frames,
+                checkpointed_frames,
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "checkpoint {signal} WAL remained busy after 5s: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Copy a database with SQLite's public online-backup API while the caller's
+/// established writer connection is the sole storage owner. The final path is
+/// published without overwrite only after page-copy, integrity, schema, and
+/// fsync checks succeed.
+pub fn create_verified_backup(
+    conn: &Connection,
+    destination: &Path,
+    signal: &str,
+    checkpoint: CheckpointReport,
+) -> Result<BackupReport, String> {
+    let started = Instant::now();
+    if !destination.is_absolute() {
+        return Err("backup destination must be an absolute path".into());
+    }
+    if destination.file_name().is_none() {
+        return Err("backup destination must name a file".into());
+    }
+    if destination.exists() {
+        return Err(format!(
+            "backup destination already exists; refusing to overwrite {}",
+            destination.display()
+        ));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "backup destination has no parent directory".to_string())?;
+    let canonical_parent = parent.canonicalize().map_err(|error| {
+        format!(
+            "backup parent directory must already exist and be accessible {}: {error}",
+            parent.display()
+        )
+    })?;
+    if !canonical_parent.is_dir() {
+        return Err(format!(
+            "backup parent is not a directory: {}",
+            parent.display()
+        ));
+    }
+    let name = destination
+        .file_name()
+        .expect("checked above")
+        .to_string_lossy();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system time precedes Unix epoch: {error}"))?
+        .as_nanos();
+    let partial = canonical_parent.join(format!(
+        ".{name}.timeless-backup-{}-{nonce}.partial",
+        std::process::id()
+    ));
+    let final_path = canonical_parent.join(destination.file_name().expect("checked above"));
+
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)
+        .map_err(|error| format!("create backup staging file {}: {error}", partial.display()))?;
+
+    let result = (|| {
+        let mut target = Connection::open(&partial)
+            .map_err(|error| format!("open backup staging database: {error}"))?;
+        let pages = {
+            let backup = Backup::new(conn, &mut target)
+                .map_err(|error| format!("initialize {signal} SQLite backup: {error}"))?;
+            backup
+                .run_to_completion(256, Duration::from_millis(2), None)
+                .map_err(|error| format!("copy {signal} SQLite backup pages: {error}"))?;
+            backup.progress().pagecount
+        };
+        let integrity: String = target
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|error| format!("verify {signal} backup integrity: {error}"))?;
+        if integrity != "ok" {
+            return Err(format!(
+                "verify {signal} backup integrity: PRAGMA quick_check returned {integrity:?}"
+            ));
+        }
+        let schema_version = preflight_database(&target, signal)?;
+        if schema_version != DATA_SCHEMA_VERSION {
+            return Err(format!(
+                "verify {signal} backup schema: expected version {DATA_SCHEMA_VERSION}, found {schema_version}"
+            ));
+        }
+        target
+            .close()
+            .map_err(|(_, error)| format!("close {signal} backup database: {error}"))?;
+        let staging = OpenOptions::new()
+            .read(true)
+            .open(&partial)
+            .map_err(|error| format!("reopen backup staging file for fsync: {error}"))?;
+        staging
+            .sync_all()
+            .map_err(|error| format!("fsync {signal} backup staging file: {error}"))?;
+
+        // hard_link is the portable no-clobber publication primitive. Both
+        // names are in the same canonical directory, so this cannot cross a
+        // filesystem boundary.
+        std::fs::hard_link(&partial, &final_path).map_err(|error| {
+            format!(
+                "publish {signal} backup without overwrite {}: {error}",
+                final_path.display()
+            )
+        })?;
+        std::fs::remove_file(&partial)
+            .map_err(|error| format!("remove published backup staging name: {error}"))?;
+        #[cfg(unix)]
+        File::open(&canonical_parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("fsync backup directory: {error}"))?;
+
+        let bytes = std::fs::metadata(&final_path)
+            .map_err(|error| format!("inspect completed backup: {error}"))?
+            .len();
+        let completed_unix_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("system time precedes Unix epoch: {error}"))?
+            .as_secs();
+        Ok(BackupReport {
+            signal: signal.to_string(),
+            destination: final_path.to_string_lossy().into_owned(),
+            bytes,
+            pages,
+            schema_version,
+            checkpoint_log_frames: checkpoint.log_frames,
+            checkpointed_frames: checkpoint.checkpointed_frames,
+            completed_unix_seconds,
+            elapsed_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    result
+}
 
 pub fn server_build_identity(signal: &str) -> serde_json::Value {
     serde_json::json!({

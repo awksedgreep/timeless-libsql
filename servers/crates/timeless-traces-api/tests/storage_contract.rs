@@ -10,6 +10,44 @@ use tempfile::TempDir;
 use timeless_traces_api::{router, Storage, DEFAULT_RETENTION, MAX_BODY_BYTES, TRACE_CAPABILITY};
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn release_backup_preserves_rich_spans_and_is_no_clobber() {
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let backup = directory.path().join("backup-traces.db");
+    let storage = Storage::start(
+        directory.path().join("traces.db"),
+        extension.clone(),
+        1,
+        8,
+        Some(DEFAULT_RETENTION),
+    )
+    .unwrap();
+    let spans = vec![RichSpan::fixture()];
+    storage
+        .submit_batch(rich_batch(&spans), spans.len(), 1_234)
+        .await
+        .unwrap();
+
+    let report = storage.backup(backup.clone()).await.unwrap();
+    assert_eq!(report.signal, "traces");
+    assert_eq!(report.schema_version, 1);
+    assert!(report.bytes > 0);
+    let original = std::fs::read(&backup).unwrap();
+    assert!(storage
+        .backup(backup.clone())
+        .await
+        .unwrap_err()
+        .contains("refusing to overwrite"));
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+
+    assert_fixture_persisted(&backup, &extension);
+    let restored = Storage::start(backup, extension, 1, 8, Some(DEFAULT_RETENTION)).unwrap();
+    assert_eq!(restored.stats().await.unwrap().total_spans, 1);
+    restored.shutdown().await.unwrap();
+    storage.shutdown().await.unwrap();
+}
+
 #[test]
 fn future_traces_schema_fails_before_vtab_initialization() {
     let extension = required_extension();

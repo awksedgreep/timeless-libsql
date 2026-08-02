@@ -23,6 +23,7 @@ pub use api::{router, MAX_BODY_BYTES};
 pub use storage::{
     FlushReport, IngestTimings, RuntimeWatermarks, Storage, StorageStats, TRACE_CAPABILITY,
 };
+pub use timeless_api_common::BackupReport;
 
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 

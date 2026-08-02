@@ -12,8 +12,8 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use timeless_api_common::{
-    acquire_database_lease, apply_schema_ledger, preflight_database, preflight_extension,
-    require_current_schema, DataPlaneSpec,
+    acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
+    preflight_database, preflight_extension, require_current_schema, BackupReport, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -312,6 +312,10 @@ enum WriteCommand {
         reply: oneshot::Sender<Result<FlushReport, String>>,
     },
     Optimize(oneshot::Sender<Result<(), String>>),
+    Backup {
+        destination: PathBuf,
+        reply: oneshot::Sender<Result<BackupReport, String>>,
+    },
     Shutdown(oneshot::Sender<Result<(), String>>),
 }
 
@@ -691,6 +695,26 @@ impl Storage {
             .map_err(|_| "SQLite writer stopped before optimize completed".to_string())?
     }
 
+    pub async fn backup(&self, destination: PathBuf) -> Result<BackupReport, String> {
+        let _ordered = self.0.admission.lock().await;
+        if self.0.shutting_down.load(Ordering::Acquire) {
+            return Err("traces API is shutting down; backup is closed".into());
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::Backup {
+                destination,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        drop(_ordered);
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before backup completed".to_string())?
+    }
+
     pub async fn stats(&self) -> Result<StorageStats, String> {
         let total_started = Instant::now();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -967,12 +991,26 @@ fn writer_main(
                 drop(api);
                 let _ = reply.send(result);
             }
+            WriteCommand::Backup { destination, reply } => {
+                let result = (|| {
+                    if let Some(error) = unreported_error.take() {
+                        return Err(format!(
+                            "refusing traces backup after an unreported write failure: {error}"
+                        ));
+                    }
+                    run_command(&conn, "flush", "flush traces for backup")?;
+                    optimize_all_backlog(&conn)?;
+                    let checkpoint = checkpoint_wal(&conn, "traces")?;
+                    create_verified_backup(&conn, &destination, "traces", checkpoint)
+                })();
+                let _ = reply.send(result);
+            }
             WriteCommand::Shutdown(reply) => {
                 let flush = run_command(&conn, "flush", "graceful traces flush");
                 let checkpoint_started = Instant::now();
                 // Attempt the checkpoint even when flush reports an error so
                 // shutdown telemetry preserves both independent operations.
-                let checkpoint = checkpoint_wal(&conn);
+                let checkpoint = checkpoint_wal(&conn, "traces").map(|_| ());
                 {
                     let mut api = profile_lock(&profile);
                     api.checkpoint_count = api.checkpoint_count.saturating_add(1);
@@ -998,7 +1036,7 @@ fn writer_main(
     // A dropped API still flushes its accepted tail. SIGKILL cannot run this;
     // only previously flushed/committed blocks are promised after kill -9.
     run_command(&conn, "flush", "final traces flush after writer disconnect")?;
-    checkpoint_wal(&conn)
+    checkpoint_wal(&conn, "traces").map(|_| ())
 }
 
 fn optimize_backlog(conn: &Connection) -> Result<(), String> {
@@ -1033,6 +1071,30 @@ fn optimize_backlog(conn: &Connection) -> Result<(), String> {
         &format!("optimize:{budget}"),
         &format!("optimize traces with {budget}-span budget"),
     )
+}
+
+fn optimize_all_backlog(conn: &Connection) -> Result<(), String> {
+    let mut previous = u64::MAX;
+    loop {
+        let stats = stat_values(conn)?;
+        let integer = |key: &str| match stats.get(key) {
+            Some(SqlValue::Integer(value)) => *value,
+            _ => 0,
+        };
+        let actionable = integer("optimize_pending_raw_entries")
+            .saturating_add(integer("optimize_merge_ready_entries"))
+            .max(0) as u64;
+        if actionable == 0 {
+            return Ok(());
+        }
+        if actionable >= previous {
+            return Err(format!(
+                "traces optimize backlog made no progress: previous={previous}, current={actionable}"
+            ));
+        }
+        previous = actionable;
+        optimize_backlog(conn)?;
+    }
 }
 
 fn optimize_span_budget(actionable_spans: u64, sample_spans: u64, sample_bytes: u64) -> usize {
@@ -1284,18 +1346,6 @@ fn run_command(conn: &Connection, command: &str, context: &str) -> Result<(), St
     conn.execute("INSERT INTO traces(traces) VALUES (?1)", [command])
         .map(|_| ())
         .map_err(|error| format!("{context}: {error}"))
-}
-
-fn checkpoint_wal(conn: &Connection) -> Result<(), String> {
-    let (busy, _log_frames, _checkpointed): (i64, i64, i64) = conn
-        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(|error| format!("checkpoint traces WAL: {error}"))?;
-    if busy != 0 {
-        return Err(format!("checkpoint traces WAL remained busy ({busy})"));
-    }
-    Ok(())
 }
 
 fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {

@@ -1,0 +1,62 @@
+name: Release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            servers -> servers/target
+      - name: Build versioned native bundle
+        run: python3 tools/package_release.py --target "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: timeless-telemetry-data-plane-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  checksums:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: timeless-telemetry-data-plane-*
+          merge-multiple: true
+          path: dist
+      - name: Produce complete release checksum set
+        run: |
+          cd dist
+          sha256sum *.tar.gz | sort -k2 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: timeless-telemetry-data-plane-checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error

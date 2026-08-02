@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use timeless_api_common::{server_build_identity, RESULT_ROWS_HEADER};
+use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
 
 use crate::storage::{LogEntry, QueryRow, QuerySpec, TimestampUnit};
 use crate::Storage;
@@ -28,6 +28,7 @@ pub fn router(storage: Storage) -> Router {
         .route("/select/logsql/field_values", get(field_values))
         .route("/select/logsql/stats", get(stats))
         .route("/api/v1/flush", get(flush))
+        .route("/api/v1/backup", post(backup))
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(storage)
@@ -237,6 +238,16 @@ async fn stats(State(storage): State<Storage>) -> impl IntoResponse {
 async fn flush(State(storage): State<Storage>) -> impl IntoResponse {
     match storage.flush().await {
         Ok(()) => (StatusCode::OK, Json(json!({"status": "ok"}))).into_response(),
+        Err(error) => server_error(error),
+    }
+}
+
+async fn backup(
+    State(storage): State<Storage>,
+    Json(request): Json<BackupRequest>,
+) -> impl IntoResponse {
+    match storage.backup(request.destination).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
         Err(error) => server_error(error),
     }
 }

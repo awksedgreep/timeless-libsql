@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use serde_json::json;
-use timeless_api_common::{server_build_identity, RESULT_ROWS_HEADER};
+use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
 
 use crate::query::{self, Params, ReadRequest};
 use crate::{victoria, Storage};
@@ -21,6 +21,7 @@ pub fn router(storage: Storage) -> Router {
         .route("/health", get(health))
         .route("/select/metrics/stats", get(stats))
         .route("/api/v1/flush", post(flush))
+        .route("/api/v1/backup", post(backup))
         .route("/api/v1/import", post(import_victoria))
         .route("/api/v1/import/prometheus", post(import_prometheus))
         .route("/api/v1/query", get(latest).post(latest))
@@ -274,6 +275,13 @@ async fn flush(State(storage): State<Storage>) -> Response {
             report.api_request_ns = duration_ns(started.elapsed());
             (StatusCode::OK, Json(report)).into_response()
         }
+        Err(error) => server_error(error),
+    }
+}
+
+async fn backup(State(storage): State<Storage>, Json(request): Json<BackupRequest>) -> Response {
+    match storage.backup(request.destination).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
         Err(error) => server_error(error),
     }
 }

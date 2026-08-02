@@ -21,6 +21,7 @@ use tokio::net::TcpListener;
 
 pub use api::router;
 pub use storage::{FlushReport, Storage, StorageStats};
+pub use timeless_api_common::BackupReport;
 
 pub const DEFAULT_RAW_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 

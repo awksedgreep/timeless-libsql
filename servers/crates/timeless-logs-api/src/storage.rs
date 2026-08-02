@@ -12,8 +12,8 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
 use timeless_api_common::{
-    acquire_database_lease, apply_schema_ledger, preflight_database, preflight_extension,
-    require_current_schema, DataPlaneSpec,
+    acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
+    preflight_database, preflight_extension, require_current_schema, BackupReport, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -184,6 +184,10 @@ enum WriteCommand {
     Flush(Option<oneshot::Sender<Result<(), String>>>),
     Optimize,
     Barrier(oneshot::Sender<()>),
+    Backup {
+        destination: PathBuf,
+        reply: oneshot::Sender<Result<BackupReport, String>>,
+    },
     Shutdown(oneshot::Sender<Result<(), String>>),
 }
 
@@ -394,6 +398,26 @@ impl Storage {
             .map_err(|_| "SQLite writer stopped before barrier".to_string())
     }
 
+    pub async fn backup(&self, destination: PathBuf) -> Result<BackupReport, String> {
+        let _ordered = self.0.admission.lock().await;
+        if self.0.shutting_down.load(Ordering::Acquire) {
+            return Err("logs API is shutting down; backup is closed".into());
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::Backup {
+                destination,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        drop(_ordered);
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before backup completed".to_string())?
+    }
+
     pub async fn query(&self, spec: QuerySpec) -> Result<Vec<QueryRow>, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.reader()
@@ -543,59 +567,91 @@ fn writer_main(
                 result?;
             }
             WriteCommand::Optimize => {
-                let stats = stat_values(&conn)?;
-                let actionable_entries = stats
-                    .get("optimize_pending_raw_entries")
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(
-                        stats
-                            .get("optimize_merge_ready_entries")
-                            .copied()
-                            .unwrap_or(0),
-                    )
-                    .max(0) as u64;
-                if actionable_entries > 0 {
-                    // The exact planner identifies actionable entries. Blob
-                    // bytes are sampled over all raw/small compressed
-                    // candidates because block payload length intentionally
-                    // is not part of the engine's in-memory metadata index.
-                    let (sample_entries, sample_bytes): (i64, i64) = conn
-                        .query_row(
-                            "SELECT COALESCE(SUM(entry_count), 0),
-                                    COALESCE(SUM(length(data)), 0)
-                             FROM logs_blocks
-                             WHERE codec IN (1, 6) OR entry_count < 8192",
-                            [],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .map_err(|e| format!("inspect optimize source bytes: {e}"))?;
-                    let budget = optimize_entry_budget(
-                        actionable_entries,
-                        sample_entries.max(0) as u64,
-                        sample_bytes.max(0) as u64,
-                    );
-                    conn.execute(
-                        "INSERT INTO logs(logs) VALUES (?1)",
-                        [format!("optimize:{budget}")],
-                    )
-                    .map_err(|e| format!("optimize logs with {budget}-entry budget: {e}"))?;
-                }
+                optimize_backlog(&conn)?;
             }
             WriteCommand::Barrier(reply) => {
                 let _ = reply.send(());
+            }
+            WriteCommand::Backup { destination, reply } => {
+                let result = (|| {
+                    conn.execute("INSERT INTO logs(logs) VALUES ('flush')", [])
+                        .map_err(|error| format!("flush logs for backup: {error}"))?;
+                    optimize_all_backlog(&conn)?;
+                    let checkpoint = checkpoint_wal(&conn, "logs")?;
+                    create_verified_backup(&conn, &destination, "logs", checkpoint)
+                })();
+                let _ = reply.send(result);
             }
             WriteCommand::Shutdown(reply) => {
                 let result = conn
                     .execute("INSERT INTO logs(logs) VALUES ('flush')", [])
                     .map(|_| ())
-                    .map_err(|e| format!("graceful logs flush: {e}"));
+                    .map_err(|e| format!("graceful logs flush: {e}"))
+                    .and_then(|_| checkpoint_wal(&conn, "logs").map(|_| ()));
                 let _ = reply.send(result.clone());
                 return result;
             }
         }
     }
     Ok(())
+}
+
+fn optimize_backlog(conn: &Connection) -> Result<u64, String> {
+    let stats = stat_values(conn)?;
+    let actionable_entries = stats
+        .get("optimize_pending_raw_entries")
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(
+            stats
+                .get("optimize_merge_ready_entries")
+                .copied()
+                .unwrap_or(0),
+        )
+        .max(0) as u64;
+    if actionable_entries == 0 {
+        return Ok(0);
+    }
+    // The exact planner identifies actionable entries. Blob bytes are sampled
+    // over raw/small candidates because payload length is intentionally not
+    // part of the extension's in-memory metadata index.
+    let (sample_entries, sample_bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(entry_count), 0),
+                    COALESCE(SUM(length(data)), 0)
+             FROM logs_blocks
+             WHERE codec IN (1, 6) OR entry_count < 8192",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| format!("inspect optimize source bytes: {error}"))?;
+    let budget = optimize_entry_budget(
+        actionable_entries,
+        sample_entries.max(0) as u64,
+        sample_bytes.max(0) as u64,
+    );
+    conn.execute(
+        "INSERT INTO logs(logs) VALUES (?1)",
+        [format!("optimize:{budget}")],
+    )
+    .map_err(|error| format!("optimize logs with {budget}-entry budget: {error}"))?;
+    Ok(actionable_entries)
+}
+
+fn optimize_all_backlog(conn: &Connection) -> Result<(), String> {
+    let mut previous = u64::MAX;
+    loop {
+        let actionable = optimize_backlog(conn)?;
+        if actionable == 0 {
+            return Ok(());
+        }
+        if actionable >= previous {
+            return Err(format!(
+                "logs optimize backlog made no progress: previous={previous}, current={actionable}"
+            ));
+        }
+        previous = actionable;
+    }
 }
 
 fn optimize_entry_budget(actionable_entries: u64, sample_entries: u64, sample_bytes: u64) -> usize {

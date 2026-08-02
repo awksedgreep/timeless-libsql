@@ -18,6 +18,7 @@ use tokio::net::TcpListener;
 
 pub use api::router;
 pub use storage::{LogEntry, QuerySpec, Storage, StorageStats, TimestampUnit};
+pub use timeless_api_common::BackupReport;
 
 #[derive(Clone, Debug)]
 pub struct Config {

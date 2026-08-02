@@ -13,8 +13,8 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use timeless_api_common::{
-    acquire_database_lease, apply_schema_ledger, preflight_database, preflight_extension,
-    require_current_schema, DataPlaneSpec,
+    acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
+    preflight_database, preflight_extension, require_current_schema, BackupReport, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -274,6 +274,10 @@ enum WriteCommand {
     Prune {
         cutoff_seconds: i64,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    Backup {
+        destination: PathBuf,
+        reply: oneshot::Sender<Result<BackupReport, String>>,
     },
     Shutdown(oneshot::Sender<Result<(), String>>),
 }
@@ -624,6 +628,29 @@ impl Storage {
             .map_err(|_| "SQLite writer stopped before prune completed".to_string())?
     }
 
+    /// Serialize a release backup behind every admitted write. The writer
+    /// performs extension-owned flush/compact before checkpoint and page-copy;
+    /// no second process or connection ever becomes a storage owner.
+    pub async fn backup(&self, destination: PathBuf) -> Result<BackupReport, String> {
+        let _ordered = self.0.admission.lock().await;
+        if self.0.shutting_down.load(Ordering::Acquire) {
+            return Err("metrics API is shutting down; backup is closed".into());
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::Backup {
+                destination,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        drop(_ordered);
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before backup completed".to_string())?
+    }
+
     pub async fn stats(&self) -> Result<StorageStats, String> {
         let total_started = Instant::now();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -910,8 +937,28 @@ fn writer_main(
                 record_maintenance(&profile, Maintenance::Prune, started.elapsed(), &result);
                 let _ = reply.send(result);
             }
+            WriteCommand::Backup { destination, reply } => {
+                let result = (|| {
+                    if let Some(error) = unreported_error.take() {
+                        return Err(format!(
+                            "refusing metrics backup after an unreported write failure: {error}"
+                        ));
+                    }
+                    run_command(&conn, table, "flush", "flush metrics for backup")?;
+                    run_command(
+                        &conn,
+                        table,
+                        "compact",
+                        "compact and roll up metrics for backup",
+                    )?;
+                    let checkpoint = checkpoint_wal(&conn, "metrics")?;
+                    create_verified_backup(&conn, &destination, "metrics", checkpoint)
+                })();
+                let _ = reply.send(result);
+            }
             WriteCommand::Shutdown(reply) => {
-                let result = run_command(&conn, table, "flush", "graceful metrics flush");
+                let result = run_command(&conn, table, "flush", "graceful metrics flush")
+                    .and_then(|_| checkpoint_wal(&conn, "metrics").map(|_| ()));
                 let _ = reply.send(result.clone());
                 return result;
             }

@@ -8,6 +8,39 @@ use tempfile::TempDir;
 use timeless_metrics_api::{router, Storage, DEFAULT_RAW_RETENTION};
 use tower::ServiceExt;
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn release_backup_is_ordered_verified_no_clobber_and_cold_reopenable() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("metrics.db");
+    let backup = directory.path().join("backup-metrics.db");
+    let storage = Storage::start(database, extension.clone(), 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    storage
+        .submit_named_batch(named_batch(3, 1_700_000_000), 3)
+        .await
+        .unwrap();
+
+    let report = storage.backup(backup.clone()).await.unwrap();
+    assert_eq!(report.signal, "metrics");
+    assert_eq!(report.destination, backup.to_string_lossy());
+    assert_eq!(report.schema_version, 1);
+    assert!(report.bytes > 0);
+    assert!(report.pages > 0);
+    let unchanged_bytes = std::fs::read(&backup).unwrap();
+    let error = storage.backup(backup.clone()).await.unwrap_err();
+    assert!(error.contains("refusing to overwrite"), "{error}");
+    assert_eq!(std::fs::read(&backup).unwrap(), unchanged_bytes);
+
+    let restored = Storage::start(backup, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let stats = restored.stats().await.unwrap();
+    assert_eq!(stats.total_points, 3);
+    assert_eq!(stats.buffered_points, 0);
+    assert_eq!(stats.series, 1);
+    restored.shutdown().await.unwrap();
+    storage.shutdown().await.unwrap();
+}
+
 #[test]
 #[ignore = "requires a built timeless_ext shared library"]
 fn future_metrics_schema_fails_before_vtab_initialization() {

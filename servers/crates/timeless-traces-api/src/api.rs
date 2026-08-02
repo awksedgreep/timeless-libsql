@@ -8,7 +8,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use timeless_api_common::{server_build_identity, VerifiedClaims, RESULT_ROWS_HEADER};
+use timeless_api_common::{
+    server_build_identity, BackupRequest, VerifiedClaims, RESULT_ROWS_HEADER,
+};
 
 use crate::otlp;
 use crate::query::{DashboardSearchParams, ReadRequest, SearchParams};
@@ -35,6 +37,7 @@ pub fn router(storage: Storage) -> Router {
             get(dashboard_trace),
         )
         .route("/api/v1/flush", get(flush).post(flush))
+        .route("/api/v1/backup", post(backup))
         .route("/insert/opentelemetry/v1/traces", post(ingest_otlp))
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -186,6 +189,13 @@ async fn flush(State(storage): State<Storage>) -> Response {
                 .insert("data_plane".into(), data_plane);
             (StatusCode::OK, Json(body)).into_response()
         }
+        Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+async fn backup(State(storage): State<Storage>, Json(request): Json<BackupRequest>) -> Response {
+    match storage.backup(request.destination).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
         Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     }
 }

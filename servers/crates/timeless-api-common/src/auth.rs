@@ -378,7 +378,7 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, AuthError> {
 fn required_scope(signal: &str, method: &Method, path: &str) -> String {
     let operation = if path == "/ready" || path == "/health" || path.ends_with("/stats") {
         "stats"
-    } else if path.ends_with("/flush") || path.ends_with("/optimize") {
+    } else if path.ends_with("/flush") || path.ends_with("/optimize") || path.ends_with("/backup") {
         "maintenance"
     } else if *method == Method::GET
         || *method == Method::HEAD
@@ -683,6 +683,16 @@ fn unix_seconds() -> Result<i64, AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_is_a_maintenance_operation_for_every_signal() {
+        for signal in ["metrics", "logs", "traces"] {
+            assert_eq!(
+                required_scope(signal, &Method::POST, "/api/v1/backup"),
+                format!("{signal}:maintenance")
+            );
+        }
+    }
     use axum::routing::{get, post};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use ed25519_dalek::{Signer, SigningKey};

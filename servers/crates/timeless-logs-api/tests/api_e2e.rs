@@ -6,6 +6,54 @@ use tower::ServiceExt;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn release_backup_preserves_exact_logs_and_refuses_overwrite() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let backup = temp.path().join("backup-logs.db");
+    let storage =
+        Storage::start(temp.path().join("logs.db"), extension.clone().into(), 1, 8).unwrap();
+    let app = router(storage.clone());
+    assert_eq!(
+        app.oneshot(ingest_request(make_lines(0, 16_384)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let report = storage.backup(backup.clone()).await.unwrap();
+    assert_eq!(report.signal, "logs");
+    assert!(report.bytes > 0);
+    let original = std::fs::read(&backup).unwrap();
+    assert!(storage
+        .backup(backup.clone())
+        .await
+        .unwrap_err()
+        .contains("refusing to overwrite"));
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+
+    let restored = Storage::start(backup, extension.into(), 1, 8).unwrap();
+    let stats = restored.stats().await.unwrap();
+    assert_eq!(stats.total_entries, 16_384);
+    assert_eq!(stats.buffered_entries, 0);
+    assert_eq!(
+        restored
+            .query(timeless_logs_api::QuerySpec {
+                limit: 20_000,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .len(),
+        16_384
+    );
+    restored.shutdown().await.unwrap();
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
