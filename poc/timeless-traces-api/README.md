@@ -4,8 +4,9 @@ This traces-specific process-boundary POC owns HTTP scheduling and SQLite
 connections. It does not implement storage. Every span and command crosses the
 public `timeless_traces` virtual table supplied by `libtimeless_ext`.
 
-Sessions 2–5 provide the server lifecycle shell, OTLP ingest, the pinned
-Jaeger read surface, and the reusable bounded/streaming extension read path.
+Sessions 2–6 provide the server lifecycle shell, OTLP ingest, the pinned
+Jaeger read surface, the reusable bounded/streaming extension read path, and a
+narrow lossless historical-query surface for TimelessTracesDashboard.
 
 ## Run
 
@@ -25,7 +26,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered extension optimize interval |
 
-## Sessions 2–5 endpoints
+## Sessions 2–6 endpoints
 
 - `GET /live` reports process liveness without touching SQLite.
 - `GET /ready` and `GET /health` verify a live reader and expose the negotiated
@@ -49,6 +50,14 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   `operation`, `start`, `end`, `limit`, `minDuration`, and `maxDuration`
   parameters. Compatibility is explicit: `limit` still counts spans before
   grouping, not traces, so a search result may be incomplete.
+- `GET /select/timeless/api/spans` implements the dashboard's exact historical
+  span search, pagination, and ordering contract. `name` retains the current
+  case-insensitive name/string-attribute match; `service`, `kind`, `status`,
+  `since`, and `until` are exact. Responses include every stored native field.
+- `GET /select/timeless/api/traces/:trace_id` returns a deterministically
+  ordered native trace with typed attributes, status description, events,
+  per-span resources, and instrumentation scope intact. These two routes are
+  traces-specific; they do not change or masquerade as the Jaeger contract.
 
 Session 5 keeps the public SQL waist useful outside this daemon. Unbounded
 `timeless_traces` cursors stream one decoded block at a time; exact

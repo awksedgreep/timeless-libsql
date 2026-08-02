@@ -210,6 +210,60 @@ async fn http_batches_leave_the_extension_8192_span_threshold_authoritative() {
     storage.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn dashboard_search_and_trace_return_complete_native_rich_spans() {
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("dashboard-native.db");
+    let storage = Storage::start(database, extension, 1, 4, None).unwrap();
+    let app = router(storage.clone());
+    let fixture = rich_json_fixture();
+    assert_eq!(
+        post(&app, &fixture, "application/json", None).await.0,
+        StatusCode::OK
+    );
+
+    let (status, body) = get(
+        &app,
+        "/select/timeless/api/spans?name=LIBSQL&limit=1&offset=0&order=desc",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(body["entries"][0]["span_id"], "1112131415161718");
+    assert_eq!(body["entries"][0]["attributes"]["rows"], 3);
+    assert_eq!(body["entries"][0]["resource"]["replica"], 7);
+    assert_eq!(
+        body["entries"][0]["instrumentation_scope"]["name"],
+        "contract-lib"
+    );
+    assert_eq!(body["entries"][0]["status_message"], Value::Null);
+    assert_eq!(body["has_more"], false);
+
+    let (status, body) = get(
+        &app,
+        "/select/timeless/api/traces/00112233445566778899aabbccddeeff",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    let spans = body["spans"].as_array().unwrap();
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0]["parent_span_id"], Value::Null);
+    assert_eq!(spans[0]["events"][0]["attributes"]["handled"], false);
+    assert_eq!(spans[0]["status_message"], "contract failure");
+    assert_eq!(spans[1]["parent_span_id"], "0102030405060708");
+
+    assert_eq!(
+        get(&app, "/select/timeless/api/spans?limit=101")
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    storage.shutdown().await.unwrap();
+}
+
 async fn post(
     app: &axum::Router,
     body: &[u8],
@@ -227,6 +281,17 @@ async fn post(
     let response = app
         .clone()
         .oneshot(request.body(Body::from(body.to_vec())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, body.to_vec())
+}
+
+async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();

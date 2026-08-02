@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::types::Value as SqlValue;
@@ -22,6 +22,8 @@ pub(crate) enum ReadRequest {
     Operations { service: String },
     Trace { trace_id: String },
     Search(SearchQuery),
+    DashboardTrace { trace_id: String },
+    DashboardSearch(DashboardSearchQuery),
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -36,6 +38,20 @@ pub(crate) struct SearchParams {
     pub max_duration: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSearchParams {
+    pub name: Option<String>,
+    pub service: Option<String>,
+    pub kind: Option<String>,
+    pub status: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<String>,
+    pub offset: Option<String>,
+    pub order: Option<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct SearchQuery {
     service: Option<String>,
@@ -45,6 +61,19 @@ pub(crate) struct SearchQuery {
     limit: i64,
     min_duration_ns: Option<i64>,
     max_duration_ns: Option<i64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DashboardSearchQuery {
+    name: Option<String>,
+    service: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+    since_ns: Option<i64>,
+    until_ns: Option<i64>,
+    limit: i64,
+    offset: i64,
+    descending: bool,
 }
 
 pub(crate) struct ReadOutput {
@@ -88,9 +117,61 @@ impl ReadRequest {
         match self {
             Self::Services => ReadKind::Services,
             Self::Operations { .. } => ReadKind::Operations,
-            Self::Trace { .. } => ReadKind::Trace,
-            Self::Search(_) => ReadKind::Search,
+            Self::Trace { .. } | Self::DashboardTrace { .. } => ReadKind::Trace,
+            Self::Search(_) | Self::DashboardSearch(_) => ReadKind::Search,
         }
+    }
+
+    pub(crate) fn dashboard_search(params: DashboardSearchParams) -> Result<Self, String> {
+        let parse_exact = |field: &str, value: Option<&str>, default: i64| {
+            value.map_or(Ok(default), |value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid dashboard {field} {value:?}"))
+            })
+        };
+        let limit = parse_exact("limit", params.limit.as_deref(), DEFAULT_LIMIT)?;
+        let offset = parse_exact("offset", params.offset.as_deref(), 0)?;
+        if !(1..=100).contains(&limit) {
+            return Err("dashboard limit must be between 1 and 100".into());
+        }
+        if offset < 0 {
+            return Err("dashboard offset must be non-negative".into());
+        }
+        let descending = match params.order.as_deref().unwrap_or("desc") {
+            "desc" => true,
+            "asc" => false,
+            value => return Err(format!("invalid dashboard order {value:?}")),
+        };
+        let kind = nonempty(params.kind);
+        if kind.as_deref().is_some_and(|value| {
+            !matches!(
+                value,
+                "internal" | "server" | "client" | "producer" | "consumer"
+            )
+        }) {
+            return Err("invalid dashboard span kind".into());
+        }
+        let status = nonempty(params.status);
+        if status
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "unset" | "ok" | "error"))
+        {
+            return Err("invalid dashboard span status".into());
+        }
+        let since_ns = optional_exact_integer("since", params.since.as_deref())?;
+        let until_ns = optional_exact_integer("until", params.until.as_deref())?;
+        Ok(Self::DashboardSearch(DashboardSearchQuery {
+            name: nonempty(params.name),
+            service: nonempty(params.service),
+            kind,
+            status,
+            since_ns,
+            until_ns,
+            limit,
+            offset,
+            descending,
+        }))
     }
 }
 
@@ -126,6 +207,20 @@ pub(crate) fn execute(
             envelope(vec![trace], 1, 1, spans.len() as u64)
         }
         ReadRequest::Search(search) => execute_search(conn, &search, cancelled),
+        ReadRequest::DashboardTrace { trace_id } => {
+            let spans = query_spans(
+                conn,
+                "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
+                        duration_ns,attributes,status_description,events,resource,instrumentation_scope \
+                   FROM traces WHERE trace_id=?1 ORDER BY start_ts,span_id",
+                vec![SqlValue::Text(trace_id)],
+                cancelled,
+            )?;
+            dashboard_trace_envelope(spans)
+        }
+        ReadRequest::DashboardSearch(search) => {
+            execute_dashboard_search(conn, &search, cancelled)
+        }
     }
 }
 
@@ -220,6 +315,104 @@ fn execute_search(
     envelope(traces, trace_count, trace_count, span_count)
 }
 
+fn execute_dashboard_search(
+    conn: &Connection,
+    search: &DashboardSearchQuery,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let mut sql = String::from(
+        "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
+                duration_ns,attributes,status_description,events,resource,instrumentation_scope \
+           FROM traces",
+    );
+    let mut values = Vec::new();
+    {
+        let mut add = |clause: &str, value: SqlValue| {
+            sql.push_str(if values.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
+            sql.push_str(clause);
+            values.push(value);
+        };
+        if let Some(value) = &search.service {
+            add("service=?", SqlValue::Text(value.clone()));
+        }
+        if let Some(value) = &search.kind {
+            add("kind=?", SqlValue::Text(value.clone()));
+        }
+        if let Some(value) = &search.status {
+            add("status=?", SqlValue::Text(value.clone()));
+        }
+        if let Some(value) = search.since_ns {
+            add("start_ts>=?", SqlValue::Integer(value));
+        }
+        if let Some(value) = search.until_ns {
+            add("start_ts<=?", SqlValue::Integer(value));
+        }
+    }
+    if search.descending {
+        sql.push_str(" ORDER BY start_ts DESC,span_id DESC");
+    } else {
+        sql.push_str(" ORDER BY start_ts ASC,span_id ASC");
+    }
+
+    // The native product's name filter also searches string-valued span
+    // attributes. JSON text LIKE would produce false positives, so keep this
+    // predicate in a bounded host loop. The public vtab cursor streams blocks
+    // and the loop stops after OFFSET + LIMIT + 1 exact matches.
+    let needed = search.offset.saturating_add(search.limit).saturating_add(1);
+    if search.name.is_none() {
+        sql.push_str(" LIMIT ? OFFSET ?");
+        values.push(SqlValue::Integer(search.limit.saturating_add(1)));
+        values.push(SqlValue::Integer(search.offset));
+    }
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("prepare dashboard spans query: {error}"))?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(|error| format!("execute dashboard spans query: {error}"))?;
+    let mut matched = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("read dashboard span row: {error}"))?
+    {
+        check_cancelled(cancelled)?;
+        let span = decode_span_row(row)?;
+        if search
+            .name
+            .as_deref()
+            .is_none_or(|pattern| dashboard_name_matches(&span, pattern))
+        {
+            matched.push(span);
+            if search.name.is_some() && matched.len() as i64 >= needed {
+                break;
+            }
+        }
+    }
+
+    let (page, has_more) = if search.name.is_some() {
+        let page = matched
+            .into_iter()
+            .skip(search.offset as usize)
+            .collect::<Vec<_>>();
+        let has_more = page.len() > search.limit as usize;
+        (
+            page.into_iter().take(search.limit as usize).collect(),
+            has_more,
+        )
+    } else {
+        let has_more = matched.len() > search.limit as usize;
+        (
+            matched.into_iter().take(search.limit as usize).collect(),
+            has_more,
+        )
+    };
+    dashboard_search_envelope(page, search.limit, search.offset, has_more)
+}
+
 #[derive(Clone)]
 struct SpanRow {
     trace_id: String,
@@ -257,37 +450,41 @@ fn query_spans(
         .map_err(|error| format!("read Jaeger span row: {error}"))?
     {
         check_cancelled(cancelled)?;
-        macro_rules! column {
-            ($index:expr) => {
-                row.get($index)
-                    .map_err(|error| format!("decode Jaeger span column {}: {error}", $index))?
-            };
-        }
-        let attributes = json_object(column!(9), "attributes")?;
-        let events = json_array(column!(11), "events")?;
-        let resource = json_object(column!(12), "resource")?;
-        let instrumentation_scope = json_object(column!(13), "instrumentation_scope")?;
-        let parent_span_id: Option<Vec<u8>> = column!(2);
-        output.push(SpanRow {
-            trace_id: hex_blob(column!(0), 16, "trace_id")?,
-            span_id: hex_blob(column!(1), 8, "span_id")?,
-            parent_span_id: parent_span_id
-                .map(|value| hex_bytes(&value, 8, "parent_span_id"))
-                .transpose()?,
-            name: column!(3),
-            service: column!(4),
-            kind: column!(5),
-            status: column!(6),
-            start_ts: column!(7),
-            duration_ns: column!(8),
-            attributes,
-            status_description: column!(10),
-            events,
-            resource,
-            instrumentation_scope,
-        });
+        output.push(decode_span_row(row)?);
     }
     Ok(output)
+}
+
+fn decode_span_row(row: &rusqlite::Row<'_>) -> Result<SpanRow, String> {
+    macro_rules! column {
+        ($index:expr) => {
+            row.get($index)
+                .map_err(|error| format!("decode traces span column {}: {error}", $index))?
+        };
+    }
+    let attributes = json_object(column!(9), "attributes")?;
+    let events = json_array(column!(11), "events")?;
+    let resource = json_object(column!(12), "resource")?;
+    let instrumentation_scope = json_object(column!(13), "instrumentation_scope")?;
+    let parent_span_id: Option<Vec<u8>> = column!(2);
+    Ok(SpanRow {
+        trace_id: hex_blob(column!(0), 16, "trace_id")?,
+        span_id: hex_blob(column!(1), 8, "span_id")?,
+        parent_span_id: parent_span_id
+            .map(|value| hex_bytes(&value, 8, "parent_span_id"))
+            .transpose()?,
+        name: column!(3),
+        service: column!(4),
+        kind: column!(5),
+        status: column!(6),
+        start_ts: column!(7),
+        duration_ns: column!(8),
+        attributes,
+        status_description: column!(10),
+        events,
+        resource,
+        instrumentation_scope,
+    })
 }
 
 fn jaeger_trace(
@@ -392,6 +589,94 @@ fn jaeger_tag(key: String, value: Value) -> Value {
     }
 }
 
+fn dashboard_trace_envelope(spans: Vec<SpanRow>) -> Result<ReadOutput, String> {
+    let span_count = spans.len() as u64;
+    let traces = u64::from(!spans.is_empty());
+    let spans = spans
+        .into_iter()
+        .map(dashboard_span)
+        .collect::<Result<Vec<_>, _>>()?;
+    let body = serde_json::to_vec(&json!({"spans": spans}))
+        .map_err(|error| format!("encode dashboard trace response: {error}"))?;
+    Ok(ReadOutput {
+        body,
+        traces,
+        spans: span_count,
+    })
+}
+
+fn dashboard_search_envelope(
+    spans: Vec<SpanRow>,
+    limit: i64,
+    offset: i64,
+    has_more: bool,
+) -> Result<ReadOutput, String> {
+    let span_count = spans.len() as u64;
+    let trace_count = spans
+        .iter()
+        .map(|span| span.trace_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    let total = offset
+        .saturating_add(spans.len() as i64)
+        .saturating_add(i64::from(has_more));
+    let entries = spans
+        .into_iter()
+        .map(dashboard_span)
+        .collect::<Result<Vec<_>, _>>()?;
+    let body = serde_json::to_vec(&json!({
+        "entries": entries,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more
+    }))
+    .map_err(|error| format!("encode dashboard search response: {error}"))?;
+    Ok(ReadOutput {
+        body,
+        traces: trace_count,
+        spans: span_count,
+    })
+}
+
+fn dashboard_span(span: SpanRow) -> Result<Value, String> {
+    let end_time = span
+        .start_ts
+        .checked_add(span.duration_ns)
+        .ok_or_else(|| "stored span end timestamp overflows i64".to_string())?;
+    let status_message = if span.status_description.is_empty() {
+        Value::Null
+    } else {
+        Value::String(span.status_description)
+    };
+    Ok(json!({
+        "trace_id": span.trace_id,
+        "span_id": span.span_id,
+        "parent_span_id": span.parent_span_id,
+        "name": span.name,
+        "kind": span.kind,
+        "start_time": span.start_ts,
+        "end_time": end_time,
+        "duration_ns": span.duration_ns,
+        "status": span.status,
+        "status_message": status_message,
+        "attributes": span.attributes,
+        "events": span.events,
+        "resource": span.resource,
+        "instrumentation_scope": span.instrumentation_scope
+    }))
+}
+
+fn dashboard_name_matches(span: &SpanRow, pattern: &str) -> bool {
+    let pattern = pattern.to_lowercase();
+    span.name.to_lowercase().contains(&pattern)
+        || span.attributes.values().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| value.to_lowercase().contains(&pattern))
+        })
+}
+
 fn envelope(
     data: impl serde::Serialize,
     total: u64,
@@ -428,6 +713,20 @@ fn parse_duration(value: &str) -> Result<i64, String> {
 
 fn parse_optional_integer(value: Option<&str>) -> Option<i64> {
     value.and_then(parse_integer_prefix)
+}
+
+fn optional_exact_integer(field: &str, value: Option<&str>) -> Result<Option<i64>, String> {
+    value
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .map_err(|_| format!("invalid dashboard {field} {value:?}"))
+        })
+        .transpose()
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }
 
 fn parse_integer_prefix(value: &str) -> Option<i64> {

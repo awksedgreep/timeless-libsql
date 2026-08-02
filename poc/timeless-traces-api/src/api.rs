@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use crate::otlp;
-use crate::query::{ReadRequest, SearchParams};
+use crate::query::{DashboardSearchParams, ReadRequest, SearchParams};
 use crate::{IngestTimings, Storage};
 
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -27,6 +27,11 @@ pub fn router(storage: Storage) -> Router {
         )
         .route("/select/jaeger/api/traces", get(search_traces))
         .route("/select/jaeger/api/traces/{trace_id}", get(trace_by_id))
+        .route("/select/timeless/api/spans", get(dashboard_search))
+        .route(
+            "/select/timeless/api/traces/{trace_id}",
+            get(dashboard_trace),
+        )
         .route("/api/v1/flush", get(flush).post(flush))
         .route("/insert/opentelemetry/v1/traces", post(ingest_otlp))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -109,6 +114,23 @@ async fn search_traces(
     Query(params): Query<SearchParams>,
 ) -> Response {
     match ReadRequest::search(params) {
+        Ok(request) => read_response(storage, request).await,
+        Err(error) => client_error(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn dashboard_trace(
+    State(storage): State<Storage>,
+    Path(trace_id): Path<String>,
+) -> Response {
+    read_response(storage, ReadRequest::DashboardTrace { trace_id }).await
+}
+
+async fn dashboard_search(
+    State(storage): State<Storage>,
+    Query(params): Query<DashboardSearchParams>,
+) -> Response {
+    match ReadRequest::dashboard_search(params) {
         Ok(request) => read_response(storage, request).await,
         Err(error) => client_error(StatusCode::BAD_REQUEST, error),
     }
