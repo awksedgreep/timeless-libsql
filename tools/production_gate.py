@@ -124,6 +124,27 @@ def linear_slope_per_hour(samples: list[tuple[float, int]], warmup_seconds: floa
     return per_second * 3_600
 
 
+def generation_slopes(samples: list[tuple[int, float, int]]) -> dict[str, dict[str, float | int]]:
+    grouped: dict[int, list[tuple[float, int]]] = defaultdict(list)
+    for generation, elapsed, rss in samples:
+        grouped[generation].append((elapsed, rss))
+    slopes = {}
+    for generation, points in grouped.items():
+        first = points[0][0]
+        span = points[-1][0] - first
+        # Treat every restart as a new allocator lifetime. Otherwise a later
+        # low-RSS process could hide growth in an earlier long-lived process.
+        warmup = min(span * 0.25, 30 * 60)
+        relative = [(elapsed - first, rss) for elapsed, rss in points]
+        slopes[str(generation)] = {
+            "samples": len(points),
+            "span_seconds": span,
+            "warmup_seconds": warmup,
+            "slope_kib_per_hour": linear_slope_per_hour(relative, warmup),
+        }
+    return slopes
+
+
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -295,7 +316,7 @@ class SignalState:
     errors: list[str] = dataclasses.field(default_factory=list)
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     state_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
-    rss_samples: list[tuple[float, int]] = dataclasses.field(default_factory=list)
+    rss_samples: list[tuple[int, float, int]] = dataclasses.field(default_factory=list)
     resource_samples: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     max_watermarks: dict[str, int] = dataclasses.field(default_factory=lambda: defaultdict(int))
 
@@ -670,7 +691,7 @@ def sample_state(state: SignalState, elapsed: float) -> None:
     rss = memory.get("vmrss_kib", 0)
     hwm = memory.get("vmhwm_kib", 0)
     state.server.memory_hwm_kib = max(state.server.memory_hwm_kib, hwm)
-    state.rss_samples.append((elapsed, rss))
+    state.rss_samples.append((state.server.generation, elapsed, rss))
     keys = (
         COUNT_FIELDS[state.signal_name],
         "database_file_bytes",
@@ -692,6 +713,8 @@ def sample_state(state: SignalState, elapsed: float) -> None:
         "queued_body_bytes",
         "in_flight_batches",
         "in_flight_requests",
+        "command_queue_capacity_batches",
+        "command_queue_capacity_requests",
         "api_read_response_bytes",
         "query_snapshot_payload_max_bytes",
         "extension_query_snapshot_payload_max_bytes",
@@ -1096,7 +1119,6 @@ def result_for_state(
     state: SignalState,
     final: dict[str, Any],
     duration_seconds: float,
-    warmup_seconds: float,
 ) -> dict[str, Any]:
     with state.state_lock:
         accepted = state.accepted
@@ -1105,13 +1127,20 @@ def result_for_state(
         errors = list(state.errors)
     physical = final.get("physical_database_bytes", final.get("disk_size", 0))
     logical = final.get("bytes_on_disk", final.get("total_bytes", 0))
+    slopes = generation_slopes(state.rss_samples)
+    long_running_slopes = [
+        generation["slope_kib_per_hour"]
+        for generation in slopes.values()
+        if generation["span_seconds"] >= 2 * 60 * 60
+    ]
     return {
         "accepted_and_durable_records": accepted,
         "durable_records_per_second": accepted / duration_seconds,
         "write_latency": latency_summary(writes),
         "query_latency": {key: latency_summary(value) for key, value in sorted(queries.items())},
         "rss_hwm_kib": state.server.memory_hwm_kib,
-        "rss_slope_kib_per_hour_after_warmup": linear_slope_per_hour(state.rss_samples, warmup_seconds),
+        "rss_slope_kib_per_hour_after_warmup": max(long_running_slopes, default=0.0),
+        "rss_slope_kib_per_hour_by_process_generation": slopes,
         "logical_storage_bytes": logical,
         "physical_storage_bytes": physical,
         "physical_bytes_per_record": physical / accepted if accepted else 0.0,
@@ -1153,6 +1182,16 @@ def enforce_gates(args: argparse.Namespace, report: dict[str, Any]) -> None:
                     f"{signal_name}/{shape}: p99 {latency['p99_ms']:.2f} ms > {args.max_p99_ms:.2f} ms"
                 )
         final = result["final_stats"]
+        capacity = final.get(
+            "command_queue_capacity_batches",
+            final.get("command_queue_capacity_requests", 0),
+        )
+        queue_key = "queued_requests" if signal_name == "traces" else "queued_batches"
+        queued_hwm = result["resource_watermarks"].get(queue_key, 0)
+        if capacity and queued_hwm > capacity:
+            failures.append(
+                f"{signal_name}: {queue_key} HWM {queued_hwm} exceeds configured capacity {capacity}"
+            )
         for key in ("queued_batches", "queued_requests", "in_flight_batches", "in_flight_requests"):
             if final.get(key, 0):
                 failures.append(f"{signal_name}: final {key}={final[key]}")
@@ -1350,14 +1389,13 @@ def main() -> int:
             barriers[signal_name] = durable_barrier(state)
             finals[signal_name] = barriers[signal_name]["stats"]
             sample_state(state, elapsed)
-        warmup = min(elapsed * 0.25, 30 * 60)
         report.update({
             "elapsed_seconds": elapsed,
             "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "faults": events,
             "final_barriers": {key: value["flush"] for key, value in barriers.items()},
             "signals": {
-                signal_name: result_for_state(state, finals[signal_name], elapsed, warmup)
+                signal_name: result_for_state(state, finals[signal_name], elapsed)
                 for signal_name, state in states.items()
             },
         })
