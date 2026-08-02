@@ -1916,6 +1916,7 @@ impl SpanBlockEngine {
                 .buffer_lock()
                 .iter()
                 .map(|span| span.service.clone())
+                .filter(|service| !service.is_empty())
                 .collect::<Vec<_>>();
             (catalog, buffered)
         };
@@ -1928,7 +1929,9 @@ impl SpanBlockEngine {
                     self.query_stream_after_snapshot(&unbounded_span_query(), || {})?;
                 let mut values = BTreeSet::new();
                 while let Some(span) = self.query_stream_next(&mut stream)? {
-                    values.insert(span.service);
+                    if !span.service.is_empty() {
+                        values.insert(span.service);
+                    }
                 }
                 payload_bytes_read = stream.payload_bytes_read;
                 decoded_spans = stream.decoded_spans;
@@ -2193,15 +2196,18 @@ impl SpanBlockEngine {
 fn extract_terms(entries: &[SpanEntry]) -> Vec<String> {
     let mut set = BTreeSet::new();
     for e in entries {
-        set.insert(format!("service:{}", e.service));
         set.insert(format!("kind:{}", super::kind_name(e.kind)));
         set.insert(format!("status:{}", status_name(e.status)));
         set.insert(format!("name:{}", e.name));
-        // `operations:` marks blocks that carry exact service/operation pair
-        // terms. The length prefix makes arbitrary UTF-8 service names
-        // collision-free without reserving a separator byte.
-        set.insert("operations:".to_string());
-        set.insert(operation_term(&e.service, &e.name));
+        if !e.service.is_empty() {
+            set.insert(format!("service:{}", e.service));
+            // `operations:` marks blocks that carry exact
+            // service/operation pair terms. The length prefix makes
+            // arbitrary UTF-8 service names collision-free without
+            // reserving a separator byte.
+            set.insert("operations:".to_string());
+            set.insert(operation_term(&e.service, &e.name));
+        }
     }
     set.into_iter().collect()
 }

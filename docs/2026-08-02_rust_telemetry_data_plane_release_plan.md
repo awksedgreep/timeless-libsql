@@ -383,6 +383,9 @@ private storage path.
 
 ### Session 2 — bounded immutable readers and exact migration writer
 
+Status: complete. Evidence:
+[`2026-08-02_rust_telemetry_data_plane_session2.md`](2026-08-02_rust_telemetry_data_plane_session2.md).
+
 - Implement signal-owned read-only legacy iterators. Add a bounded metrics NIF
   cursor; decode one validated logs/traces block at a time; support the exact
   recognized SQLite-index and old snapshot/log generations without invoking

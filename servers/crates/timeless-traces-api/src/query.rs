@@ -465,6 +465,7 @@ fn decode_span_row(row: &rusqlite::Row<'_>) -> Result<SpanRow, String> {
     let resource = json_object(column!(12), "resource")?;
     let instrumentation_scope = json_object(column!(13), "instrumentation_scope")?;
     let parent_span_id: Option<Vec<u8>> = column!(2);
+    let service: String = column!(4);
     Ok(SpanRow {
         trace_id: hex_blob(column!(0), 16, "trace_id")?,
         span_id: hex_blob(column!(1), 8, "span_id")?,
@@ -472,7 +473,11 @@ fn decode_span_row(row: &rusqlite::Row<'_>) -> Result<SpanRow, String> {
             .map(|value| hex_bytes(&value, 8, "parent_span_id"))
             .transpose()?,
         name: column!(3),
-        service: column!(4),
+        service: if service.is_empty() {
+            "unknown".to_owned()
+        } else {
+            service
+        },
         kind: column!(5),
         status: column!(6),
         start_ts: column!(7),

@@ -67,7 +67,6 @@ pub(crate) fn derive_service(
     service_from(attributes)
         .or_else(|| service_from(resource))
         .or(explicit)
-        .filter(|service| !service.is_empty())
         .ok_or_else(|| {
             "service is required: supply service TEXT or string service.name in attributes/resource"
                 .into()
@@ -99,5 +98,6 @@ mod tests {
             .unwrap(),
             "span"
         );
+        assert_eq!(derive_service("{}", "{}", Some(String::new())).unwrap(), "");
     }
 }
