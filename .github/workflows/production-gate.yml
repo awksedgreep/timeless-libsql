@@ -33,7 +33,7 @@ jobs:
         env:
           TIMELESS_BUILD_COMMIT: ${{ github.sha }}
         run: |
-          cargo build --workspace --release --locked
+          cargo build -p timeless-ext --release --locked
           cargo build --manifest-path servers/Cargo.toml --workspace --release --locked
       - name: Unit, contract, and lint gates
         run: |
