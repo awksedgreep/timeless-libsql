@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use timeless_api_common::server_build_identity;
+use timeless_api_common::{server_build_identity, AuthConfig};
 use timeless_traces_api::{run, Config};
 
 const USAGE: &str = "usage: timeless-traces-api <libtimeless_ext.so> <database> [listen-address]";
@@ -40,6 +40,11 @@ async fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    let auth = match AuthConfig::required_from_env("traces") {
+        Ok(auth) => auth,
+        Err(error) => return usage_error(error),
+    };
+
     let defaults = Config::default();
     let reader_connections = match positive_usize_from_env(
         "TIMELESS_TRACES_READER_CONNECTIONS",
@@ -55,6 +60,7 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
+    let enforce_retention = std::env::var_os("TIMELESS_TRACES_RETENTION_SECS").is_some();
     let retention =
         match optional_duration_from_env("TIMELESS_TRACES_RETENTION_SECS", defaults.retention) {
             Ok(value) => value,
@@ -82,8 +88,10 @@ async fn main() -> ExitCode {
         reader_connections,
         command_queue_batches,
         retention,
+        enforce_retention,
         flush_interval,
         optimize_interval,
+        auth,
     };
     match run(config).await {
         Ok(()) => ExitCode::SUCCESS,

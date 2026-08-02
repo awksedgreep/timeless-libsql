@@ -14,7 +14,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use timeless_api_common::{maintenance_task, shutdown_signal, validate_loopback};
+use timeless_api_common::{
+    maintenance_task, protect_router, shutdown_signal, validate_loopback, AuthConfig,
+};
 use tokio::net::TcpListener;
 
 pub use api::router;
@@ -33,6 +35,7 @@ pub struct Config {
     pub compact_interval: Duration,
     pub retention_interval: Duration,
     pub raw_retention: Duration,
+    pub auth: AuthConfig,
 }
 
 impl Default for Config {
@@ -50,6 +53,7 @@ impl Default for Config {
             compact_interval: Duration::from_secs(5 * 60),
             retention_interval: Duration::from_secs(60 * 60),
             raw_retention: DEFAULT_RAW_RETENTION,
+            auth: AuthConfig::disabled(),
         }
     }
 }
@@ -76,6 +80,7 @@ impl Config {
         {
             return Err("maintenance and retention intervals must be positive".into());
         }
+        self.auth.preflight()?;
         Ok(())
     }
 }
@@ -89,7 +94,7 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.command_queue_batches,
         config.raw_retention,
     )?;
-    let app = router(storage.clone());
+    let app = protect_router(router(storage.clone()), config.auth.clone());
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|error| format!("bind {}: {error}", config.listen))?;

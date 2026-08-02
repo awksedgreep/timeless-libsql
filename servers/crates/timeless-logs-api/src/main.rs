@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use timeless_api_common::server_build_identity;
+use timeless_api_common::{server_build_identity, AuthConfig};
 use timeless_logs_api::{run, Config};
 
 const USAGE: &str = "usage: timeless-logs-api <libtimeless_ext.so> <database> [listen-address]";
@@ -43,6 +43,14 @@ async fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    let auth = match AuthConfig::required_from_env("logs") {
+        Ok(auth) => auth,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+
     let optimize_interval = match interval_from_env("TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS", 30) {
         Ok(interval) => interval,
         Err(error) => {
@@ -67,6 +75,7 @@ async fn main() -> ExitCode {
         listen,
         reader_connections,
         optimize_interval,
+        auth,
         ..default_config
     };
     match run(config).await {

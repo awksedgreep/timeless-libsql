@@ -367,6 +367,24 @@ impl Storage {
         queue_batches: usize,
         retention: Option<Duration>,
     ) -> Result<Self, String> {
+        Self::start_with_retention_policy(
+            database_path,
+            extension_path,
+            reader_connections,
+            queue_batches,
+            retention,
+            true,
+        )
+    }
+
+    pub fn start_with_retention_policy(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        retention: Option<Duration>,
+        enforce_retention: bool,
+    ) -> Result<Self, String> {
         if reader_connections == 0 {
             return Err("reader_connections must be positive".into());
         }
@@ -401,6 +419,7 @@ impl Storage {
                     writer_db,
                     writer_ext,
                     retention,
+                    enforce_retention,
                     writer_rx,
                     ready_tx,
                     writer_profile,
@@ -430,7 +449,16 @@ impl Storage {
             let reader_ext = extension_path.clone();
             let join = thread::Builder::new()
                 .name(format!("timeless-traces-reader-{number}"))
-                .spawn(move || reader_main(reader_db, reader_ext, retention, reader_rx, ready_tx))
+                .spawn(move || {
+                    reader_main(
+                        reader_db,
+                        reader_ext,
+                        retention,
+                        enforce_retention,
+                        reader_rx,
+                        ready_tx,
+                    )
+                })
                 .map_err(|error| format!("spawn SQLite reader {number}: {error}"))?;
             match ready_rx.recv() {
                 Ok(Ok(())) => {
@@ -838,11 +866,18 @@ fn writer_main(
     database_path: PathBuf,
     extension_path: PathBuf,
     retention: Option<Duration>,
+    enforce_retention: bool,
     mut commands: mpsc::Receiver<WriteCommand>,
     ready: std_mpsc::Sender<Result<(), String>>,
     profile: Arc<StdMutex<ApiProfile>>,
 ) -> Result<(), String> {
-    let conn = match open_connection(&database_path, &extension_path, retention, true) {
+    let conn = match open_connection(
+        &database_path,
+        &extension_path,
+        retention,
+        enforce_retention,
+        true,
+    ) {
         Ok(conn) => {
             let _ = ready.send(Ok(()));
             conn
@@ -1020,10 +1055,17 @@ fn reader_main(
     database_path: PathBuf,
     extension_path: PathBuf,
     retention: Option<Duration>,
+    enforce_retention: bool,
     mut commands: mpsc::Receiver<ReadCommand>,
     ready: std_mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    let conn = match open_connection(&database_path, &extension_path, retention, false) {
+    let conn = match open_connection(
+        &database_path,
+        &extension_path,
+        retention,
+        enforce_retention,
+        false,
+    ) {
         Ok(conn) => {
             let _ = ready.send(Ok(()));
             conn
@@ -1093,6 +1135,7 @@ fn open_connection(
     path: &Path,
     extension: &Path,
     retention: Option<Duration>,
+    enforce_retention: bool,
     initialize: bool,
 ) -> Result<Connection, String> {
     let conn =
@@ -1145,13 +1188,14 @@ fn open_connection(
         )
         .map_err(|error| format!("configure traces reader: {error}"))?;
     }
-    verify_capability(&conn, retention, initialize)?;
+    verify_capability(&conn, retention, enforce_retention, initialize)?;
     Ok(conn)
 }
 
 fn verify_capability(
     conn: &Connection,
     retention: Option<Duration>,
+    enforce_retention: bool,
     probe_batch: bool,
 ) -> Result<(), String> {
     let mut statement = conn
@@ -1193,7 +1237,7 @@ fn verify_capability(
         .map(|seconds| seconds.saturating_mul(1_000_000_000))
         .map(|native| i64::try_from(native).unwrap_or(i64::MAX));
     let actual_retention = optional_integer(values.get("retention"));
-    if actual_retention != expected_retention {
+    if enforce_retention && actual_retention != expected_retention {
         return Err(format!(
             "traces retention mismatch: server requested {expected_retention:?} ns but database stores {actual_retention:?} ns"
         ));

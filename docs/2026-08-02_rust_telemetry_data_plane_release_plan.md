@@ -1,7 +1,7 @@
 # Rust telemetry data-plane release-promotion plan
 
 Date: 2026-08-02  
-Status: Sessions 0–3 complete; implementation sessions 4–8 pending
+Status: Sessions 0–4 complete; implementation sessions 5–8 pending
 Branch: `release/rust-telemetry-data-plane`
 
 This plan promotes the completed metrics, logs, and traces Rust API POCs into
@@ -426,6 +426,9 @@ open byte-identical legacy data. Successful cutover is recognized after a
 crash without relying on a final best-effort marker write.
 
 ### Session 4 — Phoenix control plane, auth, limits, and process ownership
+
+Status: complete. Evidence:
+[`2026-08-02_rust_telemetry_data_plane_session4.md`](2026-08-02_rust_telemetry_data_plane_session4.md).
 
 - Add Phoenix token/key/policy tables and issuance/rotation/revocation APIs.
 - Add Rust claim validation, per-route scopes, audit identity, one-database

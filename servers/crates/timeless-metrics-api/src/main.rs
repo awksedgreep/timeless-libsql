@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use timeless_api_common::server_build_identity;
+use timeless_api_common::{server_build_identity, AuthConfig};
 use timeless_metrics_api::{run, Config};
 
 const USAGE: &str = "usage: timeless-metrics-api <libtimeless_ext.so> <database> [listen-address]";
@@ -42,6 +42,11 @@ async fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
+
+    let auth = match AuthConfig::required_from_env("metrics") {
+        Ok(auth) => auth,
+        Err(error) => return usage_error(error),
+    };
 
     let defaults = Config::default();
     let reader_connections = match positive_usize_from_env(
@@ -89,6 +94,7 @@ async fn main() -> ExitCode {
         flush_interval,
         compact_interval,
         retention_interval,
+        auth,
         ..defaults
     };
 

@@ -14,7 +14,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use timeless_api_common::{maintenance_task, shutdown_signal, validate_loopback};
+use timeless_api_common::{
+    maintenance_task, protect_router, shutdown_signal, validate_loopback, AuthConfig,
+};
 use tokio::net::TcpListener;
 
 pub use api::{router, MAX_BODY_BYTES};
@@ -32,8 +34,12 @@ pub struct Config {
     pub reader_connections: usize,
     pub command_queue_batches: usize,
     pub retention: Option<Duration>,
+    /// `false` inherits the retention persisted by the migration-created
+    /// virtual table. `true` requires an exact configured match.
+    pub enforce_retention: bool,
     pub flush_interval: Duration,
     pub optimize_interval: Duration,
+    pub auth: AuthConfig,
 }
 
 impl Default for Config {
@@ -47,9 +53,11 @@ impl Default for Config {
             // process HWM to 66,732 KiB (four/eight used 110/198 MiB).
             reader_connections: 2,
             command_queue_batches: 256,
-            retention: Some(DEFAULT_RETENTION),
+            retention: None,
+            enforce_retention: false,
             flush_interval: Duration::from_secs(1),
             optimize_interval: Duration::from_secs(30),
+            auth: AuthConfig::disabled(),
         }
     }
 }
@@ -72,23 +80,28 @@ impl Config {
         if self.retention.is_some_and(|duration| duration.is_zero()) {
             return Err("retention must be positive when enabled".into());
         }
+        if !self.enforce_retention && self.retention.is_some() {
+            return Err("inherited retention cannot also specify a duration".into());
+        }
         if self.flush_interval.is_zero() || self.optimize_interval.is_zero() {
             return Err("maintenance intervals must be positive".into());
         }
+        self.auth.preflight()?;
         Ok(())
     }
 }
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
-    let storage = Storage::start(
+    let storage = Storage::start_with_retention_policy(
         config.database_path.clone(),
         config.extension_path.clone(),
         config.reader_connections,
         config.command_queue_batches,
         config.retention,
+        config.enforce_retention,
     )?;
-    let app = router(storage.clone());
+    let app = protect_router(router(storage.clone()), config.auth.clone());
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|error| format!("bind {}: {error}", config.listen))?;

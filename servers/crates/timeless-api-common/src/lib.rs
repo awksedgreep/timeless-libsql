@@ -5,6 +5,10 @@
 //! fencing, loopback policy, shutdown signals, and identical maintenance-task
 //! lifecycle.
 
+mod auth;
+
+pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims};
+
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::net::SocketAddr;

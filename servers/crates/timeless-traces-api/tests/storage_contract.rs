@@ -147,6 +147,23 @@ async fn session_two_owns_lifecycle_durability_and_cold_reopen() {
     );
     reopened.shutdown().await.unwrap();
 
+    // The production binary inherits the migration-persisted policy unless
+    // the operator explicitly configured a retention override.
+    let inherited = Storage::start_with_retention_policy(
+        database.clone(),
+        extension.clone(),
+        1,
+        2,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        inherited.stats().await.unwrap().retention_nanoseconds,
+        Some(DEFAULT_RETENTION.as_nanos() as i64)
+    );
+    inherited.shutdown().await.unwrap();
+
     // Existing files are fenced against accidental retention drift.
     let mismatch = match Storage::start(database, extension, 1, 2, None) {
         Ok(unexpected) => {
@@ -294,6 +311,7 @@ fn spawn_server(extension: &Path, database: &Path) -> (std::process::Child, std:
     let address = probe.local_addr().unwrap();
     drop(probe);
     let child = Command::new(env!("CARGO_BIN_EXE_timeless-traces-api"))
+        .env("TIMELESS_AUTH_MODE", "disabled")
         .arg(extension)
         .arg(database)
         .arg(address.to_string())

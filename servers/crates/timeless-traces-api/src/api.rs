@@ -1,13 +1,13 @@
 use std::time::Instant;
 
 use axum::body::{to_bytes, Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use timeless_api_common::server_build_identity;
+use timeless_api_common::{server_build_identity, VerifiedClaims};
 
 use crate::otlp;
 use crate::query::{DashboardSearchParams, ReadRequest, SearchParams};
@@ -179,6 +179,7 @@ async fn flush(State(storage): State<Storage>) -> Response {
 
 async fn ingest_otlp(
     State(storage): State<Storage>,
+    claims: Option<Extension<VerifiedClaims>>,
     headers: HeaderMap,
     request: Request<Body>,
 ) -> Response {
@@ -207,8 +208,13 @@ async fn ingest_otlp(
         == Some("gzip");
 
     let wire_started = Instant::now();
+    let decompressed_limit = claims
+        .as_ref()
+        .map(|Extension(claims)| claims.limits.max_decompressed_bytes)
+        .unwrap_or(MAX_BODY_BYTES)
+        .min(MAX_BODY_BYTES);
     let decoded = if protobuf && gzip {
-        match otlp::gunzip_bounded(&body, MAX_BODY_BYTES) {
+        match otlp::gunzip_bounded(&body, decompressed_limit) {
             Ok(decoded) => decoded,
             Err(error) if error.starts_with("decompressed protobuf exceeds") => {
                 storage.record_ingest_rejection(0, body_bytes);

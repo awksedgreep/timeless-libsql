@@ -11,7 +11,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use timeless_api_common::{maintenance_task, shutdown_signal, validate_loopback};
+use timeless_api_common::{
+    maintenance_task, protect_router, shutdown_signal, validate_loopback, AuthConfig,
+};
 use tokio::net::TcpListener;
 
 pub use api::router;
@@ -27,6 +29,7 @@ pub struct Config {
     pub flush_interval: Duration,
     pub optimize_interval: Duration,
     pub timestamp_unit: TimestampUnit,
+    pub auth: AuthConfig,
 }
 
 impl Default for Config {
@@ -48,6 +51,7 @@ impl Default for Config {
             // microseconds. Direct SQL callers can still create the legacy
             // default millisecond table explicitly.
             timestamp_unit: TimestampUnit::Microseconds,
+            auth: AuthConfig::disabled(),
         }
     }
 }
@@ -70,6 +74,7 @@ impl Config {
         if self.flush_interval.is_zero() || self.optimize_interval.is_zero() {
             return Err("maintenance intervals must be positive".into());
         }
+        self.auth.preflight()?;
         Ok(())
     }
 }
@@ -84,7 +89,7 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.command_queue_batches,
         config.timestamp_unit,
     )?;
-    let app = router(storage.clone());
+    let app = protect_router(router(storage.clone()), config.auth.clone());
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|e| format!("bind {}: {e}", config.listen))?;
