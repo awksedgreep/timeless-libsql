@@ -130,6 +130,12 @@ struct IngestResult {
     file_bytes: u64,
 }
 
+impl IngestResult {
+    fn durable_secs(&self) -> f64 {
+        self.insert_secs + self.flush_ms.unwrap_or(0.0) / 1e3
+    }
+}
+
 fn bench_plain(data: &[Span], path: &str) -> IngestResult {
     scrub(path);
     let conn = Connection::open(path).expect("open plain db");
@@ -639,15 +645,17 @@ fn main() {
     let t2_v0 = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2_v0.db", &ext, false);
     let t2_v1 = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2_v1.db", &ext, true);
     println!(
-        "- vtab tier2 v0 done ({:.2}s ingest): {} (vs tier1 {}; count + status=error verified equal)",
+        "- vtab tier2 v0 done ({:.2}s ingest + {:.1} ms final flush): {} durable (vs tier1 {}; count + status=error verified equal)",
         t2_v0.insert_secs,
-        fmt_rate(data.len(), t2_v0.insert_secs),
-        fmt_rate(data.len(), vtab.insert_secs)
+        t2_v0.flush_ms.unwrap_or(0.0),
+        fmt_rate(data.len(), t2_v0.durable_secs()),
+        fmt_rate(data.len(), vtab.durable_secs())
     );
     println!(
-        "- vtab tier2 v1 rich done ({:.2}s ingest): {} (typed JSON + count verified)",
+        "- vtab tier2 v1 rich done ({:.2}s ingest + {:.1} ms final flush): {} durable (typed JSON + count verified)",
         t2_v1.insert_secs,
-        fmt_rate(data.len(), t2_v1.insert_secs),
+        t2_v1.flush_ms.unwrap_or(0.0),
+        fmt_rate(data.len(), t2_v1.durable_secs()),
     );
     println!();
 
@@ -657,7 +665,7 @@ fn main() {
         println!(
             "| {} | {} | {} | {:.2} | {:.1}x smaller |",
             r.label,
-            fmt_rate(data.len(), r.insert_secs),
+            fmt_rate(data.len(), r.durable_secs()),
             fmt_bytes(r.file_bytes),
             r.file_bytes as f64 / data.len() as f64,
             plain.file_bytes as f64 / r.file_bytes as f64,
@@ -669,7 +677,7 @@ fn main() {
         println!(
             "| {} | {} | {} | {:.2} | {:.3}x |",
             result.label,
-            fmt_rate(data.len(), result.insert_secs),
+            fmt_rate(data.len(), result.durable_secs()),
             fmt_bytes(result.file_bytes),
             result.file_bytes as f64 / data.len() as f64,
             result.file_bytes as f64 / t2_v0.file_bytes as f64,
@@ -679,6 +687,13 @@ fn main() {
         "- rich fidelity storage cost: {:+.1}% ({:+.2} bytes/span)",
         (t2_v1.file_bytes as f64 / t2_v0.file_bytes as f64 - 1.0) * 100.0,
         (t2_v1.file_bytes as f64 - t2_v0.file_bytes as f64) / data.len() as f64,
+    );
+    println!(
+        "- batch v0: final flush {:.1} ms, optimize {:.1} ms; batch v1 rich: final flush {:.1} ms, optimize {:.1} ms",
+        t2_v0.flush_ms.unwrap_or(0.0),
+        t2_v0.optimize_ms.unwrap_or(0.0),
+        t2_v1.flush_ms.unwrap_or(0.0),
+        t2_v1.optimize_ms.unwrap_or(0.0),
     );
     println!();
     println!(
