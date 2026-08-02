@@ -91,8 +91,11 @@ poc/timeless-metrics-api/target/release/timeless-metrics-api \
   127.0.0.1:19439
 ```
 
-The provisional default is two readers. This is a correctness default, not a
-copied performance conclusion from logs; Session 6 will sweep 1/2/4/8.
+The measured default is two readers. The Session 6 1/2/4/8 sweep found that
+four readers improved saturated query p95 by only 1.06ms while adding 10.7MiB
+of peak RSS, and eight readers regressed. Two readers retained the best
+throughput, tail-latency, and memory balance; the environment override remains
+available for query-heavy deployments.
 
 ## Elixir control-plane integration
 

@@ -1,6 +1,6 @@
 # Rust metrics API POC plan
 
-Status: Sessions 0-5 complete; Session 6 ready on
+Status: Sessions 0-6 complete; POC kept on
 `poc/rust-telemetry-data-plane` (2026-08-01)
 
 This POC tests the process boundary, not a new metrics storage engine. The
@@ -332,14 +332,43 @@ SIGKILL-to-ready was 20.08ms. See
 
 ## Session 6 — Scheduling, maintenance, and final verdict
 
-- [ ] Sweep 1/2/4/8 SQLite readers after functional fixes.
-- [ ] Measure no-query and mixed ingest, every included read shape,
+- [x] Sweep 1/2/4/8 SQLite readers after functional fixes.
+- [x] Measure no-query and mixed ingest, every included read shape,
       maintenance under load, drain-to-zero, file high-water/reuse, and HWM.
-- [ ] Add API admission fairness or cross-request transaction grouping only if
+- [x] Add API admission fairness or cross-request transaction grouping only if
       queue, completion, and writer-wait evidence identifies a real problem.
-- [ ] Run the full Elixir/libSQL parity, extension workspace/CLI/oracle/crash,
+- [x] Run the full Elixir/libSQL parity, extension workspace/CLI/oracle/crash,
       HTTP fixture, and child-restart gates.
-- [ ] Record a keep/reject decision and the exact next signal boundary.
+- [x] Record a keep/reject decision and the exact next signal boundary.
+
+Result: keep. Two readers are now the measured default. The pinned mixed sweep
+completed 869.9K points/s with 8.52ms query p95, 14.35ms p99, zero errors,
+704ms drain, and 181,080KiB HWM. Four readers lowered p95 to 7.46ms but added
+10.7MiB HWM without improving throughput; one and eight readers both had worse
+tails. Admission-lock wait averaged below 0.4us/request and the deferred-
+maintenance writer queue stayed shallow, so no admission controller or cross-
+request transaction grouping was justified.
+
+Scheduled maintenance remained ordered and correct. The established 10-second
+flush cadence fragments chunks and temporarily reduces saturated throughput;
+accelerated compact scheduling also exposes second-scale writer waits. Those
+costs are measured rather than hidden, but changing cadence would alter the
+existing durability contract and belongs in a reusable extension policy, not
+an API-only optimization. SQLite reused freed pages before growing the file:
+four million added points left a 27,492,352-byte high-water unchanged. An
+explicit offline VACUUM separately reduced the same starting image from
+27,492,352 to 13,910,016 bytes.
+
+All thirteen included mechanical/PromQL shapes passed on the final fixture,
+with 9.57ms as the slowest p95. The full extension, oracle, crash, HTTP parity,
+and supervised child-restart gates passed. The exact measurements and commands
+are in
+`../timeless_metrics/bench/results/2026-08-01_metrics_api_session6.md`.
+
+The next signal boundary is traces. Reuse this proven process topology and
+control-plane seam, but begin with the existing traces storage/query contract;
+do not introduce a generic three-signal server until the traces POC identifies
+the machinery that is genuinely common.
 
 Exit criterion: a process-boundary decision based on completed work, exact
 compatibility, bounded tail latency/memory, operational isolation, and honest

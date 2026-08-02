@@ -40,8 +40,8 @@ impl Default for Config {
             extension_path: PathBuf::new(),
             database_path: PathBuf::new(),
             listen: "127.0.0.1:19439".parse().unwrap(),
-            // Provisional correctness default. Session 6 will sweep 1/2/4/8;
-            // this is not inherited as the final answer from the logs POC.
+            // Session 6 measured 1/2/4/8 on the pinned mixed workload. Two
+            // readers retained the best throughput/memory/tail balance.
             reader_connections: 2,
             command_queue_batches: 256,
             // These match TimelessMetrics.LibsqlEngine's current orchestration.
@@ -173,6 +173,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_reader_topology_matches_the_measured_operating_point() {
+        assert_eq!(Config::default().reader_connections, 2);
+    }
 
     #[test]
     fn invalid_configuration_fails_before_opening_storage() {
