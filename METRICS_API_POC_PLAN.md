@@ -1,6 +1,6 @@
 # Rust metrics API POC plan
 
-Status: Sessions 0-3 complete; Session 4 ready on
+Status: Sessions 0-5 complete; Session 6 ready on
 `poc/rust-telemetry-data-plane` (2026-08-01)
 
 This POC tests the process boundary, not a new metrics storage engine. The
@@ -299,17 +299,36 @@ control. Full method and results are in
 
 ## Session 5 — Elixir control-plane client and isolation
 
-- [ ] Add a thin opt-in Elixir client adapter using loopback HTTP or a Unix
+- [x] Add a thin opt-in Elixir client adapter using loopback HTTP or a Unix
       socket; it owns no telemetry database connection.
-- [ ] Switch one non-product Canvas/query call behind configuration and prove
+- [x] Switch one non-product Canvas/query call behind configuration and prove
       identical public results.
-- [ ] Supervise the OS child and prove Rust crash/restart does not crash the
+- [x] Supervise the OS child and prove Rust crash/restart does not crash the
       BEAM, expose partial responses, or corrupt flushed data.
-- [ ] Keep sessions, authorization policy, alerts, annotations, scrapes,
+- [x] Keep sessions, authorization policy, alerts, annotations, scrapes,
       dashboards, and cluster administration in Elixir.
 
 Exit criterion: the proposed process/control-plane boundary works in practice,
 not only as a standalone benchmark.
+
+Result: complete. `timeless_ui` now optionally supervises the Rust executable
+through an Erlang port and resolves a loopback endpoint through a stateless Req
+client which never opens the telemetry database. The configured Canvas data
+source switches only `metric_range/5`; all other callbacks remain delegated to
+the Elixir source. Complete-body and NDJSON validation prevent transport or
+parse truncation from becoming partial graph data.
+
+The release-artifact gate flushes two points, rejects a second database owner,
+sends `SIGKILL` to the Rust OS pid, observes the OTP child restart without the
+UI supervisor exiting, and returns the exact flushed millisecond points after
+reopen. It also caught and fixed normal OTP shutdown orphaning the Rust child:
+the owner now sends `SIGTERM`, the server drains through its graceful flush
+path, the port child is reaped, and an admitted unflushed tail recovers on the
+next reopen. Eight focused tests pass. An interleaved
+five-round, 2,500-sample-per-path, 600-point loopback comparison measured
+933us p95 with a pinned URL and 927us through the supervised readiness lookup;
+SIGKILL-to-ready was 20.08ms. See
+`../timeless_metrics/bench/results/2026-08-01_metrics_api_session5.md`.
 
 ## Session 6 — Scheduling, maintenance, and final verdict
 

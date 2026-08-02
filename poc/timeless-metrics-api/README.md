@@ -6,7 +6,7 @@ the existing `timeless_metrics` extension continues to own series identity,
 the 4,096-point per-series buffer threshold, compression, chunks, rollups, and
 retention commands.
 
-## Session 4 surface
+## Implemented POC surface
 
 - `GET /health`
 - `GET /select/metrics/stats`
@@ -94,6 +94,25 @@ poc/timeless-metrics-api/target/release/timeless-metrics-api \
 The provisional default is two readers. This is a correctness default, not a
 copied performance conclusion from logs; Session 6 will sweep 1/2/4/8.
 
+## Elixir control-plane integration
+
+Session 5 keeps this binary's data/query surface unchanged and proves the
+process boundary from `timeless_ui`. `TimelessUI.MetricsDataPlane.Process`
+supervises the executable through an Erlang port, and its thin Req client owns
+no telemetry connection. The opt-in Canvas source routes only historical graph
+ranges through `GET /api/v1/export`; every product-oriented Canvas callback
+stays in Elixir.
+
+The integration gate rejects a second owner, flushes data, kills this process
+with `SIGKILL`, waits for OTP to restart it, and checks the exact same result
+after reopen. Incomplete content-length and invalid NDJSON responses are one
+client error and never a partial graph. Normal OTP shutdown sends `SIGTERM`;
+the server handles both `SIGINT` and `SIGTERM` through the same graceful drain
+and storage-flush path, the port owner waits for the child to be reaped, and an
+admitted unflushed tail is recovered on the next reopen.
+Configuration and the reproducible boundary benchmark are documented in the
+sibling `timeless_ui` README and `bench/metrics_data_plane_boundary.exs`.
+
 Positive environment overrides:
 
 - `TIMELESS_METRICS_READER_CONNECTIONS` (default `2`)
@@ -136,7 +155,7 @@ Stats separate units instead of conflating them:
 ```bash
 cargo test --manifest-path poc/timeless-metrics-api/Cargo.toml
 
-TIMELESS_EXT_PATH=target/release/libtimeless_ext.so \
+TIMELESS_EXT_PATH="$PWD/target/release/libtimeless_ext.so" \
   cargo test --manifest-path poc/timeless-metrics-api/Cargo.toml \
   --test storage_contract -- --ignored
 ```

@@ -110,9 +110,7 @@ pub async fn run(config: Config) -> Result<(), String> {
     );
 
     let served = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|error| format!("serve API: {error}"));
 
@@ -124,6 +122,31 @@ pub async fn run(config: Config) -> Result<(), String> {
     let _ = retention_task.await;
     let shutdown = storage.shutdown().await;
     served.and(shutdown)
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let terminate = signal(SignalKind::terminate());
+        match terminate {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn maintenance_task<F, Fut>(
