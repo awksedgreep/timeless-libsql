@@ -298,8 +298,7 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
 }
 
 fn rich_json_fixture() -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../timeless_traces/test/fixtures/data_plane/rich_trace.otlp.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rich_trace.otlp.json");
     std::fs::read(path).unwrap()
 }
 
