@@ -469,6 +469,9 @@ the retained source.
 
 ### Session 6 — artifacts, install, backup, upgrade, and rollback
 
+Status: complete. Evidence:
+[`2026-08-02_rust_telemetry_data_plane_session6.md`](2026-08-02_rust_telemetry_data_plane_session6.md).
+
 - Build supported Linux/macOS artifacts for all three binaries and extension;
   publish deterministic checksums, SBOMs, third-party license notices, build
   provenance/identity, and a complete artifact manifest.
