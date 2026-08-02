@@ -4097,11 +4097,18 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let shared = TracesTab::shared_engine_for(self.db, &database, &table)?;
                 let _read = read_permit(&shared, self.db, &table)?;
                 let (blocks, raw_blocks, buffered) = shared.engine.stats();
+                let (disk_spans, counted_buffered) = shared.engine.span_counts();
+                debug_assert_eq!(buffered as u64, counted_buffered);
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
                     ("blocks", Value::Integer(blocks as i64)),
                     ("raw_blocks", Value::Integer(raw_blocks as i64)),
                     ("buffered_spans", Value::Integer(buffered as i64)),
+                    ("disk_spans", Value::Integer(disk_spans as i64)),
+                    (
+                        "total_spans",
+                        Value::Integer(disk_spans.saturating_add(counted_buffered) as i64),
+                    ),
                     (
                         "bytes_on_disk",
                         Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),

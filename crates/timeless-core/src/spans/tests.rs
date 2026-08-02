@@ -987,6 +987,21 @@ fn txn_rollback_discards_buffered_spans() {
 }
 
 #[test]
+fn span_counts_use_metadata_and_include_the_live_buffer_once() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    engine
+        .push(span(1, 1, None, "one", "s", 0, 0, 10, &[]))
+        .unwrap();
+    engine
+        .push(span(2, 2, None, "two", "s", 0, 0, 20, &[]))
+        .unwrap();
+    assert_eq!(engine.span_counts(), (0, 2));
+    engine.flush().unwrap();
+    assert_eq!(engine.span_counts(), (2, 0));
+}
+
+#[test]
 fn txn_rollback_restores_pretxn_spans_drained_by_intra_txn_flush() {
     let engine =
         SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();

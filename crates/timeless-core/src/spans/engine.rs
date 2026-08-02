@@ -938,6 +938,20 @@ impl SpanBlockEngine {
         self.stats_with_after_index(|| {})
     }
 
+    /// (persisted spans, buffered spans) from block metadata plus the live
+    /// buffer, without decoding payloads. The transition guard prevents a
+    /// flush from moving the same spans between both sides mid-snapshot.
+    pub fn span_counts(&self) -> (u64, u64) {
+        let _transition = self.transition_read();
+        let persisted = self
+            .index_lock()
+            .iter()
+            .map(|entry| u64::from(entry.meta.entry_count))
+            .sum();
+        let buffered = self.buffer_lock().len() as u64;
+        (persisted, buffered)
+    }
+
     /// Queryable start_ts range (blocks + buffer), payload-free. Same
     /// lock discipline as stats(): index scope dropped before the buffer
     /// is read (R7 — flush acquires buffer then index).

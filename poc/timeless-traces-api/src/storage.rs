@@ -42,6 +42,8 @@ pub struct StorageStats {
     pub raw_blocks: i64,
     pub compressed_blocks: i64,
     pub buffered_spans: i64,
+    pub disk_spans: i64,
+    pub total_spans: i64,
     pub bytes_on_disk: i64,
     pub terms: i64,
     pub trace_index_rows: i64,
@@ -53,6 +55,7 @@ pub struct StorageStats {
     pub database_shm_bytes: u64,
     pub physical_database_bytes: u64,
     pub sqlite_page_bytes: i64,
+    pub sqlite_index_bytes: i64,
     pub freelist_pages: i64,
     pub freelist_bytes: i64,
 
@@ -79,7 +82,16 @@ pub struct StorageStats {
     pub api_admission_wait_ns: u64,
     pub api_queue_wait_ns: u64,
     pub api_queue_wait_max_ns: u64,
+    pub api_ingest_requests: u64,
+    pub api_rejected_requests: u64,
+    pub api_rejected_spans: u64,
+    pub api_rejected_body_bytes: u64,
+    pub api_parse_ns: u64,
+    pub api_wire_decode_ns: u64,
+    pub api_batch_encode_ns: u64,
+    pub api_decompressed_body_bytes: u64,
     pub api_sqlite_insert_ns: u64,
+    pub api_sqlite_transaction_ns: u64,
     pub api_stats_count: u64,
     pub api_stats_total_ns: u64,
     pub api_stats_sqlite_ns: u64,
@@ -105,6 +117,7 @@ pub struct FlushReport {
     pub status: String,
     pub through_requests: u64,
     pub through_spans: u64,
+    pub through_body_bytes: u64,
     pub completed_requests: u64,
     pub completed_spans: u64,
     pub completed_body_bytes: u64,
@@ -158,6 +171,14 @@ struct ApiProfile {
     admission_wait_ns: u64,
     queue_wait_ns: u64,
     queue_wait_max_ns: u64,
+    ingest_requests: u64,
+    rejected_requests: u64,
+    rejected_spans: u64,
+    rejected_body_bytes: u64,
+    parse_ns: u64,
+    wire_decode_ns: u64,
+    batch_encode_ns: u64,
+    decompressed_body_bytes: u64,
     sqlite_insert_ns: u64,
     stats_count: u64,
     stats_total_ns: u64,
@@ -190,10 +211,13 @@ enum WriteCommand {
         blob: Vec<u8>,
         spans: usize,
         body_bytes: usize,
+        reply: Option<oneshot::Sender<Result<(), String>>>,
     },
     Barrier(oneshot::Sender<Result<(), String>>),
     Flush {
         through_requests: u64,
+        through_spans: u64,
+        through_body_bytes: u64,
         explicit: bool,
         reply: oneshot::Sender<Result<FlushReport, String>>,
     },
@@ -222,6 +246,14 @@ struct StorageInner {
 
 #[derive(Clone)]
 pub struct Storage(Arc<StorageInner>);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IngestTimings {
+    pub parse: Duration,
+    pub wire_decode: Duration,
+    pub batch_encode: Duration,
+    pub decompressed_body_bytes: usize,
+}
 
 impl Storage {
     pub fn start(
@@ -348,6 +380,43 @@ impl Storage {
         spans: usize,
         body_bytes: usize,
     ) -> Result<(), String> {
+        self.admit_batch(
+            blob,
+            spans,
+            body_bytes,
+            IngestTimings::default(),
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// Production OTLP admission waits for the single SQLite batch statement
+    /// to finish. A successful HTTP response cannot conceal a writer failure.
+    pub async fn submit_otlp_batch(
+        &self,
+        blob: Vec<u8>,
+        spans: usize,
+        body_bytes: usize,
+        timings: IngestTimings,
+    ) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.admit_batch(blob, spans, body_bytes, timings, true, Some(reply_tx))
+            .await?;
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before OTLP request completed".to_string())?
+    }
+
+    async fn admit_batch(
+        &self,
+        blob: Vec<u8>,
+        spans: usize,
+        body_bytes: usize,
+        timings: IngestTimings,
+        otlp: bool,
+        reply: Option<oneshot::Sender<Result<(), String>>>,
+    ) -> Result<(), String> {
         let admission_started = Instant::now();
         let _ordered = self.0.admission.lock().await;
         if self.0.shutting_down.load(Ordering::Acquire) {
@@ -373,13 +442,37 @@ impl Storage {
                 .admitted_body_bytes
                 .saturating_add(body_bytes as u64);
             profile.admission_wait_ns = profile.admission_wait_ns.saturating_add(admission_ns);
+            if otlp {
+                profile.ingest_requests = profile.ingest_requests.saturating_add(1);
+            }
+            profile.parse_ns = profile.parse_ns.saturating_add(duration_ns(timings.parse));
+            profile.wire_decode_ns = profile
+                .wire_decode_ns
+                .saturating_add(duration_ns(timings.wire_decode));
+            profile.batch_encode_ns = profile
+                .batch_encode_ns
+                .saturating_add(duration_ns(timings.batch_encode));
+            profile.decompressed_body_bytes = profile
+                .decompressed_body_bytes
+                .saturating_add(timings.decompressed_body_bytes as u64);
         }
         permit.send(WriteCommand::Ingest {
             blob,
             spans,
             body_bytes,
+            reply,
         });
         Ok(())
+    }
+
+    pub fn record_ingest_rejection(&self, spans: usize, body_bytes: usize) {
+        let mut profile = profile_lock(&self.0.profile);
+        profile.ingest_requests = profile.ingest_requests.saturating_add(1);
+        profile.rejected_requests = profile.rejected_requests.saturating_add(1);
+        profile.rejected_spans = profile.rejected_spans.saturating_add(spans as u64);
+        profile.rejected_body_bytes = profile
+            .rejected_body_bytes
+            .saturating_add(body_bytes as u64);
     }
 
     /// Proves that every earlier admitted request completed its one SQLite
@@ -412,12 +505,21 @@ impl Storage {
         if self.0.shutting_down.load(Ordering::Acquire) {
             return Err("traces API is shutting down; flush is closed".into());
         }
-        let through_requests = profile_lock(&self.0.profile).admitted_requests;
+        let (through_requests, through_spans, through_body_bytes) = {
+            let profile = profile_lock(&self.0.profile);
+            (
+                profile.admitted_requests,
+                profile.admitted_spans,
+                profile.admitted_body_bytes,
+            )
+        };
         let (reply_tx, reply_rx) = oneshot::channel();
         self.0
             .writer
             .send(WriteCommand::Flush {
                 through_requests,
+                through_spans,
+                through_body_bytes,
                 explicit,
                 reply: reply_tx,
             })
@@ -597,12 +699,15 @@ fn writer_main(
                 blob,
                 spans,
                 body_bytes,
+                reply,
             } => {
                 record_queue_start(&profile, spans, body_bytes);
                 let started = Instant::now();
                 let result = insert_rich_batch(&conn, &blob, spans);
                 record_queue_completion(&profile, spans, body_bytes, elapsed_ns(started), &result);
-                if let Err(error) = result {
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                } else if let Err(error) = result {
                     unreported_error = Some(error);
                 }
             }
@@ -612,6 +717,8 @@ fn writer_main(
             }
             WriteCommand::Flush {
                 through_requests,
+                through_spans,
+                through_body_bytes,
                 explicit,
                 reply,
             } => {
@@ -641,7 +748,13 @@ fn writer_main(
                     (Some(error), _) | (None, Err(error)) => Err(error),
                     (None, Ok(())) => {
                         let api = profile_lock(&profile);
-                        Ok(flush_report(&api, through_requests, flush_ns))
+                        Ok(flush_report(
+                            &api,
+                            through_requests,
+                            through_spans,
+                            through_body_bytes,
+                            flush_ns,
+                        ))
                     }
                 };
                 let _ = reply.send(result);
@@ -905,6 +1018,15 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| format!("read SQLite page accounting: {error}"))?;
+    let sqlite_index_bytes: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
+              WHERE name IN ('traces_blocks_ts','traces_terms','traces_trace_blocks',
+                             'sqlite_autoindex_traces_meta_1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("read traces SQLite index bytes: {error}"))?;
     let blocks = integer("blocks");
     let raw_blocks = integer("raw_blocks");
     Ok(StorageStats {
@@ -915,12 +1037,15 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         raw_blocks,
         compressed_blocks: blocks.saturating_sub(raw_blocks),
         buffered_spans: integer("buffered_spans"),
+        disk_spans: integer("disk_spans"),
+        total_spans: integer("total_spans"),
         bytes_on_disk: integer("bytes_on_disk"),
         terms: integer("terms"),
         trace_index_rows: integer("trace_index_rows"),
         oldest_timestamp_nanoseconds: optional_integer(values.get("ts_min")),
         newest_timestamp_nanoseconds: optional_integer(values.get("ts_max")),
         sqlite_page_bytes: page_count.saturating_mul(page_size),
+        sqlite_index_bytes,
         freelist_pages,
         freelist_bytes: freelist_pages.saturating_mul(page_size),
         ..StorageStats::default()
@@ -977,7 +1102,18 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.api_admission_wait_ns = profile.admission_wait_ns;
     stats.api_queue_wait_ns = profile.queue_wait_ns;
     stats.api_queue_wait_max_ns = profile.queue_wait_max_ns;
+    stats.api_ingest_requests = profile.ingest_requests;
+    stats.api_rejected_requests = profile.rejected_requests;
+    stats.api_rejected_spans = profile.rejected_spans;
+    stats.api_rejected_body_bytes = profile.rejected_body_bytes;
+    stats.api_parse_ns = profile.parse_ns;
+    stats.api_wire_decode_ns = profile.wire_decode_ns;
+    stats.api_batch_encode_ns = profile.batch_encode_ns;
+    stats.api_decompressed_body_bytes = profile.decompressed_body_bytes;
     stats.api_sqlite_insert_ns = profile.sqlite_insert_ns;
+    // One public batch insertion is one autocommit SQLite transaction. Keep
+    // both names so phase accounting is explicit without double measurement.
+    stats.api_sqlite_transaction_ns = profile.sqlite_insert_ns;
     stats.api_stats_count = profile.stats_count;
     stats.api_stats_total_ns = profile.stats_total_ns;
     stats.api_stats_sqlite_ns = profile.stats_sqlite_ns;
@@ -998,11 +1134,18 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.last_error.clone_from(&profile.last_error);
 }
 
-fn flush_report(profile: &ApiProfile, through_requests: u64, flush_sqlite_ns: u64) -> FlushReport {
+fn flush_report(
+    profile: &ApiProfile,
+    through_requests: u64,
+    through_spans: u64,
+    through_body_bytes: u64,
+    flush_sqlite_ns: u64,
+) -> FlushReport {
     FlushReport {
         status: "ok".into(),
         through_requests,
-        through_spans: profile.completed_spans,
+        through_spans,
+        through_body_bytes,
         completed_requests: profile.completed_requests,
         completed_spans: profile.completed_spans,
         completed_body_bytes: profile.completed_body_bytes,

@@ -49,10 +49,9 @@ async fn session_two_owns_lifecycle_durability_and_cold_reopen() {
     assert_eq!(ready.1["capability"], TRACE_CAPABILITY);
     assert_eq!(ready.1["module"], "timeless_traces");
 
-    // Session 2 reserves but does not pretend to implement OTLP. Axum rejects
-    // oversized bodies before the placeholder handler or storage admission.
+    // Invalid input and oversized bodies never reach storage admission.
     let absent_otlp = post_body(&app, "/insert/opentelemetry/v1/traces", b"{}").await;
-    assert_eq!(absent_otlp.0, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(absent_otlp.0, StatusCode::BAD_REQUEST);
     let oversized = vec![0_u8; MAX_BODY_BYTES + 1];
     let rejected = post_body(&app, "/insert/opentelemetry/v1/traces", &oversized).await;
     assert_eq!(rejected.0, StatusCode::PAYLOAD_TOO_LARGE);
@@ -71,6 +70,8 @@ async fn session_two_owns_lifecycle_durability_and_cold_reopen() {
     assert_eq!(flush.0, StatusCode::OK);
     assert_eq!(flush.1["through_requests"], 1);
     assert_eq!(flush.1["through_spans"], 1);
+    assert_eq!(flush.1["through_body_bytes"], 4_321);
+    assert_eq!(flush.1["data_plane"]["admitted_bytes"], 4_321);
     assert_eq!(flush.1["completed_requests"], 1);
     assert_eq!(flush.1["completed_spans"], 1);
     assert_eq!(flush.1["completed_body_bytes"], 4_321);

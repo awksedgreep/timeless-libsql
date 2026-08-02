@@ -6,6 +6,7 @@
 //! extension.
 
 mod api;
+mod otlp;
 mod storage;
 
 use std::net::SocketAddr;
@@ -15,7 +16,9 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 
 pub use api::{router, MAX_BODY_BYTES};
-pub use storage::{FlushReport, RuntimeWatermarks, Storage, StorageStats, TRACE_CAPABILITY};
+pub use storage::{
+    FlushReport, IngestTimings, RuntimeWatermarks, Storage, StorageStats, TRACE_CAPABILITY,
+};
 
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 

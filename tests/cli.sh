@@ -1364,7 +1364,7 @@ SELECT 'sm', key, value FROM timeless_stats('m')
 SELECT 'sl', key, value FROM timeless_stats('l')
  WHERE key IN ('module','blocks','buffered_entries','terms');
 SELECT 'st', key, value FROM timeless_stats('t')
- WHERE key IN ('module','buffered_spans','ts_min');
+ WHERE key IN ('module','buffered_spans','disk_spans','total_spans','ts_min');
 .print -- prune reflected in catalog
 INSERT INTO m(m) VALUES ('flush');
 INSERT INTO m(m) VALUES ('prune:160');
@@ -1390,6 +1390,8 @@ sl|terms|0'
 check_eq "traces stats keys" "$(grep '^st|' <<<"$got")" \
 'st|module|timeless_traces
 st|buffered_spans|1
+st|disk_spans|0
+st|total_spans|1
 st|ts_min|5000'
 # prune is CHUNK-granular: cpu-a's {100,200} chunk straddles the cutoff
 # and survives whole; cpu-b's chunk dies, leaving an empty cataloged

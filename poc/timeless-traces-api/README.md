@@ -4,8 +4,8 @@ This traces-specific process-boundary POC owns HTTP scheduling and SQLite
 connections. It does not implement storage. Every span and command crosses the
 public `timeless_traces` virtual table supplied by `libtimeless_ext`.
 
-Session 2 provides the server lifecycle shell only. OTLP ingest and Jaeger
-query routes intentionally remain unimplemented until Sessions 3 and 4.
+Sessions 2–3 provide the server lifecycle shell and OTLP ingest. Jaeger query
+routes intentionally remain unimplemented until Session 4.
 
 ## Run
 
@@ -25,7 +25,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered extension optimize interval |
 
-## Session 2 endpoints
+## Sessions 2–3 endpoints
 
 - `GET /live` reports process liveness without touching SQLite.
 - `GET /ready` and `GET /health` verify a live reader and expose the negotiated
@@ -34,9 +34,11 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   exact request/span/body queue watermarks.
 - `POST /api/v1/flush` is an ordered completion and durability barrier. Its
   response identifies the admitted request watermark covered by the flush.
-- `POST /insert/opentelemetry/v1/traces` is reserved but returns `501` in this
-  session. Bodies over 10 MiB are rejected with `413` before the handler and
-  cannot alter admission counters.
+- `POST /insert/opentelemetry/v1/traces` accepts OTLP JSON, protobuf, and
+  gzip-compressed protobuf. It validates the complete request, encodes one
+  public rich-span v1 batch, waits for its one SQLite statement, and returns
+  the established `{"partialSuccess":{}}` response. Raw and decompressed
+  bodies are independently capped at 10 MiB.
 
 Startup acquires `<database>.timeless-traces-api.lock` before opening SQLite.
 It then validates the full rich-span schema, module identity, configured
@@ -45,9 +47,11 @@ second owner or incompatible extension fails startup with a descriptive error.
 
 One writer consumes a bounded FIFO. A request is admitted only after queue
 capacity is reserved, and request/span/body watermarks change atomically.
-There is no host span buffer: one future OTLP request maps to one public rich
-batch insertion, while the extension retains its fixed 8,192-span automatic
-flush and all block/index/compression behavior.
+There is no host span buffer: one OTLP request maps to one public rich batch
+insertion, while the extension retains its fixed 8,192-span automatic flush
+and all block/index/compression behavior. A successful response covers SQLite
+statement completion; explicit flush additionally covers extension-buffer
+durability.
 
 `SIGINT` and `SIGTERM` stop HTTP admission, drain accepted requests, issue the
 public `flush` command, checkpoint the WAL, close workers, and release the
@@ -64,7 +68,9 @@ TIMELESS_EXT_PATH=../../target/debug/libtimeless_ext.so cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-The extension-backed contract covers owner fencing, capability and retention
+The extension-backed contracts cover owner fencing, capability and retention
 mismatch, body rejection before admission, a physically saturated one-request
 writer queue, exact drain watermarks, explicit flush, rich-field cold reopen,
-WAL checkpoint, graceful process termination, and kill-9 recovery.
+WAL checkpoint, graceful process termination, kill-9 recovery, JSON/protobuf/
+gzip parity, atomic malformed-request rejection, decompression bounds, and the
+8,191-to-8,192 automatic-flush boundary through HTTP.
