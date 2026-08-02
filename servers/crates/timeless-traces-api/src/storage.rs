@@ -343,6 +343,7 @@ enum ReadCommand {
 // one complete planner group can make progress; the API never creates blocks.
 const OPTIMIZE_SOURCE_BYTE_BUDGET: u64 = 32 * 1024 * 1024;
 const OPTIMIZE_TARGET_SPANS: usize = 8192;
+const MAX_BACKUP_OPTIMIZE_STEPS: usize = 1_000_000;
 
 struct StorageInner {
     writer: mpsc::Sender<WriteCommand>,
@@ -1040,18 +1041,53 @@ fn writer_main(
     checkpoint_wal(&conn, "traces").map(|_| ())
 }
 
-fn optimize_backlog(conn: &Connection) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OptimizeBacklog {
+    pending_raw_blocks: u64,
+    pending_raw_entries: u64,
+    merge_ready_groups: u64,
+    merge_ready_blocks: u64,
+    merge_ready_entries: u64,
+}
+
+impl OptimizeBacklog {
+    fn actionable_entries(self) -> u64 {
+        self.pending_raw_entries
+            .saturating_add(self.merge_ready_entries)
+    }
+}
+
+fn optimize_made_progress(before: OptimizeBacklog, after: OptimizeBacklog) -> bool {
+    after.actionable_entries() == 0 || after != before
+}
+
+fn optimize_backlog_state(conn: &Connection) -> Result<OptimizeBacklog, String> {
     let stats = stat_values(conn)?;
     let integer = |key: &str| match stats.get(key) {
-        Some(SqlValue::Integer(value)) => *value,
+        Some(SqlValue::Integer(value)) => (*value).max(0) as u64,
         _ => 0,
     };
-    let actionable_spans = integer("optimize_pending_raw_entries")
-        .saturating_add(integer("optimize_merge_ready_entries"))
-        .max(0) as u64;
+    Ok(OptimizeBacklog {
+        pending_raw_blocks: integer("optimize_pending_raw_blocks"),
+        pending_raw_entries: integer("optimize_pending_raw_entries"),
+        merge_ready_groups: integer("optimize_merge_ready_groups"),
+        merge_ready_blocks: integer("optimize_merge_ready_blocks"),
+        merge_ready_entries: integer("optimize_merge_ready_entries"),
+    })
+}
+
+fn optimize_backlog(conn: &Connection) -> Result<(), String> {
+    let actionable_spans = optimize_backlog_state(conn)?.actionable_entries();
     if actionable_spans == 0 {
         return Ok(());
     }
+    optimize_backlog_with_actionable(conn, actionable_spans)
+}
+
+fn optimize_backlog_with_actionable(
+    conn: &Connection,
+    actionable_spans: u64,
+) -> Result<(), String> {
     let (sample_spans, sample_bytes): (i64, i64) = conn
         .query_row(
             "SELECT COALESCE(SUM(entry_count), 0),
@@ -1075,27 +1111,26 @@ fn optimize_backlog(conn: &Connection) -> Result<(), String> {
 }
 
 fn optimize_all_backlog(conn: &Connection) -> Result<(), String> {
-    let mut previous = u64::MAX;
-    loop {
-        let stats = stat_values(conn)?;
-        let integer = |key: &str| match stats.get(key) {
-            Some(SqlValue::Integer(value)) => *value,
-            _ => 0,
-        };
-        let actionable = integer("optimize_pending_raw_entries")
-            .saturating_add(integer("optimize_merge_ready_entries"))
-            .max(0) as u64;
+    for step in 0..MAX_BACKUP_OPTIMIZE_STEPS {
+        let before = optimize_backlog_state(conn)?;
+        let actionable = before.actionable_entries();
         if actionable == 0 {
             return Ok(());
         }
-        if actionable >= previous {
+        optimize_backlog_with_actionable(conn, actionable)?;
+        let after = optimize_backlog_state(conn)?;
+        if after.actionable_entries() == 0 {
+            return Ok(());
+        }
+        if !optimize_made_progress(before, after) {
             return Err(format!(
-                "traces optimize backlog made no progress: previous={previous}, current={actionable}"
+                "traces optimize backlog made no progress at step {step}: {after:?}"
             ));
         }
-        previous = actionable;
-        optimize_backlog(conn)?;
     }
+    Err(format!(
+        "traces optimize backlog exceeded {MAX_BACKUP_OPTIMIZE_STEPS} steps"
+    ))
 }
 
 fn optimize_span_budget(actionable_spans: u64, sample_spans: u64, sample_bytes: u64) -> usize {
@@ -1846,5 +1881,28 @@ mod tests {
             OPTIMIZE_TARGET_SPANS
         );
         assert_eq!(optimize_span_budget(100_000, 0, 0), OPTIMIZE_TARGET_SPANS);
+    }
+
+    #[test]
+    fn optimize_progress_accepts_raw_to_merge_phase_expansion() {
+        let raw = OptimizeBacklog {
+            pending_raw_blocks: 1,
+            pending_raw_entries: 1_280,
+            merge_ready_groups: 0,
+            merge_ready_blocks: 0,
+            merge_ready_entries: 0,
+        };
+        let merge = OptimizeBacklog {
+            pending_raw_blocks: 0,
+            pending_raw_entries: 0,
+            merge_ready_groups: 1,
+            merge_ready_blocks: 4,
+            merge_ready_entries: 4_698,
+        };
+
+        assert_ne!(raw, merge);
+        assert!(merge.actionable_entries() > raw.actionable_entries());
+        assert!(optimize_made_progress(raw, merge));
+        assert!(!optimize_made_progress(raw, raw));
     }
 }

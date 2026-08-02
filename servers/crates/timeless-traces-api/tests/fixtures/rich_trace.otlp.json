@@ -1,0 +1,62 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "contract-svc"}},
+          {"key": "service.version", "value": {"stringValue": "1.2.3"}},
+          {"key": "replica", "value": {"intValue": 7}},
+          {"key": "debug", "value": {"boolValue": false}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {"name": "contract-lib", "version": "4.5.6"},
+          "spans": [
+            {
+              "traceId": "00112233445566778899aabbccddeeff",
+              "spanId": "0102030405060708",
+              "parentSpanId": "",
+              "name": "GET /contract",
+              "kind": "SPAN_KIND_SERVER",
+              "startTimeUnixNano": "1700000000000000000",
+              "endTimeUnixNano": "1700000000120000000",
+              "status": {"code": "STATUS_CODE_ERROR", "message": "contract failure"},
+              "attributes": [
+                {"key": "http.method", "value": {"stringValue": "GET"}},
+                {"key": "http.status_code", "value": {"intValue": 503}},
+                {"key": "retryable", "value": {"boolValue": true}},
+                {"key": "score", "value": {"doubleValue": 0.75}}
+              ],
+              "events": [
+                {
+                  "name": "exception",
+                  "timeUnixNano": "1700000000040000000",
+                  "attributes": [
+                    {"key": "exception.type", "value": {"stringValue": "ContractError"}},
+                    {"key": "handled", "value": {"boolValue": false}}
+                  ]
+                }
+              ]
+            },
+            {
+              "traceId": "00112233445566778899aabbccddeeff",
+              "spanId": "1112131415161718",
+              "parentSpanId": "0102030405060708",
+              "name": "DB contract",
+              "kind": "SPAN_KIND_CLIENT",
+              "startTimeUnixNano": "1700000000020000000",
+              "endTimeUnixNano": "1700000000080000000",
+              "status": {"code": "STATUS_CODE_UNSET"},
+              "attributes": [
+                {"key": "db.system", "value": {"stringValue": "libsql"}},
+                {"key": "rows", "value": {"intValue": 3}}
+              ],
+              "events": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -20,8 +20,7 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
         Storage::start(directory.path().join("jaeger.db"), extension, 2, 16, None).unwrap();
     let app = router(storage.clone());
     let fixture = std::fs::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../timeless_traces/test/fixtures/data_plane/rich_trace.otlp.json"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rich_trace.otlp.json"),
     )
     .unwrap();
     assert_eq!(post_otlp(&app, &fixture).await.0, StatusCode::OK);

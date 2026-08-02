@@ -41,7 +41,12 @@ from collections import defaultdict
 from typing import Any
 
 
-BASE_SECONDS = 2_000_000_000
+# The official 4 Hz x 64-record workload advances event time at 256 records
+# per second. This fixed window begins at 2026-08-02T00:00:00Z, stays inside
+# the seven-day retention default, and remains behind wall-clock "now" for the
+# release run so exact-latest queries are never accidentally empty.
+BASE_SECONDS = 1_785_628_800
+ORDINALS_PER_SECOND = 256
 BASE_MILLISECONDS = BASE_SECONDS * 1_000
 BASE_NANOSECONDS = BASE_SECONDS * 1_000_000_000
 SIGNALS = ("metrics", "logs", "traces")
@@ -180,6 +185,7 @@ class HttpResult:
     body: bytes
     headers: dict[str, str]
     elapsed_ms: float
+    request_bytes: int
 
     def json(self) -> Any:
         return json.loads(self.body)
@@ -313,6 +319,13 @@ class SignalState:
     query_latencies: dict[str, list[float]] = dataclasses.field(
         default_factory=lambda: defaultdict(list)
     )
+    query_response_bytes_hwm: dict[str, int] = dataclasses.field(
+        default_factory=lambda: defaultdict(int)
+    )
+    query_result_rows_hwm: dict[str, int] = dataclasses.field(
+        default_factory=lambda: defaultdict(int)
+    )
+    ingest_body_bytes_hwm: int = 0
     errors: list[str] = dataclasses.field(default_factory=list)
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     state_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
@@ -345,6 +358,7 @@ def http_request(
             response_body,
             {key.lower(): value for key, value in response.getheaders()},
             elapsed_ms(started),
+            len(payload or b""),
         )
     finally:
         connection.close()
@@ -390,7 +404,7 @@ def metrics_body(start: int, count: int) -> bytes:
     for ordinal in range(start, start + count):
         values, timestamps = grouped[ordinal % 4]
         values.append(float(ordinal) + 0.5)
-        timestamps.append(BASE_MILLISECONDS + ordinal * 1_000)
+        timestamps.append(BASE_MILLISECONDS + ordinal * 1_000 // ORDINALS_PER_SECOND)
     lines = []
     for host, (values, timestamps) in grouped.items():
         if values:
@@ -407,7 +421,7 @@ def logs_body(start: int, count: int) -> bytes:
     lines = []
     for ordinal in range(start, start + count):
         lines.append(json.dumps({
-            "_time": BASE_SECONDS + ordinal,
+            "_time": BASE_SECONDS + ordinal // ORDINALS_PER_SECOND,
             "_msg": f"release-gate-{ordinal}",
             "level": levels[ordinal % len(levels)],
             "service": "release-gate",
@@ -426,7 +440,7 @@ def traces_body(start: int, count: int) -> bytes:
     for ordinal in range(start, start + count):
         trace_number = ordinal // 4 + 1
         root_ordinal = (ordinal // 4) * 4
-        start_ns = BASE_NANOSECONDS + ordinal * 1_000_000
+        start_ns = BASE_NANOSECONDS + ordinal * 1_000_000_000 // ORDINALS_PER_SECOND
         spans.append({
             "traceId": f"{trace_number:032x}",
             "spanId": f"{ordinal + 1:016x}",
@@ -494,6 +508,7 @@ def write_once(state: SignalState) -> None:
         state.next_ordinal += state.batch
         state.accepted += state.batch
         state.write_latencies.append(result.elapsed_ms)
+        state.ingest_body_bytes_hwm = max(state.ingest_body_bytes_hwm, result.request_bytes)
 
 
 def validate_ndjson(result: HttpResult, operation: str) -> list[Any]:
@@ -510,10 +525,15 @@ def validate_ndjson(result: HttpResult, operation: str) -> list[Any]:
     return rows
 
 
-def metrics_query(state: SignalState, shape: str) -> float:
+def result_rows(result: HttpResult) -> int:
+    declared = result.headers.get("x-timeless-result-rows")
+    return int(declared) if declared is not None else 0
+
+
+def metrics_query(state: SignalState, shape: str) -> tuple[float, int, int]:
     with state.state_lock:
         newest = max(0, state.next_ordinal - 1)
-    newest_seconds = BASE_SECONDS + newest
+    newest_seconds = BASE_SECONDS + newest // ORDINALS_PER_SECOND
     from_seconds = max(BASE_SECONDS, newest_seconds - 300)
     paths = {
         "exact_latest": "/api/v1/query?metric=release_gate_metric&host=host-0",
@@ -537,13 +557,13 @@ def metrics_query(state: SignalState, shape: str) -> float:
         json.loads(result.body)
     except json.JSONDecodeError as error:
         raise GateFailure(f"metrics {shape}: partial JSON") from error
-    return result.elapsed_ms
+    return result.elapsed_ms, len(result.body), result_rows(result)
 
 
-def logs_query(state: SignalState, shape: str) -> float:
+def logs_query(state: SignalState, shape: str) -> tuple[float, int, int]:
     with state.state_lock:
         newest = max(0, state.next_ordinal - 1)
-    newest_seconds = BASE_SECONDS + newest
+    newest_seconds = BASE_SECONDS + newest // ORDINALS_PER_SECOND
     paths = {
         "exact": "/select/logsql/query?message=release-gate-0&limit=1&order=asc",
         "narrow": "/select/logsql/query?level=error&service=release-gate&limit=100&order=desc",
@@ -569,12 +589,13 @@ def logs_query(state: SignalState, shape: str) -> float:
         result = require_status(http_request(state.server, "GET", paths[shape]), 200, shape)
     if shape == "discovery":
         json.loads(result.body)
+        rows = result_rows(result)
     else:
-        validate_ndjson(result, f"logs {shape}")
-    return result.elapsed_ms
+        rows = len(validate_ndjson(result, f"logs {shape}"))
+    return result.elapsed_ms, len(result.body), rows
 
 
-def traces_query(state: SignalState, shape: str) -> float:
+def traces_query(state: SignalState, shape: str) -> tuple[float, int, int]:
     trace_one = f"{1:032x}"
     paths = {
         "exact_trace": f"/select/jaeger/api/traces/{trace_one}",
@@ -593,18 +614,22 @@ def traces_query(state: SignalState, shape: str) -> float:
         raise GateFailure(f"traces {shape}: partial JSON") from error
     if not isinstance(value, dict) or "data" not in value:
         raise GateFailure(f"traces {shape}: invalid response shape")
-    return result.elapsed_ms
+    return result.elapsed_ms, len(result.body), result_rows(result)
 
 
 def query_once(state: SignalState, shape: str) -> None:
     if state.signal_name == "metrics":
-        latency = metrics_query(state, shape)
+        latency, response_bytes, rows = metrics_query(state, shape)
     elif state.signal_name == "logs":
-        latency = logs_query(state, shape)
+        latency, response_bytes, rows = logs_query(state, shape)
     else:
-        latency = traces_query(state, shape)
+        latency, response_bytes, rows = traces_query(state, shape)
     with state.state_lock:
         state.query_latencies[shape].append(latency)
+        state.query_response_bytes_hwm[shape] = max(
+            state.query_response_bytes_hwm[shape], response_bytes
+        )
+        state.query_result_rows_hwm[shape] = max(state.query_result_rows_hwm[shape], rows)
 
 
 def semantic_oracle(server: Server) -> None:
@@ -618,8 +643,22 @@ def semantic_oracle(server: Server) -> None:
             200,
             "metrics sentinel",
         )
-        rows = validate_ndjson(result, "metrics sentinel")
-        if len(rows) != 1 or rows[0].get("values") != [0.5] or rows[0].get("timestamps") != [BASE_MILLISECONDS]:
+        try:
+            rows = [json.loads(line) for line in result.body.splitlines() if line]
+        except json.JSONDecodeError as error:
+            raise GateFailure("metrics sentinel returned partial JSON lines") from error
+        values = rows[0].get("values", []) if len(rows) == 1 else []
+        timestamps = rows[0].get("timestamps", []) if len(rows) == 1 else []
+        # Metrics are native epoch seconds, so several high-rate samples can
+        # share the sentinel second. Preserve multiplicity and require the
+        # first bit-exact sentinel rather than pretending one JSON line equals
+        # one result row (the result header counts points).
+        if (
+            len(rows) != 1
+            or 0.5 not in values
+            or BASE_MILLISECONDS not in timestamps
+            or len(values) != len(timestamps)
+        ):
             raise GateFailure(f"metrics sentinel changed: {rows!r}")
     elif server.signal_name == "logs":
         result = require_status(
@@ -715,7 +754,6 @@ def sample_state(state: SignalState, elapsed: float) -> None:
         "in_flight_requests",
         "command_queue_capacity_batches",
         "command_queue_capacity_requests",
-        "api_read_response_bytes",
         "query_snapshot_payload_max_bytes",
         "extension_query_snapshot_payload_max_bytes",
     )
@@ -1124,6 +1162,9 @@ def result_for_state(
         accepted = state.accepted
         writes = list(state.write_latencies)
         queries = {key: list(value) for key, value in state.query_latencies.items()}
+        query_response_bytes_hwm = dict(state.query_response_bytes_hwm)
+        query_result_rows_hwm = dict(state.query_result_rows_hwm)
+        ingest_body_bytes_hwm = state.ingest_body_bytes_hwm
         errors = list(state.errors)
     physical = final.get("physical_database_bytes", final.get("disk_size", 0))
     logical = final.get("bytes_on_disk", final.get("total_bytes", 0))
@@ -1138,6 +1179,11 @@ def result_for_state(
         "durable_records_per_second": accepted / duration_seconds,
         "write_latency": latency_summary(writes),
         "query_latency": {key: latency_summary(value) for key, value in sorted(queries.items())},
+        "body_and_result_watermarks": {
+            "ingest_body_bytes_hwm": ingest_body_bytes_hwm,
+            "query_response_bytes_hwm": dict(sorted(query_response_bytes_hwm.items())),
+            "query_result_rows_hwm": dict(sorted(query_result_rows_hwm.items())),
+        },
         "rss_hwm_kib": state.server.memory_hwm_kib,
         "rss_slope_kib_per_hour_after_warmup": max(long_running_slopes, default=0.0),
         "rss_slope_kib_per_hour_by_process_generation": slopes,
@@ -1181,6 +1227,8 @@ def enforce_gates(args: argparse.Namespace, report: dict[str, Any]) -> None:
                 failures.append(
                     f"{signal_name}/{shape}: p99 {latency['p99_ms']:.2f} ms > {args.max_p99_ms:.2f} ms"
                 )
+            if result["body_and_result_watermarks"]["query_result_rows_hwm"].get(shape, 0) == 0:
+                failures.append(f"{signal_name}/{shape}: every completed query returned zero rows")
         final = result["final_stats"]
         capacity = final.get(
             "command_queue_capacity_batches",
