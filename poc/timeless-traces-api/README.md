@@ -4,8 +4,8 @@ This traces-specific process-boundary POC owns HTTP scheduling and SQLite
 connections. It does not implement storage. Every span and command crosses the
 public `timeless_traces` virtual table supplied by `libtimeless_ext`.
 
-Sessions 2–4 provide the server lifecycle shell, OTLP ingest, and the pinned
-Jaeger read surface.
+Sessions 2–5 provide the server lifecycle shell, OTLP ingest, the pinned
+Jaeger read surface, and the reusable bounded/streaming extension read path.
 
 ## Run
 
@@ -25,7 +25,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered extension optimize interval |
 
-## Sessions 2–4 endpoints
+## Sessions 2–5 endpoints
 
 - `GET /live` reports process liveness without touching SQLite.
 - `GET /ready` and `GET /health` verify a live reader and expose the negotiated
@@ -49,6 +49,23 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   `operation`, `start`, `end`, `limit`, `minDuration`, and `maxDuration`
   parameters. Compatibility is explicit: `limit` still counts spans before
   grouping, not traces, so a search result may be incomplete.
+
+Session 5 keeps the public SQL waist useful outside this daemon. Unbounded
+`timeless_traces` cursors stream one decoded block at a time; exact
+`ORDER BY start_ts[,span_id] ASC|DESC LIMIT/OFFSET` queries retain only their
+bounded prefix; inclusive duration predicates filter inside the engine; and
+metadata-native discovery is available directly:
+
+```sql
+SELECT value FROM timeless_trace_services('traces');
+SELECT value FROM timeless_trace_operations('traces', 'checkout');
+```
+
+The service/operation catalog is additive block metadata. Mixed databases
+containing legacy blocks fall back to exact streaming decode, so upgrading
+never silently omits an operation. `timeless_stats('traces')` exposes snapshot,
+bounded-query, discovery, payload, decode, match, return, and cancellation work
+counters.
 
 Startup acquires `<database>.timeless-traces-api.lock` before opening SQLite.
 It then validates the full rich-span schema, module identity, configured
@@ -87,4 +104,6 @@ gzip parity, atomic malformed-request rejection, decompression bounds, and the
 Session 0 Jaeger oracle, rich tags/logs/processes/references, span-limit-before-
 grouping behavior, traces split across multiple extension blocks, scoped
 SQLite interruption, cancellation during extension work, progress-handler
-cleanup, and reuse of the same reader after cancellation.
+cleanup, reuse of the same reader after cancellation, bounded-order planner
+selection, duration pushdown, native discovery, streaming snapshot memory, and
+writer publication while broad-query decode CPU is still active.

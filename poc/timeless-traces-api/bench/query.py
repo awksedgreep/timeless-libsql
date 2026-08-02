@@ -134,6 +134,16 @@ def main():
         "routes": results,
         "api_work_delta": delta(after, before, "api_read_"),
         "extension_work_delta": delta(after, before, "extension_query_"),
+        "extension_discovery_work_delta": delta(
+            after, before, "extension_discovery_"
+        ),
+        "extension_gauges": {
+            key: after[key]
+            for key in (
+                "extension_query_bounded_max_spans",
+                "extension_query_snapshot_payload_max_bytes",
+            )
+        },
         "memory": memory(args.server_pid),
     }
     print(json.dumps(report, indent=2, sort_keys=True))

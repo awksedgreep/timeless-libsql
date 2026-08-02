@@ -309,6 +309,9 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     db.create_module(c"timeless_log_buckets", &LOG_BUCKETS, None::<()>)?;
     const LOG_COUNT: Module<LogCountTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_log_count", &LOG_COUNT, None::<()>)?;
+    const TRACE_DISCOVERY: Module<TraceDiscoveryTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_trace_services", &TRACE_DISCOVERY, None::<()>)?;
+    db.create_module(c"timeless_trace_operations", &TRACE_DISCOVERY, None::<()>)?;
     const TRACE_BUCKETS: Module<TraceBucketsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_trace_buckets", &TRACE_BUCKETS, None::<()>)?;
     const LABEL_VALUES: Module<LabelValuesTab> = Module::eponymous_only_module();
@@ -2771,6 +2774,143 @@ mod rollup_batch_tests {
 // from the metrics grid kernels, which sample BACKWARD over (t-w, t].
 // Both conventions are documented where they live.
 
+/// Metadata-native trace discovery. These public TVFs avoid decoding every
+/// span merely to enumerate the low-cardinality service/operation catalog:
+///
+///   SELECT value FROM timeless_trace_services('traces');
+///   SELECT value FROM timeless_trace_operations('traces', 'checkout');
+#[derive(Clone, Copy)]
+enum TraceDiscoveryKind {
+    Services,
+    Operations,
+}
+
+#[repr(C)]
+pub(crate) struct TraceDiscoveryTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+    kind: TraceDiscoveryKind,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for TraceDiscoveryTab {
+    type Aux = ();
+    type Cursor = TraceDiscoveryCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        let kind = if module_name == b"timeless_trace_operations" {
+            TraceDiscoveryKind::Operations
+        } else {
+            TraceDiscoveryKind::Services
+        };
+        let schema = match kind {
+            TraceDiscoveryKind::Services => c"CREATE TABLE x(value TEXT, tbl HIDDEN)",
+            TraceDiscoveryKind::Operations => {
+                c"CREATE TABLE x(value TEXT, tbl HIDDEN, service HIDDEN)"
+            }
+        };
+        Ok((
+            Cow::Borrowed(schema),
+            TraceDiscoveryTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+                kind,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        let count = match self.kind {
+            TraceDiscoveryKind::Services => 1,
+            TraceDiscoveryKind::Operations => 2,
+        };
+        best_index_args(info, 1, count)
+    }
+
+    fn open(&mut self) -> Result<Self::Cursor> {
+        Ok(TraceDiscoveryCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            kind: self.kind,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct TraceDiscoveryCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    kind: TraceDiscoveryKind,
+    rows: Vec<String>,
+    pos: usize,
+    phantom: PhantomData<&'vtab TraceDiscoveryTab>,
+}
+
+unsafe impl VTabCursor for TraceDiscoveryCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        let (module, names, required) = match self.kind {
+            TraceDiscoveryKind::Services => ("timeless_trace_services", &["tbl"][..], 0b1),
+            TraceDiscoveryKind::Operations => {
+                ("timeless_trace_operations", &["tbl", "service"][..], 0b11)
+            }
+        };
+        let slots = named_slots(module, names, required, idx_num)?;
+        let table_spec: Option<String> = args.get(slots[0].unwrap())?;
+        let table_spec =
+            table_spec.ok_or_else(|| module_err(format!("{module}: tbl must not be NULL")))?;
+        let service = if matches!(self.kind, TraceDiscoveryKind::Operations) {
+            let value: Option<String> = args.get(slots[1].unwrap())?;
+            Some(value.ok_or_else(|| module_err(format!("{module}: service must not be NULL")))?)
+        } else {
+            None
+        };
+        let (database, table) = split_spec(&table_spec);
+        let _bind = DbGuard::bind(self.db);
+        let shared = TracesTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        self.rows = match service {
+            Some(service) => shared
+                .engine
+                .discover_operations(&service)
+                .map_err(module_err)?,
+            None => shared.engine.discover_services().map_err(module_err)?,
+        };
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(&self.rows[self.pos]),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
 /// timeless_log_count('logs', filter_json, message_contains, start, stop)
 /// → one INTEGER row. Only `tbl` is required; optional bounds default to the
 /// full i64 range. Filter JSON uses `level` plus metadata equalities, matching
@@ -3183,7 +3323,7 @@ unsafe impl VTabCursor for TraceBucketsCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = TracesTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let read = read_permit(&shared, self.db, &table)?;
         let q = timeless_core::SpanQuery {
             ts_min: start,
             ts_max: stop,
@@ -3193,7 +3333,10 @@ unsafe impl VTabCursor for TraceBucketsCursor<'_> {
             status: None,
             name: None,
         };
-        self.rows = shared.engine.bucket_stats(&q, step).map_err(module_err)?;
+        self.rows = shared
+            .engine
+            .bucket_stats_after_snapshot(&q, step, move || drop(read))
+            .map_err(module_err)?;
         self.pos = 0;
         Ok(())
     }
@@ -4160,6 +4303,54 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "query_returned_spans",
                         Value::Integer(query.query_returned_spans as i64),
+                    ),
+                    (
+                        "query_snapshot_ns",
+                        Value::Integer(query.query_snapshot_ns as i64),
+                    ),
+                    (
+                        "query_snapshot_payload_bytes",
+                        Value::Integer(query.query_snapshot_payload_bytes as i64),
+                    ),
+                    (
+                        "query_snapshot_payload_max_bytes",
+                        Value::Integer(query.query_snapshot_payload_max_bytes as i64),
+                    ),
+                    (
+                        "query_stable_location_snapshots",
+                        Value::Integer(query.query_stable_location_snapshots as i64),
+                    ),
+                    (
+                        "query_bounded_count",
+                        Value::Integer(query.query_bounded_count as i64),
+                    ),
+                    (
+                        "query_bounded_requested_spans",
+                        Value::Integer(query.query_bounded_requested_spans as i64),
+                    ),
+                    (
+                        "query_bounded_max_spans",
+                        Value::Integer(query.query_bounded_max_spans as i64),
+                    ),
+                    (
+                        "query_blocks_skipped_by_bound",
+                        Value::Integer(query.query_blocks_skipped_by_bound as i64),
+                    ),
+                    (
+                        "discovery_count",
+                        Value::Integer(query.discovery_count as i64),
+                    ),
+                    (
+                        "discovery_total_ns",
+                        Value::Integer(query.discovery_total_ns as i64),
+                    ),
+                    (
+                        "discovery_payload_bytes_read",
+                        Value::Integer(query.discovery_payload_bytes_read as i64),
+                    ),
+                    (
+                        "discovery_decoded_spans",
+                        Value::Integer(query.discovery_decoded_spans as i64),
                     ),
                 ]);
             }

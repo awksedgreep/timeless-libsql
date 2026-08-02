@@ -103,13 +103,13 @@ pub(crate) fn execute(
     match request {
         ReadRequest::Services => string_list(
             conn,
-            "SELECT DISTINCT service FROM traces ORDER BY service",
+            "SELECT value FROM timeless_trace_services('traces') ORDER BY value",
             [],
             cancelled,
         ),
         ReadRequest::Operations { service } => string_list(
             conn,
-            "SELECT DISTINCT name FROM traces WHERE service=?1 ORDER BY name",
+            "SELECT value FROM timeless_trace_operations('traces', ?1) ORDER BY value",
             [service],
             cancelled,
         ),
@@ -167,31 +167,36 @@ fn execute_search(
     let mut sql = String::from(
         "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
                 duration_ns,attributes,status_description,events,resource,instrumentation_scope \
-           FROM traces WHERE 1=1",
+           FROM traces",
     );
     let mut values = Vec::new();
     {
         let mut add = |clause: &str, value: SqlValue| {
+            sql.push_str(if values.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
             sql.push_str(clause);
             values.push(value);
         };
         if let Some(value) = &search.service {
-            add(" AND service=?", SqlValue::Text(value.clone()));
+            add("service=?", SqlValue::Text(value.clone()));
         }
         if let Some(value) = &search.operation {
-            add(" AND name=?", SqlValue::Text(value.clone()));
+            add("name=?", SqlValue::Text(value.clone()));
         }
         if let Some(value) = search.start_ns {
-            add(" AND start_ts>=?", SqlValue::Integer(value));
+            add("start_ts>=?", SqlValue::Integer(value));
         }
         if let Some(value) = search.end_ns {
-            add(" AND start_ts<=?", SqlValue::Integer(value));
+            add("start_ts<=?", SqlValue::Integer(value));
         }
         if let Some(value) = search.min_duration_ns {
-            add(" AND duration_ns>=?", SqlValue::Integer(value));
+            add("duration_ns>=?", SqlValue::Integer(value));
         }
         if let Some(value) = search.max_duration_ns {
-            add(" AND duration_ns<=?", SqlValue::Integer(value));
+            add("duration_ns<=?", SqlValue::Integer(value));
         }
     }
     // Compatibility contract: newest spans first, then apply the span limit,

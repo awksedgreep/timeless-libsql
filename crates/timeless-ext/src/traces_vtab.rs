@@ -54,7 +54,7 @@ use rusqlite::vtab::{
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{
     kind_from_name, kind_name, status_from_name, status_name, SpanBlockEngine, SpanBlockStore,
-    SpanEngineConfig, SpanEntry, SpanQuery,
+    SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder, SpanQueryStream,
 };
 
 use crate::batch::BatchReader;
@@ -95,6 +95,13 @@ const BIT_STATUS: c_int = 8;
 const BIT_NAME: c_int = 16;
 const BIT_TS_LO: c_int = 32;
 const BIT_TS_HI: c_int = 64;
+const BIT_DURATION_LO: c_int = 128;
+const BIT_DURATION_HI: c_int = 256;
+
+const PLAN_BOUNDED_TS_ASC: &str = "bounded-ts-asc";
+const PLAN_BOUNDED_TS_ASC_OFFSET: &str = "bounded-ts-asc-offset";
+const PLAN_BOUNDED_TS_DESC: &str = "bounded-ts-desc";
+const PLAN_BOUNDED_TS_DESC_OFFSET: &str = "bounded-ts-desc-offset";
 
 /// Declared column indices (argv in xUpdate = these + 2).
 const COL_TRACE_ID: usize = 0;
@@ -593,11 +600,24 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
         let mut name_c: Option<usize> = None;
         let mut lo_c: Option<usize> = None;
         let mut hi_c: Option<usize> = None;
+        let mut duration_lo_c: Option<usize> = None;
+        let mut duration_hi_c: Option<usize> = None;
+        let mut limit_c: Option<usize> = None;
+        let mut offset_c: Option<usize> = None;
+        let mut bounded_safe = true;
         for (i, c) in info.constraints().enumerate() {
             if !c.is_usable() {
+                if !matches!(
+                    c.operator(),
+                    SQLITE_INDEX_CONSTRAINT_LIMIT | SQLITE_INDEX_CONSTRAINT_OFFSET
+                ) {
+                    bounded_safe = false;
+                }
                 continue;
             }
             match (c.column() as usize, c.operator()) {
+                (_, SQLITE_INDEX_CONSTRAINT_LIMIT) if limit_c.is_none() => limit_c = Some(i),
+                (_, SQLITE_INDEX_CONSTRAINT_OFFSET) if offset_c.is_none() => offset_c = Some(i),
                 (COL_TRACE_ID, SQLITE_INDEX_CONSTRAINT_EQ) if trace_c.is_none() => {
                     trace_c = Some(i)
                 }
@@ -607,21 +627,60 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
                     status_c = Some(i)
                 }
                 (COL_NAME, SQLITE_INDEX_CONSTRAINT_EQ) if name_c.is_none() => name_c = Some(i),
-                (COL_START_TS, SQLITE_INDEX_CONSTRAINT_GE)
-                | (COL_START_TS, SQLITE_INDEX_CONSTRAINT_GT)
-                    if lo_c.is_none() =>
-                {
-                    lo_c = Some(i)
+                (COL_START_TS, SQLITE_INDEX_CONSTRAINT_GE) if lo_c.is_none() => lo_c = Some(i),
+                (COL_START_TS, SQLITE_INDEX_CONSTRAINT_LE) if hi_c.is_none() => hi_c = Some(i),
+                (COL_START_TS, SQLITE_INDEX_CONSTRAINT_GT) if lo_c.is_none() => {
+                    lo_c = Some(i);
+                    bounded_safe = false;
                 }
-                (COL_START_TS, SQLITE_INDEX_CONSTRAINT_LE)
-                | (COL_START_TS, SQLITE_INDEX_CONSTRAINT_LT)
-                    if hi_c.is_none() =>
-                {
-                    hi_c = Some(i)
+                (COL_START_TS, SQLITE_INDEX_CONSTRAINT_LT) if hi_c.is_none() => {
+                    hi_c = Some(i);
+                    bounded_safe = false;
                 }
-                _ => {}
+                (COL_DURATION, SQLITE_INDEX_CONSTRAINT_GE) if duration_lo_c.is_none() => {
+                    duration_lo_c = Some(i)
+                }
+                (COL_DURATION, SQLITE_INDEX_CONSTRAINT_LE) if duration_hi_c.is_none() => {
+                    duration_hi_c = Some(i)
+                }
+                (COL_DURATION, SQLITE_INDEX_CONSTRAINT_GT) if duration_lo_c.is_none() => {
+                    duration_lo_c = Some(i);
+                    bounded_safe = false;
+                }
+                (COL_DURATION, SQLITE_INDEX_CONSTRAINT_LT) if duration_hi_c.is_none() => {
+                    duration_hi_c = Some(i);
+                    bounded_safe = false;
+                }
+                _ => bounded_safe = false,
             }
         }
+
+        let bounded_order = if bounded_safe && limit_c.is_some() {
+            let order = info.order_bys().collect::<Vec<_>>();
+            match order.as_slice() {
+                [first] if first.column() as usize == COL_START_TS => {
+                    Some(if first.is_order_by_desc() {
+                        SpanQueryOrder::Desc
+                    } else {
+                        SpanQueryOrder::Asc
+                    })
+                }
+                [first, second]
+                    if first.column() as usize == COL_START_TS
+                        && second.column() as usize == COL_SPAN_ID
+                        && first.is_order_by_desc() == second.is_order_by_desc() =>
+                {
+                    Some(if first.is_order_by_desc() {
+                        SpanQueryOrder::Desc
+                    } else {
+                        SpanQueryOrder::Asc
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         // Pass 2 (mutable): claim argv slots in canonical order.
         let mut mask: c_int = 0;
@@ -646,16 +705,34 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
         claim(info, name_c, BIT_NAME);
         claim(info, lo_c, BIT_TS_LO);
         claim(info, hi_c, BIT_TS_HI);
+        claim(info, duration_lo_c, BIT_DURATION_LO);
+        claim(info, duration_hi_c, BIT_DURATION_HI);
+        if bounded_order.is_some() {
+            claim(info, limit_c, 0);
+            claim(info, offset_c, 0);
+        }
 
         info.set_idx_num(mask);
+        if let Some(order) = bounded_order {
+            info.set_idx_str(match (order, offset_c.is_some()) {
+                (SpanQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
+                (SpanQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
+                (SpanQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
+                (SpanQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
+            });
+            info.set_order_by_consumed(true);
+            info.set_estimated_rows(100);
+        }
         // Cost ladder steers the planner: a trace_id lookup is a
         // point probe of the trace index (the entire reason this vtab
         // exists) and must win against any other join order SQLite
         // considers; term/range plans prune blocks; a bare scan
         // decompresses everything.
+        let pruning_mask =
+            BIT_TRACE | BIT_SERVICE | BIT_KIND | BIT_STATUS | BIT_NAME | BIT_TS_LO | BIT_TS_HI;
         info.set_estimated_cost(if mask & BIT_TRACE != 0 {
             10.0
-        } else if mask != 0 {
+        } else if mask & pruning_mask != 0 {
             1e3
         } else {
             1e6
@@ -671,6 +748,8 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             table_name: self.table_name.clone(),
             rows: Vec::new(),
             pos: 0,
+            stream: None,
+            current: None,
             phantom: PhantomData,
         })
     }
@@ -944,12 +1023,6 @@ impl SavepointVTab for TracesTab {
 // The cursor
 // ---------------------------------------------------------------------------
 
-/// One output row, materialized at filter() time. JSON text was already
-/// canonicalized at ingest (or decoded from a compatible old block).
-struct OutRow {
-    entry: SpanEntry,
-}
-
 #[repr(C)]
 pub struct TracesCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
@@ -957,23 +1030,39 @@ pub struct TracesCursor<'vtab> {
     /// The connection driving this scan (bound in filter()).
     db: *mut ffi::sqlite3,
     table_name: String,
-    rows: Vec<OutRow>,
+    /// Ordered LIMIT/OFFSET plans retain only their bounded prefix.
+    rows: Vec<SpanEntry>,
     pos: usize,
+    /// Unbounded plans decode one block at a time. `current` is the sole row
+    /// exposed to SQLite; stopping a SELECT early cannot leave a database-
+    /// sized result vector behind the extension boundary.
+    stream: Option<SpanQueryStream>,
+    current: Option<SpanEntry>,
     phantom: PhantomData<&'vtab TracesTab>,
+}
+
+impl Drop for TracesCursor<'_> {
+    fn drop(&mut self) {
+        if let Some(mut stream) = self.stream.take() {
+            self.shared.engine.finish_query_stream(&mut stream);
+        }
+    }
 }
 
 unsafe impl VTabCursor for TracesCursor<'_> {
     /// Decode the pushed constraints per the best_index bitmask, run
     /// one engine query (sequential block reads — no rayon anywhere on
-    /// this path, per the Session 3 deadlock lesson), materialize rows.
-    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+    /// this path, per the Session 3 deadlock lesson). Bounded plans retain a
+    /// LIMIT+OFFSET prefix; unbounded plans prime a one-block stream.
+    fn filter(&mut self, idx_num: c_int, idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         // Route block reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
-        let _read = self
-            .shared
-            .write_gate
-            .acquire_read(self.db as usize, &self.table_name)
-            .map_err(module_err)?;
+        if let Some(mut old) = self.stream.take() {
+            self.shared.engine.finish_query_stream(&mut old);
+        }
+        self.rows.clear();
+        self.current = None;
+        self.pos = 0;
 
         // argv slots were claimed in canonical order (trace, service,
         // kind, status, name, ts lo, ts hi) — the mask alone tells us
@@ -1072,59 +1161,156 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         } else {
             i64::MAX
         };
-
-        let entries = if impossible {
-            Vec::new()
+        let duration_min: i64 = if idx_num & BIT_DURATION_LO != 0 {
+            match args.get::<Option<i64>>(next())? {
+                Some(value) => value,
+                None => {
+                    impossible = true;
+                    i64::MIN
+                }
+            }
         } else {
-            self.shared
-                .engine
-                .query(&SpanQuery {
-                    ts_min,
-                    ts_max,
-                    trace_id,
-                    service,
-                    kind,
-                    status,
-                    name,
-                })
-                .map_err(module_err)?
+            i64::MIN
+        };
+        let duration_max: i64 = if idx_num & BIT_DURATION_HI != 0 {
+            match args.get::<Option<i64>>(next())? {
+                Some(value) => value,
+                None => {
+                    impossible = true;
+                    i64::MAX
+                }
+            }
+        } else {
+            i64::MAX
         };
 
-        self.rows = entries.into_iter().map(|entry| OutRow { entry }).collect();
-        self.pos = 0;
+        let bounded_order = match idx_str {
+            Some(PLAN_BOUNDED_TS_ASC) => Some((SpanQueryOrder::Asc, false)),
+            Some(PLAN_BOUNDED_TS_ASC_OFFSET) => Some((SpanQueryOrder::Asc, true)),
+            Some(PLAN_BOUNDED_TS_DESC) => Some((SpanQueryOrder::Desc, false)),
+            Some(PLAN_BOUNDED_TS_DESC_OFFSET) => Some((SpanQueryOrder::Desc, true)),
+            _ => None,
+        };
+        let bounded = if let Some((order, has_offset)) = bounded_order {
+            let limit: Option<i64> = args.get(next())?;
+            let offset: Option<i64> = if has_offset {
+                args.get(next())?
+            } else {
+                Some(0)
+            };
+            let capacity = match (limit, offset) {
+                (Some(0), _) => Some(0),
+                (Some(limit), Some(offset)) if limit > 0 => limit
+                    .checked_add(offset.max(0))
+                    .and_then(|value| usize::try_from(value).ok()),
+                _ => None,
+            };
+            Some((order, capacity))
+        } else {
+            None
+        };
+
+        if impossible {
+            return Ok(());
+        }
+        let query = SpanQuery {
+            ts_min,
+            ts_max,
+            trace_id,
+            service,
+            kind,
+            status,
+            name,
+        };
+        let read = self
+            .shared
+            .write_gate
+            .acquire_read(self.db as usize, &self.table_name)
+            .map_err(module_err)?;
+        match bounded {
+            Some((order, capacity)) => {
+                self.rows = self
+                    .shared
+                    .engine
+                    .query_ordered_with_duration_after_snapshot(
+                        &query,
+                        duration_min,
+                        duration_max,
+                        order,
+                        capacity,
+                        move || drop(read),
+                    )
+                    .map_err(module_err)?;
+            }
+            None => {
+                let mut stream = self
+                    .shared
+                    .engine
+                    .query_stream_with_duration_after_snapshot(
+                        &query,
+                        duration_min,
+                        duration_max,
+                        move || drop(read),
+                    )
+                    .map_err(module_err)?;
+                self.current = match self.shared.engine.query_stream_next(&mut stream) {
+                    Ok(row) => row,
+                    Err(error) => {
+                        self.shared.engine.finish_query_stream(&mut stream);
+                        return Err(module_err(error));
+                    }
+                };
+                self.stream = Some(stream);
+            }
+        }
         Ok(())
     }
 
     fn next(&mut self) -> Result<()> {
+        let _bind = DbGuard::bind(self.db);
         self.pos += 1;
+        if let Some(stream) = self.stream.as_mut() {
+            self.current = self
+                .shared
+                .engine
+                .query_stream_next(stream)
+                .map_err(module_err)?;
+        }
         Ok(())
     }
 
     fn eof(&self) -> bool {
-        self.pos >= self.rows.len()
+        if self.stream.is_some() {
+            self.current.is_none()
+        } else {
+            self.pos >= self.rows.len()
+        }
     }
 
     fn column(&self, ctx: &mut Context, i: c_int) -> Result<()> {
-        let row = &self.rows[self.pos];
+        let row = self
+            .current
+            .as_ref()
+            .unwrap_or_else(|| &self.rows[self.pos]);
         match i as usize {
             // Ids come back as BLOBs, always (hex() in SQL to display).
-            COL_TRACE_ID => ctx.set_result(&&row.entry.trace_id[..]),
-            COL_SPAN_ID => ctx.set_result(&&row.entry.span_id[..]),
-            COL_PARENT => match &row.entry.parent_span_id {
+            COL_TRACE_ID => ctx.set_result(&&row.trace_id[..]),
+            COL_SPAN_ID => ctx.set_result(&&row.span_id[..]),
+            COL_PARENT => match &row.parent_span_id {
                 Some(p) => ctx.set_result(&&p[..]),
                 None => ctx.set_result(&Null),
             },
-            COL_NAME => ctx.set_result(&row.entry.name),
-            COL_SERVICE => ctx.set_result(&row.entry.service),
-            COL_KIND => ctx.set_result(&kind_name(row.entry.kind)),
-            COL_STATUS => ctx.set_result(&status_name(row.entry.status)),
-            COL_START_TS => ctx.set_result(&row.entry.start_ts),
-            COL_DURATION => ctx.set_result(&row.entry.duration_ns),
-            COL_ATTRS => ctx.set_result(&row.entry.attributes.as_ref()),
-            COL_STATUS_DESCRIPTION => ctx.set_result(&row.entry.status_description.as_ref()),
-            COL_EVENTS => ctx.set_result(&row.entry.events.as_ref()),
-            COL_RESOURCE => ctx.set_result(&row.entry.resource.as_ref()),
-            COL_SCOPE => ctx.set_result(&row.entry.instrumentation_scope.as_ref()),
+            COL_NAME => ctx.set_result(&row.name),
+            COL_SERVICE => ctx.set_result(&row.service),
+            COL_KIND => ctx.set_result(&kind_name(row.kind)),
+            COL_STATUS => ctx.set_result(&status_name(row.status)),
+            COL_START_TS => ctx.set_result(&row.start_ts),
+            COL_DURATION => ctx.set_result(&row.duration_ns),
+            COL_ATTRS => ctx.set_result(&row.attributes.as_ref()),
+            COL_STATUS_DESCRIPTION => ctx.set_result(&row.status_description.as_ref()),
+            COL_EVENTS => ctx.set_result(&row.events.as_ref()),
+            COL_RESOURCE => ctx.set_result(&row.resource.as_ref()),
+            COL_SCOPE => ctx.set_result(&row.instrumentation_scope.as_ref()),
             // The hidden command column reads as NULL.
             _ => ctx.set_result(&Null),
         }

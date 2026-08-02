@@ -33,7 +33,7 @@
 //!     requests' is THE trace query, and status-pure blocks mean a
 //!     `status:error` posting-list lookup prunes the ~95%+ of blocks
 //!     with no errors instead of matching all of them.
-//!   - Terms are ALWAYS service:/kind:/status:/name: — no index_keys
+//!   - Query terms are ALWAYS service:/kind:/status:/name: — no index_keys
 //!     knob. Logs need an allowlist because log metadata is open-ended
 //!     user data where indexing an identifier-valued key would bloat
 //!     the term table past the data. Span dimensions are the opposite:
@@ -42,6 +42,9 @@
 //!     enums), so they are indexed unconditionally. High-cardinality
 //!     span data lives in `attributes`, which is scan-only, exactly
 //!     like non-indexed log metadata.
+//!   - Blocks also carry collision-free service/operation compound terms and
+//!     an `operations:` generation marker. Public discovery can therefore be
+//!     metadata-native while mixed legacy/new databases fall back to decode.
 
 use std::borrow::Cow;
 
@@ -53,7 +56,9 @@ pub mod mem;
 mod tests;
 
 pub use codec::{decode_span_block, encode_span_block};
-pub use engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery, TraceBucketStat};
+pub use engine::{
+    SpanBlockEngine, SpanEngineConfig, SpanQuery, SpanQueryOrder, SpanQueryStream, TraceBucketStat,
+};
 pub use mem::MemSpanStore;
 
 // Shared with the logs block store on purpose: a BlockLoc is a BlockLoc
@@ -170,6 +175,17 @@ pub struct EncodedSpanBlock {
 /// enclosing transaction, which IS the atomicity that lets block rows,
 /// term rows and trace-index rows appear and disappear together.
 pub trait SpanBlockStore: Send + Sync {
+    /// Whether block locations captured by a query remain readable from the
+    /// same logical snapshot after a concurrent writer replaces them.
+    ///
+    /// SQLite-backed stores return true because the outer virtual-table
+    /// statement pins a database snapshot. Conservative stores leave this
+    /// false, causing the engine to own candidate payload bytes before it
+    /// releases its publication guard.
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        false
+    }
+
     /// Persist a batch of blocks (a status-partitioned flush emits up
     /// to three). Each block's term rows AND trace-index rows are
     /// written in the same operation — a block is never visible without
@@ -212,6 +228,15 @@ pub trait SpanBlockStore: Send + Sync {
     /// `trace_id`, via the trace index — never a scan. The hero query
     /// (`WHERE trace_id = x'...'`) reads exactly these blocks.
     fn query_trace(&self, trace_id: &[u8; 16]) -> Result<Vec<(BlockLoc, BlockMeta)>, String>;
+
+    /// Distinct suffixes of terms beginning with `prefix`, when the backend
+    /// can answer that from its posting-list catalog without payload reads.
+    /// `None` asks the engine to use its exact decode fallback. This optional
+    /// seam keeps discovery reusable without making an index capability a
+    /// requirement for non-SQL stores.
+    fn query_term_values(&self, _prefix: &str) -> Result<Option<Vec<String>>, String> {
+        Ok(None)
+    }
 
     /// Portable cancellation checkpoint. SQLite-backed stores execute a
     /// minimal statement so `sqlite3_interrupt` is observed even while a

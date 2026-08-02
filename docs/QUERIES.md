@@ -91,7 +91,29 @@ SELECT bucket_ts, group_key, n
   FROM timeless_log_buckets('logs', 'level', NULL, :t0, :t1, 60000);
 SELECT bucket_ts, service, n, dur_p50, dur_p95, dur_p99
   FROM timeless_trace_buckets('traces', NULL, :t0, :t1, 60000000000);
+
+-- trace discovery from block metadata, including the live 8,192-span buffer
+SELECT value FROM timeless_trace_services('traces');
+SELECT value FROM timeless_trace_operations('traces', 'checkout');
+
+-- bounded newest-first span search; LIMIT+OFFSET is pushed into the engine
+SELECT * FROM traces
+ WHERE service = 'checkout' AND duration_ns >= 1000000
+ ORDER BY start_ts DESC, span_id DESC LIMIT 100 OFFSET 0;
 ```
+
+Unbounded `timeless_traces` scans stream one decoded block at a time. Inclusive
+`start_ts` and `duration_ns` bounds plus exact service/kind/status/name filters
+are applied inside the engine. When SQLite supplies an exact
+`ORDER BY start_ts[,span_id] ASC|DESC LIMIT/OFFSET` shape, the engine retains
+only `LIMIT + OFFSET` rows and stops at block timestamp bounds. Strict bounds
+and unrecognized row predicates remain above the vtab and deliberately disable
+bounded planning.
+
+Trace service/operation discovery reads posting-list metadata rather than span
+payloads. New blocks carry a collision-free service/operation pair term; if a
+selected legacy block lacks the generation marker, operation discovery falls
+back to exact block-at-a-time decode. Upgrades therefore remain complete.
 
 ## Scalar aggregate without raw materialization
 

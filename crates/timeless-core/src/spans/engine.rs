@@ -12,14 +12,15 @@
 //!
 //! Differences from BlockEngine, all traced to the trace-store design:
 //!   - partition dimension is STATUS not level (3 pure buckets + mixed);
-//!   - terms are always service:/kind:/status:/name: (no index_keys —
+//!   - query terms are always service:/kind:/status:/name: (no index_keys —
 //!     see spans/mod.rs for why span dimensions need no allowlist);
+//!     exact service/operation discovery adds compound catalog terms;
 //!   - every persisted block carries its deduped TRACE-ID set, and the
 //!     query path has a second entrance: query() with a trace_id uses
 //!     store.query_trace() instead of the term index.
 
-use std::collections::BTreeSet;
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -78,6 +79,7 @@ pub struct TraceBucketStat {
 /// "unbounded", like the other vtabs). `trace_id` switches the plan:
 /// when set, candidate blocks come from the TRACE INDEX, not the term
 /// posting lists — that is the hero pushdown.
+#[derive(Clone, Debug)]
 pub struct SpanQuery {
     pub ts_min: i64,
     pub ts_max: i64,
@@ -89,6 +91,92 @@ pub struct SpanQuery {
     pub status: Option<u8>,
     /// Exact operation-name match.
     pub name: Option<String>,
+}
+
+/// Ordering guaranteed by the bounded query path. Equal timestamps use the
+/// packed span id as the public deterministic tie-breaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpanQueryOrder {
+    Asc,
+    Desc,
+}
+
+struct SpanQueryBlockSnapshot {
+    payload: Option<Vec<u8>>,
+    location: Option<BlockLoc>,
+    meta: BlockMeta,
+    sequence: usize,
+}
+
+struct SpanQuerySnapshot {
+    blocks: Vec<SpanQueryBlockSnapshot>,
+    buffered: Vec<SpanEntry>,
+    candidate_blocks: u64,
+    payload_bytes: u64,
+    stable_locations: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct QuerySequence {
+    source: usize,
+    row: usize,
+}
+
+struct BoundedSpan {
+    entry: SpanEntry,
+    sequence: QuerySequence,
+    order: SpanQueryOrder,
+}
+
+impl PartialEq for BoundedSpan {
+    fn eq(&self, other: &Self) -> bool {
+        self.entry.start_ts == other.entry.start_ts
+            && self.entry.span_id == other.entry.span_id
+            && self.sequence == other.sequence
+            && self.order == other.order
+    }
+}
+
+impl Eq for BoundedSpan {}
+
+impl PartialOrd for BoundedSpan {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BoundedSpan {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        debug_assert_eq!(self.order, other.order);
+        let key = |entry: &SpanEntry| (entry.start_ts, entry.span_id);
+        match self.order {
+            SpanQueryOrder::Asc => key(&self.entry)
+                .cmp(&key(&other.entry))
+                .then_with(|| self.sequence.cmp(&other.sequence)),
+            SpanQueryOrder::Desc => key(&other.entry)
+                .cmp(&key(&self.entry))
+                .then_with(|| self.sequence.cmp(&other.sequence)),
+        }
+    }
+}
+
+/// Incremental unbounded cursor state. At most one decoded block and the
+/// 8,191-entry live buffer generation are owned at once; database-sized
+/// result vectors are never constructed.
+pub struct SpanQueryStream {
+    query: SpanQuery,
+    duration_min: i64,
+    duration_max: i64,
+    blocks: VecDeque<SpanQueryBlockSnapshot>,
+    buffered: std::vec::IntoIter<SpanEntry>,
+    decoded: std::vec::IntoIter<SpanEntry>,
+    started: Instant,
+    payload_blocks_read: u64,
+    payload_bytes_read: u64,
+    decoded_spans: u64,
+    matched_spans: u64,
+    returned_spans: u64,
+    finished: bool,
 }
 
 /// Cumulative successful query work. Direct SQLite/libSQL users can inspect
@@ -106,6 +194,18 @@ pub struct SpanQueryProfileSnapshot {
     pub query_buffered_spans_examined: u64,
     pub query_matched_spans: u64,
     pub query_returned_spans: u64,
+    pub query_snapshot_ns: u64,
+    pub query_snapshot_payload_bytes: u64,
+    pub query_snapshot_payload_max_bytes: u64,
+    pub query_stable_location_snapshots: u64,
+    pub query_bounded_count: u64,
+    pub query_bounded_requested_spans: u64,
+    pub query_bounded_max_spans: u64,
+    pub query_blocks_skipped_by_bound: u64,
+    pub discovery_count: u64,
+    pub discovery_total_ns: u64,
+    pub discovery_payload_bytes_read: u64,
+    pub discovery_decoded_spans: u64,
 }
 
 #[derive(Default)]
@@ -120,6 +220,18 @@ struct SpanQueryProfile {
     query_buffered_spans_examined: AtomicU64,
     query_matched_spans: AtomicU64,
     query_returned_spans: AtomicU64,
+    query_snapshot_ns: AtomicU64,
+    query_snapshot_payload_bytes: AtomicU64,
+    query_snapshot_payload_max_bytes: AtomicU64,
+    query_stable_location_snapshots: AtomicU64,
+    query_bounded_count: AtomicU64,
+    query_bounded_requested_spans: AtomicU64,
+    query_bounded_max_spans: AtomicU64,
+    query_blocks_skipped_by_bound: AtomicU64,
+    discovery_count: AtomicU64,
+    discovery_total_ns: AtomicU64,
+    discovery_payload_bytes_read: AtomicU64,
+    discovery_decoded_spans: AtomicU64,
 }
 
 impl SpanQueryProfile {
@@ -136,6 +248,18 @@ impl SpanQueryProfile {
             query_buffered_spans_examined: load(&self.query_buffered_spans_examined),
             query_matched_spans: load(&self.query_matched_spans),
             query_returned_spans: load(&self.query_returned_spans),
+            query_snapshot_ns: load(&self.query_snapshot_ns),
+            query_snapshot_payload_bytes: load(&self.query_snapshot_payload_bytes),
+            query_snapshot_payload_max_bytes: load(&self.query_snapshot_payload_max_bytes),
+            query_stable_location_snapshots: load(&self.query_stable_location_snapshots),
+            query_bounded_count: load(&self.query_bounded_count),
+            query_bounded_requested_spans: load(&self.query_bounded_requested_spans),
+            query_bounded_max_spans: load(&self.query_bounded_max_spans),
+            query_blocks_skipped_by_bound: load(&self.query_blocks_skipped_by_bound),
+            discovery_count: load(&self.discovery_count),
+            discovery_total_ns: load(&self.discovery_total_ns),
+            discovery_payload_bytes_read: load(&self.discovery_payload_bytes_read),
+            discovery_decoded_spans: load(&self.discovery_decoded_spans),
         }
     }
 }
@@ -849,122 +973,626 @@ impl SpanBlockEngine {
         Ok(victims.len())
     }
 
-    /// The query path — NO rayon, sequential reads (module header).
-    ///
-    /// TWO plans, chosen by the presence of trace_id:
-    ///   trace plan: store.query_trace() → exactly the blocks holding
-    ///     that trace's spans (the hero pushdown; the ts overlap check
-    ///     on the returned metas still applies — free pruning);
-    ///   term plan: service/kind/status/name filters → terms →
-    ///     store.query_terms (posting-list intersection + ts overlap).
-    /// Then, both plans: read + decode candidates, exact per-span
-    /// filtering (block-granular indexes approximate), merge matching
-    /// BUFFERED spans (queryable-before-flush), sort by start_ts.
+    /// Materialized engine query retained for direct core callers and kernels.
+    /// The SQLite vtab uses `query_stream_after_snapshot` for unbounded scans
+    /// and this bounded path for ordered LIMIT/OFFSET queries.
     pub fn query(&self, q: &SpanQuery) -> Result<Vec<SpanEntry>, String> {
+        self.query_ordered_after_snapshot(q, SpanQueryOrder::Asc, None, || {})
+    }
+
+    pub fn query_bounded(
+        &self,
+        q: &SpanQuery,
+        order: SpanQueryOrder,
+        max_spans: usize,
+    ) -> Result<Vec<SpanEntry>, String> {
+        self.query_ordered_after_snapshot(q, order, Some(max_spans), || {})
+    }
+
+    pub fn query_ordered_after_snapshot<F>(
+        &self,
+        q: &SpanQuery,
+        order: SpanQueryOrder,
+        max_spans: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<Vec<SpanEntry>, String>
+    where
+        F: FnOnce(),
+    {
+        self.query_ordered_with_duration_after_snapshot(
+            q,
+            i64::MIN,
+            i64::MAX,
+            order,
+            max_spans,
+            after_snapshot,
+        )
+    }
+
+    /// Duration-aware ordered query used by the traces vtab. Duration bounds
+    /// are kept out of `SpanQuery` so the existing public core struct remains
+    /// source-compatible for direct users.
+    pub fn query_ordered_with_duration_after_snapshot<F>(
+        &self,
+        q: &SpanQuery,
+        duration_min: i64,
+        duration_max: i64,
+        order: SpanQueryOrder,
+        max_spans: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<Vec<SpanEntry>, String>
+    where
+        F: FnOnce(),
+    {
         let started = Instant::now();
-        let _transition = self.transition_read();
-        if let Some(k) = q.kind {
-            if k > 4 {
-                return Err(format!("invalid kind {k} in query"));
-            }
-        }
-        if let Some(s) = q.status {
-            if s > 2 {
-                return Err(format!("invalid status {s} in query"));
-            }
-        }
+        let snapshot_started = Instant::now();
+        let snapshot = self.snapshot_query(q, duration_min, duration_max)?;
+        let snapshot_ns = elapsed_ns(snapshot_started);
+        after_snapshot();
 
-        let locs = match &q.trace_id {
-            Some(tid) => self
-                .store
-                .query_trace(tid)
-                .map_err(|error| self.query_error(error))?
-                .into_iter()
-                .filter(|(_, m)| m.ts_min <= q.ts_max && m.ts_max >= q.ts_min)
-                .collect::<Vec<_>>(),
-            None => {
-                let mut terms: Vec<String> = Vec::new();
-                if let Some(svc) = &q.service {
-                    terms.push(format!("service:{svc}"));
-                }
-                if let Some(k) = q.kind {
-                    terms.push(format!("kind:{}", super::kind_name(k)));
-                }
-                if let Some(s) = q.status {
-                    terms.push(format!("status:{}", status_name(s)));
-                }
-                if let Some(n) = &q.name {
-                    terms.push(format!("name:{n}"));
-                }
-                self.store
-                    .query_terms(&terms, q.ts_min, q.ts_max)
-                    .map_err(|error| self.query_error(error))?
-            }
+        let candidate_blocks = snapshot.candidate_blocks;
+        let buffered_spans_examined = snapshot.buffered.len() as u64;
+        let snapshot_payload_bytes = snapshot.payload_bytes;
+        let stable_locations = snapshot.stable_locations;
+        let mut payload_blocks_read = if stable_locations {
+            0
+        } else {
+            candidate_blocks
         };
-
-        let candidate_blocks = locs.len() as u64;
-        let mut payload_blocks_read = 0_u64;
-        let mut payload_bytes_read = 0_u64;
+        let mut payload_bytes_read = snapshot_payload_bytes;
         let mut decoded_spans = 0_u64;
         let mut matched_spans = 0_u64;
-        let mut out: Vec<SpanEntry> = Vec::new();
-        for (loc, _meta) in &locs {
-            let bytes = self
-                .store
-                .read_block(loc)
-                .map_err(|error| self.query_error(error))?;
-            payload_blocks_read = payload_blocks_read.saturating_add(1);
-            payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
-            let entries = decode_span_block(&bytes)?;
-            decoded_spans = decoded_spans.saturating_add(entries.len() as u64);
-            for entry in entries {
-                if entry_matches(&entry, q) {
-                    matched_spans = matched_spans.saturating_add(1);
-                    out.push(entry);
+        let mut blocks_skipped_by_bound = 0_u64;
+        let mut out;
+
+        if let Some(capacity) = max_spans {
+            let mut blocks = snapshot.blocks;
+            match order {
+                SpanQueryOrder::Asc => {
+                    blocks.sort_by_key(|block| (block.meta.ts_min, block.sequence))
+                }
+                SpanQueryOrder::Desc => blocks.sort_by(|a, b| {
+                    b.meta
+                        .ts_max
+                        .cmp(&a.meta.ts_max)
+                        .then_with(|| a.sequence.cmp(&b.sequence))
+                }),
+            }
+            let mut heap: BinaryHeap<BoundedSpan> = BinaryHeap::new();
+            let buffered_source = candidate_blocks as usize;
+            for (row, entry) in snapshot.buffered.into_iter().enumerate() {
+                matched_spans = matched_spans.saturating_add(1);
+                Self::retain_bounded(
+                    &mut heap,
+                    BoundedSpan {
+                        entry,
+                        sequence: QuerySequence {
+                            source: buffered_source,
+                            row,
+                        },
+                        order,
+                    },
+                    capacity,
+                );
+            }
+            let block_count = blocks.len();
+            for (position, block) in blocks.into_iter().enumerate() {
+                let cannot_displace = capacity == 0
+                    || (heap.len() == capacity
+                        && heap.peek().is_some_and(|worst| match order {
+                            SpanQueryOrder::Asc => block.meta.ts_min > worst.entry.start_ts,
+                            SpanQueryOrder::Desc => block.meta.ts_max < worst.entry.start_ts,
+                        }));
+                if cannot_displace {
+                    blocks_skipped_by_bound =
+                        blocks_skipped_by_bound.saturating_add((block_count - position) as u64);
+                    break;
+                }
+                let (bytes, store_read) = self.query_block_bytes(block)?;
+                payload_blocks_read = payload_blocks_read.saturating_add(store_read);
+                if store_read != 0 {
+                    payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
+                }
+                let entries = decode_span_block(&bytes)?;
+                decoded_spans = decoded_spans.saturating_add(entries.len() as u64);
+                for (row, entry) in entries.into_iter().enumerate() {
+                    if entry_matches(&entry, q, duration_min, duration_max) {
+                        matched_spans = matched_spans.saturating_add(1);
+                        Self::retain_bounded(
+                            &mut heap,
+                            BoundedSpan {
+                                entry,
+                                sequence: QuerySequence {
+                                    source: position,
+                                    row,
+                                },
+                                order,
+                            },
+                            capacity,
+                        );
+                    }
                 }
             }
+            let mut ranked = heap.into_vec();
+            ranked.sort_by(|a, b| compare_spans(&a.entry, &b.entry, order));
+            out = ranked.into_iter().map(|ranked| ranked.entry).collect();
+        } else {
+            out = Vec::new();
+            for block in snapshot.blocks {
+                let (bytes, store_read) = self.query_block_bytes(block)?;
+                payload_blocks_read = payload_blocks_read.saturating_add(store_read);
+                if store_read != 0 {
+                    payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
+                }
+                let entries = decode_span_block(&bytes)?;
+                decoded_spans = decoded_spans.saturating_add(entries.len() as u64);
+                for entry in entries {
+                    if entry_matches(&entry, q, duration_min, duration_max) {
+                        matched_spans = matched_spans.saturating_add(1);
+                        out.push(entry);
+                    }
+                }
+            }
+            matched_spans = matched_spans.saturating_add(snapshot.buffered.len() as u64);
+            out.extend(snapshot.buffered);
+            out.sort_by(|a, b| compare_spans(a, b, order));
         }
         self.store
             .check_cancelled()
             .map_err(|error| self.query_error(error))?;
-        let buffer = self.buffer_lock();
-        let buffered_spans_examined = buffer.len() as u64;
-        for entry in buffer.iter() {
-            if entry_matches(entry, q) {
-                matched_spans = matched_spans.saturating_add(1);
-                out.push(entry.clone());
-            }
+        self.record_query(
+            started,
+            snapshot_ns,
+            candidate_blocks,
+            payload_blocks_read,
+            payload_bytes_read,
+            snapshot_payload_bytes,
+            stable_locations,
+            decoded_spans,
+            buffered_spans_examined,
+            matched_spans,
+            out.len() as u64,
+        );
+        if let Some(capacity) = max_spans {
+            let requested = capacity as u64;
+            self.query_profile
+                .query_bounded_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.query_profile
+                .query_bounded_requested_spans
+                .fetch_add(requested, Ordering::Relaxed);
+            self.query_profile
+                .query_bounded_max_spans
+                .fetch_max(requested, Ordering::Relaxed);
+            self.query_profile
+                .query_blocks_skipped_by_bound
+                .fetch_add(blocks_skipped_by_bound, Ordering::Relaxed);
         }
-        drop(buffer);
-        out.sort_by_key(|e| e.start_ts);
+        Ok(out)
+    }
+
+    /// Capture one stable query generation, then let the vtab stream it a
+    /// block at a time after releasing the cross-connection read permit.
+    pub fn query_stream_after_snapshot<F>(
+        &self,
+        q: &SpanQuery,
+        after_snapshot: F,
+    ) -> Result<SpanQueryStream, String>
+    where
+        F: FnOnce(),
+    {
+        self.query_stream_with_duration_after_snapshot(q, i64::MIN, i64::MAX, after_snapshot)
+    }
+
+    pub fn query_stream_with_duration_after_snapshot<F>(
+        &self,
+        q: &SpanQuery,
+        duration_min: i64,
+        duration_max: i64,
+        after_snapshot: F,
+    ) -> Result<SpanQueryStream, String>
+    where
+        F: FnOnce(),
+    {
+        let started = Instant::now();
+        let snapshot_started = Instant::now();
+        let snapshot = self.snapshot_query(q, duration_min, duration_max)?;
+        let snapshot_ns = elapsed_ns(snapshot_started);
+        after_snapshot();
         self.query_profile
             .query_count
             .fetch_add(1, Ordering::Relaxed);
         self.query_profile
-            .query_total_ns
-            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+            .query_snapshot_ns
+            .fetch_add(snapshot_ns, Ordering::Relaxed);
         self.query_profile
             .query_candidate_blocks
-            .fetch_add(candidate_blocks, Ordering::Relaxed);
-        self.query_profile
-            .query_payload_blocks_read
-            .fetch_add(payload_blocks_read, Ordering::Relaxed);
-        self.query_profile
-            .query_payload_bytes_read
-            .fetch_add(payload_bytes_read, Ordering::Relaxed);
-        self.query_profile
-            .query_decoded_spans
-            .fetch_add(decoded_spans, Ordering::Relaxed);
+            .fetch_add(snapshot.candidate_blocks, Ordering::Relaxed);
         self.query_profile
             .query_buffered_spans_examined
-            .fetch_add(buffered_spans_examined, Ordering::Relaxed);
+            .fetch_add(snapshot.buffered.len() as u64, Ordering::Relaxed);
+        self.query_profile
+            .query_snapshot_payload_bytes
+            .fetch_add(snapshot.payload_bytes, Ordering::Relaxed);
+        self.query_profile
+            .query_snapshot_payload_max_bytes
+            .fetch_max(snapshot.payload_bytes, Ordering::Relaxed);
+        if snapshot.stable_locations {
+            self.query_profile
+                .query_stable_location_snapshots
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(SpanQueryStream {
+            query: q.clone(),
+            duration_min,
+            duration_max,
+            blocks: snapshot.blocks.into(),
+            buffered: snapshot.buffered.into_iter(),
+            decoded: Vec::new().into_iter(),
+            started,
+            payload_blocks_read: if snapshot.stable_locations {
+                0
+            } else {
+                snapshot.candidate_blocks
+            },
+            payload_bytes_read: snapshot.payload_bytes,
+            decoded_spans: 0,
+            matched_spans: 0,
+            returned_spans: 0,
+            finished: false,
+        })
+    }
+
+    pub fn query_stream_next(
+        &self,
+        stream: &mut SpanQueryStream,
+    ) -> Result<Option<SpanEntry>, String> {
+        loop {
+            if let Some(entry) = stream.decoded.next() {
+                if entry_matches(
+                    &entry,
+                    &stream.query,
+                    stream.duration_min,
+                    stream.duration_max,
+                ) {
+                    stream.matched_spans = stream.matched_spans.saturating_add(1);
+                    stream.returned_spans = stream.returned_spans.saturating_add(1);
+                    return Ok(Some(entry));
+                }
+                continue;
+            }
+            if let Some(block) = stream.blocks.pop_front() {
+                let (bytes, store_read) = self.query_block_bytes(block)?;
+                stream.payload_blocks_read = stream.payload_blocks_read.saturating_add(store_read);
+                if store_read != 0 {
+                    stream.payload_bytes_read =
+                        stream.payload_bytes_read.saturating_add(bytes.len() as u64);
+                }
+                let entries = decode_span_block(&bytes)?;
+                stream.decoded_spans = stream.decoded_spans.saturating_add(entries.len() as u64);
+                self.store
+                    .check_cancelled()
+                    .map_err(|error| self.query_error(error))?;
+                stream.decoded = entries.into_iter();
+                continue;
+            }
+            if let Some(entry) = stream.buffered.next() {
+                stream.matched_spans = stream.matched_spans.saturating_add(1);
+                stream.returned_spans = stream.returned_spans.saturating_add(1);
+                return Ok(Some(entry));
+            }
+            self.finish_query_stream(stream);
+            return Ok(None);
+        }
+    }
+
+    pub fn finish_query_stream(&self, stream: &mut SpanQueryStream) {
+        if stream.finished {
+            return;
+        }
+        stream.finished = true;
+        self.query_profile
+            .query_total_ns
+            .fetch_add(elapsed_ns(stream.started), Ordering::Relaxed);
+        self.query_profile
+            .query_payload_blocks_read
+            .fetch_add(stream.payload_blocks_read, Ordering::Relaxed);
+        self.query_profile
+            .query_payload_bytes_read
+            .fetch_add(stream.payload_bytes_read, Ordering::Relaxed);
+        self.query_profile
+            .query_decoded_spans
+            .fetch_add(stream.decoded_spans, Ordering::Relaxed);
         self.query_profile
             .query_matched_spans
-            .fetch_add(matched_spans, Ordering::Relaxed);
+            .fetch_add(stream.matched_spans, Ordering::Relaxed);
         self.query_profile
             .query_returned_spans
-            .fetch_add(out.len() as u64, Ordering::Relaxed);
-        Ok(out)
+            .fetch_add(stream.returned_spans, Ordering::Relaxed);
+    }
+
+    fn snapshot_query(
+        &self,
+        q: &SpanQuery,
+        duration_min: i64,
+        duration_max: i64,
+    ) -> Result<SpanQuerySnapshot, String> {
+        let _transition = self.transition_read();
+        self.validate_query(q)?;
+        let locs = self.query_locations(q)?;
+        let candidate_blocks = locs.len() as u64;
+        let stable_locations = self.store.query_snapshot_keeps_locations_readable();
+        let mut blocks = Vec::with_capacity(locs.len());
+        let mut payload_bytes = 0_u64;
+        for (sequence, (location, meta)) in locs.into_iter().enumerate() {
+            if stable_locations {
+                blocks.push(SpanQueryBlockSnapshot {
+                    payload: None,
+                    location: Some(location),
+                    meta,
+                    sequence,
+                });
+            } else {
+                let bytes = self
+                    .store
+                    .read_block(&location)
+                    .map_err(|error| self.query_error(error))?;
+                payload_bytes = payload_bytes.saturating_add(bytes.len() as u64);
+                blocks.push(SpanQueryBlockSnapshot {
+                    payload: Some(bytes),
+                    location: None,
+                    meta,
+                    sequence,
+                });
+            }
+        }
+        let buffered = self
+            .buffer_lock()
+            .iter()
+            .filter(|entry| entry_matches(entry, q, duration_min, duration_max))
+            .cloned()
+            .collect();
+        Ok(SpanQuerySnapshot {
+            blocks,
+            buffered,
+            candidate_blocks,
+            payload_bytes,
+            stable_locations,
+        })
+    }
+
+    fn validate_query(&self, q: &SpanQuery) -> Result<(), String> {
+        if q.kind.is_some_and(|kind| kind > 4) {
+            return Err(format!("invalid kind {} in query", q.kind.unwrap()));
+        }
+        if q.status.is_some_and(|status| status > 2) {
+            return Err(format!("invalid status {} in query", q.status.unwrap()));
+        }
+        Ok(())
+    }
+
+    fn query_locations(&self, q: &SpanQuery) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        match &q.trace_id {
+            Some(trace_id) => Ok(self
+                .store
+                .query_trace(trace_id)
+                .map_err(|error| self.query_error(error))?
+                .into_iter()
+                .filter(|(_, meta)| meta.ts_min <= q.ts_max && meta.ts_max >= q.ts_min)
+                .collect()),
+            None => {
+                let mut terms = Vec::new();
+                if let Some(service) = &q.service {
+                    terms.push(format!("service:{service}"));
+                }
+                if let Some(kind) = q.kind {
+                    terms.push(format!("kind:{}", super::kind_name(kind)));
+                }
+                if let Some(status) = q.status {
+                    terms.push(format!("status:{}", status_name(status)));
+                }
+                if let Some(name) = &q.name {
+                    terms.push(format!("name:{name}"));
+                }
+                self.store
+                    .query_terms(&terms, q.ts_min, q.ts_max)
+                    .map_err(|error| self.query_error(error))
+            }
+        }
+    }
+
+    fn query_block_bytes(&self, block: SpanQueryBlockSnapshot) -> Result<(Vec<u8>, u64), String> {
+        match (block.payload, block.location) {
+            (Some(bytes), None) => Ok((bytes, 0)),
+            (None, Some(location)) => self
+                .store
+                .read_block(&location)
+                .map(|bytes| (bytes, 1))
+                .map_err(|error| self.query_error(error)),
+            _ => Err("invalid span query block snapshot".into()),
+        }
+    }
+
+    fn retain_bounded(heap: &mut BinaryHeap<BoundedSpan>, span: BoundedSpan, capacity: usize) {
+        if capacity == 0 {
+            return;
+        }
+        if heap.len() < capacity {
+            heap.push(span);
+        } else if heap.peek().is_some_and(|worst| span < *worst) {
+            let _ = heap.pop();
+            heap.push(span);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_query(
+        &self,
+        started: Instant,
+        snapshot_ns: u64,
+        candidate_blocks: u64,
+        payload_blocks_read: u64,
+        payload_bytes_read: u64,
+        snapshot_payload_bytes: u64,
+        stable_locations: bool,
+        decoded_spans: u64,
+        buffered_spans_examined: u64,
+        matched_spans: u64,
+        returned_spans: u64,
+    ) {
+        for (counter, value) in [
+            (&self.query_profile.query_count, 1),
+            (&self.query_profile.query_total_ns, elapsed_ns(started)),
+            (&self.query_profile.query_snapshot_ns, snapshot_ns),
+            (&self.query_profile.query_candidate_blocks, candidate_blocks),
+            (
+                &self.query_profile.query_payload_blocks_read,
+                payload_blocks_read,
+            ),
+            (
+                &self.query_profile.query_payload_bytes_read,
+                payload_bytes_read,
+            ),
+            (
+                &self.query_profile.query_snapshot_payload_bytes,
+                snapshot_payload_bytes,
+            ),
+            (&self.query_profile.query_decoded_spans, decoded_spans),
+            (
+                &self.query_profile.query_buffered_spans_examined,
+                buffered_spans_examined,
+            ),
+            (&self.query_profile.query_matched_spans, matched_spans),
+            (&self.query_profile.query_returned_spans, returned_spans),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
+        self.query_profile
+            .query_snapshot_payload_max_bytes
+            .fetch_max(snapshot_payload_bytes, Ordering::Relaxed);
+        if stable_locations {
+            self.query_profile
+                .query_stable_location_snapshots
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Exact service discovery from the public posting-list catalog. The
+    /// bounded live buffer is merged so queryable-before-flush semantics are
+    /// identical to row scans. Stores without catalog discovery fall back to
+    /// an exact streamed decode.
+    pub fn discover_services(&self) -> Result<Vec<String>, String> {
+        let started = Instant::now();
+        let (catalog, buffered) = {
+            let _transition = self.transition_read();
+            let catalog = self
+                .store
+                .query_term_values("service:")
+                .map_err(|error| self.query_error(error))?;
+            let buffered = self
+                .buffer_lock()
+                .iter()
+                .map(|span| span.service.clone())
+                .collect::<Vec<_>>();
+            (catalog, buffered)
+        };
+        let mut payload_bytes_read = 0;
+        let mut decoded_spans = 0;
+        let mut values = match catalog {
+            Some(values) => values.into_iter().collect::<BTreeSet<_>>(),
+            None => {
+                let mut stream =
+                    self.query_stream_after_snapshot(&unbounded_span_query(), || {})?;
+                let mut values = BTreeSet::new();
+                while let Some(span) = self.query_stream_next(&mut stream)? {
+                    values.insert(span.service);
+                }
+                payload_bytes_read = stream.payload_bytes_read;
+                decoded_spans = stream.decoded_spans;
+                values
+            }
+        };
+        values.extend(buffered);
+        self.query_profile
+            .discovery_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.query_profile
+            .discovery_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.query_profile
+            .discovery_payload_bytes_read
+            .fetch_add(payload_bytes_read, Ordering::Relaxed);
+        self.query_profile
+            .discovery_decoded_spans
+            .fetch_add(decoded_spans, Ordering::Relaxed);
+        Ok(values.into_iter().collect())
+    }
+
+    /// Exact operation discovery for one service. New blocks carry a
+    /// collision-free compound term plus an `operations:` generation marker.
+    /// If any selected legacy block lacks the marker, decode fallback keeps
+    /// mixed-version databases exact instead of silently omitting operations.
+    pub fn discover_operations(&self, service: &str) -> Result<Vec<String>, String> {
+        let started = Instant::now();
+        let prefix = operation_prefix(service);
+        let (catalog, all_marked, buffered) = {
+            let _transition = self.transition_read();
+            let service_term = format!("service:{service}");
+            let candidates = self
+                .store
+                .query_terms(std::slice::from_ref(&service_term), i64::MIN, i64::MAX)
+                .map_err(|error| self.query_error(error))?;
+            let marked = self
+                .store
+                .query_terms(
+                    &[service_term, "operations:".to_string()],
+                    i64::MIN,
+                    i64::MAX,
+                )
+                .map_err(|error| self.query_error(error))?;
+            let catalog = self
+                .store
+                .query_term_values(&prefix)
+                .map_err(|error| self.query_error(error))?;
+            let buffered = self
+                .buffer_lock()
+                .iter()
+                .filter(|span| span.service == service)
+                .map(|span| span.name.clone())
+                .collect::<Vec<_>>();
+            (catalog, candidates.len() == marked.len(), buffered)
+        };
+        let mut payload_bytes_read = 0;
+        let mut decoded_spans = 0;
+        let mut values = match (all_marked, catalog) {
+            (true, Some(values)) => values.into_iter().collect::<BTreeSet<_>>(),
+            _ => {
+                let mut query = unbounded_span_query();
+                query.service = Some(service.to_string());
+                let mut stream = self.query_stream_after_snapshot(&query, || {})?;
+                let mut values = BTreeSet::new();
+                while let Some(span) = self.query_stream_next(&mut stream)? {
+                    values.insert(span.name);
+                }
+                payload_bytes_read = stream.payload_bytes_read;
+                decoded_spans = stream.decoded_spans;
+                values
+            }
+        };
+        values.extend(buffered);
+        self.query_profile
+            .discovery_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.query_profile
+            .discovery_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.query_profile
+            .discovery_payload_bytes_read
+            .fetch_add(payload_bytes_read, Ordering::Relaxed);
+        self.query_profile
+            .discovery_decoded_spans
+            .fetch_add(decoded_spans, Ordering::Relaxed);
+        Ok(values.into_iter().collect())
     }
 
     fn query_error(&self, error: String) -> String {
@@ -990,6 +1618,22 @@ impl SpanBlockEngine {
         filter: &SpanQuery,
         step: i64,
     ) -> Result<Vec<TraceBucketStat>, String> {
+        self.bucket_stats_after_snapshot(filter, step, || {})
+    }
+
+    /// Streaming bucket kernel with the same ownership callback as row
+    /// queries. It retains only duration vectors required for exact
+    /// percentiles, never the rich span rowset, and lets SQLite release its
+    /// writer gate before decode/sort CPU begins.
+    pub fn bucket_stats_after_snapshot<F>(
+        &self,
+        filter: &SpanQuery,
+        step: i64,
+        after_snapshot: F,
+    ) -> Result<Vec<TraceBucketStat>, String>
+    where
+        F: FnOnce(),
+    {
         if step <= 0 {
             return Err(format!("step must be positive, got {step}"));
         }
@@ -1002,12 +1646,20 @@ impl SpanBlockEngine {
                 ));
             }
         }
-        let spans = self.query(filter)?;
-        // F7: percentiles need the bucket's duration VECTORS (same
-        // memory order as the spans query() just materialized).
+        let mut stream = self.query_stream_after_snapshot(filter, after_snapshot)?;
+        // Exact percentiles require duration vectors, but not the rich span
+        // rows that previously dominated memory.
         let mut stats: std::collections::BTreeMap<(i64, String), (TraceBucketStat, Vec<i64>)> =
             std::collections::BTreeMap::new();
-        for s in &spans {
+        loop {
+            let s = match self.query_stream_next(&mut stream) {
+                Ok(Some(span)) => span,
+                Ok(None) => break,
+                Err(error) => {
+                    self.finish_query_stream(&mut stream);
+                    return Err(error);
+                }
+            };
             let k = (s.start_ts as i128 - start as i128) / step as i128;
             let bucket_ts = (start as i128 + k * step as i128) as i64;
             let entry = stats.entry((bucket_ts, s.service.clone())).or_insert((
@@ -1113,7 +1765,8 @@ impl SpanBlockEngine {
 /// Terms for a batch of spans: service:/kind:/status:/name: — ALWAYS
 /// all four (no index_keys allowlist; spans/mod.rs explains why traces
 /// differ from logs here). Deduplicated + sorted; a block-level index
-/// only cares that the term occurs at all.
+/// only cares that the term occurs at all. Compound operation terms are
+/// additive discovery metadata, not row-filtering dimensions.
 fn extract_terms(entries: &[SpanEntry]) -> Vec<String> {
     let mut set = BTreeSet::new();
     for e in entries {
@@ -1121,8 +1774,21 @@ fn extract_terms(entries: &[SpanEntry]) -> Vec<String> {
         set.insert(format!("kind:{}", super::kind_name(e.kind)));
         set.insert(format!("status:{}", status_name(e.status)));
         set.insert(format!("name:{}", e.name));
+        // `operations:` marks blocks that carry exact service/operation pair
+        // terms. The length prefix makes arbitrary UTF-8 service names
+        // collision-free without reserving a separator byte.
+        set.insert("operations:".to_string());
+        set.insert(operation_term(&e.service, &e.name));
     }
     set.into_iter().collect()
+}
+
+fn operation_term(service: &str, name: &str) -> String {
+    format!("operation:{}:{service}{name}", service.len())
+}
+
+fn operation_prefix(service: &str) -> String {
+    format!("operation:{}:{service}", service.len())
 }
 
 /// Deduped, sorted trace ids of a batch — the block's trace-index rows.
@@ -1139,8 +1805,11 @@ fn extract_trace_ids(entries: &[SpanEntry]) -> Vec<[u8; 16]> {
 /// Exact per-span filter — the truth the block-level indexes only
 /// approximate (a block containing the trace still contains other
 /// traces' spans; a status-pure block still spans a ts range).
-fn entry_matches(e: &SpanEntry, q: &SpanQuery) -> bool {
+fn entry_matches(e: &SpanEntry, q: &SpanQuery, duration_min: i64, duration_max: i64) -> bool {
     if e.start_ts < q.ts_min || e.start_ts > q.ts_max {
+        return false;
+    }
+    if e.duration_ns < duration_min || e.duration_ns > duration_max {
         return false;
     }
     if let Some(tid) = &q.trace_id {
@@ -1169,6 +1838,27 @@ fn entry_matches(e: &SpanEntry, q: &SpanQuery) -> bool {
         }
     }
     true
+}
+
+fn compare_spans(a: &SpanEntry, b: &SpanEntry, order: SpanQueryOrder) -> CmpOrdering {
+    let a_key = (a.start_ts, a.span_id);
+    let b_key = (b.start_ts, b.span_id);
+    match order {
+        SpanQueryOrder::Asc => a_key.cmp(&b_key),
+        SpanQueryOrder::Desc => b_key.cmp(&a_key),
+    }
+}
+
+fn unbounded_span_query() -> SpanQuery {
+    SpanQuery {
+        ts_min: i64::MIN,
+        ts_max: i64::MAX,
+        trace_id: None,
+        service: None,
+        kind: None,
+        status: None,
+        name: None,
+    }
 }
 
 fn elapsed_ns(started: Instant) -> u64 {

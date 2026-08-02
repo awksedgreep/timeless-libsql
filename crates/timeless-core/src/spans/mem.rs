@@ -198,6 +198,16 @@ impl SpanBlockStore for MemSpanStore {
         Ok(out)
     }
 
+    fn query_term_values(&self, prefix: &str) -> Result<Option<Vec<String>>, String> {
+        let inner = self.lock();
+        let values = inner
+            .terms
+            .keys()
+            .filter_map(|term| term.strip_prefix(prefix).map(ToOwned::to_owned))
+            .collect();
+        Ok(Some(values))
+    }
+
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
         self.lock().meta_kv.insert(key.to_owned(), value.to_vec());
         Ok(())

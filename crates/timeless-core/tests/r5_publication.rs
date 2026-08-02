@@ -9,7 +9,7 @@ use timeless_core::{
     BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta, BlockStore, ChunkBytes, ChunkLoc,
     ChunkStore, EncodedBlock, EncodedChunk, EncodedSpanBlock, Engine, FsStore, LogEntry, LogQuery,
     MemBlockStore, MemSpanStore, ResolvedSeries, SpanBlockEngine, SpanBlockStore, SpanEngineConfig,
-    SpanEntry, SpanQuery, StoredChunk, StoredSeries,
+    SpanEntry, SpanQuery, SpanQueryOrder, StoredChunk, StoredSeries,
 };
 
 const MAINTENANCE_WINDOW: Duration = Duration::from_millis(200);
@@ -260,6 +260,70 @@ impl BlockStore for PausingBlockStore {
 struct PausingSpanStore {
     inner: MemSpanStore,
     pause: Arc<ReadPause>,
+}
+
+/// MVCC-style span store used to prove that traces retain locations rather
+/// than every payload when the backend pins old row versions.
+struct StableLocationSpanStore {
+    inner: MemSpanStore,
+}
+
+impl SpanBlockStore for StableLocationSpanStore {
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        true
+    }
+
+    fn put_blocks(&self, blocks: &[EncodedSpanBlock]) -> Result<Vec<BlockLoc>, String> {
+        self.inner.put_blocks(blocks)
+    }
+
+    fn replace_blocks(
+        &self,
+        add: &[EncodedSpanBlock],
+        _remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        let locations = self.inner.put_blocks(add)?;
+        on_committed(&locations);
+        Ok(locations)
+    }
+
+    fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
+        self.inner.read_block(loc)
+    }
+
+    fn delete_blocks(&self, _locs: &[BlockLoc]) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+        self.inner.scan()
+    }
+
+    fn query_terms(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.inner.query_terms(terms, ts_min, ts_max)
+    }
+
+    fn query_trace(&self, trace_id: &[u8; 16]) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.inner.query_trace(trace_id)
+    }
+
+    fn query_term_values(&self, prefix: &str) -> Result<Option<Vec<String>>, String> {
+        self.inner.query_term_values(prefix)
+    }
+
+    fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
+        self.inner.save_meta(key, value)
+    }
+
+    fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner.load_meta(key)
+    }
 }
 
 impl SpanBlockStore for PausingSpanStore {
@@ -774,6 +838,197 @@ fn logs_prune_can_publish_after_query_snapshot_before_materialization() {
         "prune remained blocked after the query owned its payload snapshot"
     );
     assert_eq!(rows, vec![log_entry(1, "one")]);
+}
+
+#[test]
+fn traces_flush_can_publish_after_query_snapshot_before_materialization() {
+    let engine = Arc::new(
+        SpanBlockEngine::new(
+            Box::new(MemSpanStore::new()),
+            SpanEngineConfig {
+                flush_threshold: 1000,
+                ..SpanEngineConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    engine.push(span_entry(1, 1)).unwrap();
+    engine.flush().unwrap();
+    engine.push(span_entry(2, 2)).unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        query_engine.query_ordered_after_snapshot(
+            &span_query(),
+            SpanQueryOrder::Asc,
+            None,
+            move || {
+                snapshot_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+            },
+        )
+    });
+    snapshot_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let maintenance_engine = Arc::clone(&engine);
+    let maintenance = thread::spawn(move || {
+        let result = maintenance_engine.flush();
+        done_tx.send(()).unwrap();
+        result
+    });
+    let overtook = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+    assert_eq!(
+        query.join().unwrap().unwrap(),
+        vec![span_entry(1, 1), span_entry(2, 2)]
+    );
+    maintenance.join().unwrap().unwrap();
+    assert!(overtook, "flush stayed blocked after the trace snapshot");
+}
+
+#[test]
+fn traces_optimize_can_publish_after_query_snapshot_before_materialization() {
+    let engine = Arc::new(
+        SpanBlockEngine::new(
+            Box::new(MemSpanStore::new()),
+            SpanEngineConfig {
+                flush_threshold: 1000,
+                ..SpanEngineConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    engine.push(span_entry(1, 1)).unwrap();
+    engine.flush().unwrap();
+    engine.push(span_entry(2, 2)).unwrap();
+    engine.flush().unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        query_engine.query_ordered_after_snapshot(
+            &span_query(),
+            SpanQueryOrder::Asc,
+            None,
+            move || {
+                snapshot_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+            },
+        )
+    });
+    snapshot_rx.recv().unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let maintenance_engine = Arc::clone(&engine);
+    let maintenance = thread::spawn(move || {
+        let result = maintenance_engine.optimize();
+        done_tx.send(()).unwrap();
+        result
+    });
+    let overtook = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+    assert_eq!(
+        query.join().unwrap().unwrap(),
+        vec![span_entry(1, 1), span_entry(2, 2)]
+    );
+    maintenance.join().unwrap().unwrap();
+    assert!(overtook, "optimize stayed blocked after the trace snapshot");
+}
+
+#[test]
+fn traces_prune_can_publish_after_query_snapshot_before_materialization() {
+    let engine = Arc::new(
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap(),
+    );
+    engine.push(span_entry(1, 1)).unwrap();
+    engine.flush().unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        query_engine.query_ordered_after_snapshot(
+            &span_query(),
+            SpanQueryOrder::Asc,
+            None,
+            move || {
+                snapshot_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+            },
+        )
+    });
+    snapshot_rx.recv().unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let maintenance_engine = Arc::clone(&engine);
+    let maintenance = thread::spawn(move || {
+        let result = maintenance_engine.prune(10);
+        done_tx.send(()).unwrap();
+        result
+    });
+    let overtook = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+    assert_eq!(query.join().unwrap().unwrap(), vec![span_entry(1, 1)]);
+    maintenance.join().unwrap().unwrap();
+    assert!(overtook, "prune stayed blocked after the trace snapshot");
+}
+
+#[test]
+fn traces_stable_store_streams_locations_with_bounded_payload_memory() {
+    let engine = Arc::new(
+        SpanBlockEngine::new(
+            Box::new(StableLocationSpanStore {
+                inner: MemSpanStore::new(),
+            }),
+            SpanEngineConfig {
+                flush_threshold: 1000,
+                ..SpanEngineConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    engine.push(span_entry(1, 1)).unwrap();
+    engine.flush().unwrap();
+    engine.push(span_entry(2, 2)).unwrap();
+    engine.flush().unwrap();
+
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let query_engine = Arc::clone(&engine);
+    let query = thread::spawn(move || {
+        let mut stream = query_engine.query_stream_after_snapshot(&span_query(), move || {
+            snapshot_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        })?;
+        let mut rows = Vec::new();
+        while let Some(row) = query_engine.query_stream_next(&mut stream)? {
+            rows.push(row);
+        }
+        Ok::<_, String>(rows)
+    });
+    snapshot_rx.recv().unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let maintenance_engine = Arc::clone(&engine);
+    let maintenance = thread::spawn(move || {
+        let result = maintenance_engine.optimize();
+        done_tx.send(()).unwrap();
+        result
+    });
+    let overtook = done_rx.recv_timeout(MAINTENANCE_WINDOW).is_ok();
+    resume_tx.send(()).unwrap();
+    assert_eq!(
+        query.join().unwrap().unwrap(),
+        vec![span_entry(1, 1), span_entry(2, 2)]
+    );
+    maintenance.join().unwrap().unwrap();
+    assert!(overtook);
+    let profile = engine.query_profile();
+    assert_eq!(profile.query_stable_location_snapshots, 1);
+    assert_eq!(profile.query_snapshot_payload_bytes, 0);
+    assert_eq!(profile.query_snapshot_payload_max_bytes, 0);
+    assert!(profile.query_payload_bytes_read > 0);
 }
 
 #[test]

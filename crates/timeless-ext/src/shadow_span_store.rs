@@ -101,6 +101,7 @@ pub(crate) struct ShadowSpanStore {
     /// prepare_cached).
     query_base: String,
     term_select: String,
+    terms_table: String,
     /// The hero query, fully preformatted (fixed shape).
     query_trace_sql: String,
 }
@@ -138,6 +139,7 @@ impl ShadowSpanStore {
                  FROM {blocks} b WHERE b.ts_min <= ?1 AND b.ts_max >= ?2"
             ),
             term_select: format!("SELECT block_id FROM {terms} WHERE term = ?"),
+            terms_table: terms.clone(),
             // One PK probe of the trace index (WITHOUT ROWID: the probe
             // IS the b-tree walk), then metadata rows for the matching
             // blocks. ORDER BY ts_min keeps downstream merges
@@ -245,6 +247,14 @@ impl ShadowSpanStore {
 }
 
 impl SpanBlockStore for ShadowSpanStore {
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        // The outer virtual-table SELECT pins the host connection's SQLite
+        // snapshot. WAL retains replaced rows and rollback-journal mode keeps
+        // its shared lock until the statement ends, so row ids captured by
+        // xFilter remain readable while xNext streams payloads.
+        true
+    }
+
     /// Batch insert for the status-partitioned flush (up to three
     /// blocks per flush). One lock acquisition + one from_handle for
     /// the whole batch; insert_block's prepare_cached statements are
@@ -380,6 +390,24 @@ impl SpanBlockStore for ShadowSpanStore {
             vec![Value::Blob(trace_id.to_vec())],
             "trace query",
         )
+    }
+
+    fn query_term_values(&self, prefix: &str) -> Result<Option<Vec<String>>, String> {
+        let conn = Self::conn()?;
+        let sql = format!(
+            "SELECT DISTINCT substr(term, length(?1) + 1) FROM {} \
+             WHERE substr(term, 1, length(?1)) = ?1 ORDER BY 1",
+            self.terms_table
+        );
+        let mut statement = conn
+            .prepare_cached(&sql)
+            .map_err(|error| format!("prepare trace term discovery failed: {error}"))?;
+        let values = statement
+            .query_map([prefix], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("execute trace term discovery failed: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read trace term discovery failed: {error}"))?;
+        Ok(Some(values))
     }
 
     fn check_cancelled(&self) -> Result<(), String> {

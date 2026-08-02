@@ -19,7 +19,7 @@ use std::time::Duration;
 use super::codec::{
     decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
 };
-use super::engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery};
+use super::engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery, SpanQueryOrder};
 use super::mem::MemSpanStore;
 use super::{
     kind_from_name, status_from_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore,
@@ -758,6 +758,123 @@ fn trace_query_reads_only_blocks_containing_the_trace() {
         "span query cancelled"
     );
     assert_eq!(engine.query_profile().query_cancelled, 1);
+}
+
+#[test]
+fn bounded_trace_query_is_exact_and_skips_older_blocks() {
+    let engine = SpanBlockEngine::new(
+        Box::new(MemSpanStore::new()),
+        SpanEngineConfig {
+            flush_threshold: 1000,
+            ..SpanEngineConfig::default()
+        },
+    )
+    .unwrap();
+    let mut all = Vec::new();
+    for block in 0..3_u8 {
+        for row in 0..5_u8 {
+            let entry = span(
+                block + 1,
+                block * 10 + row,
+                None,
+                "op",
+                "api",
+                1,
+                1,
+                100 * i64::from(block) + i64::from(row),
+                &[],
+            );
+            engine.push(entry.clone()).unwrap();
+            all.push(entry);
+        }
+        engine.flush().unwrap();
+    }
+    all.sort_by_key(|span| std::cmp::Reverse((span.start_ts, span.span_id)));
+    let got = engine
+        .query_bounded(&full_range_query(), SpanQueryOrder::Desc, 3)
+        .unwrap();
+    assert_eq!(got, all[..3]);
+    let profile = engine.query_profile();
+    assert_eq!(profile.query_bounded_count, 1);
+    assert_eq!(profile.query_bounded_requested_spans, 3);
+    assert_eq!(profile.query_bounded_max_spans, 3);
+    // MemSpanStore is conservative: it owns all three payloads at the
+    // snapshot boundary, but the bounded materializer decodes only one.
+    assert_eq!(profile.query_payload_blocks_read, 3);
+    assert_eq!(profile.query_decoded_spans, 5);
+    assert_eq!(profile.query_blocks_skipped_by_bound, 2);
+    assert_eq!(profile.query_returned_spans, 3);
+}
+
+#[test]
+fn duration_pushdown_filters_before_the_bounded_prefix() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    let mut short = span(1, 1, None, "op", "api", 1, 1, 10, &[]);
+    short.duration_ns = 10;
+    let mut long = span(2, 2, None, "op", "api", 1, 1, 20, &[]);
+    long.duration_ns = 1_000;
+    engine.push(short).unwrap();
+    engine.push(long.clone()).unwrap();
+    engine.flush().unwrap();
+    let got = engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            100,
+            i64::MAX,
+            SpanQueryOrder::Desc,
+            Some(1),
+            || {},
+        )
+        .unwrap();
+    assert_eq!(got, vec![long]);
+    assert_eq!(engine.query_profile().query_matched_spans, 1);
+}
+
+#[test]
+fn native_discovery_includes_buffer_and_falls_back_for_legacy_operation_terms() {
+    let store = MemSpanStore::new();
+    let legacy = span(1, 1, None, "legacy-op", "legacy-svc", 1, 1, 10, &[]);
+    let (data, meta) = encode_span_block(std::slice::from_ref(&legacy), CODEC_RAW, 7).unwrap();
+    store
+        .put_blocks(&[EncodedSpanBlock {
+            meta,
+            data,
+            terms: vec![
+                "kind:server".into(),
+                "name:legacy-op".into(),
+                "service:legacy-svc".into(),
+                "status:ok".into(),
+            ],
+            trace_ids: vec![legacy.trace_id],
+        }])
+        .unwrap();
+    let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+    engine
+        .push(span(
+            2,
+            2,
+            None,
+            "buffered-op",
+            "buffered-svc",
+            1,
+            1,
+            20,
+            &[],
+        ))
+        .unwrap();
+    assert_eq!(
+        engine.discover_services().unwrap(),
+        vec!["buffered-svc", "legacy-svc"]
+    );
+    assert_eq!(
+        engine.discover_operations("legacy-svc").unwrap(),
+        vec!["legacy-op"]
+    );
+    assert_eq!(
+        engine.discover_operations("buffered-svc").unwrap(),
+        vec!["buffered-op"]
+    );
 }
 
 // ---------------------------------------------------------------------------

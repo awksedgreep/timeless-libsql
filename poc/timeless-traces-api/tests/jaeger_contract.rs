@@ -28,11 +28,12 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     storage.flush().await.unwrap();
 
     let services = get_json(&app, "/select/jaeger/api/services").await;
-    assert_eq!(services.0, StatusCode::OK);
+    assert_eq!(services.0, StatusCode::OK, "{}", services.1);
     assert_eq!(services.1["data"], serde_json::json!(["contract-svc"]));
     assert_envelope(&services.1, 1);
 
     let operations = get_json(&app, "/select/jaeger/api/services/contract-svc/operations").await;
+    assert_eq!(operations.0, StatusCode::OK, "{}", operations.1);
     assert_eq!(
         operations.1["data"],
         serde_json::json!(["DB contract", "GET /contract"])
@@ -40,6 +41,7 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     assert_envelope(&operations.1, 2);
 
     let detail = get_json(&app, &format!("/select/jaeger/api/traces/{TRACE_ID}")).await;
+    assert_eq!(detail.0, StatusCode::OK, "{}", detail.1);
     assert_envelope(&detail.1, 1);
     let trace = &detail.1["data"][0];
     assert_eq!(trace["traceID"], TRACE_ID);
@@ -127,15 +129,22 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     assert_eq!(stats.api_read_errors, 0);
     assert_eq!(stats.api_read_result_spans, 5);
     assert!(stats.api_read_response_bytes > 0);
-    assert_eq!(stats.extension_query_count, 6);
-    assert_eq!(stats.extension_query_candidate_blocks, 10);
-    assert_eq!(stats.extension_query_payload_blocks_read, 10);
-    assert_eq!(stats.extension_query_decoded_spans, 10);
-    // Duration remains a SQLite recheck in Session 4, so the extension
-    // returns one extra candidate child for maxDuration. Session 5 can now
-    // measure that tax explicitly instead of hiding it in response counts.
-    assert_eq!(stats.extension_query_matched_spans, 10);
-    assert_eq!(stats.extension_query_returned_spans, 10);
+    assert_eq!(stats.extension_query_count, 4);
+    assert_eq!(stats.extension_query_candidate_blocks, 6);
+    assert_eq!(stats.extension_query_payload_blocks_read, 6);
+    assert_eq!(stats.extension_query_decoded_spans, 6);
+    // Discovery is metadata-native and duration is now an exact engine
+    // predicate, so only the five API-visible span rows cross the vtab.
+    assert_eq!(stats.extension_query_matched_spans, 5);
+    assert_eq!(stats.extension_query_returned_spans, 5);
+    assert_eq!(stats.extension_query_bounded_count, 3);
+    assert_eq!(stats.extension_query_bounded_requested_spans, 30);
+    assert_eq!(stats.extension_query_bounded_max_spans, 10);
+    assert_eq!(stats.extension_query_stable_location_snapshots, 4);
+    assert_eq!(stats.extension_query_snapshot_payload_bytes, 0);
+    assert_eq!(stats.extension_discovery_count, 2);
+    assert_eq!(stats.extension_discovery_payload_bytes_read, 0);
+    assert_eq!(stats.extension_discovery_decoded_spans, 0);
     assert!(stats.extension_query_payload_bytes_read > 0);
     storage.shutdown().await.unwrap();
 }
@@ -216,9 +225,11 @@ async fn dropped_query_cancels_and_the_same_reader_is_reusable() {
     let task = tokio::spawn(async move {
         slow_app
             .oneshot(
-                Request::get("/select/jaeger/api/services")
-                    .body(Body::empty())
-                    .unwrap(),
+                Request::get(
+                    "/select/jaeger/api/traces?service=svc&minDuration=999999999s&limit=100",
+                )
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
     });
@@ -241,6 +252,77 @@ async fn dropped_query_cancels_and_the_same_reader_is_reusable() {
     .expect("reader was not reusable after cancellation");
     assert_eq!(fresh.0, StatusCode::OK);
     assert_eq!(fresh.1["data"], serde_json::json!(["span"]));
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn broad_query_releases_publication_gate_before_decode_cpu() {
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("writer-fairness.db"),
+        extension,
+        2,
+        32,
+        None,
+    )
+    .unwrap();
+    let mut next = 1_u64;
+    for _ in 0..16 {
+        let spans = (0..8_192)
+            .map(|_| {
+                let span = Span::minimal(next);
+                next += 1;
+                span
+            })
+            .collect::<Vec<_>>();
+        let batch = rich_batch(&spans);
+        storage
+            .submit_batch(batch.clone(), spans.len(), batch.len())
+            .await
+            .unwrap();
+    }
+    storage.barrier().await.unwrap();
+    let app = router(storage.clone());
+    let slow_app = app.clone();
+    let slow = tokio::spawn(async move {
+        get_json(
+            &slow_app,
+            "/select/jaeger/api/traces?service=svc&minDuration=999999999s&limit=100",
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    assert!(
+        !slow.is_finished(),
+        "broad query did not overlap the writer"
+    );
+
+    let target = Span::target([0xbb; 16], [0x33; 8], [0; 8], "published", 999);
+    let batch = rich_batch(std::slice::from_ref(&target));
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        storage.submit_batch(batch.clone(), 1, batch.len()),
+    )
+    .await
+    .expect("query CPU blocked writer publication")
+    .unwrap();
+    assert!(
+        !slow.is_finished(),
+        "broad query finished before writer-fairness overlap was observed"
+    );
+    assert_eq!(slow.await.unwrap().0, StatusCode::OK);
+    storage.flush().await.unwrap();
+    let published = get_json(
+        &app,
+        "/select/jaeger/api/traces/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .await;
+    assert_eq!(published.0, StatusCode::OK, "{}", published.1);
+    assert_eq!(
+        published.1["data"][0]["spans"][0]["operationName"],
+        "published"
+    );
     storage.shutdown().await.unwrap();
 }
 

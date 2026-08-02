@@ -384,9 +384,9 @@ SQL
 # + 1 trace row. in_txn: auto-flush at 8192 wrote blocks + trace rows.
 # post: everything back — 1 block / 4 terms / 1 trace row — and the
 # pre-txn buffered error span RESTORED.
-expected='pre|2|1|4|1
+expected='pre|2|1|6|1
 in_txn|1|1|9002
-post|2|1|4|1
+post|2|1|6|1
 rows|keep-flushed|ok|1000
 rows|keep-buffered|error|2000
 ok'
@@ -862,8 +862,8 @@ SQL
 # (4 terms) = 3 blocks / 12 term rows / 3 trace rows.
 # after: both old blocks pruned with ALL their index rows; the new
 # block keeps 4 terms + 1 trace row.
-expected='before|3|12|3
-after|1|4|1
+expected='before|3|18|3
+after|1|6|1
 rows|33333333333333333333333333333333|new-op
 gone|0'
 check_eq "traces prune drops blocks + terms + trace-index rows" "$got" "$expected"
@@ -3166,6 +3166,88 @@ PY
 check_eq "size-tiered optimize bounds rewrites and direct callers can budget work" \
   "$got" \
 $'amplification|2.200|9|8|2048\nbudget|2|512|1|1024|0'
+
+# ---------------------------------------------------------------------------
+echo "== section 44: streaming and metadata-native traces reads =="
+TRACE_READ_DB="$TMP/trace_reads.db"
+got=$(python3 - "$EXT" "$TRACE_READ_DB" <<'PY'
+import sqlite3
+import sys
+
+extension, database = sys.argv[1:]
+db = sqlite3.connect(database)
+db.enable_load_extension(True)
+db.load_extension(extension)
+db.enable_load_extension(False)
+db.execute("CREATE VIRTUAL TABLE traces USING timeless_traces")
+for number in range(12):
+    service = 'api' if number != 0 else 'worker'
+    operation = 'GET /items' if service == 'api' else 'tick'
+    duration = 5_000 if number == 5 else number + 1
+    db.execute(
+        "INSERT INTO traces(trace_id,span_id,name,service,kind,status,start_ts,"
+        "duration_ns,attributes,events,resource,instrumentation_scope) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (number.to_bytes(16, 'big'), number.to_bytes(8, 'big'), operation,
+         service, 'server', 'ok', number, duration, '{}', '[]', '{}', '{}'),
+    )
+    if number in (3, 7, 11):
+        db.execute("INSERT INTO traces(traces) VALUES ('flush')")
+db.commit()
+
+services = ','.join(row[0] for row in db.execute(
+    "SELECT value FROM timeless_trace_services('traces') ORDER BY value"
+))
+operations = ','.join(row[0] for row in db.execute(
+    "SELECT value FROM timeless_trace_operations('traces','api') ORDER BY value"
+))
+newest = ','.join(str(row[0]) for row in db.execute(
+    "SELECT start_ts FROM traces WHERE service='api' "
+    "ORDER BY start_ts DESC,span_id DESC LIMIT 2 OFFSET 1"
+))
+duration = ','.join(str(row[0]) for row in db.execute(
+    "SELECT start_ts FROM traces WHERE service='api' AND duration_ns>=1000 "
+    "ORDER BY start_ts DESC,span_id DESC LIMIT 2"
+))
+stats = dict(db.execute(
+    "SELECT key, CAST(value AS INTEGER) FROM timeless_stats('traces')"
+))
+assert services == 'api,worker'
+assert operations == 'GET /items'
+assert newest == '10,9'
+assert duration == '5'
+assert stats['discovery_count'] == 2
+assert stats['query_bounded_count'] == 2
+assert stats['query_bounded_requested_spans'] == 5
+assert stats['query_bounded_max_spans'] == 3
+assert stats['query_stable_location_snapshots'] == 2
+assert stats['query_snapshot_payload_max_bytes'] == 0
+assert stats['query_blocks_skipped_by_bound'] >= 2
+assert db.execute(
+    "SELECT count(*) FROM traces_terms WHERE term='operations:'"
+).fetchone()[0] == 3
+plan = ' '.join(row[3] for row in db.execute(
+    "EXPLAIN QUERY PLAN SELECT start_ts FROM traces WHERE service='api' "
+    "ORDER BY start_ts DESC,span_id DESC LIMIT 2 OFFSET 1"
+))
+assert 'bounded-ts-desc-offset' in plan
+assert db.execute("SELECT count(*) FROM traces").fetchone()[0] == 12
+after = dict(db.execute(
+    "SELECT key, CAST(value AS INTEGER) FROM timeless_stats('traces')"
+))
+assert after['query_count'] == 3
+assert after['query_snapshot_payload_max_bytes'] == 0
+print(f"catalog|{services}|{operations}")
+print(f"bounded|{newest}|{duration}|{stats['query_blocks_skipped_by_bound']}")
+print(f"stream|{after['query_count']}|{after['query_stable_location_snapshots']}|"
+      f"{after['query_snapshot_payload_max_bytes']}")
+db.close()
+PY
+) || { fail "section 44 traces read driver crashed"; got=""; }
+
+check_eq "traces expose bounded streaming reads and native discovery" \
+  "$got" \
+$'catalog|api,worker|GET /items\nbounded|10,9|5|2\nstream|3|3|0'
 
 # ---------------------------------------------------------------------------
 echo
