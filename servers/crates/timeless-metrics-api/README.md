@@ -1,0 +1,267 @@
+# timeless-metrics-api release server
+
+This first-class signal server was promoted from the completed metrics API
+process-boundary POC. It is not a new storage engine. The binary owns HTTP
+scheduling and SQLite connections while
+the existing `timeless_metrics` extension continues to own series identity,
+the 4,096-point per-series buffer threshold, compression, chunks, rollups, and
+retention commands.
+
+## Implemented surface
+
+- `GET /live`
+- `GET /ready`
+- `GET /health`
+- `GET /select/metrics/stats`
+- `POST /api/v1/flush`
+- `POST /api/v1/import/prometheus`
+- `POST /api/v1/import`
+- `GET|POST /api/v1/query` (native `metric=` exact latest or Session 4 `query=` PromQL)
+- `GET /api/v1/export` (VictoriaMetrics JSON-line raw export)
+- `GET|POST /api/v1/query_range` (native exact range aggregation or Session 4 `query=` PromQL)
+- `GET /api/v1/labels`
+- `GET /api/v1/label/{name}/values`
+- `GET /api/v1/series`
+- Prometheus aliases for instant/range queries and label/series discovery
+
+The Session 4 PromQL slice supports an instant vector selector and
+`avg_over_time(selector[window])`. It deliberately rejects every other
+function, operator, aggregation, subquery, offset, or modifier with a
+Prometheus `bad_data` response. There is no hidden Elixir fallback and still
+no auth, cluster, or product route. The
+Prometheus route keeps the request as a reference-counted body and passes the
+complete exposition through the extension's public ingest surface; Rust does
+not parse or copy it at the API boundary. The VictoriaMetrics route parses the
+JSON-line body once, interns its series within the request, and encodes one
+public named-columnar `0x01` batch. Neither path issues per-point SQL or flushes
+at the request boundary.
+
+Both routes preserve the existing asynchronous empty `204` admission contract.
+Valid lines in a partially malformed body are persisted and rejected lines are
+counted. A 10 MiB body limit is enforced before admission; an oversized body
+returns `413` and does not affect queue or point watermarks.
+
+The process starts one ordered SQLite writer and a configurable reader pool.
+It creates the same rollup ladder as `TimelessMetrics.LibsqlEngine`, schedules
+the same 10-second flush, five-minute compact/rollup, and hourly seven-day raw
+retention prune, and sends only public extension commands. Graceful shutdown
+places an ordered `flush` behind all admitted writes.
+
+`POST /api/v1/flush` reports the admitted batch and point watermark covered by
+the command together with completed, failed, queued, and in-flight work. It is
+a real completion/durability barrier, not queue admission.
+
+Mechanical reads execute on the existing SQLite reader pool. The API discovers
+`timeless_latest_frame`, `timeless_raw_frame`, and
+`timeless_window_batches` through `pragma_module_list`; it never infers a
+capability from an extension version. Older extensions retain row-oriented
+`timeless_latest` and `timeless_raw` fallbacks. Current `TLF1`, `TRF1`, and
+`TWB1` results are length/bitmap/version validated. Raw and window response
+encoders borrow column offsets from the one returned blob and write final JSON
+directly rather than allocating a second timestamp/value object graph.
+
+Native range uses packed extension windows for complete avg/sum/min/max/count
+shapes. Partial grids plus first/last/rate use the packed raw frame and the
+established host aggregation semantics. Prometheus discovery accepts repeated
+`match[]`/`match` selectors as a union, preserves duplicate matcher AND
+semantics, fully anchors regexes, and treats a missing label as the empty
+string. Native exact routes keep their Session 0 response envelopes and
+inclusive timestamp bounds.
+
+PromQL parsing is storage-independent. The query layer lowers plain selectors
+to `timeless_raw_frame` and performs a linear last-sample sweep over the exact
+300-second `(T-lookback,T]` window. `avg_over_time` lowers directly to
+`timeless_window_batches`, preserving `(T-window,T]`, grid timestamps, and the
+metric name. The Rust process writes the final vector/matrix response without
+BEAM/NIF or per-series transport. RFC3339 and numeric times, duration/numeric
+steps, duplicate matcher AND semantics, and the 11,000-point resolution limit
+match the existing service contract.
+
+Every read carries a cancellation token. A dropped HTTP future stops host grid
+evaluation between points and installs a scoped SQLite progress handler; the
+handler is cleared before that reader accepts its next request. Stats expose
+PromQL requests plus current/cancelled API reads.
+
+## Run
+
+```bash
+cargo build -p timeless-ext --release
+cargo build --manifest-path servers/Cargo.toml --release
+
+servers/target/release/timeless-metrics-api \
+  target/release/libtimeless_ext.so \
+  /tmp/timeless-metrics-api.db \
+  127.0.0.1:19439
+```
+
+The measured default is two readers. The Session 6 1/2/4/8 sweep found that
+four readers improved saturated query p95 by only 1.06ms while adding 10.7MiB
+of peak RSS, and eight readers regressed. Two readers retained the best
+throughput, tail-latency, and memory balance; the environment override remains
+available for query-heavy deployments.
+
+## Elixir control-plane integration
+
+Session 5 keeps this binary's data/query surface unchanged and proves the
+process boundary from `timeless_ui`. `TimelessUI.MetricsDataPlane.Process`
+supervises the executable through an Erlang port, and its thin Req client owns
+no telemetry connection. The opt-in Canvas source routes only historical graph
+ranges through `GET /api/v1/export`; every product-oriented Canvas callback
+stays in Elixir.
+
+The integration gate rejects a second owner, flushes data, kills this process
+with `SIGKILL`, waits for OTP to restart it, and checks the exact same result
+after reopen. Incomplete content-length and invalid NDJSON responses are one
+client error and never a partial graph. Normal OTP shutdown sends `SIGTERM`;
+the server handles both `SIGINT` and `SIGTERM` through the same graceful drain
+and storage-flush path, the port owner waits for the child to be reaped, and an
+admitted unflushed tail is recovered on the next reopen.
+Configuration and the reproducible boundary benchmark are documented in the
+sibling `timeless_ui` README and `bench/metrics_data_plane_boundary.exs`.
+
+Positive environment overrides:
+
+- `TIMELESS_METRICS_READER_CONNECTIONS` (default `2`)
+- `TIMELESS_METRICS_COMMAND_QUEUE_BATCHES` (default `256`)
+- `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` (default `10`)
+- `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` (default `300`)
+- `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` (default `3600`)
+
+## Ownership and accounting
+
+The server takes an advisory exclusive lock on
+`<database>.timeless-metrics-api.lock`. A second server using this contract is
+rejected before opening SQLite. The lease cannot stop an unrelated process
+that ignores it, so deployments must still route all runtime access through
+the API owner.
+
+Stats separate units instead of conflating them:
+
+- series, raw-chunk, and rollup index entries are row counts;
+- `sqlite_index_bytes` is SQLite page allocation for the catalog/chunk indexes;
+- logical compressed payload, database/WAL/SHM bytes, SQLite page high-water,
+  and freelist bytes are distinct fields;
+- admitted/completed/failed batches and points, queued and in-flight work, and
+  oldest queue age are distinct; unknown point counts remain explicit while a
+  Prometheus request waits for the extension to parse it;
+- admitted/completed/queued/in-flight body bytes and per-format request counts
+  expose the bounded-memory shape;
+- API admission/queue/SQLite/stats/flush timers and maintenance timers are
+  cumulative nanoseconds. VictoriaMetrics parse and batch-encode time is owned
+  by the API counters; Prometheus parse/point/error counters and time are owned
+  by `timeless_stats('metrics')`; its timer covers fused parse, resolve, and
+  buffer work, so direct SQLite/libSQL users receive the same observability.
+- mechanical/PromQL read request counts by shape, current/cancelled reads,
+  total socket-to-result time, errors,
+  packed frame bytes, response bytes, returned series, and returned points are
+  cumulative and do not require `timeless_stats` work on the query hot path.
+
+## Validation
+
+```bash
+cargo test --manifest-path servers/Cargo.toml -p timeless-metrics-api
+
+TIMELESS_EXT_PATH="$PWD/target/release/libtimeless_ext.so" \
+  cargo test --manifest-path servers/Cargo.toml -p timeless-metrics-api \
+  --test storage_contract -- --ignored
+```
+
+The Session 1 extension-backed test proves 4,095 points remain buffered, point
+4,096 automatically becomes one durable raw chunk, an explicit flush persists
+a smaller tail, the ordered counters drain to zero, a second owner is rejected,
+and all 4,106 points recover after shutdown/reopen.
+
+The Session 2 contract submits both native formats with partially malformed
+bodies plus all-malformed requests. A fifth Prometheus request beginning with a
+reserved batch-version byte proves the HTTP route cannot switch the extension's
+hidden-column protocol. Five admitted/completed requests persist exactly four
+valid points across two series, report eight rejected inputs, drain to zero
+through the ordered flush, and recover exactly after reopen. It also proves the
+10 MiB rejection occurs before admission and pins body-byte, API, and extension
+phase counters.
+
+The Session 3 contract adds exact latest/export/range bodies, a forced
+partial-grid raw fallback, native/discovery response ordering, repeated and
+malformed selectors, missing-label equality/inequality behavior, explicit
+PromQL rejection, read accounting, and exact latest after shutdown/reopen.
+The Session 4 contracts add selector and `avg_over_time` vector/matrix bodies,
+strict lookback/window boundaries, request formats/errors, reopen, and a
+4,000-series cancellation/reuse regression. All five extension-backed
+contracts pass together.
+
+That test exposed and fixed an existing extension gap: the engine queued a
+series at 4,096 points but the metrics virtual table never drained its pending
+queue. Every metrics ingest surface now calls the shared pending-flush path,
+so direct SQLite/libSQL users receive the advertised behavior. Below threshold
+the empty-queue path performs no store write. `tests/correctness.sh r1` pins
+the direct-SQL threshold and transaction regressions.
+
+## Session 2 ingest result
+
+On the Session 0 host, two fresh deterministic runs per format used 4,000
+series, 1,000 points/request, deferred scheduled maintenance, one SQLite writer,
+two readers, and an explicit final flush. The final 3 ms step is limited by the
+four-writer HTTP client near the Prometheus result, so it is a demonstrated
+clean rate rather than the server's saturation point.
+
+| format | completed points/s | write p95 | write p99 | final queue age | drain | HWM |
+|---|---:|---:|---:|---:|---:|---:|
+| Prometheus | 855.2–855.6K | 448us | 556us | 7–9ms | 725–745ms | 178,888–180,016KiB |
+| VictoriaMetrics JSON lines | 613.2–620.9K | 2.78–2.87ms | 3.48–3.51ms | 7–8ms | 667–738ms | 178,164–179,460KiB |
+
+Both formats had zero HTTP/storage errors, reached exactly 4,000 series, and
+drained queued and in-flight work to zero. Prometheus is 9.7% faster than the
+779.9K points/s Session 0 Elixir+libSQL no-query control, with 51% lower write
+p95 and about 52% lower process HWM. VictoriaMetrics remains the deliberately
+uncached named-series floor; resolved batch `0x02` is a later measured
+optimization, not a Session 2 storage change.
+
+The first Prometheus profiling run exposed an API observability regression: two
+full `timeless_stats` scans surrounded every insert, reducing completion to
+179.0K points/s. SQLite already returns the accepted point count in
+`last_insert_rowid`; rejected-line totals belong to the extension's cumulative
+stats. Removing the redundant scans produced the repeatable result above while
+retaining exact completion and error accounting.
+
+Full method and phase attribution are in
+`../../../timeless_metrics/bench/results/2026-08-01_metrics_api_session2.md`.
+
+## Session 3 mechanical read result
+
+The fixed comparison used separate fresh processes seeded with the same 4,000
+series and exactly 400,000 points. Every shape returned the same response byte
+count from Elixir+libSQL and Rust+libSQL.
+
+| shape | Elixir p95 | Rust p95 | result |
+|---|---:|---:|---:|
+| exact latest | 272us | 651us | Rust 2.39x slower |
+| exact 15s range | 310us | 561us | Rust 1.81x slower |
+| exact raw export | 248us | 752us | Rust 3.03x slower |
+| all label names | 70.35ms | 10.54ms | Rust 6.68x faster |
+| metric label values | 722us | 672us | Rust 1.07x faster |
+| metric series | 5.15ms | 1.06ms | Rust 4.88x faster |
+| exact selector series | 1.08ms | 957us | Rust 1.13x faster |
+
+Same-lifecycle HWM was 56,948KiB for Rust and 244,796KiB for the Elixir
+control. In the larger mixed run, Rust completed 866.6K points/s with 10.08ms
+query p95 and 180,716KiB HWM; two Elixir controls completed 604.8-782.5K with
+70.26-93.71ms query p95 and 457,128-460,152KiB HWM. Exact data reads retain a
+small sub-millisecond Rust HTTP/serializer tax, while discovery, mixed tails,
+and memory improve substantially. See
+`../../../timeless_metrics/bench/results/2026-08-01_metrics_api_session3.md`
+for the method, control cache-race observation, and discarded setup runs.
+
+## Session 1 shell smoke result
+
+On the Session 0 host, an empty release server with two readers handled the
+three sequential control-route loops below with zero errors:
+
+| route | requests | sequential req/s | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|---:|
+| `GET /health` | 2,000 | 2,047.2 | 471.2us | 788.8us | 914.1us |
+| `GET /select/metrics/stats` | 2,000 | 2,007.9 | 490.5us | 790.2us | 914.6us |
+| `POST /api/v1/flush` | 200 | 4,131.6 | 214.4us | 453.2us | 560.3us |
+
+Linux `VmHWM` was 9,176 KiB (`VmRSS` 9,176 KiB after the run). These are shell
+sanity numbers, not an ingest comparison with Session 0. Reproduce them with
+`python3 bench_shell.py` while the server is running.

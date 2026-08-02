@@ -6,7 +6,7 @@
 //!     their partition's blocks (the "level-term weakness" fix)
 //!   - merge span cap respected
 //!   - buffered + flushed merge correctness
-//! plus codec round-trips and validation edges.
+//!     plus codec round-trips and validation edges.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
@@ -14,8 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use super::codec::{
-    decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
-    PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS,
+    decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR,
+    CODEC_RICH_RAW, CODEC_ZSTD, PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS,
 };
 use super::engine::{BlockEngine, BlockEngineConfig, LogQuery, LogQueryOrder};
 use super::mem::MemBlockStore;
@@ -25,11 +25,13 @@ fn entry(ts: i64, level: u8, message: &str, metadata: &[(&str, &str)]) -> LogEnt
     LogEntry {
         ts,
         level,
+        severity: None,
         message: message.to_owned(),
         metadata: metadata
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        metadata_json: None,
     }
 }
 
@@ -38,10 +40,40 @@ fn full_range_query() -> LogQuery {
         ts_min: i64::MIN,
         ts_max: i64::MAX,
         level: None,
+        severity: None,
         metadata_eq: Vec::new(),
         message_contains: None,
         message_like_prune: None,
     }
+}
+
+#[test]
+fn rich_log_codecs_preserve_severity_and_typed_metadata() {
+    let rich = LogEntry {
+        ts: 1_785_600_000_123_456,
+        level: 1,
+        severity: Some("notice".into()),
+        message: "typed metadata".into(),
+        metadata: vec![
+            ("nested".into(), "{\"ok\":true}".into()),
+            ("status".into(), "202".into()),
+        ],
+        metadata_json: Some("{\"nested\":{\"ok\":true},\"status\":202}".into()),
+    };
+
+    for codec in [CODEC_RICH_RAW, CODEC_RICH_COLUMNAR] {
+        let (bytes, meta) = encode_block(std::slice::from_ref(&rich), codec, 7).unwrap();
+        assert_eq!(meta.codec, codec);
+        let decoded = decode_block(&bytes).unwrap();
+        assert_eq!(decoded, vec![rich.clone()]);
+        assert_eq!(
+            decoded[0].metadata_json.as_deref(),
+            Some("{\"nested\":{\"ok\":true},\"status\":202}")
+        );
+    }
+
+    assert!(encode_block(std::slice::from_ref(&rich), CODEC_RAW, 7).is_err());
+    assert!(encode_block(&[rich], CODEC_COLUMNAR_V2, 7).is_err());
 }
 
 fn config(index_keys: &[&str]) -> BlockEngineConfig {
@@ -655,6 +687,18 @@ fn native_count_uses_metadata_when_proven_and_decodes_only_when_needed() {
         ..full_range_query()
     };
     assert_eq!(engine.count(&errors).unwrap(), 4);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+
+    // The release API always supplies the canonical exact severity. Legacy
+    // codecs contain only the original four names, so `error` remains proven
+    // by the legacy error partition without weakening rich-codec correctness.
+    reads.store(0, Ordering::SeqCst);
+    let exact_legacy_errors = LogQuery {
+        level: Some(3),
+        severity: Some("error".into()),
+        ..full_range_query()
+    };
+    assert_eq!(engine.count(&exact_legacy_errors).unwrap(), 4);
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 
     // A boundary through a block, metadata equality, or exact message

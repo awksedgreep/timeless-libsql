@@ -2,7 +2,7 @@
 # Focused correctness regressions from REVIEW_FIX_PLAN.md.
 #
 # Usage:
-#   ./tests/correctness.sh [r1|r2|r3|r4|r8]
+#   ./tests/correctness.sh [r1|r2|r3|r4|r8|logs-rich]
 #
 # TIMELESS_EXT may point at an already-built extension. Otherwise this script
 # builds the release cdylib before running the selected section.
@@ -14,7 +14,7 @@ EXT="${TIMELESS_EXT:-$ROOT/target/release/libtimeless_ext.so}"
 SECTION="${1:-r1}"
 
 case "$SECTION" in
-  r1|r2|r3|r4|r8) ;;
+  r1|r2|r3|r4|r8|logs-rich) ;;
   *)
     echo "unknown correctness section: $SECTION" >&2
     exit 2
@@ -49,6 +49,12 @@ fi
 if [[ "$SECTION" == "r8" ]]; then
   echo "== R8: timestamp extremes and NULL constraints =="
   python3 "$ROOT/tests/r8_extremes.py" "$EXT" "$TMP"
+  exit
+fi
+
+if [[ "$SECTION" == "logs-rich" ]]; then
+  echo "== release: capability handshake and rich logs v0/v1 compatibility =="
+  python3 "$ROOT/tests/logs_rich.py" "$EXT" "$TMP/logs-rich.db"
   exit
 fi
 

@@ -586,9 +586,11 @@ check_eq "service/level/ts pushdown + LIKE above the vtab" "$got" "$expected"
 # ---------------------------------------------------------------------------
 echo "== section 10b: logs bounded ORDER BY/LIMIT/OFFSET pushdown =="
 # Two overlapping flushed ranges, duplicate timestamps, and a buffered tail.
-# The bounded path must return the same exact window SQLite would select while
-# retaining only LIMIT+OFFSET rows. LIKE and strict bounds remain on the
-# conservative unbounded path because SQLite still performs those exact checks.
+# The bounded path must return the same exact window while retaining only
+# LIMIT+OFFSET rows. Equal timestamps use the released product's canonical
+# message/severity/metadata comparator regardless of block/insertion order.
+# LIKE and strict bounds remain on the conservative unbounded path because
+# SQLite still performs those exact checks.
 BOUNDEDLOGDB="$TMP/logs_bounded.db"
 got=$(sqlite3 "$BOUNDEDLOGDB" <<SQL
 .load $EXT
@@ -613,17 +615,17 @@ SELECT 'profile',
   (SELECT value FROM timeless_stats('logs') WHERE key='query_bounded_max_entries');
 SQL
 )
-expected='desc|30|b1-30
-desc|30|b0-30-a
+expected='desc|30|b0-30-a
 desc|30|b0-30-b
+desc|30|b1-30
 asc|5|b1-05
 asc|10|b0-10
 asc|20|b1-20
 api|5|b1-05
 api|10|b0-10
-api|30|b1-30
-like|30|b1-30
+api|30|b0-30-a
 like|30|b0-30-a
+like|30|b0-30-b
 strict|40|b1-40
 strict|50|buf-50
 profile|3|13|5'

@@ -30,6 +30,11 @@ unsafe extern "C" fn init_common(
 }
 
 #[no_mangle]
+/// SQLite's conventional loadable-extension entry point.
+///
+/// # Safety
+///
+/// The arguments must satisfy SQLite's loadable-extension ABI.
 pub unsafe extern "C" fn sqlite3_extension_init(
     db: *mut ffi::sqlite3,
     pz_err_msg: *mut *mut c_char,
@@ -39,6 +44,11 @@ pub unsafe extern "C" fn sqlite3_extension_init(
 }
 
 #[no_mangle]
+/// Filename-derived SQLite entry-point alias.
+///
+/// # Safety
+///
+/// The arguments must satisfy SQLite's loadable-extension ABI.
 pub unsafe extern "C" fn sqlite3_dbhealthext_init(
     db: *mut ffi::sqlite3,
     pz_err_msg: *mut *mut c_char,
@@ -48,6 +58,11 @@ pub unsafe extern "C" fn sqlite3_dbhealthext_init(
 }
 
 #[no_mangle]
+/// Underscore-preserving filename-derived SQLite entry-point alias.
+///
+/// # Safety
+///
+/// The arguments must satisfy SQLite's loadable-extension ABI.
 pub unsafe extern "C" fn sqlite3_dbhealth_ext_init(
     db: *mut ffi::sqlite3,
     pz_err_msg: *mut *mut c_char,

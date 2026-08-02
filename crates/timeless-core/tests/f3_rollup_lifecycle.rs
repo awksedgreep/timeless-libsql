@@ -11,6 +11,8 @@ use timeless_core::{
     RollupTier, StoredChunk, StoredRollupChunk,
 };
 
+type StoredTestChunk = (i64, i64, i64, ChunkMeta, Vec<u8>);
+
 /// Minimal in-memory ChunkStore with rollup support. Not transactional —
 /// journal tests assert ENGINE state only (the row side rides the host
 /// transaction in the real store, which cli.sh §25 covers).
@@ -18,7 +20,7 @@ use timeless_core::{
 struct MemChunkStore {
     next_id: AtomicI64,
     // (id, series_id, resolution, meta-ish, payload)
-    chunks: Mutex<Vec<(i64, i64, i64, ChunkMeta, Vec<u8>)>>,
+    chunks: Mutex<Vec<StoredTestChunk>>,
     registry: Mutex<Option<Vec<u8>>>,
 }
 
@@ -357,7 +359,7 @@ fn rollups_survive_raw_retention() {
     // Epoch 0's first bucket is fully intact in the rollup.
     let b0 = rolled.iter().find(|b| b.bucket_ts == 0).expect("bucket 0");
     assert_eq!(b0.count, 6, "ts 0..50 (6 samples) in bucket 0");
-    assert_eq!(b0.sum, (0 + 1 + 2 + 3 + 4 + 5) as f64);
+    assert_eq!(b0.sum, 15.0);
 }
 
 #[test]

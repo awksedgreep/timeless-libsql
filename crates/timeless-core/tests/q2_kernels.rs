@@ -55,8 +55,7 @@ fn naive_grid_last(
     while t <= stop {
         let hit = samples
             .iter()
-            .filter(|&&(ts, _)| ts <= t && (ts as i128) > (t as i128) - (lookback as i128))
-            .next_back();
+            .rfind(|&&(ts, _)| ts <= t && (ts as i128) > (t as i128) - (lookback as i128));
         if let Some(&(_, val)) = hit {
             out.push((t, val));
         }

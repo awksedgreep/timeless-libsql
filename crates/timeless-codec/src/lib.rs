@@ -270,7 +270,7 @@ pub fn decode_bitmap(bytes: &[u8], n: usize) -> Result<Vec<bool>, String> {
     }
     // Pad-bit check: mask off the n%8 valid bits of the last byte;
     // anything left set is not a bitmap we wrote.
-    if n % 8 != 0 {
+    if !n.is_multiple_of(8) {
         let last = bytes[bytes.len() - 1];
         if last & !((1u8 << (n % 8)) - 1) != 0 {
             return Err("bitmap: nonzero padding bits in final byte".into());
@@ -813,7 +813,7 @@ pub fn encode_fixed_bytes(data: &[u8], width: usize, zstd_level: i32) -> Result<
     if width == 0 {
         return Err("encode_fixed_bytes: width must be > 0".into());
     }
-    if data.len() % width != 0 {
+    if !data.len().is_multiple_of(width) {
         return Err(format!(
             "encode_fixed_bytes: {} bytes is not a multiple of width {width}",
             data.len()
@@ -1060,10 +1060,8 @@ mod tests {
     fn reader_framed_column_walks_back_to_back_frames() {
         // Two encode_str frames packed with no outer length table —
         // the shredded-metadata consumption pattern.
-        let a = encode_str(["x", "y"].into_iter(), 2, LVL)
-            .unwrap()
-            .to_bytes();
-        let b = encode_str(["z"].into_iter(), 1, LVL).unwrap().to_bytes();
+        let a = encode_str(["x", "y"], 2, LVL).unwrap().to_bytes();
+        let b = encode_str(["z"], 1, LVL).unwrap().to_bytes();
         let mut buf = a.clone();
         buf.extend_from_slice(&b);
         let mut r = Reader::new(&buf);

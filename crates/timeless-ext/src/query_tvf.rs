@@ -3001,13 +3001,17 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
         };
 
         let mut level = None;
+        let mut severity = None;
         let mut metadata_eq = Vec::new();
         if let Some(text) = filter_json.filter(|text| !text.is_empty()) {
             for (key, value) in parse_labels_json(&text)
                 .map_err(|error| module_err(format!("{M}: filter: {error}")))?
             {
                 if key == "level" {
-                    level = Some(timeless_core::level_from_name(&value).map_err(module_err)?);
+                    let canonical =
+                        timeless_core::canonical_severity(&value).map_err(module_err)?;
+                    level = Some(timeless_core::level_from_name(canonical).map_err(module_err)?);
+                    severity = Some(canonical.to_owned());
                 } else {
                     metadata_eq.push((key, value));
                 }
@@ -3024,6 +3028,7 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
                     ts_min,
                     ts_max,
                     level,
+                    severity,
                     metadata_eq,
                     message_contains,
                     message_like_prune: None,
@@ -3179,13 +3184,16 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
         let (start, stop, step) = (int(3, "start")?, int(4, "stop")?, int(5, "step")?);
 
         let mut level = None;
+        let mut severity = None;
         let mut metadata_eq: Vec<(String, String)> = Vec::new();
         if let Some(txt) = filter_json.filter(|t| !t.is_empty()) {
             for (k, v) in
                 parse_labels_json(&txt).map_err(|e| module_err(format!("{M}: filter: {e}")))?
             {
                 if k == "level" {
-                    level = Some(timeless_core::level_from_name(&v).map_err(module_err)?);
+                    let canonical = timeless_core::canonical_severity(&v).map_err(module_err)?;
+                    level = Some(timeless_core::level_from_name(canonical).map_err(module_err)?);
+                    severity = Some(canonical.to_owned());
                 } else {
                     metadata_eq.push((k, v));
                 }
@@ -3199,6 +3207,7 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
             ts_min: start,
             ts_max: stop,
             level,
+            severity,
             metadata_eq,
             message_contains: None,
             message_like_prune: None,
@@ -3861,7 +3870,7 @@ fn sum_blob_bytes(database: &str, table: &str, suffix: &str, column: &str) -> Re
         "SELECT COALESCE(SUM(length({column})), 0) FROM {}",
         crate::sql_ident::qualified_shadow(database, table, suffix)
     );
-    Ok(conn.query_row(&sql, [], |r| r.get(0))?)
+    conn.query_row(&sql, [], |r| r.get(0))
 }
 
 fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
@@ -3870,7 +3879,7 @@ fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
         "SELECT COUNT(*) FROM {}",
         crate::sql_ident::qualified_shadow(database, table, suffix)
     );
-    Ok(conn.query_row(&sql, [], |r| r.get(0))?)
+    conn.query_row(&sql, [], |r| r.get(0))
 }
 
 unsafe impl VTabCursor for StatsCursor<'_> {

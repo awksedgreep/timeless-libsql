@@ -3,6 +3,7 @@ name = "timeless-ext"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [lib]
 # cdylib = "C dynamic library": a plain .so with a C ABI, which is what
@@ -12,7 +13,7 @@ license.workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-rusqlite = { version = "0.40.1", features = ["vtab", "loadable_extension"] }
+rusqlite = { version = "0.40.1", features = ["functions", "vtab", "loadable_extension"] }
 timeless-core = { path = "../timeless-core" }
 # F8 label matchers ({"re": ...} in TVF filters). SQL-user convenience
 # only — the waist and the layers above it keep their own matcher

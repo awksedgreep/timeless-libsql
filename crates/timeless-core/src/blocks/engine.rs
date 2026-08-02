@@ -17,8 +17,14 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
-use super::codec::{decode_block, encode_block, CODEC_COLUMNAR_V2, CODEC_RAW};
-use super::{level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock, LogEntry};
+use super::codec::{
+    decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR,
+    CODEC_RICH_RAW,
+};
+use super::{
+    canonical_severity, level_from_name, level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock,
+    LogEntry,
+};
 
 /// Tuning knobs. All ts_* values are in the SAME opaque unit as
 /// LogEntry.ts — the engine never assumes seconds/millis/nanos.
@@ -264,6 +270,9 @@ pub struct LogQuery {
     pub ts_max: i64,
     /// Exact level match (0..=3).
     pub level: Option<u8>,
+    /// Exact rich severity spelling. `level` remains the coarse partition
+    /// constraint; this distinguishes notice/info and the error family.
+    pub severity: Option<String>,
     /// Metadata equality filters; ALL must match. Pairs whose key is in
     /// index_keys also prune blocks via the term index; the rest are
     /// checked per-entry only.
@@ -343,6 +352,7 @@ impl Ord for BoundedEntry {
                 .entry
                 .ts
                 .cmp(&other.entry.ts)
+                .then_with(|| canonical_entry_cmp(&self.entry, &other.entry))
                 .then_with(|| self.sequence.cmp(&other.sequence)),
             // For DESC, an older timestamp is worse. At equal timestamps the
             // later canonical row is worse, so ties remain stable.
@@ -350,6 +360,7 @@ impl Ord for BoundedEntry {
                 .entry
                 .ts
                 .cmp(&self.entry.ts)
+                .then_with(|| canonical_entry_cmp(&self.entry, &other.entry))
                 .then_with(|| self.sequence.cmp(&other.sequence)),
         }
     }
@@ -791,6 +802,7 @@ impl BlockEngine {
                 entry.level
             ));
         }
+        normalize_rich_entry(&mut entry)?;
         // Sort by key; stable sort keeps insertion order among equal
         // keys, so "last one wins" = keep the LAST of each run.
         entry.metadata.sort_by(|a, b| a.0.cmp(&b.0));
@@ -824,6 +836,7 @@ impl BlockEngine {
                     entry.level
                 ));
             }
+            normalize_rich_entry(entry)?;
             entry.metadata.sort_by(|a, b| a.0.cmp(&b.0));
             entry.metadata.reverse();
             entry.metadata.dedup_by(|a, b| a.0 == b.0);
@@ -936,7 +949,12 @@ impl BlockEngine {
             let level = buf[start].level;
             let end = start + buf[start..].iter().take_while(|e| e.level == level).count();
             let run = &buf[start..end];
-            let (data, meta) = encode_block(run, CODEC_RAW, self.config.zstd_level)?;
+            let codec = if run.iter().any(LogEntry::is_rich) {
+                CODEC_RICH_RAW
+            } else {
+                CODEC_RAW
+            };
+            let (data, meta) = encode_block(run, codec, self.config.zstd_level)?;
             // A level-pure run yields exactly one level: term here.
             let terms = self.extract_terms(run);
             blocks.push(EncodedBlock { meta, data, terms });
@@ -1015,7 +1033,7 @@ impl BlockEngine {
     /// as a vtab LIKE constraint, so wildcard-escaping cannot reach us.
     pub fn like_pattern_trigrams(pattern: &str) -> Vec<String> {
         let mut set = BTreeSet::new();
-        for run in pattern.split(|c| c == '%' || c == '_') {
+        for run in pattern.split(['%', '_']) {
             Self::message_trigrams_of(run, &mut set);
         }
         set.into_iter().map(Self::tg_term).collect()
@@ -1179,7 +1197,7 @@ impl BlockEngine {
             .index_lock()
             .iter()
             .filter(|entry| {
-                entry.meta.codec == CODEC_RAW
+                is_raw_codec(entry.meta.codec)
                     || (entry.meta.entry_count as usize) < self.config.merge_target_entries
             })
             .copied()
@@ -1207,7 +1225,7 @@ impl BlockEngine {
             }
         }
         for entry in candidates.iter().filter(|entry| {
-            entry.meta.codec != CODEC_RAW && !ready_compressed.contains(&entry.loc.id)
+            !is_raw_codec(entry.meta.codec) && !ready_compressed.contains(&entry.loc.id)
         }) {
             backlog.merge_deferred_blocks += 1;
             backlog.merge_deferred_entries += entry.meta.entry_count as u64;
@@ -1220,7 +1238,7 @@ impl BlockEngine {
         let mut compressed_buckets: [Vec<IndexEntry>; 5] = Default::default();
         for entry in candidates {
             let bucket = entry.partition.map_or(4, usize::from);
-            if entry.meta.codec == CODEC_RAW {
+            if is_raw_codec(entry.meta.codec) {
                 raw_buckets[bucket].push(*entry);
             } else {
                 compressed_buckets[bucket].push(*entry);
@@ -1413,7 +1431,7 @@ impl BlockEngine {
             .index_lock()
             .iter()
             .filter(|e| {
-                e.meta.codec == CODEC_RAW
+                is_raw_codec(e.meta.codec)
                     || (e.meta.entry_count as usize) < self.config.merge_target_entries
             })
             .copied()
@@ -1467,7 +1485,12 @@ impl BlockEngine {
             }
             entries.sort_by_key(|e| e.ts);
             let terms = self.extract_terms(&entries);
-            let (data, meta) = encode_block(&entries, CODEC_COLUMNAR_V2, self.config.zstd_level)?;
+            let codec = if entries.iter().any(LogEntry::is_rich) {
+                CODEC_RICH_COLUMNAR
+            } else {
+                CODEC_COLUMNAR_V2
+            };
+            let (data, meta) = encode_block(&entries, codec, self.config.zstd_level)?;
             let output_bytes = data.len() as u64;
             adds.push(EncodedBlock { meta, data, terms });
             add_partitions.push(group.partition);
@@ -1790,11 +1813,13 @@ impl BlockEngine {
                     .entry
                     .ts
                     .cmp(&b.entry.ts)
+                    .then_with(|| canonical_entry_cmp(&a.entry, &b.entry))
                     .then_with(|| a.sequence.cmp(&b.sequence)),
                 LogQueryOrder::Desc => b
                     .entry
                     .ts
                     .cmp(&a.entry.ts)
+                    .then_with(|| canonical_entry_cmp(&a.entry, &b.entry))
                     .then_with(|| a.sequence.cmp(&b.sequence)),
             });
             out = ranked.into_iter().map(|ranked| ranked.entry).collect();
@@ -1823,11 +1848,15 @@ impl BlockEngine {
             }
             matched_entries = matched_entries.saturating_add(snapshot.buffered.len() as u64);
             out.extend(snapshot.buffered);
-            // Stable sort: equal timestamps keep canonical block order and
-            // buffered entries land after flushed ones in either direction.
+            // Equal timestamps use the released product's canonical payload
+            // comparator; exact duplicate rows retain stable source order.
             match order {
-                LogQueryOrder::Asc => out.sort_by_key(|entry| entry.ts),
-                LogQueryOrder::Desc => out.sort_by(|a, b| b.ts.cmp(&a.ts)),
+                LogQueryOrder::Asc => {
+                    out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| canonical_entry_cmp(a, b)))
+                }
+                LogQueryOrder::Desc => {
+                    out.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| canonical_entry_cmp(a, b)))
+                }
             }
         }
         let materialize_ns = elapsed_ns(materialize_started);
@@ -1943,9 +1972,20 @@ impl BlockEngine {
                 .message_contains
                 .as_deref()
                 .is_none_or(|needle| needle.is_empty());
-            let level_proven = match q.level {
-                None => true,
-                Some(level) => block.partition == Some(level),
+            let level_proven = match (q.level, q.severity.as_ref()) {
+                (None, None) => true,
+                (Some(level), None) => block.partition == Some(level),
+                // Legacy codecs only contain the original four severity
+                // names, so an exact predicate matching the bucket name is
+                // proven by their partition metadata. Rich codecs must decode
+                // because that same bucket can contain critical/alert/etc.
+                (Some(level), Some(severity))
+                    if severity == level_name(level)
+                        && !matches!(block.meta.codec, CODEC_RICH_RAW | CODEC_RICH_COLUMNAR) =>
+                {
+                    block.partition == Some(level)
+                }
+                _ => false,
             };
             if fully_covered && message_free && q.metadata_eq.is_empty() && level_proven {
                 let entries = block.meta.entry_count as u64;
@@ -2163,7 +2203,7 @@ impl BlockEngine {
         if group_by == "level" && filter.metadata_eq.is_empty() && filter.message_contains.is_none()
         {
             let _transition = self.transition_read();
-            let mut counts: std::collections::BTreeMap<(i64, u8), u64> =
+            let mut counts: std::collections::BTreeMap<(i64, String), u64> =
                 std::collections::BTreeMap::new();
             let candidates: Vec<(BlockMeta, BlockLoc, Option<u8>)> = {
                 let index = self.index_lock();
@@ -2175,12 +2215,26 @@ impl BlockEngine {
             };
             let mut decode: Vec<BlockLoc> = Vec::new();
             for (meta, loc, partition) in candidates {
+                // Rich blocks partition on the four storage buckets but expose
+                // the product's complete severity vocabulary. Their payload is
+                // therefore authoritative for both grouping and exact filters.
+                if matches!(meta.codec, CODEC_RICH_RAW | CODEC_RICH_COLUMNAR) {
+                    decode.push(loc);
+                    continue;
+                }
                 match partition {
-                    Some(level) if filter.level.is_none() || filter.level == Some(level) => {
+                    Some(level)
+                        if (filter.level.is_none() || filter.level == Some(level))
+                            && filter
+                                .severity
+                                .as_deref()
+                                .is_none_or(|severity| severity == level_name(level)) =>
+                    {
                         let inside = meta.ts_min >= start && meta.ts_max <= stop;
                         if inside && bucket_of(meta.ts_min) == bucket_of(meta.ts_max) {
-                            *counts.entry((bucket_of(meta.ts_min), level)).or_insert(0) +=
-                                meta.entry_count as u64;
+                            *counts
+                                .entry((bucket_of(meta.ts_min), level_name(level).to_string()))
+                                .or_insert(0) += meta.entry_count as u64;
                         } else {
                             decode.push(loc);
                         }
@@ -2198,7 +2252,14 @@ impl BlockEngine {
                         return;
                     }
                 }
-                *counts.entry((bucket_of(e.ts), e.level)).or_insert(0) += 1;
+                if let Some(severity) = &filter.severity {
+                    if e.severity_name() != severity {
+                        return;
+                    }
+                }
+                *counts
+                    .entry((bucket_of(e.ts), e.severity_name().to_string()))
+                    .or_insert(0) += 1;
             };
             for loc in decode {
                 let bytes = self.store.read_block(&loc)?;
@@ -2209,12 +2270,7 @@ impl BlockEngine {
             for entry in self.buffer_lock().iter() {
                 bin(entry);
             }
-            let mut out: std::collections::BTreeMap<(i64, String), u64> =
-                std::collections::BTreeMap::new();
-            for ((b, level), n) in counts {
-                out.insert((b, level_name(level).to_string()), n);
-            }
-            return Ok(out.into_iter().map(|((b, g), n)| (b, g, n)).collect());
+            return Ok(counts.into_iter().map(|((b, g), n)| (b, g, n)).collect());
         }
 
         let entries = self.query(filter)?;
@@ -2223,7 +2279,7 @@ impl BlockEngine {
         for e in &entries {
             let bucket_ts = bucket_of(e.ts);
             let group = if group_by == "level" {
-                level_name(e.level).to_string()
+                e.severity_name().to_string()
             } else {
                 e.meta_value(group_by).unwrap_or("").to_string()
             };
@@ -2265,7 +2321,7 @@ impl BlockEngine {
         // Never retain index while reading the buffered count.
         let (blocks, raw) = {
             let index = self.index_lock();
-            let raw = index.iter().filter(|e| e.meta.codec == CODEC_RAW).count();
+            let raw = index.iter().filter(|e| is_raw_codec(e.meta.codec)).count();
             (index.len(), raw)
         };
         after_index();
@@ -2289,6 +2345,11 @@ fn entry_matches(e: &LogEntry, q: &LogQuery) -> bool {
             return false;
         }
     }
+    if let Some(severity) = &q.severity {
+        if e.severity_name() != severity {
+            return false;
+        }
+    }
     for (k, v) in &q.metadata_eq {
         if e.meta_value(k) != Some(v.as_str()) {
             return false;
@@ -2300,6 +2361,33 @@ fn entry_matches(e: &LogEntry, q: &LogQuery) -> bool {
         }
     }
     true
+}
+
+fn normalize_rich_entry(entry: &mut LogEntry) -> Result<(), String> {
+    if let Some(severity) = &entry.severity {
+        let canonical = canonical_severity(severity)?;
+        let bucket = level_from_name(canonical)?;
+        if bucket != entry.level {
+            return Err(format!(
+                "severity {canonical:?} belongs to level bucket {bucket}, not {}",
+                entry.level
+            ));
+        }
+        if canonical != severity {
+            entry.severity = Some(canonical.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn canonical_entry_cmp(left: &LogEntry, right: &LogEntry) -> CmpOrdering {
+    left.message
+        .cmp(&right.message)
+        .then_with(|| left.severity_name().cmp(right.severity_name()))
+        .then_with(|| match (&left.metadata_json, &right.metadata_json) {
+            (Some(left), Some(right)) => left.cmp(right),
+            _ => left.metadata.cmp(&right.metadata),
+        })
 }
 
 fn message_contains_case_insensitive(message: &str, needle: &str) -> bool {

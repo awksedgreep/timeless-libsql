@@ -40,6 +40,7 @@
 #![cfg_attr(not(feature = "entrypoints"), allow(dead_code))]
 
 mod batch;
+mod capabilities;
 mod flatjson;
 mod health_vtab;
 mod logs_vtab;
@@ -93,6 +94,7 @@ pub fn register_dbhealth(db: &Connection) -> Result<()> {
 /// excludes the development-only `timeless_spike` module and the separately
 /// packaged dbhealth modules.
 pub fn register_telemetry(db: &Connection) -> Result<()> {
+    capabilities::register(db)?;
     metrics_vtab::register(db)?;
     logs_vtab::register(db)?;
     traces_vtab::register(db)?;
@@ -110,6 +112,12 @@ unsafe extern "C" fn init_common(
 
 #[cfg(feature = "entrypoints")]
 #[no_mangle]
+/// SQLite's conventional loadable-extension entry point.
+///
+/// # Safety
+///
+/// SQLite must provide valid initialization pointers according to its
+/// loadable-extension ABI. The function forwards them unchanged to rusqlite.
 pub unsafe extern "C" fn sqlite3_extension_init(
     db: *mut ffi::sqlite3,
     pz_err_msg: *mut *mut c_char,
@@ -120,6 +128,11 @@ pub unsafe extern "C" fn sqlite3_extension_init(
 
 #[cfg(feature = "entrypoints")]
 #[no_mangle]
+/// Filename-derived alias for SQLite extension loading.
+///
+/// # Safety
+///
+/// The arguments must satisfy SQLite's loadable-extension ABI.
 pub unsafe extern "C" fn sqlite3_timelessext_init(
     db: *mut ffi::sqlite3,
     pz_err_msg: *mut *mut c_char,
@@ -130,6 +143,11 @@ pub unsafe extern "C" fn sqlite3_timelessext_init(
 
 #[cfg(feature = "entrypoints")]
 #[no_mangle]
+/// Underscore-preserving filename-derived SQLite entry-point alias.
+///
+/// # Safety
+///
+/// The arguments must satisfy SQLite's loadable-extension ABI.
 pub unsafe extern "C" fn sqlite3_timeless_ext_init(
     db: *mut ffi::sqlite3,
     pz_err_msg: *mut *mut c_char,

@@ -152,8 +152,10 @@ fn block_engine_retention() {
     let entry = |ts: i64| LogEntry {
         ts,
         level: 1,
+        severity: None,
         message: format!("m{ts}"),
         metadata: vec![],
+        metadata_json: None,
     };
     engine.push(entry(10_000)).unwrap();
     engine.push(entry(10_050)).unwrap();
@@ -165,6 +167,7 @@ fn block_engine_retention() {
         ts_min: i64::MIN,
         ts_max: i64::MAX,
         level: None,
+        severity: None,
         metadata_eq: vec![],
         message_contains: None,
         message_like_prune: None,

@@ -87,6 +87,13 @@ pub const CODEC_ZSTD: u8 = 2;
 pub const CODEC_COLUMNAR: u8 = 4;
 /// Adaptive columnar v2: codec 4 + shredded metadata/attributes.
 pub const CODEC_COLUMNAR_V2: u8 = 5;
+/// Rich logs raw format: the fourth column retains exact severity and typed
+/// canonical JSON. It is intentionally a new codec so older extensions fail
+/// loudly instead of flattening new data.
+pub const CODEC_RICH_RAW: u8 = 6;
+/// Rich logs compressed format. Timestamp/level/message use the established
+/// typed encoders; the rich envelope is independently zstd-compressed.
+pub const CODEC_RICH_COLUMNAR: u8 = 7;
 
 const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = 38;
@@ -96,6 +103,12 @@ fn known_codec(codec: u8) -> bool {
         || codec == CODEC_ZSTD
         || codec == CODEC_COLUMNAR
         || codec == CODEC_COLUMNAR_V2
+        || codec == CODEC_RICH_RAW
+        || codec == CODEC_RICH_COLUMNAR
+}
+
+pub fn is_raw_codec(codec: u8) -> bool {
+    codec == CODEC_RAW || codec == CODEC_RICH_RAW
 }
 
 /// Encode `entries` into one block payload. Entries should already be
@@ -119,6 +132,12 @@ pub fn encode_block(
     }
 
     let n = entries.len();
+    let rich_codec = matches!(codec, CODEC_RICH_RAW | CODEC_RICH_COLUMNAR);
+    if !rich_codec && entries.iter().any(LogEntry::is_rich) {
+        return Err(format!(
+            "encode_block: rich log entry requires codec {CODEC_RICH_RAW} or {CODEC_RICH_COLUMNAR}"
+        ));
+    }
     let mut ts_min = i64::MAX;
     let mut ts_max = i64::MIN;
     for e in entries {
@@ -135,10 +154,14 @@ pub fn encode_block(
     // Column 2 raw form (one byte per entry) and column 4 raw form
     // (the pair serialization) are shared by every codec.
     let col_lvl_raw: Vec<u8> = entries.iter().map(|e| e.level).collect();
-    let col_meta_raw = serialize_metadata(entries)?;
+    let col_meta_raw = if rich_codec {
+        serialize_rich_metadata(entries)?
+    } else {
+        serialize_metadata(entries)?
+    };
 
     let columns: [Vec<u8>; 4] = match codec {
-        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 => {
+        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR => {
             // Codecs 4/5: typed column encoders pick their own strategy
             // (and record it in the column frame). The ts delta pass
             // lives INSIDE encode_i64 now; we hand it absolutes. The
@@ -170,7 +193,7 @@ pub fn encode_block(
             // numbers — much better zstd food than large monotonically-
             // shifting absolutes.
             let mut col_ts = Vec::with_capacity(n * 8);
-            if codec == CODEC_RAW {
+            if is_raw_codec(codec) {
                 for e in entries {
                     col_ts.extend_from_slice(&e.ts.to_le_bytes());
                 }
@@ -270,7 +293,10 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     }
 
     // ── Codecs 4/5: typed column decoders ────────────────────────────
-    if codec == CODEC_COLUMNAR || codec == CODEC_COLUMNAR_V2 {
+    if matches!(
+        codec,
+        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR
+    ) {
         let timestamps = decode_i64(stored[0], n)?;
         let levels = decode_u8(stored[1], n)?;
         for (i, &lvl) in levels.iter().enumerate() {
@@ -279,8 +305,17 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
             }
         }
         let messages = decode_str(stored[2], n)?;
+        let rich = codec == CODEC_RICH_COLUMNAR;
+        let rich_metadatas = if rich {
+            let raw = zstd_decompress(stored[3], "rich metadata column")?;
+            Some(parse_rich_metadata(&raw, n)?)
+        } else {
+            None
+        };
         let metadatas = if codec == CODEC_COLUMNAR_V2 {
             decode_pairs_column(stored[3], n, "metadata", parse_metadata)?
+        } else if rich {
+            Vec::new()
         } else {
             let meta_raw = zstd_decompress(stored[3], "metadata column")?;
             parse_metadata(&meta_raw, n)?
@@ -289,12 +324,21 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
         let mut out = Vec::with_capacity(n);
         let mut msg_it = messages.into_iter();
         let mut md_it = metadatas.into_iter();
+        let mut rich_it = rich_metadatas.into_iter().flatten();
         for i in 0..n {
+            let (metadata, severity, metadata_json) = if rich {
+                let rich = rich_it.next().unwrap();
+                (rich.metadata, Some(rich.severity), Some(rich.metadata_json))
+            } else {
+                (md_it.next().unwrap(), None, None)
+            };
             out.push(LogEntry {
                 ts: timestamps[i],
                 level: levels[i],
+                severity,
                 message: msg_it.next().unwrap(),
-                metadata: md_it.next().unwrap(),
+                metadata,
+                metadata_json,
             });
         }
         return Ok(out);
@@ -363,18 +407,37 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     }
 
     // ── Column 4: metadata ───────────────────────────────────────────
-    let metadatas = parse_metadata(&cols[3], n)?;
+    let rich = codec == CODEC_RICH_RAW;
+    let rich_metadatas = if rich {
+        Some(parse_rich_metadata(&cols[3], n)?)
+    } else {
+        None
+    };
+    let metadatas = if rich {
+        Vec::new()
+    } else {
+        parse_metadata(&cols[3], n)?
+    };
 
     // ── Zip the columns back into entries ────────────────────────────
     let mut out = Vec::with_capacity(n);
     let mut msg_it = messages.into_iter();
     let mut md_it = metadatas.into_iter();
+    let mut rich_it = rich_metadatas.into_iter().flatten();
     for i in 0..n {
+        let (metadata, severity, metadata_json) = if rich {
+            let rich = rich_it.next().unwrap();
+            (rich.metadata, Some(rich.severity), Some(rich.metadata_json))
+        } else {
+            (md_it.next().unwrap(), None, None)
+        };
         out.push(LogEntry {
             ts: timestamps[i],
             level: cols[1][i],
+            severity,
             message: msg_it.next().unwrap(),
-            metadata: md_it.next().unwrap(),
+            metadata,
+            metadata_json,
         });
     }
     Ok(out)
@@ -413,6 +476,99 @@ fn serialize_metadata(entries: &[LogEntry]) -> Result<Vec<u8>, String> {
         }
     }
     Ok(col_meta)
+}
+
+struct RichMetadata {
+    severity: String,
+    metadata: Vec<(String, String)>,
+    metadata_json: String,
+}
+
+fn serialize_rich_metadata(entries: &[LogEntry]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let severity = entry.severity_name().as_bytes();
+        if severity.len() > u16::MAX as usize {
+            return Err("encode_block: severity exceeds u16::MAX bytes".into());
+        }
+        let metadata_json = match &entry.metadata_json {
+            Some(json) => canonical_metadata_json(json)?,
+            None => pairs_metadata_json(&entry.metadata)?,
+        };
+        if metadata_json.len() > u32::MAX as usize {
+            return Err("encode_block: metadata JSON exceeds u32::MAX bytes".into());
+        }
+        out.extend_from_slice(&(severity.len() as u16).to_le_bytes());
+        out.extend_from_slice(severity);
+        out.extend_from_slice(&(metadata_json.len() as u32).to_le_bytes());
+        out.extend_from_slice(metadata_json.as_bytes());
+    }
+    Ok(out)
+}
+
+fn parse_rich_metadata(bytes: &[u8], n: usize) -> Result<Vec<RichMetadata>, String> {
+    let mut reader = Reader::new(bytes);
+    let mut out = Vec::with_capacity(n);
+    for index in 0..n {
+        let severity_len = reader.u16("severity length")? as usize;
+        let severity = std::str::from_utf8(reader.take(severity_len, "severity bytes")?)
+            .map_err(|_| format!("block: entry {index}: severity is not valid UTF-8"))?
+            .to_owned();
+        super::canonical_severity(&severity)
+            .map_err(|error| format!("block: entry {index}: {error}"))?;
+        let json_len = reader.u32("metadata JSON length")? as usize;
+        let json = std::str::from_utf8(reader.take(json_len, "metadata JSON bytes")?)
+            .map_err(|_| format!("block: entry {index}: metadata JSON is not UTF-8"))?;
+        let metadata_json = canonical_metadata_json(json)
+            .map_err(|error| format!("block: entry {index}: {error}"))?;
+        let metadata = metadata_pairs_from_json(&metadata_json)?;
+        out.push(RichMetadata {
+            severity,
+            metadata,
+            metadata_json,
+        });
+    }
+    if reader.remaining() != 0 {
+        return Err("block: trailing bytes in rich metadata column".into());
+    }
+    Ok(out)
+}
+
+fn canonical_metadata_json(json: &str) -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| format!("metadata JSON: {error}"))?;
+    let serde_json::Value::Object(object) = value else {
+        return Err("metadata JSON must be an object".into());
+    };
+    let sorted: std::collections::BTreeMap<String, serde_json::Value> =
+        object.into_iter().collect();
+    serde_json::to_string(&sorted).map_err(|error| format!("metadata JSON encode: {error}"))
+}
+
+fn pairs_metadata_json(metadata: &[(String, String)]) -> Result<String, String> {
+    let object: std::collections::BTreeMap<String, serde_json::Value> = metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+        .collect();
+    serde_json::to_string(&object).map_err(|error| format!("metadata JSON encode: {error}"))
+}
+
+fn metadata_pairs_from_json(json: &str) -> Result<Vec<(String, String)>, String> {
+    let serde_json::Value::Object(object) = serde_json::from_str::<serde_json::Value>(json)
+        .map_err(|error| format!("metadata JSON: {error}"))?
+    else {
+        return Err("metadata JSON must be an object".into());
+    };
+    Ok(object
+        .into_iter()
+        .map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::String(value) => value,
+                other => serde_json::to_string(&other).unwrap_or_default(),
+            };
+            (key, value)
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

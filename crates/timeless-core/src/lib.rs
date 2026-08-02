@@ -7,6 +7,11 @@
 //! The Elixir repo's crate is intentionally untouched; rewiring it to depend
 //! on this crate is a later, post-publication step.
 
+// These public tuple-shaped query contracts and explicit kernel parameters are
+// established storage-waist APIs. Changing them just to shorten their Rust
+// type spelling would be a compatibility change, not a lint cleanup.
+#![allow(clippy::type_complexity, clippy::too_many_arguments)]
+
 pub mod blocks;
 mod engine;
 pub mod rollup;
@@ -15,8 +20,8 @@ pub mod store;
 pub mod waist;
 
 pub use blocks::{
-    level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta, BlockStore,
-    EncodedBlock, LogEntry, LogQuery, LogQueryOrder, MemBlockStore,
+    canonical_severity, level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc,
+    BlockMeta, BlockStore, EncodedBlock, LogEntry, LogQuery, LogQueryOrder, MemBlockStore,
 };
 pub use engine::*;
 pub use rollup::{

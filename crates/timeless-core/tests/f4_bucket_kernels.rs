@@ -43,12 +43,14 @@ fn log_bucket_counts_match_naive() {
         let e = LogEntry {
             ts: 10_000 + rng.below(5_000) as i64,
             level: (rng.below(4)) as u8,
+            severity: None,
             message: format!("m{i}"),
             metadata: if i % 5 == 0 {
                 vec![] // no service key → group ""
             } else {
                 vec![("service".into(), format!("svc{}", rng.below(3)))]
             },
+            metadata_json: None,
         };
         all.push(e.clone());
         engine.push(e).unwrap();
@@ -66,6 +68,7 @@ fn log_bucket_counts_match_naive() {
                 ts_min: start,
                 ts_max: stop,
                 level: None,
+                severity: None,
                 metadata_eq: vec![],
                 message_contains: None,
                 message_like_prune: None,
@@ -99,6 +102,7 @@ fn log_bucket_counts_match_naive() {
         ts_min: 10_000,
         ts_max: 14_999,
         level: None,
+        severity: None,
         metadata_eq: vec![],
         message_contains: None,
         message_like_prune: None,
@@ -115,6 +119,7 @@ fn log_bucket_counts_match_naive() {
         ts_min: 0,
         ts_max: i64::MAX - 1,
         level: None,
+        severity: None,
         metadata_eq: vec![],
         message_contains: None,
         message_like_prune: None,
@@ -175,7 +180,8 @@ fn trace_bucket_stats_match_naive() {
             name: None,
         };
         let kernel = engine.bucket_stats(&q, step).unwrap();
-        let mut naive: std::collections::BTreeMap<(i64, String), (u64, u64, i64, i64, i64)> =
+        type NaiveTraceBucket = (u64, u64, i64, i64, i64);
+        let mut naive: std::collections::BTreeMap<(i64, String), NaiveTraceBucket> =
             Default::default();
         for s in &all {
             if s.start_ts < start || s.start_ts > stop {

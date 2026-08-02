@@ -1,7 +1,7 @@
 # Rust telemetry data-plane release-promotion plan
 
 Date: 2026-08-02  
-Status: Session 0 complete; implementation sessions 1–8 pending  
+Status: Sessions 0–1 complete; implementation sessions 2–8 pending
 Branch: `release/rust-telemetry-data-plane`
 
 This plan promotes the completed metrics, logs, and traces Rust API POCs into
@@ -360,6 +360,9 @@ every source/target format and current gap is named; the cross-signal plan is
 committed and pushed. No production behavior has changed.
 
 ### Session 1 — release-grade extension and signal binaries
+
+Status: complete. Evidence:
+[`2026-08-02_rust_telemetry_data_plane_session1.md`](2026-08-02_rust_telemetry_data_plane_session1.md).
 
 - Add the public extension/server/data capability handshake and additive
   schema migration ledger with downgrade refusal tests.

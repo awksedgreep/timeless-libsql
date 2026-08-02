@@ -17,7 +17,7 @@ use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // Helpers that lived below the NIF boundary in the original tms_engine file.
-fn partition_vec_memory(timestamps: &Vec<i64>, values: &Vec<f64>) -> usize {
+fn partition_vec_memory(timestamps: &[i64], values: &[f64]) -> usize {
     (timestamps.len() + values.len()) * 8
 }
 
@@ -1522,7 +1522,7 @@ impl Engine {
     /// Use after pre-resolving series IDs.
     pub fn write_batch_raw(&self, data: &[u8]) -> EngineResult<()> {
         const ENTRY_SIZE: usize = 24;
-        if data.len() % ENTRY_SIZE != 0 {
+        if !data.len().is_multiple_of(ENTRY_SIZE) {
             return Err(format!(
                 "raw batch length {} is not a multiple of {}",
                 data.len(),
@@ -1830,7 +1830,7 @@ impl Engine {
             .iter()
             .map(|e| (*e.key(), e.value().timestamps.len()))
             .collect();
-        sizes.sort_by(|a, b| b.1.cmp(&a.1));
+        sizes.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let mut freed = 0usize;
         let overage = current - self.memory_budget;

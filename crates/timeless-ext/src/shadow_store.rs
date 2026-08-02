@@ -29,9 +29,9 @@
 //!     A's), and
 //!   - no cross-connection re-entry: we only ever touch the connection
 //!     whose mutex the current thread already holds.
-//! A call with no binding is a hard error — the permanent guard
-//! against the old rayon trap (a worker thread reaching the store used
-//! to deadlock on the host connection's mutex; now it gets a message).
+//!     A call with no binding is a hard error — the permanent guard
+//!     against the old rayon trap (a worker thread reaching the store used
+//!     to deadlock on the host connection's mutex; now it gets a message).
 //!
 //! With the raw handle gone, this struct is Strings-only and the
 //! compiler derives Send + Sync — the `unsafe impl Send for HostHandle`

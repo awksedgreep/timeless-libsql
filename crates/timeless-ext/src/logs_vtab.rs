@@ -49,8 +49,8 @@ use rusqlite::vtab::{
 };
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{
-    level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockStore, LogEntry, LogQuery,
-    LogQueryOrder,
+    canonical_severity, level_from_name, BlockEngine, BlockEngineConfig, BlockStore, LogEntry,
+    LogQuery, LogQueryOrder,
 };
 
 use crate::batch::BatchReader;
@@ -72,15 +72,44 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
 const FLUSH_THRESHOLD: usize = 8192; // buffered entries before auto-flush
 const ZSTD_LEVEL: i32 = 7;
 const MERGE_TARGET_ENTRIES: usize = 8192;
-/// HARD CAP on merged-block ts span: 1 hour in MILLISECONDS (this vtab
-/// documents ts as unix millis). PLAN.md "Pruning & retention": merge
+/// HARD CAP on merged-block ts span: 1 hour in the table's declared unit.
+/// PLAN.md "Pruning & retention": merge
 /// compaction must never produce blocks straddling retention
 /// boundaries, or expired entries stay pinned until the whole merged
 /// block ages out. 1h granules keep 'prune:<ts>' effective at typical
 /// (hours-to-days) log retention windows.
-const MERGE_MAX_TS_SPAN: i64 = 3_600_000;
-/// F2 retention unit conversion: logs ts is epoch MILLISECONDS.
-const NATIVE_PER_SECOND: i64 = 1_000;
+#[derive(Clone, Copy)]
+struct TimestampUnit {
+    name: &'static str,
+    per_second: i64,
+    hour: i64,
+}
+
+fn timestamp_unit(value: &str) -> std::result::Result<TimestampUnit, String> {
+    match value {
+        "ms" => Ok(TimestampUnit {
+            name: "ms",
+            per_second: 1_000,
+            hour: 3_600_000,
+        }),
+        "us" => Ok(TimestampUnit {
+            name: "us",
+            per_second: 1_000_000,
+            hour: 3_600_000_000,
+        }),
+        other => Err(format!("timestamp_unit={other:?}; expected 'ms' or 'us'")),
+    }
+}
+
+fn load_timestamp_unit(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> std::result::Result<TimestampUnit, String> {
+    let value = shadow_meta::load_meta_text(conn, database, table, "timestamp_unit")?
+        .unwrap_or_else(|| "ms".into());
+    timestamp_unit(&value)
+}
 
 /// best_index bitmask layout (fixed bits first, then one bit per index
 /// key). c_int gives 31 usable bits → 3 fixed + up to 28 index keys.
@@ -108,6 +137,38 @@ const FIXED_COLS: usize = 4;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
+}
+
+fn canonical_rich_metadata(
+    text: &str,
+) -> std::result::Result<(String, Vec<(String, String)>), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("invalid JSON: {error}"))?;
+    let serde_json::Value::Object(object) = value else {
+        return Err("expected a JSON object".into());
+    };
+    let sorted: std::collections::BTreeMap<String, serde_json::Value> =
+        object.into_iter().collect();
+    let pairs = sorted
+        .iter()
+        .map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            };
+            (key.clone(), value)
+        })
+        .collect();
+    let canonical =
+        serde_json::to_string(&sorted).map_err(|error| format!("encode JSON: {error}"))?;
+    Ok((canonical, pairs))
+}
+
+fn metadata_is_flat_strings(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|object| object.values().all(serde_json::Value::is_string))
 }
 
 /// Load the persisted F6 message_index setting ('trigram' => true).
@@ -178,6 +239,7 @@ impl LogsTab {
             None => Vec::new(),
         };
         let message_trigrams = load_message_index(&host, database, table).map_err(module_err)?;
+        let timestamp_unit = load_timestamp_unit(&host, database, table).map_err(module_err)?;
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
         let shared = shared::get_or_create(&key, move || {
             BlockEngine::new(
@@ -186,7 +248,7 @@ impl LogsTab {
                     flush_threshold: FLUSH_THRESHOLD,
                     zstd_level: ZSTD_LEVEL,
                     merge_target_entries: MERGE_TARGET_ENTRIES,
-                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    merge_max_ts_span: timestamp_unit.hour,
                     message_trigrams,
                     index_keys,
                 },
@@ -227,7 +289,7 @@ impl LogsTab {
         let instance_id =
             shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
 
-        let (index_keys, retention) = if is_create {
+        let (index_keys, retention, timestamp_unit) = if is_create {
             // index_keys comes from the CREATE args and is PERSISTED in
             // _meta: the key set is baked into the terms already written
             // to `_terms`, so it is a property of the DATA, not of
@@ -235,17 +297,14 @@ impl LogsTab {
             // never trusts (or receives) fresh args. F2 retention rides
             // the same convention (unit-resolved to ms, persisted).
             let mut keys_value: Option<String> = None;
-            let mut retention: Option<i64> = None;
+            let mut retention_value: Option<String> = None;
             let mut message_index: Option<bool> = None;
+            let mut timestamp_unit_value = "ms".to_owned();
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 match name.as_str() {
                     "index_keys" => keys_value = Some(value),
-                    "retention" => {
-                        retention = Some(
-                            table_args::parse_retention(&value, NATIVE_PER_SECOND)
-                                .map_err(module_err)?,
-                        );
-                    }
+                    "retention" => retention_value = Some(value),
+                    "timestamp_unit" => timestamp_unit_value = value,
                     "message_index" => {
                         message_index = Some(match value.as_str() {
                             "trigram" => true,
@@ -260,7 +319,7 @@ impl LogsTab {
                     other => {
                         return Err(module_err(format!(
                             "unrecognized argument {other:?}; timeless_logs supports: \
-                             index_keys, retention, message_index"
+                             index_keys, retention, message_index, timestamp_unit"
                         )));
                     }
                 }
@@ -269,6 +328,20 @@ impl LogsTab {
                 .map_err(module_err)?;
             store
                 .save_meta("index_keys", keys.join(",").as_bytes())
+                .map_err(module_err)?;
+            let timestamp_unit = timestamp_unit(&timestamp_unit_value).map_err(module_err)?;
+            shadow_meta::save_meta_text(
+                &host,
+                &database,
+                &table,
+                "timestamp_unit",
+                timestamp_unit.name,
+            )
+            .map_err(module_err)?;
+            let retention = retention_value
+                .as_deref()
+                .map(|value| table_args::parse_retention(value, timestamp_unit.per_second))
+                .transpose()
                 .map_err(module_err)?;
             if let Some(native) = retention {
                 shadow_meta::save_meta_text(
@@ -284,7 +357,7 @@ impl LogsTab {
                 shadow_meta::save_meta_text(&host, &database, &table, "message_index", "trigram")
                     .map_err(module_err)?;
             }
-            (keys, retention)
+            (keys, retention, timestamp_unit)
         } else {
             let keys = match store.load_meta("index_keys").map_err(module_err)? {
                 Some(bytes) => {
@@ -301,9 +374,12 @@ impl LogsTab {
                 // writes it). Treat as "no index keys".
                 None => Vec::new(),
             };
+            let timestamp_unit =
+                load_timestamp_unit(&host, &database, &table).map_err(module_err)?;
             (
                 keys,
                 shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?,
+                timestamp_unit,
             )
         };
 
@@ -323,7 +399,7 @@ impl LogsTab {
                     flush_threshold: FLUSH_THRESHOLD,
                     zstd_level: ZSTD_LEVEL,
                     merge_target_entries: MERGE_TARGET_ENTRIES,
-                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    merge_max_ts_span: timestamp_unit.hour,
                     message_trigrams,
                     index_keys: index_keys_for_engine,
                 },
@@ -382,7 +458,9 @@ impl LogsTab {
         }
     }
 
-    /// F5 Tier 2 batch ingest (logs blob v0). Layout, little-endian:
+    /// Versioned Tier 2 batch ingest. Layouts are little-endian.
+    ///
+    /// v0 keeps the original millisecond/four-bucket/flat-string contract:
     ///   0    u8   version = 0x01
     ///   1    u8   flags = 0
     ///   2    u16  reserved
@@ -395,30 +473,46 @@ impl LogsTab {
     /// All-or-nothing: the whole blob is parsed and validated before a
     /// single entry reaches the engine buffer; durability is identical
     /// to row inserts (buffered until 'flush', auto-flush included).
+    /// v1 starts with version 0x02 and replaces the level byte column with
+    /// length-prefixed exact severity strings. Metadata is canonical typed
+    /// JSON, and the table's persisted timestamp_unit declares ms or us.
     fn ingest_batch(&self, blob: &[u8]) -> Result<i64> {
         let decode_started = std::time::Instant::now();
         let mut r = BatchReader::new(blob);
         let version = r.u8("version")?;
-        if version != 0x01 {
+        if version != 0x01 && version != 0x02 {
             return Err(module_err(format!(
-                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01)"
+                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01 and v1 = 0x02)"
             )));
         }
         let flags = r.u8("flags")?;
         if flags != 0 {
             return Err(module_err(format!(
-                "batch blob: unknown flags 0x{flags:02x} (v0 defines none; must be 0)"
+                "batch blob: unknown flags 0x{flags:02x} (v0/v1 define none; must be 0)"
             )));
         }
         r.skip(2, "reserved header bytes")?;
         let n = r.u32("n_entries")? as usize;
 
         let ts_bytes = r.take(n * 8, "timestamp column")?;
-        let level_bytes = r.take(n, "level column")?;
-        if let Some(bad) = level_bytes.iter().find(|&&l| l > 3) {
-            return Err(module_err(format!(
-                "batch blob: invalid level byte {bad} (0=debug 1=info 2=warning 3=error); batch rejected"
-            )));
+        let mut severities = Vec::with_capacity(n);
+        let mut levels = Vec::with_capacity(n);
+        if version == 0x01 {
+            let level_bytes = r.take(n, "level column")?;
+            if let Some(bad) = level_bytes.iter().find(|&&l| l > 3) {
+                return Err(module_err(format!(
+                    "batch blob: invalid level byte {bad} (0=debug 1=info 2=warning 3=error); batch rejected"
+                )));
+            }
+            levels.extend_from_slice(level_bytes);
+            severities.resize(n, None);
+        } else {
+            for i in 0..n {
+                let severity = canonical_severity(r.str(&format!("severity {i}"))?)
+                    .map_err(|error| module_err(format!("batch blob: entry {i}: {error}")))?;
+                levels.push(level_from_name(severity).map_err(module_err)?);
+                severities.push(Some(severity.to_owned()));
+            }
         }
         let mut entries = Vec::with_capacity(n);
         let mut messages = Vec::with_capacity(n);
@@ -427,19 +521,28 @@ impl LogsTab {
         }
         for (i, message) in messages.into_iter().enumerate() {
             let meta_txt = r.str(&format!("metadata {i}"))?;
-            let metadata: Vec<(String, String)> = if meta_txt.is_empty() {
-                Vec::new()
+            let (metadata, metadata_json) = if version == 0x01 {
+                let metadata = if meta_txt.is_empty() {
+                    Vec::new()
+                } else {
+                    parse_labels_json(meta_txt)
+                        .map_err(|e| module_err(format!("batch blob: entry {i} metadata: {e}")))?
+                        .into_iter()
+                        .collect()
+                };
+                (metadata, None)
             } else {
-                parse_labels_json(meta_txt)
-                    .map_err(|e| module_err(format!("batch blob: entry {i} metadata: {e}")))?
-                    .into_iter()
-                    .collect()
+                let (canonical, metadata) = canonical_rich_metadata(meta_txt)
+                    .map_err(|e| module_err(format!("batch blob: entry {i} metadata: {e}")))?;
+                (metadata, Some(canonical))
             };
             entries.push(LogEntry {
                 ts: i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
-                level: level_bytes[i],
+                level: levels[i],
+                severity: severities[i].clone(),
                 message,
                 metadata,
+                metadata_json,
             });
         }
         if r.remaining() != 0 {
@@ -751,16 +854,14 @@ impl UpdateVTab<'_> for LogsTab {
         match args.iter().nth(cmd_idx) {
             Some(ValueRef::Null) | None => {} // plain data row
             Some(ValueRef::Blob(blob)) => {
-                // F5 Tier 2: dispatch by version byte; 0x00 and
-                // 0x02-0x08 are RESERVED so a future format fed to an
-                // old build fails loudly instead of being mis-parsed.
+                // Versioned public batches. Unknown revisions fail loudly.
                 return match blob.first() {
-                    Some(0x01) => self.ingest_batch(blob),
-                    Some(b @ (0x00 | 0x02..=0x08)) => Err(module_err(format!(
-                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01)"
+                    Some(0x01 | 0x02) => self.ingest_batch(blob),
+                    Some(b @ (0x00 | 0x03..=0x08)) => Err(module_err(format!(
+                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01 and v1 = 0x02)"
                     ))),
                     Some(b) => Err(module_err(format!(
-                        "unknown blob format (first byte 0x{b:02x}; logs batch v0 starts with 0x01)"
+                        "unknown blob format (first byte 0x{b:02x}; logs batches start with 0x01/0x02)"
                     ))),
                     None => Err(module_err("empty blob".into())),
                 };
@@ -778,46 +879,70 @@ impl UpdateVTab<'_> for LogsTab {
         let level_txt: Option<String> = args.get(3)?;
         let Some(level_txt) = level_txt else {
             return Err(module_err(
-                "level is required (TEXT: debug|info|warning|error)".into(),
+                "level is required (TEXT product severity)".into(),
             ));
         };
-        let level = level_from_name(&level_txt).map_err(module_err)?;
+        let severity = canonical_severity(&level_txt)
+            .map_err(module_err)?
+            .to_owned();
+        let level = level_from_name(&severity).map_err(module_err)?;
         let message: Option<String> = args.get(4)?;
         let Some(message) = message else {
             return Err(module_err("message is required (TEXT)".into()));
         };
 
-        // metadata: optional flat JSON object (same parser as metrics
-        // labels — the two tables agree on the format by construction).
+        // Rich metadata is retained as canonical typed JSON. Scalar/nested
+        // values also derive stable string projections for equality indexes.
         let metadata_json: Option<String> = args.get(5)?;
-        let mut metadata: Vec<(String, String)> = match metadata_json {
-            Some(txt) => parse_labels_json(&txt)
-                .map_err(module_err)?
-                .into_iter()
-                .collect(),
-            None => Vec::new(),
-        };
+        let (mut canonical_json, mut metadata): (String, Vec<(String, String)>) =
+            match metadata_json {
+                Some(txt) => canonical_rich_metadata(&txt).map_err(module_err)?,
+                None => ("{}".into(), Vec::new()),
+            };
 
         // Index-key hidden columns as INSERT shorthand: a non-NULL
         // value is merged into the metadata pairs (overriding a same-key
         // pair from the JSON — the more specific binding wins).
+        let mut metadata_overridden = false;
         for (k, key_name) in self.index_keys.iter().enumerate() {
             let v: Option<String> = args.get(6 + k)?;
             if let Some(v) = v {
+                metadata_overridden = true;
                 metadata.retain(|(mk, _)| mk != key_name);
                 metadata.push((key_name.clone(), v));
             }
         }
+        if metadata_overridden {
+            let mut value: serde_json::Value = serde_json::from_str(&canonical_json)
+                .map_err(|error| module_err(format!("decode metadata JSON: {error}")))?;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| module_err("metadata JSON must be an object".into()))?;
+            for (k, key_name) in self.index_keys.iter().enumerate() {
+                let v: Option<String> = args.get(6 + k)?;
+                if let Some(v) = v {
+                    object.insert(key_name.clone(), serde_json::Value::String(v));
+                }
+            }
+            let sorted: std::collections::BTreeMap<String, serde_json::Value> =
+                object.clone().into_iter().collect();
+            canonical_json = serde_json::to_string(&sorted)
+                .map_err(|error| module_err(format!("encode metadata JSON: {error}")))?;
+        }
 
         // push() canonicalizes (sorts) metadata, validates, and
         // auto-flushes at the threshold.
+        let rich = severity != timeless_core::level_name(level)
+            || !metadata_is_flat_strings(&canonical_json);
         self.shared
             .engine
             .push(LogEntry {
                 ts,
                 level,
+                severity: rich.then_some(severity),
                 message,
                 metadata,
+                metadata_json: rich.then_some(canonical_json),
             })
             .map_err(module_err)?;
 
@@ -960,17 +1085,20 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         // match nothing — empty result, not an error (WHERE level='oops'
         // is a valid query that happens to select zero rows).
         let mut impossible = false;
-        let level: Option<u8> = if idx_num & BIT_LEVEL != 0 {
+        let (level, severity): (Option<u8>, Option<String>) = if idx_num & BIT_LEVEL != 0 {
             let v: Option<String> = args.get(next())?;
-            match v.as_deref().map(level_from_name) {
-                Some(Ok(l)) => Some(l),
+            match v.as_deref().map(canonical_severity) {
+                Some(Ok(severity)) => (
+                    Some(level_from_name(severity).map_err(module_err)?),
+                    Some(severity.to_owned()),
+                ),
                 _ => {
                     impossible = true;
-                    None
+                    (None, None)
                 }
             }
         } else {
-            None
+            (None, None)
         };
         let ts_min: i64 = if idx_num & BIT_TS_LO != 0 {
             let v: Option<i64> = args.get(next())?;
@@ -1068,6 +1196,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 ts_min,
                 ts_max,
                 level,
+                severity,
                 metadata_eq,
                 message_contains,
                 message_like_prune,
@@ -1088,9 +1217,15 @@ unsafe impl VTabCursor for LogsCursor<'_> {
 
         self.rows = entries
             .into_iter()
-            .map(|entry| OutRow {
-                metadata_json: pairs_to_json(&entry.metadata),
-                entry,
+            .map(|entry| {
+                let metadata_json = entry
+                    .metadata_json
+                    .clone()
+                    .unwrap_or_else(|| pairs_to_json(&entry.metadata));
+                OutRow {
+                    metadata_json,
+                    entry,
+                }
             })
             .collect();
         self.pos = 0;
@@ -1111,7 +1246,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         let i = i as usize;
         match i {
             0 => ctx.set_result(&row.entry.ts),
-            1 => ctx.set_result(&level_name(row.entry.level)),
+            1 => ctx.set_result(&row.entry.severity_name()),
             2 => ctx.set_result(&row.entry.message),
             3 => ctx.set_result(&row.metadata_json),
             _ if i >= FIXED_COLS && i < FIXED_COLS + self.index_keys.len() => {

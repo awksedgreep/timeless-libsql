@@ -134,8 +134,10 @@ fn pruning_is_sound() {
                 .push(LogEntry {
                     ts,
                     level: (rng.below(4)) as u8,
+                    severity: None,
                     message: m,
                     metadata: vec![],
+                    metadata_json: None,
                 })
                 .unwrap();
         }
@@ -147,8 +149,10 @@ fn pruning_is_sound() {
             .push(LogEntry {
                 ts,
                 level: 1,
+                severity: None,
                 message: m,
                 metadata: vec![],
+                metadata_json: None,
             })
             .unwrap();
     }
@@ -171,6 +175,7 @@ fn pruning_is_sound() {
             ts_min: i64::MIN,
             ts_max: i64::MAX,
             level: None,
+            severity: None,
             metadata_eq: vec![],
             message_contains: None,
             message_like_prune: None,
@@ -220,8 +225,10 @@ fn pruning_actually_prunes() {
                 .push(LogEntry {
                     ts,
                     level: 1,
+                    severity: None,
                     message,
                     metadata: vec![],
+                    metadata_json: None,
                 })
                 .unwrap();
         }
@@ -233,6 +240,7 @@ fn pruning_actually_prunes() {
         ts_min: i64::MIN,
         ts_max: i64::MAX,
         level: None,
+        severity: None,
         metadata_eq: vec![],
         message_contains: None,
         message_like_prune: Some("%xyzzy%".to_string()),
@@ -269,15 +277,15 @@ fn unindexed_blocks_never_pruned() {
     let reads = Arc::new(AtomicUsize::new(0));
     // Same store contents, but engine had trigrams OFF at write time.
     let engine = engine_with(false, reads.clone());
-    let mut ts = 0i64;
     for i in 0..100 {
-        ts += 1;
         engine
             .push(LogEntry {
-                ts,
+                ts: i64::from(i) + 1,
                 level: 1,
+                severity: None,
                 message: format!("secret-tokenword {i}"),
                 metadata: vec![],
+                metadata_json: None,
             })
             .unwrap();
     }
@@ -289,6 +297,7 @@ fn unindexed_blocks_never_pruned() {
             ts_min: i64::MIN,
             ts_max: i64::MAX,
             level: None,
+            severity: None,
             metadata_eq: vec![],
             message_contains: None,
             message_like_prune: Some("%tokenword%".to_string()),

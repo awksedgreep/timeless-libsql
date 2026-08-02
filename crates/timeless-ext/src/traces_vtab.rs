@@ -469,24 +469,24 @@ impl TracesTab {
         let mut resources = vec![Cow::Borrowed("{}"); n];
         let mut scopes = vec![Cow::Borrowed("{}"); n];
         if version == 0x02 {
-            for i in 0..n {
-                status_descriptions[i] =
+            for (i, status_description) in status_descriptions.iter_mut().enumerate() {
+                *status_description =
                     Cow::Owned(r.str(&format!("status_description {i}"))?.to_owned());
             }
-            for i in 0..n {
-                events[i] = Cow::Owned(
+            for (i, event) in events.iter_mut().enumerate() {
+                *event = Cow::Owned(
                     otel_json::array(Some(r.str(&format!("events {i}"))?), "events")
                         .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
                 );
             }
-            for i in 0..n {
-                resources[i] = Cow::Owned(
+            for (i, resource) in resources.iter_mut().enumerate() {
+                *resource = Cow::Owned(
                     otel_json::object(Some(r.str(&format!("resource {i}"))?), "resource")
                         .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
                 );
             }
-            for i in 0..n {
-                scopes[i] = Cow::Owned(
+            for (i, scope) in scopes.iter_mut().enumerate() {
+                *scope = Cow::Owned(
                     otel_json::object(
                         Some(r.str(&format!("instrumentation_scope {i}"))?),
                         "instrumentation_scope",

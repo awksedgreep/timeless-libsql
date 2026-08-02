@@ -32,7 +32,8 @@ pub mod mem;
 mod tests;
 
 pub use codec::{
-    decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
+    decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW,
+    CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_ZSTD,
 };
 pub use engine::{
     BlockEngine, BlockEngineConfig, BlockEngineProfileSnapshot, LogQuery, LogQueryOrder,
@@ -49,11 +50,32 @@ pub const LEVEL_NAMES: [&str; 4] = ["debug", "info", "warning", "error"];
 pub fn level_from_name(name: &str) -> Result<u8, String> {
     match name {
         "debug" => Ok(0),
-        "info" => Ok(1),
-        "warning" => Ok(2),
-        "error" => Ok(3),
+        "info" | "notice" => Ok(1),
+        "warning" | "warn" => Ok(2),
+        "error" | "critical" | "alert" | "emergency" => Ok(3),
         other => Err(format!(
-            "unknown log level {other:?}; expected one of: debug, info, warning, error"
+            "unknown log level {other:?}; expected one of: debug, info, notice, warning, \
+             warn, error, critical, alert, emergency"
+        )),
+    }
+}
+
+/// Canonical product spelling for every accepted severity. The four-byte
+/// `level` bucket remains the partition/pruning key; this string preserves the
+/// richer Logger vocabulary for exact query and migration fidelity.
+pub fn canonical_severity(name: &str) -> Result<&'static str, String> {
+    match name {
+        "debug" => Ok("debug"),
+        "info" => Ok("info"),
+        "notice" => Ok("notice"),
+        "warning" | "warn" => Ok("warning"),
+        "error" => Ok("error"),
+        "critical" => Ok("critical"),
+        "alert" => Ok("alert"),
+        "emergency" => Ok("emergency"),
+        other => Err(format!(
+            "unknown log level {other:?}; expected one of: debug, info, notice, warning, \
+             warn, error, critical, alert, emergency"
         )),
     }
 }
@@ -75,8 +97,14 @@ pub struct LogEntry {
     pub ts: i64,
     /// 0=debug 1=info 2=warning 3=error (see LEVEL_NAMES).
     pub level: u8,
+    /// Exact product severity. `None` is the legacy v0/block default and maps
+    /// to `level_name(level)`.
+    pub severity: Option<String>,
     pub message: String,
     pub metadata: Vec<(String, String)>,
+    /// Canonical typed JSON object for rich logs. `None` means a legacy flat
+    /// string-pair object reconstructed from `metadata` at the SQL boundary.
+    pub metadata_json: Option<String>,
 }
 
 impl LogEntry {
@@ -86,6 +114,16 @@ impl LogEntry {
             .binary_search_by(|(k, _)| k.as_str().cmp(key))
             .ok()
             .map(|i| self.metadata[i].1.as_str())
+    }
+
+    pub fn severity_name(&self) -> &str {
+        self.severity
+            .as_deref()
+            .unwrap_or_else(|| level_name(self.level))
+    }
+
+    pub fn is_rich(&self) -> bool {
+        self.severity.is_some() || self.metadata_json.is_some()
     }
 }
 
@@ -108,10 +146,9 @@ pub struct BlockMeta {
     pub ts_min: i64,
     pub ts_max: i64,
     pub entry_count: u32,
-    /// CODEC_RAW, CODEC_ZSTD / CODEC_COLUMNAR (legacy, still
-    /// decodable) or CODEC_COLUMNAR_V2 (codec byte 3 is reserved for
-    /// OpenZL — PLAN.md "Codec strategy"; blocks with different codecs
-    /// coexist).
+    /// Legacy and rich raw/columnar codecs coexist. Unknown codecs are
+    /// rejected before payload decode, so an older extension cannot silently
+    /// reinterpret a rich block.
     pub codec: u8,
 }
 

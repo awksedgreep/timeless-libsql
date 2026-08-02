@@ -11,7 +11,7 @@
 //!   - min/max:  f64::min / f64::max folds, seeded by the first sample
 //!   - last_ts/last_val: the max-ts sample; ties resolved by engine
 //!     order (the LATER element wins, same rule as the Q2 grid kernel)
-//! `avg` is sum/count computed at READ time, never stored.
+//!     `avg` is sum/count computed at READ time, never stored.
 //!
 //! This is PRE-AGGREGATION: bit-parity with raw-sample folds across
 //! arbitrary query windows is impossible for float sums and is NOT

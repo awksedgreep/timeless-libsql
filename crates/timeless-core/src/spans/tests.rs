@@ -553,8 +553,8 @@ fn optimize_writes_codec_5_blocks_that_decode_exactly() {
             (i % 5 != 0).then_some(i / 2),
             ["GET /x", "db.query", "cache.get"][i as usize % 3],
             ["api", "db", "cache"][i as usize % 3],
-            (i % 5) as u8,
-            (i % 3) as u8,
+            i % 5,
+            i % 3,
             10_000 + i as i64,
             &[("http.method", "GET")],
         );

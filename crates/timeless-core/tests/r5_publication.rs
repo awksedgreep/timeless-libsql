@@ -379,8 +379,10 @@ fn log_entry(ts: i64, message: &str) -> LogEntry {
     LogEntry {
         ts,
         level: 1,
+        severity: None,
         message: message.to_owned(),
         metadata: vec![("service".to_owned(), "api".to_owned())],
+        metadata_json: None,
     }
 }
 
@@ -389,6 +391,7 @@ fn log_query() -> LogQuery {
         ts_min: i64::MIN + 1,
         ts_max: i64::MAX - 1,
         level: None,
+        severity: None,
         metadata_eq: Vec::new(),
         message_contains: None,
         message_like_prune: None,
