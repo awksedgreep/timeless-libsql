@@ -108,16 +108,16 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     assert!(flushed.1["database_file_bytes"].as_u64().unwrap() > 0);
     assert!(flushed.1["sqlite_page_bytes"].as_i64().unwrap() > 0);
 
-    let missing_ingest = app
+    let missing_query = app
         .clone()
         .oneshot(
-            Request::post("/api/v1/import/prometheus")
-                .body(Body::from("not implemented in Session 1"))
+            Request::get("/api/v1/query?metric=not-implemented-until-session-3")
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(missing_ingest.status(), StatusCode::NOT_FOUND);
+    assert_eq!(missing_query.status(), StatusCode::NOT_FOUND);
 
     drop(app);
     storage.shutdown().await.unwrap();
@@ -134,6 +134,126 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
         recovered.rollup_tiers.as_deref(),
         Some("3600:2592000,86400:31536000,2592000:0")
     );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_preserves_native_ingest_and_partial_success_contracts() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        2,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let base_ms = 1_700_000_000_000_i64;
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"contract_vm\",\"host\":\"edge\",\"env\":\"test\"}},",
+            "\"values\":[1.5,2.5],\"timestamps\":[{},{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"contract_vm\",\"host\":\"edge\",\"env\":\"test\"}},",
+            "\"values\":[3.5],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":"
+        ),
+        base_ms,
+        base_ms + 1_000,
+        base_ms + 2_000,
+    );
+    let prometheus = format!(
+        concat!(
+            "contract_prom{{host=\"edge\",env=\"test\"}} 4.5 {}\n",
+            "contract_prom{{host=\"edge\",env=\"test\"}} NaN {}\n",
+            "contract_prom{{host=\"edge\",env=\"test\"}} +Inf {}\n",
+            "malformed line\n"
+        ),
+        base_ms,
+        base_ms + 1_000,
+        base_ms + 2_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", prometheus.as_bytes()).await);
+    assert_no_content(post_body(&app, "/api/v1/import", br#"{"metric":"#).await);
+    assert_no_content(
+        post_body(
+            &app,
+            "/api/v1/import/prometheus",
+            b"garbage one\ngarbage two\n",
+        )
+        .await,
+    );
+    let reserved_prometheus = b"\x01not an HTTP batch protocol";
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", reserved_prometheus).await);
+
+    let oversized = vec![b'x'; 10 * 1024 * 1024 + 1];
+    let too_large = post_body(&app, "/api/v1/import", &oversized).await;
+    assert_eq!(too_large.0, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let flush = post_json(&app, "/api/v1/flush").await;
+    assert_eq!(flush.0, StatusCode::OK);
+    assert_eq!(flush.1["through_batches"], 5);
+    assert_eq!(flush.1["through_points"], 4);
+    assert_eq!(flush.1["completed_batches"], 5);
+    assert_eq!(flush.1["completed_points"], 4);
+    assert_eq!(flush.1["failed_batches"], 0);
+    assert_eq!(flush.1["queued_batches"], 0);
+    assert_eq!(flush.1["in_flight_batches"], 0);
+
+    let health = get_json(&app, "/health").await;
+    assert_eq!(health.1["points"], 4);
+    assert_eq!(health.1["series"], 2);
+    assert_eq!(health.1["import_errors"], 8);
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.admitted_batches, 5);
+    assert_eq!(stats.admitted_points, 4);
+    assert_eq!(stats.completed_batches, 5);
+    assert_eq!(stats.completed_points, 4);
+    assert_eq!(stats.import_errors, 8);
+    assert_eq!(stats.api_ingest_requests, 5);
+    assert_eq!(stats.api_victoria_requests, 2);
+    assert_eq!(stats.api_prometheus_requests, 3);
+    let expected_body_bytes = victoria.len()
+        + prometheus.len()
+        + br#"{"metric":"#.len()
+        + b"garbage one\ngarbage two\n".len()
+        + reserved_prometheus.len();
+    assert_eq!(stats.admitted_body_bytes, expected_body_bytes as u64);
+    assert_eq!(stats.completed_body_bytes, expected_body_bytes as u64);
+    assert!(stats.api_parse_ns > 0);
+    assert!(stats.api_batch_encode_ns > 0);
+    assert_eq!(stats.extension_prometheus_ingest_batches, 2);
+    assert_eq!(stats.extension_prometheus_ingest_points, 1);
+    assert_eq!(stats.extension_prometheus_ingest_errors, 5);
+    assert!(stats.extension_prometheus_ingest_total_ns > 0);
+    assert_eq!(stats.queued_unknown_point_batches, 0);
+    assert_eq!(stats.queued_body_bytes, 0);
+    assert_eq!(stats.in_flight_body_bytes, 0);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let rows = persisted_rows(&database, &extension);
+    assert_eq!(
+        rows,
+        vec![
+            ("contract_prom".into(), 1_700_000_000, 4.5),
+            ("contract_vm".into(), 1_700_000_000, 1.5),
+            ("contract_vm".into(), 1_700_000_001, 2.5),
+            ("contract_vm".into(), 1_700_000_002, 3.5),
+        ]
+    );
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let recovered = reopened.stats().await.unwrap();
+    assert_eq!(recovered.series, 2);
+    assert_eq!(recovered.disk_points, 4);
+    assert_eq!(recovered.buffered_points, 0);
     reopened.shutdown().await.unwrap();
 }
 
@@ -161,6 +281,40 @@ async fn post_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
         .await
         .unwrap();
     (status, serde_json::from_slice(&body).unwrap())
+}
+
+async fn post_body(app: &axum::Router, path: &str, body: &[u8]) -> (StatusCode, Vec<u8>) {
+    let response = app
+        .clone()
+        .oneshot(Request::post(path).body(Body::from(body.to_vec())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 11 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, body.to_vec())
+}
+
+fn assert_no_content(response: (StatusCode, Vec<u8>)) {
+    assert_eq!(response.0, StatusCode::NO_CONTENT);
+    assert!(response.1.is_empty());
+}
+
+fn persisted_rows(database: &Path, extension: &Path) -> Vec<(String, i64, f64)> {
+    let conn = rusqlite::Connection::open(database).unwrap();
+    unsafe {
+        conn.load_extension_enable().unwrap();
+        conn.load_extension(extension, None::<&str>).unwrap();
+    }
+    conn.load_extension_disable().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT name, ts, value FROM metrics ORDER BY name, ts, value")
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 fn extension_path() -> PathBuf {

@@ -3769,6 +3769,22 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ("buffer_memory", Value::Integer(info.buffer_memory as i64)),
                     ("ts_min", opt_ts(info.oldest_ts)),
                     ("ts_max", opt_ts(info.newest_ts)),
+                    (
+                        "prometheus_ingest_batches",
+                        Value::Integer(info.prometheus_ingest_batches as i64),
+                    ),
+                    (
+                        "prometheus_ingest_points",
+                        Value::Integer(info.prometheus_ingest_points as i64),
+                    ),
+                    (
+                        "prometheus_ingest_errors",
+                        Value::Integer(info.prometheus_ingest_errors as i64),
+                    ),
+                    (
+                        "prometheus_ingest_total_ns",
+                        Value::Integer(info.prometheus_ingest_total_ns as i64),
+                    ),
                 ]);
                 // F3 ladder visibility: the declared tiers (native spec)
                 // and how many rollup chunks exist across them.

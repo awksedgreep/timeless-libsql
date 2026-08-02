@@ -658,6 +658,7 @@ name = "timeless-metrics-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
  "fs2",
  "rusqlite",
  "serde",

@@ -6,16 +6,26 @@ the existing `timeless_metrics` extension continues to own series identity,
 the 4,096-point per-series buffer threshold, compression, chunks, rollups, and
 retention commands.
 
-## Session 1 surface
+## Session 2 surface
 
 - `GET /health`
 - `GET /select/metrics/stats`
 - `POST /api/v1/flush`
+- `POST /api/v1/import/prometheus`
+- `POST /api/v1/import`
 
-There is deliberately no ingest, query, auth, cluster, or product route yet.
-The contract test submits public named-batch `0x01` blobs through an internal
-seam only; Session 2 will put the established Prometheus and VictoriaMetrics
-HTTP contracts in front of that seam.
+There is deliberately no query, auth, cluster, or product route yet. The
+Prometheus route keeps the request as a reference-counted body and passes the
+complete exposition through the extension's public ingest surface; Rust does
+not parse or copy it at the API boundary. The VictoriaMetrics route parses the
+JSON-line body once, interns its series within the request, and encodes one
+public named-columnar `0x01` batch. Neither path issues per-point SQL or flushes
+at the request boundary.
+
+Both routes preserve the existing asynchronous empty `204` admission contract.
+Valid lines in a partially malformed body are persisted and rejected lines are
+counted. A 10 MiB body limit is enforced before admission; an oversized body
+returns `413` and does not affect queue or point watermarks.
 
 The process starts one ordered SQLite writer and a configurable reader pool.
 It creates the same rollup ladder as `TimelessMetrics.LibsqlEngine`, schedules
@@ -65,10 +75,15 @@ Stats separate units instead of conflating them:
 - logical compressed payload, database/WAL/SHM bytes, SQLite page high-water,
   and freelist bytes are distinct fields;
 - admitted/completed/failed batches and points, queued and in-flight work, and
-  oldest queue age are distinct;
+  oldest queue age are distinct; unknown point counts remain explicit while a
+  Prometheus request waits for the extension to parse it;
+- admitted/completed/queued/in-flight body bytes and per-format request counts
+  expose the bounded-memory shape;
 - API admission/queue/SQLite/stats/flush timers and maintenance timers are
-  cumulative nanoseconds. Parse and batch-encode timers remain zero until
-  Session 2 adds ingest.
+  cumulative nanoseconds. VictoriaMetrics parse and batch-encode time is owned
+  by the API counters; Prometheus parse/point/error counters and time are owned
+  by `timeless_stats('metrics')`; its timer covers fused parse, resolve, and
+  buffer work, so direct SQLite/libSQL users receive the same observability.
 
 ## Validation
 
@@ -80,11 +95,19 @@ TIMELESS_EXT_PATH=target/release/libtimeless_ext.so \
   --test storage_contract -- --ignored
 ```
 
-The extension-backed test proves 4,095 points remain buffered, point 4,096
-automatically becomes one durable raw chunk, an explicit flush persists a
-smaller tail, the ordered counters drain to zero, a second owner is rejected,
-and all 4,106 points recover after shutdown/reopen. It also proves Session 1
-has no accidental ingest route.
+The Session 1 extension-backed test proves 4,095 points remain buffered, point
+4,096 automatically becomes one durable raw chunk, an explicit flush persists
+a smaller tail, the ordered counters drain to zero, a second owner is rejected,
+and all 4,106 points recover after shutdown/reopen.
+
+The Session 2 contract submits both native formats with partially malformed
+bodies plus all-malformed requests. A fifth Prometheus request beginning with a
+reserved batch-version byte proves the HTTP route cannot switch the extension's
+hidden-column protocol. Five admitted/completed requests persist exactly four
+valid points across two series, report eight rejected inputs, drain to zero
+through the ordered flush, and recover exactly after reopen. It also proves the
+10 MiB rejection occurs before admission and pins body-byte, API, and extension
+phase counters.
 
 That test exposed and fixed an existing extension gap: the engine queued a
 series at 4,096 points but the metrics virtual table never drained its pending
@@ -93,7 +116,37 @@ so direct SQLite/libSQL users receive the advertised behavior. Below threshold
 the empty-queue path performs no store write. `tests/correctness.sh r1` pins
 the direct-SQL threshold and transaction regressions.
 
-## Shell smoke result
+## Session 2 ingest result
+
+On the Session 0 host, two fresh deterministic runs per format used 4,000
+series, 1,000 points/request, deferred scheduled maintenance, one SQLite writer,
+two readers, and an explicit final flush. The final 3 ms step is limited by the
+four-writer HTTP client near the Prometheus result, so it is a demonstrated
+clean rate rather than the server's saturation point.
+
+| format | completed points/s | write p95 | write p99 | final queue age | drain | HWM |
+|---|---:|---:|---:|---:|---:|---:|
+| Prometheus | 855.2–855.6K | 448us | 556us | 7–9ms | 725–745ms | 178,888–180,016KiB |
+| VictoriaMetrics JSON lines | 613.2–620.9K | 2.78–2.87ms | 3.48–3.51ms | 7–8ms | 667–738ms | 178,164–179,460KiB |
+
+Both formats had zero HTTP/storage errors, reached exactly 4,000 series, and
+drained queued and in-flight work to zero. Prometheus is 9.7% faster than the
+779.9K points/s Session 0 Elixir+libSQL no-query control, with 51% lower write
+p95 and about 52% lower process HWM. VictoriaMetrics remains the deliberately
+uncached named-series floor; resolved batch `0x02` is a later measured
+optimization, not a Session 2 storage change.
+
+The first Prometheus profiling run exposed an API observability regression: two
+full `timeless_stats` scans surrounded every insert, reducing completion to
+179.0K points/s. SQLite already returns the accepted point count in
+`last_insert_rowid`; rejected-line totals belong to the extension's cumulative
+stats. Removing the redundant scans produced the repeatable result above while
+retaining exact completion and error accounting.
+
+Full method and phase attribution are in
+`../../../timeless_metrics/bench/results/2026-08-01_metrics_api_session2.md`.
+
+## Session 1 shell smoke result
 
 On the Session 0 host, an empty release server with two readers handled the
 three sequential control-route loops below with zero errors:
@@ -105,6 +158,5 @@ three sequential control-route loops below with zero errors:
 | `POST /api/v1/flush` | 200 | 4,131.6 | 214.4us | 453.2us | 560.3us |
 
 Linux `VmHWM` was 9,176 KiB (`VmRSS` 9,176 KiB after the run). These are shell
-sanity numbers, not an ingest comparison with Session 0: Session 1 intentionally
-has no HTTP ingest path. Reproduce them with `python3 bench_shell.py` while the
-server is running. Completed-points throughput begins in Session 2.
+sanity numbers, not an ingest comparison with Session 0. Reproduce them with
+`python3 bench_shell.py` while the server is running.

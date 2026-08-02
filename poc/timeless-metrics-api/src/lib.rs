@@ -6,6 +6,7 @@
 
 mod api;
 mod storage;
+mod victoria;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 # Rust metrics API POC plan
 
-Status: Sessions 0-1 complete; Session 2 ready on
+Status: Sessions 0-2 complete; Session 3 ready on
 `poc/rust-telemetry-data-plane` (2026-08-01)
 
 This POC tests the process boundary, not a new metrics storage engine. The
@@ -175,19 +175,44 @@ reopen, ordered completion counters, and advisory sole ownership. See
 
 ## Session 2 — Native batched ingest
 
-- [ ] Implement `POST /api/v1/import/prometheus` by passing the complete body
+- [x] Implement `POST /api/v1/import/prometheus` by passing the complete body
       through the extension's existing Prometheus ingest path.
-- [ ] Implement `POST /api/v1/import` by parsing Victoria JSON lines once and
+- [x] Implement `POST /api/v1/import` by parsing Victoria JSON lines once and
       encoding one established named batch `0x01` per admitted request.
-- [ ] Add a durable series-id cache and resolved batch `0x02` only as a later
-      measured optimization; named batch remains the correctness floor.
-- [ ] Preserve partial/malformed body semantics from Session 0 and enforce the
+- [x] Keep a durable series-id cache and resolved batch `0x02` deferred until a
+      later measured optimization; named batch remains the correctness floor.
+- [x] Preserve partial/malformed body semantics from Session 0 and enforce the
       existing HTTP body limit before unbounded allocation.
-- [ ] Benchmark parse, encode, statement, queue, completion, and HWM. Do not
+- [x] Benchmark parse, encode, statement, queue, completion, and HWM. Do not
       add request compression or cross-request grouping without evidence.
 
 Exit criterion: byte/semantic ingest parity, exact persisted points after
 flush/reopen, bounded admission, and no per-point SQL path.
+
+Result: complete. The extension-backed contract admits partial and all-invalid
+Prometheus/VictoriaMetrics requests with the established empty `204`, persists
+four valid points, reports eight rejected inputs, rejects 10 MiB + 1 before
+admission, drains exactly five requests through flush, and recovers all four
+points after reopen. One rejected Prometheus body begins with a reserved batch
+version and proves the HTTP route cannot switch hidden-column protocols.
+Prometheus bodies remain reference-counted and unparsed by the API;
+VictoriaMetrics bodies are parsed once into one named-columnar batch.
+
+Two fresh no-query Prometheus runs completed 855.2–855.6K points/s with 448us
+write p95, a 7–9ms final queue age, zero errors, and 178,888–180,016KiB HWM.
+That is 9.7% faster than Session 0's 779.9K Elixir+libSQL control with about 52%
+less HWM. Two VictoriaMetrics named-batch runs completed 613.2–620.9K points/s
+with 2.78–2.87ms p95, single-digit final queue depth, zero errors, and
+178,164–179,460KiB HWM. The latter is the evidence for measuring resolved batch
+`0x02` later, not grounds for changing the Session 2 storage contract.
+
+Profiling also caught and removed two per-request `timeless_stats` scans that
+initially reduced the Prometheus path to 179.0K points/s. Point completion now
+uses SQLite's existing `last_insert_rowid`; rejected-line totals and fused
+parse/resolve/buffer time remain cumulative extension stats available to direct
+SQLite/libSQL users. See
+`poc/timeless-metrics-api/README.md` and
+`../timeless_metrics/bench/results/2026-08-01_metrics_api_session2.md`.
 
 ## Session 3 — Mechanical reads and discovery
 

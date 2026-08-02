@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 axum = "0.8"
+bytes = "1"
 fs2 = "0.4"
 rusqlite = { version = "0.40.1", features = ["bundled", "load_extension"] }
 serde = { version = "1", features = ["derive"] }

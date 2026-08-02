@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use fs2::FileExt;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection};
@@ -61,9 +62,16 @@ pub struct StorageStats {
     pub in_flight_batches: u64,
     pub in_flight_points: u64,
     pub oldest_queued_ms: u64,
+    pub queued_unknown_point_batches: u64,
+    pub admitted_body_bytes: u64,
+    pub completed_body_bytes: u64,
+    pub queued_body_bytes: u64,
+    pub in_flight_body_bytes: u64,
+    pub import_errors: u64,
 
-    // Session 1 has no ingest route, so parse/encode remain zero. Naming them
-    // now pins the telemetry contract before Session 2 supplies those phases.
+    pub api_ingest_requests: u64,
+    pub api_victoria_requests: u64,
+    pub api_prometheus_requests: u64,
     pub api_parse_ns: u64,
     pub api_batch_encode_ns: u64,
     pub api_admission_wait_ns: u64,
@@ -87,6 +95,10 @@ pub struct StorageStats {
     pub prune_count: u64,
     pub prune_total_ns: u64,
     pub prune_errors: u64,
+    pub extension_prometheus_ingest_batches: i64,
+    pub extension_prometheus_ingest_points: i64,
+    pub extension_prometheus_ingest_errors: i64,
+    pub extension_prometheus_ingest_total_ns: i64,
     pub last_error: Option<String>,
 }
 
@@ -109,15 +121,22 @@ pub struct FlushReport {
 
 #[derive(Default)]
 struct ApiProfile {
-    pending: VecDeque<(Instant, usize)>,
+    pending: VecDeque<PendingBatch>,
     in_flight_batches: u64,
     in_flight_points: u64,
+    in_flight_body_bytes: u64,
     admitted_batches: u64,
     admitted_points: u64,
+    admitted_body_bytes: u64,
     completed_batches: u64,
     completed_points: u64,
+    completed_body_bytes: u64,
     failed_batches: u64,
     failed_points: u64,
+    import_errors: u64,
+    ingest_requests: u64,
+    victoria_requests: u64,
+    prometheus_requests: u64,
     parse_ns: u64,
     batch_encode_ns: u64,
     admission_wait_ns: u64,
@@ -144,15 +163,47 @@ struct ApiProfile {
     last_error: Option<String>,
 }
 
+struct PendingBatch {
+    queued_at: Instant,
+    points: Option<usize>,
+    body_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+enum IngestFormat {
+    Internal,
+    Victoria,
+    Prometheus,
+}
+
+struct Admission {
+    points: Option<usize>,
+    body_bytes: usize,
+    import_errors: usize,
+    parse_duration: Duration,
+    encode_duration: Duration,
+    format: IngestFormat,
+}
+
+#[derive(Clone, Copy)]
+struct IngestOutcome {
+    points: usize,
+    import_errors: usize,
+}
+
 enum WriteCommand {
     IngestNamed {
         blob: Vec<u8>,
         points: usize,
+        body_bytes: usize,
+    },
+    IngestPrometheus {
+        body: Bytes,
+        body_bytes: usize,
     },
     Barrier(oneshot::Sender<Result<(), String>>),
     Flush {
         through_batches: u64,
-        through_points: u64,
         explicit: bool,
         reply: oneshot::Sender<Result<FlushReport, String>>,
     },
@@ -291,13 +342,77 @@ impl Storage {
         })))
     }
 
-    /// Internal Session 1 contract seam. Session 2 will call this after HTTP
-    /// parsing/encoding; it intentionally accepts only the extension's public
-    /// named-batch blob and never inspects or stores points itself.
+    /// Internal contract seam used by extension-backed tests. Production HTTP
+    /// named batches enter through submit_victoria_batch so request telemetry
+    /// remains complete.
     pub async fn submit_named_batch(&self, blob: Vec<u8>, points: usize) -> Result<(), String> {
-        if points == 0 {
-            return Err("named batch point count must be positive".into());
-        }
+        let body_bytes = blob.len();
+        self.admit_ingest(
+            WriteCommand::IngestNamed {
+                blob,
+                points,
+                body_bytes,
+            },
+            Admission {
+                points: Some(points),
+                body_bytes,
+                import_errors: 0,
+                parse_duration: Duration::ZERO,
+                encode_duration: Duration::ZERO,
+                format: IngestFormat::Internal,
+            },
+        )
+        .await
+    }
+
+    pub async fn submit_victoria_batch(
+        &self,
+        blob: Vec<u8>,
+        points: usize,
+        import_errors: usize,
+        body_bytes: usize,
+        parse_duration: Duration,
+        encode_duration: Duration,
+    ) -> Result<(), String> {
+        self.admit_ingest(
+            WriteCommand::IngestNamed {
+                blob,
+                points,
+                body_bytes,
+            },
+            Admission {
+                points: Some(points),
+                body_bytes,
+                import_errors,
+                parse_duration,
+                encode_duration,
+                format: IngestFormat::Victoria,
+            },
+        )
+        .await
+    }
+
+    pub async fn submit_prometheus(&self, body: Bytes) -> Result<(), String> {
+        let body_bytes = body.len();
+        self.admit_ingest(
+            WriteCommand::IngestPrometheus { body, body_bytes },
+            Admission {
+                points: None,
+                body_bytes,
+                import_errors: 0,
+                parse_duration: Duration::ZERO,
+                encode_duration: Duration::ZERO,
+                format: IngestFormat::Prometheus,
+            },
+        )
+        .await
+    }
+
+    async fn admit_ingest(
+        &self,
+        command: WriteCommand,
+        admission: Admission,
+    ) -> Result<(), String> {
         let admission_started = Instant::now();
         let _ordered = self.0.admission.lock().await;
         let permit = self
@@ -309,12 +424,41 @@ impl Storage {
         let admission_ns = elapsed_ns(admission_started);
         {
             let mut profile = profile_lock(&self.0.profile);
-            profile.pending.push_back((Instant::now(), points));
+            profile.pending.push_back(PendingBatch {
+                queued_at: Instant::now(),
+                points: admission.points,
+                body_bytes: admission.body_bytes,
+            });
             profile.admitted_batches = profile.admitted_batches.saturating_add(1);
-            profile.admitted_points = profile.admitted_points.saturating_add(points as u64);
+            profile.admitted_points = profile
+                .admitted_points
+                .saturating_add(admission.points.unwrap_or(0) as u64);
+            profile.admitted_body_bytes = profile
+                .admitted_body_bytes
+                .saturating_add(admission.body_bytes as u64);
+            profile.import_errors = profile
+                .import_errors
+                .saturating_add(admission.import_errors as u64);
+            profile.parse_ns = profile
+                .parse_ns
+                .saturating_add(duration_ns(admission.parse_duration));
+            profile.batch_encode_ns = profile
+                .batch_encode_ns
+                .saturating_add(duration_ns(admission.encode_duration));
             profile.admission_wait_ns = profile.admission_wait_ns.saturating_add(admission_ns);
+            match admission.format {
+                IngestFormat::Internal => {}
+                IngestFormat::Victoria => {
+                    profile.ingest_requests = profile.ingest_requests.saturating_add(1);
+                    profile.victoria_requests = profile.victoria_requests.saturating_add(1);
+                }
+                IngestFormat::Prometheus => {
+                    profile.ingest_requests = profile.ingest_requests.saturating_add(1);
+                    profile.prometheus_requests = profile.prometheus_requests.saturating_add(1);
+                }
+            }
         }
-        permit.send(WriteCommand::IngestNamed { blob, points });
+        permit.send(command);
         Ok(())
     }
 
@@ -345,16 +489,15 @@ impl Storage {
     async fn flush_ordered(&self, explicit: bool) -> Result<FlushReport, String> {
         let total_started = Instant::now();
         let _ordered = self.0.admission.lock().await;
-        let (through_batches, through_points) = {
+        let through_batches = {
             let profile = profile_lock(&self.0.profile);
-            (profile.admitted_batches, profile.admitted_points)
+            profile.admitted_batches
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         self.0
             .writer
             .send(WriteCommand::Flush {
                 through_batches,
-                through_points,
                 explicit,
                 reply: reply_tx,
             })
@@ -497,12 +640,29 @@ fn writer_main(
     let mut unreported_error: Option<String> = None;
     while let Some(command) = commands.blocking_recv() {
         match command {
-            WriteCommand::IngestNamed { blob, points } => {
-                record_queue_start(&profile, points);
+            WriteCommand::IngestNamed {
+                blob,
+                points,
+                body_bytes,
+            } => {
+                record_queue_start(&profile, Some(points), body_bytes);
                 let started = Instant::now();
-                let result = insert_named_batch(&conn, &blob, points);
+                let result = insert_named_batch(&conn, &blob, points).map(|()| IngestOutcome {
+                    points,
+                    import_errors: 0,
+                });
                 let insert_ns = elapsed_ns(started);
-                record_queue_completion(&profile, points, insert_ns, &result);
+                record_queue_completion(&profile, Some(points), body_bytes, insert_ns, &result);
+                if let Err(error) = result {
+                    unreported_error = Some(error);
+                }
+            }
+            WriteCommand::IngestPrometheus { body, body_bytes } => {
+                record_queue_start(&profile, None, body_bytes);
+                let started = Instant::now();
+                let result = insert_prometheus_body(&conn, body.as_ref());
+                let insert_ns = elapsed_ns(started);
+                record_queue_completion(&profile, None, body_bytes, insert_ns, &result);
                 if let Err(error) = result {
                     unreported_error = Some(error);
                 }
@@ -513,7 +673,6 @@ fn writer_main(
             }
             WriteCommand::Flush {
                 through_batches,
-                through_points,
                 explicit,
                 reply,
             } => {
@@ -543,12 +702,7 @@ fn writer_main(
                     (Some(error), _) | (None, Err(error)) => Err(error),
                     (None, Ok(())) => {
                         let api = profile_lock(&profile);
-                        Ok(flush_report(
-                            &api,
-                            through_batches,
-                            through_points,
-                            flush_ns,
-                        ))
+                        Ok(flush_report(&api, through_batches, flush_ns))
                     }
                 };
                 let _ = reply.send(result);
@@ -679,6 +833,55 @@ fn insert_named_batch(conn: &Connection, blob: &[u8], points: usize) -> Result<(
     Ok(())
 }
 
+fn insert_prometheus_body(conn: &Connection, body: &[u8]) -> Result<IngestOutcome, String> {
+    if body.is_empty() {
+        return Ok(IngestOutcome {
+            points: 0,
+            import_errors: 0,
+        });
+    }
+    // The hidden-column public protocol reserves these bytes for batch
+    // versions. A Prometheus HTTP route must not let an arbitrary request
+    // switch protocols; valid exposition can never start with them.
+    if matches!(body.first(), Some(0x00..=0x08)) {
+        return Ok(IngestOutcome {
+            points: 0,
+            import_errors: 1,
+        });
+    }
+
+    let execution = conn
+        .execute("INSERT INTO metrics(metrics) VALUES (?1)", params![body])
+        .map_err(|error| format!("insert Prometheus exposition: {error}"));
+
+    match execution {
+        Ok(_) => {
+            let inserted = conn.last_insert_rowid();
+            let points = usize::try_from(inserted).map_err(|_| {
+                format!("Prometheus extension returned invalid point count {inserted}")
+            })?;
+            Ok(IngestOutcome {
+                points,
+                // The extension owns Prometheus parsing and exposes its
+                // cumulative rejected-line count through timeless_stats.
+                // Reading that TVF around every write is observability work
+                // on the hot path, so StorageStats combines it later.
+                import_errors: 0,
+            })
+        }
+        Err(error) if error.contains("prometheus body: 0 samples ingested") => {
+            // Preserve the established asynchronous HTTP contract: an
+            // all-malformed request is completed with rejected-line telemetry,
+            // not converted into a synchronous HTTP/storage failure.
+            Ok(IngestOutcome {
+                points: 0,
+                import_errors: 0,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn run_command(conn: &Connection, command: &str, context: &str) -> Result<(), String> {
     conn.execute("INSERT INTO metrics(metrics) VALUES (?1)", [command])
         .map(|_| ())
@@ -760,6 +963,10 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         sqlite_page_bytes: page_count.saturating_mul(page_size),
         freelist_pages,
         freelist_bytes: freelist_pages.saturating_mul(page_size),
+        extension_prometheus_ingest_batches: integer("prometheus_ingest_batches"),
+        extension_prometheus_ingest_points: integer("prometheus_ingest_points"),
+        extension_prometheus_ingest_errors: integer("prometheus_ingest_errors"),
+        extension_prometheus_ingest_total_ns: integer("prometheus_ingest_total_ns"),
         ..StorageStats::default()
     })
 }
@@ -800,15 +1007,35 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.queued_points = profile
         .pending
         .iter()
-        .map(|(_, points)| *points as u64)
+        .filter_map(|pending| pending.points)
+        .map(|points| points as u64)
         .sum();
+    stats.queued_unknown_point_batches = profile
+        .pending
+        .iter()
+        .filter(|pending| pending.points.is_none())
+        .count() as u64;
     stats.in_flight_batches = profile.in_flight_batches;
     stats.in_flight_points = profile.in_flight_points;
+    stats.admitted_body_bytes = profile.admitted_body_bytes;
+    stats.completed_body_bytes = profile.completed_body_bytes;
+    stats.queued_body_bytes = profile
+        .pending
+        .iter()
+        .map(|pending| pending.body_bytes as u64)
+        .sum();
+    stats.in_flight_body_bytes = profile.in_flight_body_bytes;
+    stats.import_errors = profile
+        .import_errors
+        .saturating_add(stats.extension_prometheus_ingest_errors.max(0) as u64);
     stats.oldest_queued_ms = profile
         .pending
         .front()
-        .map(|(queued_at, _)| duration_ms(queued_at.elapsed()))
+        .map(|pending| duration_ms(pending.queued_at.elapsed()))
         .unwrap_or(0);
+    stats.api_ingest_requests = profile.ingest_requests;
+    stats.api_victoria_requests = profile.victoria_requests;
+    stats.api_prometheus_requests = profile.prometheus_requests;
     stats.api_parse_ns = profile.parse_ns;
     stats.api_batch_encode_ns = profile.batch_encode_ns;
     stats.api_admission_wait_ns = profile.admission_wait_ns;
@@ -835,16 +1062,11 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.last_error = profile.last_error.clone();
 }
 
-fn flush_report(
-    profile: &ApiProfile,
-    through_batches: u64,
-    through_points: u64,
-    flush_sqlite_ns: u64,
-) -> FlushReport {
+fn flush_report(profile: &ApiProfile, through_batches: u64, flush_sqlite_ns: u64) -> FlushReport {
     FlushReport {
         status: "ok".into(),
         through_batches,
-        through_points,
+        through_points: profile.completed_points,
         completed_batches: profile.completed_batches,
         completed_points: profile.completed_points,
         failed_batches: profile.failed_batches,
@@ -853,7 +1075,8 @@ fn flush_report(
         queued_points: profile
             .pending
             .iter()
-            .map(|(_, points)| *points as u64)
+            .filter_map(|pending| pending.points)
+            .map(|points| points as u64)
             .sum(),
         in_flight_batches: profile.in_flight_batches,
         in_flight_points: profile.in_flight_points,
@@ -862,36 +1085,65 @@ fn flush_report(
     }
 }
 
-fn record_queue_start(profile: &StdMutex<ApiProfile>, points: usize) {
+fn record_queue_start(profile: &StdMutex<ApiProfile>, points: Option<usize>, body_bytes: usize) {
     let mut profile = profile_lock(profile);
-    if let Some((queued_at, queued_points)) = profile.pending.pop_front() {
-        debug_assert_eq!(queued_points, points);
-        let wait_ns = elapsed_ns(queued_at);
-        let points = queued_points as u64;
+    if let Some(pending) = profile.pending.pop_front() {
+        debug_assert_eq!(pending.points, points);
+        debug_assert_eq!(pending.body_bytes, body_bytes);
+        let wait_ns = elapsed_ns(pending.queued_at);
         profile.queue_wait_ns = profile.queue_wait_ns.saturating_add(wait_ns);
         profile.queue_wait_max_ns = profile.queue_wait_max_ns.max(wait_ns);
         profile.in_flight_batches = profile.in_flight_batches.saturating_add(1);
-        profile.in_flight_points = profile.in_flight_points.saturating_add(points);
+        profile.in_flight_points = profile
+            .in_flight_points
+            .saturating_add(pending.points.unwrap_or(0) as u64);
+        profile.in_flight_body_bytes = profile
+            .in_flight_body_bytes
+            .saturating_add(body_bytes as u64);
     }
 }
 
 fn record_queue_completion(
     profile: &StdMutex<ApiProfile>,
-    points: usize,
+    declared_points: Option<usize>,
+    body_bytes: usize,
     insert_ns: u64,
-    result: &Result<(), String>,
+    result: &Result<IngestOutcome, String>,
 ) {
     let mut profile = profile_lock(profile);
     profile.in_flight_batches = profile.in_flight_batches.saturating_sub(1);
-    profile.in_flight_points = profile.in_flight_points.saturating_sub(points as u64);
+    profile.in_flight_points = profile
+        .in_flight_points
+        .saturating_sub(declared_points.unwrap_or(0) as u64);
+    profile.in_flight_body_bytes = profile
+        .in_flight_body_bytes
+        .saturating_sub(body_bytes as u64);
     profile.sqlite_insert_ns = profile.sqlite_insert_ns.saturating_add(insert_ns);
-    if let Err(error) = result {
-        profile.failed_batches = profile.failed_batches.saturating_add(1);
-        profile.failed_points = profile.failed_points.saturating_add(points as u64);
-        profile.last_error = Some(error.clone());
-    } else {
-        profile.completed_batches = profile.completed_batches.saturating_add(1);
-        profile.completed_points = profile.completed_points.saturating_add(points as u64);
+    match result {
+        Err(error) => {
+            profile.failed_batches = profile.failed_batches.saturating_add(1);
+            profile.failed_points = profile
+                .failed_points
+                .saturating_add(declared_points.unwrap_or(0) as u64);
+            profile.last_error = Some(error.clone());
+        }
+        Ok(outcome) => {
+            if declared_points.is_none() {
+                profile.admitted_points = profile
+                    .admitted_points
+                    .saturating_add(outcome.points as u64);
+            }
+            profile.completed_batches = profile.completed_batches.saturating_add(1);
+            profile.completed_points = profile
+                .completed_points
+                .saturating_add(outcome.points as u64);
+            profile.completed_body_bytes = profile
+                .completed_body_bytes
+                .saturating_add(body_bytes as u64);
+            profile.import_errors = profile
+                .import_errors
+                .saturating_add(outcome.import_errors as u64);
+        }
     }
 }
 

@@ -5,19 +5,58 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bytes::Bytes;
 use serde_json::json;
 
-use crate::Storage;
+use crate::{victoria, Storage};
+
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn router(storage: Storage) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/select/metrics/stats", get(stats))
         .route("/api/v1/flush", post(flush))
-        // Session 1 has no request bodies. Keep a finite global default so a
-        // later route cannot accidentally begin with unbounded allocation.
-        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .route("/api/v1/import", post(import_victoria))
+        .route("/api/v1/import/prometheus", post(import_prometheus))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(storage)
+}
+
+async fn import_victoria(State(storage): State<Storage>, body: Bytes) -> Response {
+    let body_bytes = body.len();
+    let parse_started = Instant::now();
+    let batch = victoria::parse(&body);
+    let parse_duration = parse_started.elapsed();
+    let points = batch.point_count();
+    let import_errors = batch.errors;
+    let encode_started = Instant::now();
+    let blob = match batch.encode() {
+        Ok(blob) => blob,
+        Err(error) => return server_error(error),
+    };
+    let encode_duration = encode_started.elapsed();
+    match storage
+        .submit_victoria_batch(
+            blob,
+            points,
+            import_errors,
+            body_bytes,
+            parse_duration,
+            encode_duration,
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => server_error(error),
+    }
+}
+
+async fn import_prometheus(State(storage): State<Storage>, body: Bytes) -> Response {
+    match storage.submit_prometheus(body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => server_error(error),
+    }
 }
 
 async fn health(State(storage): State<Storage>) -> Response {
@@ -43,6 +82,7 @@ async fn health(State(storage): State<Storage>) -> Response {
                 "in_flight_batches": stats.in_flight_batches,
                 "in_flight_points": stats.in_flight_points,
                 "oldest_queued_ms": stats.oldest_queued_ms,
+                "import_errors": stats.import_errors,
                 "database_file_bytes": stats.database_file_bytes,
                 "database_wal_bytes": stats.database_wal_bytes,
                 "freelist_bytes": stats.freelist_bytes

@@ -571,6 +571,13 @@ pub struct Engine {
     /// Fast resolution cache: hash(metric, labels) → series_id.
     /// Persists across batches — steady-state scraping is pure cache hits.
     resolve_cache: DashMap<u64, i64>,
+    /// Fused Prometheus ingest telemetry. These cumulative counters are
+    /// exposed through timeless_stats so embedding hosts can observe partial
+    /// parse success without parsing the exposition body a second time.
+    prometheus_ingest_batches: AtomicU64,
+    prometheus_ingest_points: AtomicU64,
+    prometheus_ingest_errors: AtomicU64,
+    prometheus_ingest_total_ns: AtomicU64,
     /// True while a transaction journal is recording (between txn_begin
     /// and txn_commit/txn_rollback). An atomic so the hot paths can
     /// skip journal work with a single relaxed-ish load when no
@@ -1226,6 +1233,10 @@ impl Engine {
             cold_flush_running: AtomicBool::new(false),
             compaction_running: AtomicBool::new(false),
             resolve_cache: DashMap::new(),
+            prometheus_ingest_batches: AtomicU64::new(0),
+            prometheus_ingest_points: AtomicU64::new(0),
+            prometheus_ingest_errors: AtomicU64::new(0),
+            prometheus_ingest_total_ns: AtomicU64::new(0),
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(None),
@@ -1578,6 +1589,7 @@ impl Engine {
     /// timestamps are normalized to seconds, matching the scraper.
     /// Returns (samples_written, parse_errors).
     pub fn ingest_prometheus(&self, body: &[u8], default_ts: i64) -> EngineResult<(usize, usize)> {
+        let started = Instant::now();
         let mut sorted: Vec<(&str, &str)> = Vec::with_capacity(16);
         let mut failure: EngineResult<()> = Ok(());
         let now = Instant::now();
@@ -1601,6 +1613,16 @@ impl Engine {
             }
         });
 
+        self.prometheus_ingest_batches
+            .fetch_add(1, Ordering::Relaxed);
+        self.prometheus_ingest_points
+            .fetch_add(count as u64, Ordering::Relaxed);
+        self.prometheus_ingest_errors
+            .fetch_add(errors as u64, Ordering::Relaxed);
+        self.prometheus_ingest_total_ns.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         failure?;
         Ok((count, errors))
     }
@@ -4217,6 +4239,10 @@ impl Engine {
             file_count,
             oldest_ts,
             newest_ts,
+            prometheus_ingest_batches: self.prometheus_ingest_batches.load(Ordering::Relaxed),
+            prometheus_ingest_points: self.prometheus_ingest_points.load(Ordering::Relaxed),
+            prometheus_ingest_errors: self.prometheus_ingest_errors.load(Ordering::Relaxed),
+            prometheus_ingest_total_ns: self.prometheus_ingest_total_ns.load(Ordering::Relaxed),
         }
     }
 }
@@ -4248,6 +4274,10 @@ pub struct EngineInfo {
     pub file_count: usize,
     pub oldest_ts: Option<i64>,
     pub newest_ts: Option<i64>,
+    pub prometheus_ingest_batches: u64,
+    pub prometheus_ingest_points: u64,
+    pub prometheus_ingest_errors: u64,
+    pub prometheus_ingest_total_ns: u64,
 }
 
 /// F7 window operations (FEATURE_PLAN.md "The SQL query tier") — the

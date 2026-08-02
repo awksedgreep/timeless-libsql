@@ -80,6 +80,12 @@ fn prometheus_ingest_semantics() {
         .unwrap();
     assert_eq!((count, errors), (0, 2));
 
+    let info = engine.info();
+    assert_eq!(info.prometheus_ingest_batches, 2);
+    assert_eq!(info.prometheus_ingest_points, 2);
+    assert_eq!(info.prometheus_ingest_errors, 4);
+    assert!(info.prometheus_ingest_total_ns > 0);
+
     engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
