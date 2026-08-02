@@ -108,16 +108,9 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     assert!(flushed.1["database_file_bytes"].as_u64().unwrap() > 0);
     assert!(flushed.1["sqlite_page_bytes"].as_i64().unwrap() > 0);
 
-    let missing_query = app
-        .clone()
-        .oneshot(
-            Request::get("/api/v1/query?metric=not-implemented-until-session-3")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing_query.status(), StatusCode::NOT_FOUND);
+    let empty_query = get_json(&app, "/api/v1/query?metric=missing").await;
+    assert_eq!(empty_query.0, StatusCode::OK);
+    assert_eq!(empty_query.1, serde_json::json!({"data": []}));
 
     drop(app);
     storage.shutdown().await.unwrap();
@@ -257,6 +250,229 @@ async fn session_two_preserves_native_ingest_and_partial_success_contracts() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_three_pins_mechanical_reads_discovery_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_three.db");
+    let base = 1_700_000_000_i64;
+    let base_ms = base * 1_000;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        2,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"contract_vm\",\"host\":\"edge\",\"env\":\"test\"}},",
+            "\"values\":[1.5,2.5,3.5],\"timestamps\":[{},{},{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"contract_vm\",\"host\":\"west\",\"env\":\"prod\"}},",
+            "\"values\":[8.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"contract_sparse\",\"host\":\"edge\"}},",
+            "\"values\":[9.0],\"timestamps\":[{}]}}"
+        ),
+        base_ms,
+        base_ms + 1_000,
+        base_ms + 2_000,
+        base_ms + 1_000,
+        base_ms,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let latest = get_json(&app, "/api/v1/query?metric=contract_vm&host=edge&env=test").await;
+    assert_eq!(latest.0, StatusCode::OK);
+    assert_eq!(
+        latest.1,
+        serde_json::json!({
+            "labels": {"env": "test", "host": "edge"},
+            "timestamp": base + 2,
+            "value": 3.5
+        })
+    );
+
+    let posted = post_form(
+        &app,
+        "/api/v1/query?metric=wrong&host=wrong",
+        "metric=contract_vm&host=edge&env=test",
+    )
+    .await;
+    assert_eq!(posted.0, StatusCode::OK);
+    assert_eq!(posted.1, latest.1);
+
+    let export = get_body(
+        &app,
+        &format!(
+            "/api/v1/export?metric=contract_vm&host=edge&env=test&from={base}&to={}",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(export.0, StatusCode::OK);
+    assert_eq!(
+        String::from_utf8(export.1).unwrap(),
+        format!(
+            concat!(
+                "{{\"metric\":{{\"__name__\":\"contract_vm\",\"env\":\"test\",\"host\":\"edge\"}},",
+                "\"timestamps\":[{},{},{}],\"values\":[1.5,2.5,3.5]}}"
+            ),
+            base_ms,
+            base_ms + 1_000,
+            base_ms + 2_000
+        )
+    );
+    let empty_export = get_body(
+        &app,
+        &format!(
+            "/api/v1/export?metric=contract_vm&host=missing&from={base}&to={}",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(empty_export, (StatusCode::OK, Vec::new()));
+
+    let range = get_json(
+        &app,
+        &format!(
+            "/api/v1/query_range?metric=contract_vm&host=edge&env=test&from={base}&to={}&step=1&aggregate=avg",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK);
+    assert_eq!(
+        range.1,
+        serde_json::json!({
+            "metric": "contract_vm",
+            "series": [{
+                "labels": {"env": "test", "host": "edge"},
+                "data": [[base, 1.5], [base + 1, 2.5], [base + 2, 3.5]]
+            }]
+        })
+    );
+    let partial = get_json(
+        &app,
+        &format!(
+            "/api/v1/query_range?metric=contract_vm&host=edge&env=test&from={base}&to={}&step=2&aggregate=avg",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(
+        partial.1,
+        serde_json::json!({
+            "metric": "contract_vm",
+            "series": [{
+                "labels": {"env": "test", "host": "edge"},
+                "data": [[base, 2.0], [base + 2, 3.5]]
+            }]
+        })
+    );
+
+    assert_eq!(
+        get_json(&app, "/api/v1/labels").await.1,
+        serde_json::json!({"status": "success", "data": ["__name__", "env", "host"]})
+    );
+    assert_eq!(
+        get_json(&app, "/api/v1/label/host/values?metric=contract_vm")
+            .await
+            .1,
+        serde_json::json!({"status": "success", "data": ["edge", "west"]})
+    );
+    assert_eq!(
+        get_json(&app, "/api/v1/label/__name__/values").await.1,
+        serde_json::json!({"status": "success", "data": ["contract_sparse", "contract_vm"]})
+    );
+    assert_eq!(
+        get_json(&app, "/api/v1/series?metric=contract_vm").await.1,
+        serde_json::json!({
+            "status": "success",
+            "data": [
+                {"labels": {"env": "prod", "host": "west"}},
+                {"labels": {"env": "test", "host": "edge"}}
+            ]
+        })
+    );
+
+    let selector = "%7B__name__%3D~%22contract_.%2A%22%2Cenv%21%3D%22prod%22%2Chost%3D~%22edge%7Cwest%22%2Chost%21%3D%22west%22%7D";
+    assert_eq!(
+        get_json(
+            &app,
+            &format!("/prometheus/api/v1/series?match%5B%5D={selector}")
+        )
+        .await
+        .1,
+        serde_json::json!({
+            "status": "success",
+            "data": [
+                {"__name__": "contract_sparse", "host": "edge"},
+                {"__name__": "contract_vm", "env": "test", "host": "edge"}
+            ]
+        })
+    );
+    let absent_env = "%7B__name__%3D%22contract_sparse%22%2Cenv%3D%22%22%7D";
+    assert_eq!(
+        get_json(&app, &format!("/api/v1/series?match%5B%5D={absent_env}"))
+            .await
+            .1,
+        serde_json::json!({
+            "status": "success",
+            "data": [{"__name__": "contract_sparse", "host": "edge"}]
+        })
+    );
+    assert_eq!(
+        get_json(&app, "/prometheus/api/v1/series").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get_json(&app, "/api/v1/series?match%5B%5D=%7Bbad%3D~%22%5B%22%7D")
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get_json(&app, "/api/v1/query?query=contract_vm").await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.api_read_errors, 0);
+    assert_eq!(stats.api_latest_requests, 2);
+    assert_eq!(stats.api_export_requests, 2);
+    assert_eq!(stats.api_range_requests, 2);
+    assert_eq!(stats.api_discovery_requests, 6);
+    assert_eq!(stats.api_read_requests, 12);
+    assert!(stats.api_read_total_ns > 0);
+    assert!(stats.api_read_frame_bytes > 0);
+    assert!(stats.api_read_response_bytes > 0);
+    assert!(stats.api_read_result_series > 0);
+    assert!(stats.api_read_result_points > 0);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        get_json(
+            &reopened_app,
+            "/api/v1/query?metric=contract_vm&host=edge&env=test"
+        )
+        .await
+        .1,
+        latest.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()
@@ -294,6 +510,37 @@ async fn post_body(app: &axum::Router, path: &str, body: &[u8]) -> (StatusCode, 
         .await
         .unwrap();
     (status, body.to_vec())
+}
+
+async fn get_body(app: &axum::Router, path: &str) -> (StatusCode, Vec<u8>) {
+    let response = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, body.to_vec())
+}
+
+async fn post_form(app: &axum::Router, path: &str, body: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
 }
 
 fn assert_no_content(response: (StatusCode, Vec<u8>)) {

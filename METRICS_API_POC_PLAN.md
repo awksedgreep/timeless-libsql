@@ -1,6 +1,6 @@
 # Rust metrics API POC plan
 
-Status: Sessions 0-2 complete; Session 3 ready on
+Status: Sessions 0-3 complete; Session 4 ready on
 `poc/rust-telemetry-data-plane` (2026-08-01)
 
 This POC tests the process boundary, not a new metrics storage engine. The
@@ -216,18 +216,47 @@ SQLite/libSQL users. See
 
 ## Session 3 — Mechanical reads and discovery
 
-- [ ] Implement native exact latest, range/export, label names/values, and
+- [x] Implement native exact latest, range/export, label names/values, and
       series routes from `timeless_latest[_frame]`, `timeless_raw_frame`,
       `timeless_series`, and `timeless_label_values`.
-- [ ] Decode packed frames directly into final response serializers; do not
+- [x] Decode packed frames directly into final response serializers; do not
       recreate Rust -> SQLite rows -> host objects -> JSON expansion.
-- [ ] Preserve matcher, timestamp, ordering, empty-result, NaN, and response
+- [x] Preserve matcher, timestamp, ordering, empty-result, NaN, and response
       envelope semantics against Session 0 fixtures.
-- [ ] Keep row-TVF fallbacks where feature discovery says an older extension
+- [x] Keep row-TVF fallbacks where feature discovery says an older extension
       lacks a frame; never infer capability from a version string.
 
 Exit criterion: exact route parity with bounded memory, and direct extension
 users retain every accelerated primitive used by the server.
+
+Result: complete. The Rust reader pool now serves native latest, inclusive raw
+export, native-window/common aggregation with raw-frame fallback for partial
+and first/last/rate shapes, label names/values, native series, and repeated
+Prometheus selector discovery. It probes `pragma_module_list` for packed
+capabilities and retains row-TVF latest/raw fallbacks. `TLF1`, `TRF1`, and
+`TWB1` envelopes are validated; raw/window columns remain borrowed views over
+one SQLite blob while the reader writes the final JSON body, avoiding duplicate
+point vectors.
+
+The extension-backed fixture pins GET/POST merging, exact and multi-series
+envelopes, inclusive bounds, empty export, native and partial range paths,
+metric/regex/duplicate/missing-label matcher behavior, malformed selectors,
+explicit PromQL deferral, read telemetry, and exact reopen results. A fixed
+400,000-point comparison returned identical response byte counts for all seven
+mechanical shapes. Rust p95 was 1.8-3.0x slower for exact latest/range/export
+but remained 0.56-0.75ms; it was 6.7x faster for label names, 4.9x faster for
+metric series, and modestly faster for label values/exact selector discovery.
+Same-lifecycle HWM was 56,948KiB versus 244,796KiB for Elixir+libSQL.
+
+Under the deterministic 4,000-series mixed workload, Rust completed 866.6K
+points/s with 10.08ms query p95 and 180,716KiB HWM. Two Elixir+libSQL controls
+completed 604.8-782.5K points/s with 70.26-93.71ms p95 and 457,128-460,152KiB
+HWM; both logged the pre-existing label-cache miss race even though their
+measured client windows reported zero query errors. The Rust run had no
+read/write error, drained to zero, and reported 25.25MB of packed query frames
+for only 684.7KB of response bodies. Full method and discarded-harness notes
+are in
+`../timeless_metrics/bench/results/2026-08-01_metrics_api_session3.md`.
 
 ## Session 4 — First PromQL vertical slice
 

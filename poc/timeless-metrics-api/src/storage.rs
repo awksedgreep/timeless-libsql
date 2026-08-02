@@ -14,6 +14,8 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
+
 /// The same ladder currently created by `TimelessMetrics.LibsqlEngine`.
 pub const DEFAULT_ROLLUPS: &str = "3600s@2592000s,86400s@31536000s,2592000s@0";
 
@@ -82,6 +84,17 @@ pub struct StorageStats {
     pub api_stats_total_ns: u64,
     pub api_stats_sqlite_ns: u64,
     pub api_stats_retries: u64,
+    pub api_read_requests: u64,
+    pub api_latest_requests: u64,
+    pub api_export_requests: u64,
+    pub api_range_requests: u64,
+    pub api_discovery_requests: u64,
+    pub api_read_total_ns: u64,
+    pub api_read_errors: u64,
+    pub api_read_frame_bytes: u64,
+    pub api_read_response_bytes: u64,
+    pub api_read_result_series: u64,
+    pub api_read_result_points: u64,
     pub api_flush_count: u64,
     pub api_flush_total_ns: u64,
     pub api_flush_sqlite_ns: u64,
@@ -147,6 +160,17 @@ struct ApiProfile {
     stats_total_ns: u64,
     stats_sqlite_ns: u64,
     stats_retries: u64,
+    read_requests: u64,
+    latest_requests: u64,
+    export_requests: u64,
+    range_requests: u64,
+    discovery_requests: u64,
+    read_total_ns: u64,
+    read_errors: u64,
+    read_frame_bytes: u64,
+    read_response_bytes: u64,
+    read_result_series: u64,
+    read_result_points: u64,
     explicit_flush_count: u64,
     explicit_flush_total_ns: u64,
     explicit_flush_sqlite_ns: u64,
@@ -217,6 +241,10 @@ enum WriteCommand {
 
 enum ReadCommand {
     Stats(oneshot::Sender<Result<(StorageStats, u64, u64), String>>),
+    Query {
+        request: ReadRequest,
+        reply: oneshot::Sender<Result<ReadOutput, String>>,
+    },
     Shutdown,
 }
 
@@ -583,6 +611,53 @@ impl Storage {
         Ok(stats)
     }
 
+    pub(crate) async fn read(&self, request: ReadRequest) -> Result<ReadOutput, String> {
+        let started = Instant::now();
+        let kind = request.kind();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.reader()
+            .send(ReadCommand::Query {
+                request,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "SQLite reader is not running".to_string())?;
+        let result = reply_rx
+            .await
+            .map_err(|_| "SQLite reader stopped before query completed".to_string())?;
+        let mut profile = profile_lock(&self.0.profile);
+        profile.read_requests = profile.read_requests.saturating_add(1);
+        profile.read_total_ns = profile.read_total_ns.saturating_add(elapsed_ns(started));
+        match kind {
+            ReadKind::Latest => profile.latest_requests = profile.latest_requests.saturating_add(1),
+            ReadKind::Export => profile.export_requests = profile.export_requests.saturating_add(1),
+            ReadKind::Range => profile.range_requests = profile.range_requests.saturating_add(1),
+            ReadKind::Discovery => {
+                profile.discovery_requests = profile.discovery_requests.saturating_add(1)
+            }
+        }
+        match &result {
+            Ok(output) => {
+                profile.read_frame_bytes = profile
+                    .read_frame_bytes
+                    .saturating_add(output.frame_bytes as u64);
+                profile.read_response_bytes = profile
+                    .read_response_bytes
+                    .saturating_add(output.body.len() as u64);
+                profile.read_result_series =
+                    profile.read_result_series.saturating_add(output.series);
+                profile.read_result_points =
+                    profile.read_result_points.saturating_add(output.points);
+            }
+            Err(error) => {
+                profile.read_errors = profile.read_errors.saturating_add(1);
+                profile.last_error = Some(error.clone());
+            }
+        }
+        drop(profile);
+        result
+    }
+
     fn reader(&self) -> &mpsc::Sender<ReadCommand> {
         let number = self.0.next_reader.fetch_add(1, Ordering::Relaxed);
         &self.0.readers[number % self.0.readers.len()]
@@ -748,9 +823,16 @@ fn reader_main(
     ready: std_mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
     let conn = match open_connection(&database_path, &extension_path, false) {
-        Ok(conn) => {
+        Ok(conn) => conn,
+        Err(error) => {
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let features = match QueryFeatures::discover(&conn) {
+        Ok(features) => {
             let _ = ready.send(Ok(()));
-            conn
+            features
         }
         Err(error) => {
             let _ = ready.send(Err(error.clone()));
@@ -767,6 +849,10 @@ fn reader_main(
                     || retries = retries.saturating_add(1),
                 )
                 .map(|stats| (stats, elapsed_ns(started), retries));
+                let _ = reply.send(result);
+            }
+            ReadCommand::Query { request, reply } => {
+                let result = retry_read(|| query::execute(&conn, features, request.clone()), || {});
                 let _ = reply.send(result);
             }
             ReadCommand::Shutdown => return Ok(()),
@@ -1046,6 +1132,17 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.api_stats_total_ns = profile.stats_total_ns;
     stats.api_stats_sqlite_ns = profile.stats_sqlite_ns;
     stats.api_stats_retries = profile.stats_retries;
+    stats.api_read_requests = profile.read_requests;
+    stats.api_latest_requests = profile.latest_requests;
+    stats.api_export_requests = profile.export_requests;
+    stats.api_range_requests = profile.range_requests;
+    stats.api_discovery_requests = profile.discovery_requests;
+    stats.api_read_total_ns = profile.read_total_ns;
+    stats.api_read_errors = profile.read_errors;
+    stats.api_read_frame_bytes = profile.read_frame_bytes;
+    stats.api_read_response_bytes = profile.read_response_bytes;
+    stats.api_read_result_series = profile.read_result_series;
+    stats.api_read_result_points = profile.read_result_points;
     stats.api_flush_count = profile.explicit_flush_count;
     stats.api_flush_total_ns = profile.explicit_flush_total_ns;
     stats.api_flush_sqlite_ns = profile.explicit_flush_sqlite_ns;

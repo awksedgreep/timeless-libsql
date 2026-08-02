@@ -6,15 +6,23 @@ the existing `timeless_metrics` extension continues to own series identity,
 the 4,096-point per-series buffer threshold, compression, chunks, rollups, and
 retention commands.
 
-## Session 2 surface
+## Session 3 surface
 
 - `GET /health`
 - `GET /select/metrics/stats`
 - `POST /api/v1/flush`
 - `POST /api/v1/import/prometheus`
 - `POST /api/v1/import`
+- `GET|POST /api/v1/query` (native `metric=` exact latest)
+- `GET /api/v1/export` (VictoriaMetrics JSON-line raw export)
+- `GET|POST /api/v1/query_range` (native exact range aggregation)
+- `GET /api/v1/labels`
+- `GET /api/v1/label/{name}/values`
+- `GET /api/v1/series`
+- Prometheus aliases for label/series discovery
 
-There is deliberately no query, auth, cluster, or product route yet. The
+PromQL remains deliberately explicit and unsupported until Session 4; there
+is still no auth, cluster, or product route. The
 Prometheus route keeps the request as a reference-counted body and passes the
 complete exposition through the extension's public ingest surface; Rust does
 not parse or copy it at the API boundary. The VictoriaMetrics route parses the
@@ -36,6 +44,23 @@ places an ordered `flush` behind all admitted writes.
 `POST /api/v1/flush` reports the admitted batch and point watermark covered by
 the command together with completed, failed, queued, and in-flight work. It is
 a real completion/durability barrier, not queue admission.
+
+Mechanical reads execute on the existing SQLite reader pool. The API discovers
+`timeless_latest_frame`, `timeless_raw_frame`, and
+`timeless_window_batches` through `pragma_module_list`; it never infers a
+capability from an extension version. Older extensions retain row-oriented
+`timeless_latest` and `timeless_raw` fallbacks. Current `TLF1`, `TRF1`, and
+`TWB1` results are length/bitmap/version validated. Raw and window response
+encoders borrow column offsets from the one returned blob and write final JSON
+directly rather than allocating a second timestamp/value object graph.
+
+Native range uses packed extension windows for complete avg/sum/min/max/count
+shapes. Partial grids plus first/last/rate use the packed raw frame and the
+established host aggregation semantics. Prometheus discovery accepts repeated
+`match[]`/`match` selectors as a union, preserves duplicate matcher AND
+semantics, fully anchors regexes, and treats a missing label as the empty
+string. Native exact routes keep their Session 0 response envelopes and
+inclusive timestamp bounds.
 
 ## Run
 
@@ -84,6 +109,9 @@ Stats separate units instead of conflating them:
   by the API counters; Prometheus parse/point/error counters and time are owned
   by `timeless_stats('metrics')`; its timer covers fused parse, resolve, and
   buffer work, so direct SQLite/libSQL users receive the same observability.
+- mechanical read request counts by shape, total socket-to-result time, errors,
+  packed frame bytes, response bytes, returned series, and returned points are
+  cumulative and do not require `timeless_stats` work on the query hot path.
 
 ## Validation
 
@@ -108,6 +136,12 @@ valid points across two series, report eight rejected inputs, drain to zero
 through the ordered flush, and recover exactly after reopen. It also proves the
 10 MiB rejection occurs before admission and pins body-byte, API, and extension
 phase counters.
+
+The Session 3 contract adds exact latest/export/range bodies, a forced
+partial-grid raw fallback, native/discovery response ordering, repeated and
+malformed selectors, missing-label equality/inequality behavior, explicit
+PromQL rejection, read accounting, and exact latest after shutdown/reopen.
+All three extension-backed session contracts pass together.
 
 That test exposed and fixed an existing extension gap: the engine queued a
 series at 4,096 points but the metrics virtual table never drained its pending
@@ -145,6 +179,31 @@ retaining exact completion and error accounting.
 
 Full method and phase attribution are in
 `../../../timeless_metrics/bench/results/2026-08-01_metrics_api_session2.md`.
+
+## Session 3 mechanical read result
+
+The fixed comparison used separate fresh processes seeded with the same 4,000
+series and exactly 400,000 points. Every shape returned the same response byte
+count from Elixir+libSQL and Rust+libSQL.
+
+| shape | Elixir p95 | Rust p95 | result |
+|---|---:|---:|---:|
+| exact latest | 272us | 651us | Rust 2.39x slower |
+| exact 15s range | 310us | 561us | Rust 1.81x slower |
+| exact raw export | 248us | 752us | Rust 3.03x slower |
+| all label names | 70.35ms | 10.54ms | Rust 6.68x faster |
+| metric label values | 722us | 672us | Rust 1.07x faster |
+| metric series | 5.15ms | 1.06ms | Rust 4.88x faster |
+| exact selector series | 1.08ms | 957us | Rust 1.13x faster |
+
+Same-lifecycle HWM was 56,948KiB for Rust and 244,796KiB for the Elixir
+control. In the larger mixed run, Rust completed 866.6K points/s with 10.08ms
+query p95 and 180,716KiB HWM; two Elixir controls completed 604.8-782.5K with
+70.26-93.71ms query p95 and 457,128-460,152KiB HWM. Exact data reads retain a
+small sub-millisecond Rust HTTP/serializer tax, while discovery, mixed tails,
+and memory improve substantially. See
+`../../../timeless_metrics/bench/results/2026-08-01_metrics_api_session3.md`
+for the method, control cache-race observation, and discarded setup runs.
 
 ## Session 1 shell smoke result
 
