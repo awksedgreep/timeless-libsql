@@ -1,6 +1,6 @@
 # Rust metrics API POC plan
 
-Status: Session 0 complete; Session 1 ready on
+Status: Sessions 0-1 complete; Session 2 ready on
 `poc/rust-telemetry-data-plane` (2026-08-01)
 
 This POC tests the process boundary, not a new metrics storage engine. The
@@ -148,20 +148,30 @@ prevent asynchronous `204` admission from being reported as stored work.
 
 ## Session 1 — Descriptive server shell and storage contract
 
-- [ ] Create `poc/timeless-metrics-api` as a separate Rust workspace/binary,
+- [x] Create `poc/timeless-metrics-api` as a separate Rust workspace/binary,
       reusing proven logs POC worker patterns without copying logs semantics.
-- [ ] Start one writer and a configurable reader pool over one database; load
+- [x] Start one writer and a configurable reader pool over one database; load
       the existing extension and use the current metrics table/schema.
-- [ ] Implement only `GET /health`, `GET /select/metrics/stats`, and an explicit
+- [x] Implement only `GET /health`, `GET /select/metrics/stats`, and an explicit
       ordered flush barrier.
-- [ ] Expose admitted/completed/queued counters, API phase timers, extension
+- [x] Expose admitted/completed/queued counters, API phase timers, extension
       stats, database file/freelist bytes, and actual index units.
-- [ ] Pin shutdown, restart, invalid configuration, and sole-database-owner
+- [x] Pin shutdown, restart, invalid configuration, and sole-database-owner
       behavior. No auth or product routes.
 
 Exit criterion: an extension-backed test proves buffered points, the exact
 4,096-per-series automatic flush contract, explicit flush, restart recovery,
 and no host storage implementation.
+
+Result: complete. The test uncovered one extension bug: metrics queued a
+partition at 4,096 points but no vtab ingest surface drained the pending queue.
+The fix calls the existing engine operation after Tier 1, named/resolved batch,
+and Prometheus ingest, preserving a no-store-write fast path below threshold
+and benefiting every direct SQLite/libSQL user. The API test proves 4,095
+buffered -> one chunk at 4,096 -> explicit tail flush -> 4,106 points after
+reopen, ordered completion counters, and advisory sole ownership. See
+`poc/timeless-metrics-api/README.md` and
+`../timeless_metrics/bench/results/2026-08-01_metrics_api_session1.md`.
 
 ## Session 2 — Native batched ingest
 

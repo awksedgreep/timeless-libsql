@@ -88,6 +88,41 @@ db.executescript(
     """
 )
 
+# Metrics used to mark a partition as flushable at 4,096 points without ever
+# draining the engine's pending queue. Pin the public threshold itself: 4,095
+# remains queryable in memory, and the next point creates exactly one durable
+# raw chunk without any host-issued `flush` command.
+db.execute("CREATE VIRTUAL TABLE metrics_threshold USING timeless_metrics")
+db.execute(
+    """
+    WITH RECURSIVE seq(n) AS (
+      VALUES(1) UNION ALL SELECT n + 1 FROM seq WHERE n < 4095
+    )
+    INSERT INTO metrics_threshold(name, ts, value)
+    SELECT 'threshold_metric', 100000 + n, n FROM seq
+    """
+)
+
+
+def metric_stat(key):
+    return db.execute(
+        "SELECT CAST(value AS INTEGER) FROM timeless_stats('metrics_threshold') "
+        "WHERE key = ?",
+        (key,),
+    ).fetchone()[0]
+
+
+assert metric_stat("buffered_points") == 4095
+assert metric_stat("disk_points") == 0
+assert scalar(db, "SELECT COUNT(*) FROM metrics_threshold_chunks") == 0
+db.execute(
+    "INSERT INTO metrics_threshold(name, ts, value) "
+    "VALUES ('threshold_metric', 104096, 4096)"
+)
+assert metric_stat("buffered_points") == 0
+assert metric_stat("disk_points") == 4096
+assert scalar(db, "SELECT COUNT(*) FROM metrics_threshold_chunks") == 1
+
 # A statement that fails after its first xUpdate must roll back that first
 # in-memory mutation while leaving the explicit outer transaction usable.
 statement_cases = [

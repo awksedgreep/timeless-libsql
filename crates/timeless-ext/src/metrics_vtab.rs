@@ -434,10 +434,11 @@ impl MetricsTab {
     /// single point is written. A malformed batch is a hard error and
     /// stores nothing.
     ///
-    /// Deliberately does NOT flush: same durability contract as Tier 1
-    /// (the caller sends 'flush' when it wants chunks on disk). Returns
-    /// the point count as the synthetic rowid so callers can sanity-check
-    /// via last_insert_rowid().
+    /// Series below the 4,096-point threshold remain buffered with the Tier 1
+    /// durability contract. Series reaching it are drained through the
+    /// engine's existing pending-flush path before the statement commits.
+    /// Returns the point count as the synthetic rowid so callers can
+    /// sanity-check via last_insert_rowid().
     fn ingest_batch(&mut self, blob: &[u8]) -> Result<i64> {
         // ── 1. Header (12 bytes, all little-endian) ──────────────────
         let mut r = BatchReader::new(blob);
@@ -547,6 +548,7 @@ impl MetricsTab {
             .engine
             .write_batch_raw(&raw)
             .map_err(module_err)?;
+        self.shared.engine.flush_pending().map_err(module_err)?;
 
         Ok(n_points as i64)
     }
@@ -613,6 +615,7 @@ impl MetricsTab {
             .engine
             .write_batch_raw(&raw)
             .map_err(module_err)?;
+        self.shared.engine.flush_pending().map_err(module_err)?;
         Ok(n_points as i64)
     }
 
@@ -636,9 +639,10 @@ impl MetricsTab {
     /// Prometheus server treats a scrape. Only "zero samples AND at
     /// least one error" is rejected: that body was not exposition text.
     ///
-    /// Like the batch path, this deliberately does NOT flush (same
-    /// durability contract as Tier 1) and returns the sample count as
-    /// the synthetic rowid, visible via last_insert_rowid().
+    /// Like the batch path, this flushes only series which reach the engine's
+    /// 4,096-point threshold; smaller buffers retain the Tier 1 durability
+    /// contract. Returns the sample count as the synthetic rowid, visible via
+    /// last_insert_rowid().
     fn ingest_prometheus_text(&self, body: &[u8]) -> Result<i64> {
         // Wall clock in EPOCH SECONDS (the unit decision above). A
         // pre-1970 system clock would make duration_since fail; falling
@@ -660,6 +664,7 @@ impl MetricsTab {
                 "prometheus body: 0 samples ingested, {errors} malformed line(s)"
             )));
         }
+        self.shared.engine.flush_pending().map_err(module_err)?;
         Ok(count as i64)
     }
 }
@@ -919,6 +924,7 @@ impl UpdateVTab<'_> for MetricsTab {
             }
         };
         self.shared.engine.write_point(sid, ts, value);
+        self.shared.engine.flush_pending().map_err(module_err)?;
 
         // Vtab rowids here are SYNTHETIC: points live in partition
         // buffers/chunks, not addressable rows, so we just hand SQLite a

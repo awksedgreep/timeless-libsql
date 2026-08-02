@@ -1672,7 +1672,9 @@ impl Engine {
 
     pub fn flush_pending(&self) -> EngineResult<usize> {
         let count = self.flush_pending_inner()?;
-        self.apply_retention()?;
+        if count > 0 {
+            self.apply_retention()?;
+        }
         Ok(count)
     }
 
@@ -1682,6 +1684,13 @@ impl Engine {
             let mut queue = self.flush_queue_lock();
             std::mem::take(&mut *queue)
         };
+        // The virtual-table ingest paths call this after every statement so
+        // the advertised threshold is self-driving for direct SQLite users.
+        // Keep the overwhelmingly common below-threshold path free of store
+        // writes (especially the legacy registry snapshot).
+        if keys.is_empty() {
+            return Ok(0);
+        }
         let mut count = 0;
         for key in keys {
             if let Some((timestamps, values)) =
