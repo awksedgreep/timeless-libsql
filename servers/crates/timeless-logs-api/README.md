@@ -55,10 +55,16 @@ TIMELESS_AUTH_MODE=disabled servers/target/release/timeless-logs-api \
 release omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
 `TIMELESS_TENANT` through the Phoenix supervisor.
 
-`TIMELESS_LOGS_READER_CONNECTIONS` selects the positive SQLite reader-pool
-size. The measured default is two: one reader materially increased query tail
+The positive release controls are:
+
+- `TIMELESS_LOGS_READER_CONNECTIONS` (default `2`)
+- `TIMELESS_LOGS_COMMAND_QUEUE_BATCHES` (default `256`)
+- `TIMELESS_LOGS_FLUSH_INTERVAL_SECS` (default `1`)
+- `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` (default `30`)
+
+The measured reader default is two: one reader materially increased query tail
 latency, while four and eight added memory without a useful throughput or tail
-latency return. This is a deployment control only; it does not change query or
+latency return. These are deployment controls only; they do not change query or
 storage semantics.
 
 The API uses one SQLite writer and a small pool of SQLite readers. Retryable

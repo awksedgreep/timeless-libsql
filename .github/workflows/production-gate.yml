@@ -1,0 +1,58 @@
+name: Production data-plane gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["release/rust-telemetry-data-plane"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-data-plane-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  short-fault-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TIMELESS_EXT_PATH: ${{ github.workspace }}/target/release/libtimeless_ext.so
+      TIMELESS_EXT_TEST_PATH: ${{ github.workspace }}/target/release/libtimeless_ext.so
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            servers -> servers/target
+      - name: Build the real extension and release servers
+        env:
+          TIMELESS_BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          cargo build --workspace --release --locked
+          cargo build --manifest-path servers/Cargo.toml --workspace --release --locked
+      - name: Unit, contract, and lint gates
+        run: |
+          cargo test --workspace --locked
+          cargo test --manifest-path servers/Cargo.toml --workspace --all-targets --locked
+          cargo clippy --manifest-path servers/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Exact real-extension storage contracts
+        run: |
+          cargo test --manifest-path servers/Cargo.toml -p timeless-metrics-api --test storage_contract -- --ignored
+          cargo test --manifest-path servers/Cargo.toml -p timeless-logs-api --test api_e2e -- --ignored
+      - name: Two-minute mixed fault gate
+        run: >-
+          python3 tools/production_gate.py
+          --mode short
+          --duration-seconds 120
+          --output production-gate-short.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-gate-short-${{ github.sha }}
+          path: production-gate-short.json
+          if-no-files-found: error

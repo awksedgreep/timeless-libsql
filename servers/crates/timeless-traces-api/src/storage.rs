@@ -185,6 +185,9 @@ pub struct StorageStats {
     pub checkpoint_count: u64,
     pub checkpoint_total_ns: u64,
     pub checkpoint_errors: u64,
+    pub backup_count: u64,
+    pub backup_total_ns: u64,
+    pub backup_errors: u64,
     pub last_error: Option<String>,
 }
 
@@ -287,6 +290,9 @@ struct ApiProfile {
     checkpoint_count: u64,
     checkpoint_total_ns: u64,
     checkpoint_errors: u64,
+    backup_count: u64,
+    backup_total_ns: u64,
+    backup_errors: u64,
     last_error: Option<String>,
 }
 
@@ -992,6 +998,7 @@ fn writer_main(
                 let _ = reply.send(result);
             }
             WriteCommand::Backup { destination, reply } => {
+                let started = Instant::now();
                 let result = (|| {
                     if let Some(error) = unreported_error.take() {
                         return Err(format!(
@@ -1000,9 +1007,13 @@ fn writer_main(
                     }
                     run_command(&conn, "flush", "flush traces for backup")?;
                     optimize_all_backlog(&conn)?;
-                    let checkpoint = checkpoint_wal(&conn, "traces")?;
+                    let checkpoint_started = Instant::now();
+                    let checkpoint = checkpoint_wal(&conn, "traces");
+                    record_checkpoint(&profile, checkpoint_started.elapsed(), &checkpoint);
+                    let checkpoint = checkpoint?;
                     create_verified_backup(&conn, &destination, "traces", checkpoint)
                 })();
+                record_backup(&profile, started.elapsed(), &result);
                 let _ = reply.send(result);
             }
             WriteCommand::Shutdown(reply) => {
@@ -1011,17 +1022,7 @@ fn writer_main(
                 // Attempt the checkpoint even when flush reports an error so
                 // shutdown telemetry preserves both independent operations.
                 let checkpoint = checkpoint_wal(&conn, "traces").map(|_| ());
-                {
-                    let mut api = profile_lock(&profile);
-                    api.checkpoint_count = api.checkpoint_count.saturating_add(1);
-                    api.checkpoint_total_ns = api
-                        .checkpoint_total_ns
-                        .saturating_add(elapsed_ns(checkpoint_started));
-                    if let Err(error) = &checkpoint {
-                        api.checkpoint_errors = api.checkpoint_errors.saturating_add(1);
-                        api.last_error = Some(error.clone());
-                    }
-                }
+                record_checkpoint(&profile, checkpoint_started.elapsed(), &checkpoint);
                 let result = match (unreported_error.take(), flush, checkpoint) {
                     (Some(error), _, _) => Err(error),
                     (None, Err(error), _) => Err(error),
@@ -1551,7 +1552,42 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.checkpoint_count = profile.checkpoint_count;
     stats.checkpoint_total_ns = profile.checkpoint_total_ns;
     stats.checkpoint_errors = profile.checkpoint_errors;
+    stats.backup_count = profile.backup_count;
+    stats.backup_total_ns = profile.backup_total_ns;
+    stats.backup_errors = profile.backup_errors;
     stats.last_error.clone_from(&profile.last_error);
+}
+
+fn record_checkpoint<T>(
+    profile: &StdMutex<ApiProfile>,
+    duration: Duration,
+    result: &Result<T, String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.checkpoint_count = profile.checkpoint_count.saturating_add(1);
+    profile.checkpoint_total_ns = profile
+        .checkpoint_total_ns
+        .saturating_add(duration_ns(duration));
+    if let Err(error) = result {
+        profile.checkpoint_errors = profile.checkpoint_errors.saturating_add(1);
+        profile.last_error = Some(error.clone());
+    }
+}
+
+fn record_backup(
+    profile: &StdMutex<ApiProfile>,
+    duration: Duration,
+    result: &Result<BackupReport, String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.backup_count = profile.backup_count.saturating_add(1);
+    profile.backup_total_ns = profile
+        .backup_total_ns
+        .saturating_add(duration_ns(duration));
+    if let Err(error) = result {
+        profile.backup_errors = profile.backup_errors.saturating_add(1);
+        profile.last_error = Some(error.clone());
+    }
 }
 
 fn flush_report(

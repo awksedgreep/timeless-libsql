@@ -62,13 +62,23 @@ pub struct QueryRow {
     pub metadata_json: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct StorageStats {
     pub total_blocks: i64,
     pub total_entries: i64,
     pub total_bytes: i64,
     pub disk_size: i64,
     pub index_size: i64,
+    pub database_file_bytes: u64,
+    pub database_wal_bytes: u64,
+    pub database_shm_bytes: u64,
+    pub physical_database_bytes: u64,
+    pub sqlite_page_bytes: i64,
+    pub freelist_pages: i64,
+    pub freelist_bytes: i64,
+    pub writer_connections: usize,
+    pub reader_connections: usize,
+    pub command_queue_capacity_batches: usize,
     pub term_postings: i64,
     pub oldest_timestamp: Option<i64>,
     pub newest_timestamp: Option<i64>,
@@ -161,6 +171,13 @@ pub struct StorageStats {
     pub writer_wait_count: i64,
     pub writer_wait_ns: i64,
     pub writer_timeouts: i64,
+    pub checkpoint_count: i64,
+    pub checkpoint_total_ns: i64,
+    pub checkpoint_errors: i64,
+    pub backup_count: i64,
+    pub backup_total_ns: i64,
+    pub backup_errors: i64,
+    pub last_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -177,6 +194,13 @@ struct QueueProfile {
     queue_wait_max_ns: u64,
     query_count: u64,
     query_ns: u64,
+    checkpoint_count: u64,
+    checkpoint_total_ns: u64,
+    checkpoint_errors: u64,
+    backup_count: u64,
+    backup_total_ns: u64,
+    backup_errors: u64,
+    last_error: Option<String>,
 }
 
 enum WriteCommand {
@@ -220,6 +244,8 @@ struct StorageInner {
     lease: StdMutex<Option<File>>,
     shutting_down: AtomicBool,
     timestamp_unit: TimestampUnit,
+    database_path: PathBuf,
+    queue_capacity: usize,
 }
 
 #[derive(Clone)]
@@ -317,6 +343,8 @@ impl Storage {
             lease: StdMutex::new(Some(lease)),
             shutting_down: AtomicBool::new(false),
             timestamp_unit,
+            database_path,
+            queue_capacity: queue_batches,
         })))
     }
 
@@ -484,6 +512,21 @@ impl Storage {
         stats.api_queue_wait_max_ns = profile.queue_wait_max_ns as i64;
         stats.api_query_count = profile.query_count as i64;
         stats.api_query_ns = profile.query_ns as i64;
+        stats.checkpoint_count = profile.checkpoint_count as i64;
+        stats.checkpoint_total_ns = profile.checkpoint_total_ns as i64;
+        stats.checkpoint_errors = profile.checkpoint_errors as i64;
+        stats.backup_count = profile.backup_count as i64;
+        stats.backup_total_ns = profile.backup_total_ns as i64;
+        stats.backup_errors = profile.backup_errors as i64;
+        stats.last_error.clone_from(&profile.last_error);
+        stats.writer_connections = 1;
+        stats.reader_connections = self.0.readers.len();
+        stats.command_queue_capacity_batches = self.0.queue_capacity;
+        let (file, wal, shm) = database_file_sizes(&self.0.database_path);
+        stats.database_file_bytes = file;
+        stats.database_wal_bytes = wal;
+        stats.database_shm_bytes = shm;
+        stats.physical_database_bytes = file.saturating_add(wal).saturating_add(shm);
         Ok(stats)
     }
 
@@ -573,21 +616,32 @@ fn writer_main(
                 let _ = reply.send(());
             }
             WriteCommand::Backup { destination, reply } => {
+                let started = Instant::now();
                 let result = (|| {
                     conn.execute("INSERT INTO logs(logs) VALUES ('flush')", [])
                         .map_err(|error| format!("flush logs for backup: {error}"))?;
                     optimize_all_backlog(&conn)?;
-                    let checkpoint = checkpoint_wal(&conn, "logs")?;
+                    let checkpoint_started = Instant::now();
+                    let checkpoint = checkpoint_wal(&conn, "logs");
+                    record_checkpoint(&profile, checkpoint_started.elapsed(), &checkpoint);
+                    let checkpoint = checkpoint?;
                     create_verified_backup(&conn, &destination, "logs", checkpoint)
                 })();
+                record_backup(&profile, started.elapsed(), &result);
                 let _ = reply.send(result);
             }
             WriteCommand::Shutdown(reply) => {
-                let result = conn
+                let flush = conn
                     .execute("INSERT INTO logs(logs) VALUES ('flush')", [])
                     .map(|_| ())
-                    .map_err(|e| format!("graceful logs flush: {e}"))
-                    .and_then(|_| checkpoint_wal(&conn, "logs").map(|_| ()));
+                    .map_err(|e| format!("graceful logs flush: {e}"));
+                let checkpoint_started = Instant::now();
+                let checkpoint = checkpoint_wal(&conn, "logs").map(|_| ());
+                record_checkpoint(&profile, checkpoint_started.elapsed(), &checkpoint);
+                let result = match (flush, checkpoint) {
+                    (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+                    (Ok(()), Ok(())) => Ok(()),
+                };
                 let _ = reply.send(result.clone());
                 return result;
             }
@@ -1069,14 +1123,16 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
             },
         )
         .map_err(|e| format!("read block stats: {e}"))?;
-    let page_bytes: i64 = conn
+    let (page_count, page_size, freelist_pages): (i64, i64, i64) = conn
         .query_row(
-            "SELECT (SELECT page_count FROM pragma_page_count) *
-                    (SELECT page_size FROM pragma_page_size)",
+            "SELECT (SELECT page_count FROM pragma_page_count),
+                    (SELECT page_size FROM pragma_page_size),
+                    (SELECT freelist_count FROM pragma_freelist_count)",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| format!("read database size: {e}"))?;
+    let page_bytes = page_count.saturating_mul(page_size);
     let index_bytes: i64 = conn
         .query_row(
             "SELECT COALESCE(SUM(pgsize), 0)
@@ -1100,6 +1156,16 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         total_bytes: bytes,
         disk_size: page_bytes,
         index_size: index_bytes,
+        database_file_bytes: 0,
+        database_wal_bytes: 0,
+        database_shm_bytes: 0,
+        physical_database_bytes: 0,
+        sqlite_page_bytes: page_bytes,
+        freelist_pages,
+        freelist_bytes: freelist_pages.saturating_mul(page_size),
+        writer_connections: 0,
+        reader_connections: 0,
+        command_queue_capacity_batches: 0,
         term_postings,
         oldest_timestamp: oldest,
         newest_timestamp: newest,
@@ -1192,7 +1258,66 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         writer_wait_count: stat("writer_wait_count"),
         writer_wait_ns: stat("writer_wait_ns"),
         writer_timeouts: stat("writer_timeouts"),
+        checkpoint_count: 0,
+        checkpoint_total_ns: 0,
+        checkpoint_errors: 0,
+        backup_count: 0,
+        backup_total_ns: 0,
+        backup_errors: 0,
+        last_error: None,
     })
+}
+
+fn record_checkpoint<T>(
+    profile: &StdMutex<QueueProfile>,
+    duration: Duration,
+    result: &Result<T, String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.checkpoint_count = profile.checkpoint_count.saturating_add(1);
+    profile.checkpoint_total_ns = profile
+        .checkpoint_total_ns
+        .saturating_add(duration_ns(duration));
+    if let Err(error) = result {
+        profile.checkpoint_errors = profile.checkpoint_errors.saturating_add(1);
+        profile.last_error = Some(error.clone());
+    }
+}
+
+fn record_backup(
+    profile: &StdMutex<QueueProfile>,
+    duration: Duration,
+    result: &Result<BackupReport, String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.backup_count = profile.backup_count.saturating_add(1);
+    profile.backup_total_ns = profile
+        .backup_total_ns
+        .saturating_add(duration_ns(duration));
+    if let Err(error) = result {
+        profile.backup_errors = profile.backup_errors.saturating_add(1);
+        profile.last_error = Some(error.clone());
+    }
+}
+
+fn database_file_sizes(database_path: &Path) -> (u64, u64, u64) {
+    (
+        file_size(database_path),
+        file_size(&suffix_path(database_path, "-wal")),
+        file_size(&suffix_path(database_path, "-shm")),
+    )
+}
+
+fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|value| value.len())
+        .unwrap_or(0)
 }
 
 fn stat_values(conn: &Connection) -> Result<HashMap<String, i64>, String> {

@@ -32,6 +32,27 @@ async fn release_backup_preserves_exact_logs_and_refuses_overwrite() {
         .unwrap_err()
         .contains("refusing to overwrite"));
     assert_eq!(std::fs::read(&backup).unwrap(), original);
+    let live_stats = storage.stats().await.unwrap();
+    assert_eq!(live_stats.backup_count, 2);
+    assert_eq!(live_stats.backup_errors, 1);
+    assert_eq!(live_stats.checkpoint_count, 2);
+    assert_eq!(live_stats.checkpoint_errors, 0);
+    assert!(live_stats.backup_total_ns > 0);
+    assert!(live_stats.checkpoint_total_ns > 0);
+    assert!(live_stats.database_file_bytes > 0);
+    assert_eq!(live_stats.writer_connections, 1);
+    assert_eq!(live_stats.reader_connections, 1);
+    assert_eq!(live_stats.command_queue_capacity_batches, 8);
+    assert_eq!(
+        live_stats.physical_database_bytes,
+        live_stats.database_file_bytes
+            + live_stats.database_wal_bytes
+            + live_stats.database_shm_bytes
+    );
+    assert!(live_stats.sqlite_page_bytes > 0);
+    assert!(live_stats.freelist_pages >= 0);
+    assert!(live_stats.freelist_bytes >= 0);
+    assert!(live_stats.freelist_bytes <= live_stats.sqlite_page_bytes);
 
     let restored = Storage::start(backup, extension.into(), 1, 8).unwrap();
     let stats = restored.stats().await.unwrap();

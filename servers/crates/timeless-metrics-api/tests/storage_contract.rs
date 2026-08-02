@@ -31,6 +31,13 @@ async fn release_backup_is_ordered_verified_no_clobber_and_cold_reopenable() {
     let error = storage.backup(backup.clone()).await.unwrap_err();
     assert!(error.contains("refusing to overwrite"), "{error}");
     assert_eq!(std::fs::read(&backup).unwrap(), unchanged_bytes);
+    let live_stats = storage.stats().await.unwrap();
+    assert_eq!(live_stats.backup_count, 2);
+    assert_eq!(live_stats.backup_errors, 1);
+    assert_eq!(live_stats.checkpoint_count, 2);
+    assert_eq!(live_stats.checkpoint_errors, 0);
+    assert!(live_stats.backup_total_ns > 0);
+    assert!(live_stats.checkpoint_total_ns > 0);
 
     let restored = Storage::start(backup, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
     let stats = restored.stats().await.unwrap();

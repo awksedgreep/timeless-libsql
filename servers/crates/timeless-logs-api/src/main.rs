@@ -51,19 +51,42 @@ async fn main() -> ExitCode {
         }
     };
 
-    let optimize_interval = match interval_from_env("TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS", 30) {
+    let defaults = Config::default();
+    let flush_interval = match interval_from_env(
+        "TIMELESS_LOGS_FLUSH_INTERVAL_SECS",
+        defaults.flush_interval.as_secs(),
+    ) {
         Ok(interval) => interval,
         Err(error) => {
             eprintln!("{error}");
             return ExitCode::from(2);
         }
     };
-    let default_config = Config::default();
+    let optimize_interval = match interval_from_env(
+        "TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS",
+        defaults.optimize_interval.as_secs(),
+    ) {
+        Ok(interval) => interval,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
     let reader_connections = match positive_usize_from_env(
         "TIMELESS_LOGS_READER_CONNECTIONS",
-        default_config.reader_connections,
+        defaults.reader_connections,
     ) {
         Ok(connections) => connections,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let command_queue_batches = match positive_usize_from_env(
+        "TIMELESS_LOGS_COMMAND_QUEUE_BATCHES",
+        defaults.command_queue_batches,
+    ) {
+        Ok(batches) => batches,
         Err(error) => {
             eprintln!("{error}");
             return ExitCode::from(2);
@@ -74,9 +97,11 @@ async fn main() -> ExitCode {
         database_path: PathBuf::from(database_path),
         listen,
         reader_connections,
+        command_queue_batches,
+        flush_interval,
         optimize_interval,
         auth,
-        ..default_config
+        ..defaults
     };
     match run(config).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -125,7 +150,8 @@ fn interval_from_env(name: &str, default_seconds: u64) -> Result<Duration, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::parse_positive_usize;
+    use super::{interval_from_env, parse_positive_usize};
+    use std::time::Duration;
 
     #[test]
     fn reader_override_requires_a_positive_integer() {
@@ -137,5 +163,20 @@ mod tests {
         assert!(parse_positive_usize("READERS", "many")
             .unwrap_err()
             .starts_with("invalid READERS=\"many\":"));
+    }
+
+    #[test]
+    fn zero_maintenance_interval_is_rejected() {
+        const NAME: &str = "TIMELESS_LOGS_TEST_INTERVAL_SECS";
+        std::env::set_var(NAME, "0");
+        assert_eq!(
+            interval_from_env(NAME, 30).unwrap_err(),
+            format!("{NAME} must be positive")
+        );
+        std::env::remove_var(NAME);
+        assert_eq!(
+            interval_from_env(NAME, 30).unwrap(),
+            Duration::from_secs(30)
+        );
     }
 }

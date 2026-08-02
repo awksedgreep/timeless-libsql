@@ -40,6 +40,13 @@ async fn release_backup_preserves_rich_spans_and_is_no_clobber() {
         .unwrap_err()
         .contains("refusing to overwrite"));
     assert_eq!(std::fs::read(&backup).unwrap(), original);
+    let live_stats = storage.stats().await.unwrap();
+    assert_eq!(live_stats.backup_count, 2);
+    assert_eq!(live_stats.backup_errors, 1);
+    assert_eq!(live_stats.checkpoint_count, 2);
+    assert_eq!(live_stats.checkpoint_errors, 0);
+    assert!(live_stats.backup_total_ns > 0);
+    assert!(live_stats.checkpoint_total_ns > 0);
 
     assert_fixture_persisted(&backup, &extension);
     let restored = Storage::start(backup, extension, 1, 8, Some(DEFAULT_RETENTION)).unwrap();
