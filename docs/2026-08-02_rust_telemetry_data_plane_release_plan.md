@@ -1,7 +1,7 @@
 # Rust telemetry data-plane release-promotion plan
 
 Date: 2026-08-02  
-Status: Sessions 0–1 complete; implementation sessions 2–8 pending
+Status: Sessions 0–3 complete; implementation sessions 4–8 pending
 Branch: `release/rust-telemetry-data-plane`
 
 This plan promotes the completed metrics, logs, and traces Rust API POCs into
@@ -405,6 +405,9 @@ preflight and injected disk-full fail closed; full signal oracles pass after
 optimize/checkpoint/cold reopen.
 
 ### Session 3 — automatic startup detection and atomic default cutover
+
+Status: complete. Evidence:
+[`2026-08-02_rust_telemetry_data_plane_session3.md`](2026-08-02_rust_telemetry_data_plane_session3.md).
 
 - Put the detector before every signal owner and implement all eight states.
 - Automatically start/resume migration for an unambiguous legacy source.
