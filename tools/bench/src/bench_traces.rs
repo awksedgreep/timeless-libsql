@@ -32,7 +32,7 @@
 //!   - durations log-normal-ish (exp of a sum of uniforms) with
 //!     per-kind scale: servers ~50ms, clients ~10ms, internal ~1ms
 //!   - attributes: {http.method, http.status} on every span, status
-//!     correlated with error-ness — canonical sorted flat JSON, same
+//!     correlated with error-ness — canonical JSON, same
 //!     bytes both stores
 //!
 //! Correctness gates (assert, not report): all query COUNTs match the
@@ -54,8 +54,8 @@ use rusqlite::{params, Connection};
 // benchmark ingests. Aliased to keep the body diff-minimal against the
 // recorded Session 6 runs.
 use datasets::{
-    generate_traces as generate, SpanRecord as Span, N_TRACES, SERVICES,
-    TRACE_BASE_TS as BASE_TS, TRACE_NAMES as NAMES, TRACE_STEP_NS,
+    generate_traces as generate, SpanRecord as Span, N_TRACES, SERVICES, TRACE_BASE_TS as BASE_TS,
+    TRACE_NAMES as NAMES, TRACE_STEP_NS,
 };
 
 // ---------------------------------------------------------------------------
@@ -76,7 +76,8 @@ fn open_with_ext(path: &str, ext: &str) -> Connection {
     let conn = Connection::open(path).expect("open db");
     unsafe {
         conn.load_extension_enable().expect("enable ext loading");
-        conn.load_extension(ext, None::<&str>).expect("load extension");
+        conn.load_extension(ext, None::<&str>)
+            .expect("load extension");
     }
     conn.load_extension_disable().expect("disable ext loading");
     conn
@@ -216,9 +217,14 @@ fn bench_vtab(data: &[Span], path: &str, ext: &str) -> IngestResult {
 
 /// F5 Tier 2: spans as columnar batch blobs (traces blob v0, 50k spans
 /// per blob). Auto-flush included, same as Tier 1.
-fn encode_span_blob(data: &[Span]) -> Vec<u8> {
+fn put_text(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn encode_span_blob(data: &[Span], rich: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + data.len() * 80);
-    out.push(0x01);
+    out.push(if rich { 0x02 } else { 0x01 });
     out.push(0x00);
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -252,49 +258,152 @@ fn encode_span_blob(data: &[Span]) -> Vec<u8> {
         out.extend_from_slice(&e.duration_ns.to_le_bytes());
     }
     for e in data {
-        out.extend_from_slice(&(e.attributes.len() as u32).to_le_bytes());
-        out.extend_from_slice(e.attributes.as_bytes());
+        if rich {
+            let status: u16 = e.http_status.parse().unwrap();
+            put_text(
+                &mut out,
+                &format!(
+                    r#"{{"http.method":"{}","http.status":{},"sampled":true}}"#,
+                    e.http_method, status
+                ),
+            );
+        } else {
+            put_text(&mut out, &e.attributes);
+        }
+    }
+    if rich {
+        for e in data {
+            put_text(
+                &mut out,
+                if e.status == "error" {
+                    "benchmark request failed"
+                } else {
+                    ""
+                },
+            );
+        }
+        for e in data {
+            if e.status == "error" {
+                put_text(
+                    &mut out,
+                    &format!(
+                        r#"[{{"attributes":{{"escaped":false}},"name":"exception","timestamp":{}}}]"#,
+                        e.start_ts + 1
+                    ),
+                );
+            } else {
+                put_text(&mut out, "[]");
+            }
+        }
+        for e in data {
+            put_text(
+                &mut out,
+                &format!(
+                    r#"{{"deployment.environment":"production","service.name":"{}"}}"#,
+                    e.service
+                ),
+            );
+        }
+        for _ in data {
+            put_text(
+                &mut out,
+                r#"{"attributes":{"debug":false},"name":"bench-lib","version":"1.0"}"#,
+            );
+        }
     }
     out
 }
 
-fn bench_vtab_tier2(data: &[Span], path: &str, ext: &str) -> f64 {
+fn bench_vtab_tier2(data: &[Span], path: &str, ext: &str, rich: bool) -> IngestResult {
     scrub(path);
     let conn = open_with_ext(path, ext);
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .expect("set auto_vacuum");
     conn.execute_batch("CREATE VIRTUAL TABLE spans USING timeless_traces;")
         .expect("create traces vtab");
     const BLOB_SPANS: usize = 50_000;
-    let blobs: Vec<Vec<u8>> = data.chunks(BLOB_SPANS).map(encode_span_blob).collect();
-    let t0 = Instant::now();
     conn.execute_batch("BEGIN").unwrap();
+    let mut insert_secs = 0.0;
     {
         let mut stmt = conn
             .prepare("INSERT INTO spans(spans) VALUES (?1)")
             .expect("prepare tier2");
-        for blob in &blobs {
+        // Build one caller-owned blob at a time so the HWM reflects the
+        // extension plus one realistic request, not a benchmark-only
+        // Vec containing the entire 960k-span wire payload. Encoding is
+        // outside the timer, matching the established pre-encoded v0 run.
+        for chunk in data.chunks(BLOB_SPANS) {
+            let blob = encode_span_blob(chunk, rich);
+            let started = Instant::now();
             stmt.execute(params![blob]).expect("tier2 ingest");
+            insert_secs += started.elapsed().as_secs_f64();
         }
     }
+    let commit_started = Instant::now();
     conn.execute_batch("COMMIT").unwrap();
-    let insert_secs = t0.elapsed().as_secs_f64();
+    insert_secs += commit_started.elapsed().as_secs_f64();
+    let flush_started = Instant::now();
     conn.execute("INSERT INTO spans(spans) VALUES ('flush')", [])
         .expect("flush");
+    let flush_ms = flush_started.elapsed().as_secs_f64() * 1e3;
+    let optimize_started = Instant::now();
+    conn.execute("INSERT INTO spans(spans) VALUES ('optimize')", [])
+        .expect("optimize");
+    let optimize_ms = optimize_started.elapsed().as_secs_f64() * 1e3;
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA incremental_vacuum;")
+            .expect("prepare incremental_vacuum");
+        let mut rows = stmt.query([]).expect("run incremental_vacuum");
+        while rows.next().expect("step incremental_vacuum").is_some() {}
+    }
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM spans", [], |r| r.get(0))
         .expect("tier2 count");
     assert_eq!(n as usize, data.len(), "tier2 lost spans");
     let errs: i64 = conn
-        .query_row("SELECT COUNT(*) FROM spans WHERE status='error'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM spans WHERE status='error'", [], |r| {
+            r.get(0)
+        })
         .expect("tier2 status count");
     let expect = data.iter().filter(|e| e.status == "error").count() as i64;
-    assert_eq!(errs, expect, "tier2 status counts disagree with the dataset");
-    insert_secs
+    assert_eq!(
+        errs, expect,
+        "tier2 status counts disagree with the dataset"
+    );
+    if rich {
+        let typed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spans WHERE json_type(attributes, '$.\"http.status\"')='integer' \
+                 AND json_type(resource)='object' AND json_type(events)='array' \
+                 AND json_type(instrumentation_scope)='object'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rich JSON fidelity count");
+        assert_eq!(typed as usize, data.len(), "rich tier2 lost JSON types");
+    }
+    drop(conn);
+    IngestResult {
+        label: if rich {
+            "batch-v1 rich"
+        } else {
+            "batch-v0 core"
+        },
+        insert_secs,
+        flush_ms: Some(flush_ms),
+        optimize_ms: Some(optimize_ms),
+        file_bytes: db_bytes(path),
+    }
 }
 
 fn time_count(conn: &Connection, label: &str, sql: &str, params: &[&dyn rusqlite::ToSql]) -> i64 {
     let t = Instant::now();
     let n: i64 = conn.query_row(sql, params, |r| r.get(0)).expect(label);
-    println!("- {label}: {n} rows, {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "- {label}: {n} rows, {:.1} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
     n
 }
 
@@ -379,7 +488,12 @@ fn query_bench(data: &[Span], plain_path: &str, vtab_path: &str, ext: &str) {
     let plain = Connection::open(plain_path).expect("reopen plain");
     let (p_avg, p_rows) = trace_lookup_avg(&plain, &ids);
     println!("- trace_id point lookup: {p_avg:.3} ms avg over 100 traces ({p_rows} spans)");
-    let p1 = time_count(&plain, "status='error' count", "SELECT COUNT(*) FROM spans WHERE status='error'", &[]);
+    let p1 = time_count(
+        &plain,
+        "status='error' count",
+        "SELECT COUNT(*) FROM spans WHERE status='error'",
+        &[],
+    );
     let p2 = time_count(
         &plain,
         "service+range count",
@@ -390,11 +504,21 @@ fn query_bench(data: &[Span], plain_path: &str, vtab_path: &str, ext: &str) {
 
     println!("traces vtab:");
     let vtab = open_with_ext(vtab_path, ext);
-    let v0 = time_count(&vtab, "count(*) after reopen", "SELECT COUNT(*) FROM spans", &[]);
+    let v0 = time_count(
+        &vtab,
+        "count(*) after reopen",
+        "SELECT COUNT(*) FROM spans",
+        &[],
+    );
     assert_eq!(v0 as usize, n_spans, "vtab lost spans across reopen!");
     let (v_avg, v_rows) = trace_lookup_avg(&vtab, &ids);
     println!("- trace_id point lookup: {v_avg:.3} ms avg over 100 traces ({v_rows} spans)");
-    let v1 = time_count(&vtab, "status='error' count", "SELECT COUNT(*) FROM spans WHERE status='error'", &[]);
+    let v1 = time_count(
+        &vtab,
+        "status='error' count",
+        "SELECT COUNT(*) FROM spans WHERE status='error'",
+        &[],
+    );
     let v2 = time_count(
         &vtab,
         "service+range count (pushdown)",
@@ -463,7 +587,7 @@ fn query_bench(data: &[Span], plain_path: &str, vtab_path: &str, ext: &str) {
         assert_eq!(got.8, want.duration_ns, "span {i}: duration_ns");
         assert_eq!(got.9, want.attributes, "span {i}: attributes");
     }
-    println!("- correctness: 3 random spans bit-exact through the vtab (all 10 columns)");
+    println!("- correctness: 3 random core spans bit-exact through the vtab");
 
     // ── Full-trace span-set equality, plain vs vtab, one trace.
     let probe = ids[42];
@@ -503,17 +627,27 @@ fn main() {
         SERVICES.len(),
         NAMES.len()
     );
-    println!("- generated workload in {:.1} ms", tg.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "- generated workload in {:.1} ms",
+        tg.elapsed().as_secs_f64() * 1e3
+    );
 
     let plain = bench_plain(&data, "/tmp/tl_bench_traces_plain.db");
     println!("- plain baseline done ({:.2}s insert)", plain.insert_secs);
     let vtab = bench_vtab(&data, "/tmp/tl_bench_traces_vtab.db", &ext);
     println!("- vtab done ({:.2}s insert)", vtab.insert_secs);
-    let t2_secs = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2.db", &ext);
+    let t2_v0 = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2_v0.db", &ext, false);
+    let t2_v1 = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2_v1.db", &ext, true);
     println!(
-        "- vtab tier2 done ({t2_secs:.2}s ingest): {} (vs tier1 {}; count + status=error verified equal)",
-        fmt_rate(data.len(), t2_secs),
+        "- vtab tier2 v0 done ({:.2}s ingest): {} (vs tier1 {}; count + status=error verified equal)",
+        t2_v0.insert_secs,
+        fmt_rate(data.len(), t2_v0.insert_secs),
         fmt_rate(data.len(), vtab.insert_secs)
+    );
+    println!(
+        "- vtab tier2 v1 rich done ({:.2}s ingest): {} (typed JSON + count verified)",
+        t2_v1.insert_secs,
+        fmt_rate(data.len(), t2_v1.insert_secs),
     );
     println!();
 
@@ -529,6 +663,23 @@ fn main() {
             plain.file_bytes as f64 / r.file_bytes as f64,
         );
     }
+    println!("\n| direct batch | ingest rate | optimized bytes | bytes/span | size vs v0 |");
+    println!("|--------------|-------------|-----------------|------------|------------|");
+    for result in [&t2_v0, &t2_v1] {
+        println!(
+            "| {} | {} | {} | {:.2} | {:.3}x |",
+            result.label,
+            fmt_rate(data.len(), result.insert_secs),
+            fmt_bytes(result.file_bytes),
+            result.file_bytes as f64 / data.len() as f64,
+            result.file_bytes as f64 / t2_v0.file_bytes as f64,
+        );
+    }
+    println!(
+        "- rich fidelity storage cost: {:+.1}% ({:+.2} bytes/span)",
+        (t2_v1.file_bytes as f64 / t2_v0.file_bytes as f64 - 1.0) * 100.0,
+        (t2_v1.file_bytes as f64 - t2_v0.file_bytes as f64) / data.len() as f64,
+    );
     println!();
     println!(
         "- vtab: flush {:.1} ms, optimize {:.1} ms",

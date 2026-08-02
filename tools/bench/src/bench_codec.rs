@@ -180,7 +180,9 @@ fn report(
     n_entries: usize,
     wins: &[(usize, Vec<(&'static str, usize)>)],
 ) {
-    println!("\n### {label}: representative group #{rep_idx} ({rep_len} entries), per-column bytes\n");
+    println!(
+        "\n### {label}: representative group #{rep_idx} ({rep_len} entries), per-column bytes\n"
+    );
     println!("| column | codec 4 | codec 5 | delta |");
     println!("|--------|---------|---------|-------|");
     for (i, name) in col_names.iter().enumerate() {
@@ -228,7 +230,10 @@ fn report(
     );
 
     let mbs = raw_bytes as f64 / 1.0e6;
-    println!("\n### {label}: throughput (raw column bytes: {})\n", fmt_mb(raw_bytes));
+    println!(
+        "\n### {label}: throughput (raw column bytes: {})\n",
+        fmt_mb(raw_bytes)
+    );
     println!("| codec | encode | decode |");
     println!("|-------|--------|--------|");
     for (name, s) in [("codec 4", s_v1), ("codec 5", s_v2)] {
@@ -350,9 +355,23 @@ fn main() {
         }
     }
 
-    let log_wins = vec![(0usize, ts_wins), (1, lvl_wins), (2, msg_wins), (3, meta_wins)];
+    let log_wins = vec![
+        (0usize, ts_wins),
+        (1, lvl_wins),
+        (2, msg_wins),
+        (3, meta_wins),
+    ];
     report(
-        "logs", &log_col_names, rep_idx, rep_len, &rep_v1, &rep_v2, &s_v1, &s_v2, raw_bytes, n_entries,
+        "logs",
+        &log_col_names,
+        rep_idx,
+        rep_len,
+        &rep_v1,
+        &rep_v2,
+        &s_v1,
+        &s_v2,
+        raw_bytes,
+        n_entries,
         &log_wins,
     );
     let logs_improve = 1.0 - s_v2.total_bytes as f64 / s_v1.total_bytes as f64;
@@ -370,13 +389,17 @@ fn main() {
             service: r.service.into(),
             kind: r.kind_num,
             status: r.status_num,
+            status_description: "".into(),
             start_ts: r.start_ts,
             duration_ns: r.duration_ns,
-            // Canonical sorted pair order (http.method < http.status).
-            attributes: vec![
-                ("http.method".into(), r.http_method.into()),
-                ("http.status".into(), r.http_status.into()),
-            ],
+            attributes: format!(
+                r#"{{"http.method":"{}","http.status":"{}"}}"#,
+                r.http_method, r.http_status
+            )
+            .into(),
+            events: "[]".into(),
+            resource: "{}".into(),
+            instrumentation_scope: "{}".into(),
         })
         .collect();
     let n_spans = spans.len();
@@ -393,8 +416,16 @@ fn main() {
 
     const SPAN_COLS: usize = 10;
     let span_col_names = [
-        "trace_id", "span_id", "parent_id", "name", "service", "kind", "status", "start_ts",
-        "duration", "attributes",
+        "trace_id",
+        "span_id",
+        "parent_id",
+        "name",
+        "service",
+        "kind",
+        "status",
+        "start_ts",
+        "duration",
+        "attributes",
     ];
     let mut s_v1 = CodecStats::new(SPAN_COLS);
     let mut s_v2 = CodecStats::new(SPAN_COLS);
@@ -402,8 +433,10 @@ fn main() {
     // Typed columns: name(3), service(4), kind(5), status(6),
     // start_ts(7), duration(8); attributes(9) reports codec 5's
     // shredded-vs-legacy pairs byte. Ids (0,1) are always fixed+zstd.
-    let mut wins: Vec<(usize, Vec<(&'static str, usize)>)> =
-        [3usize, 4, 5, 6, 7, 8, 9].iter().map(|&i| (i, Vec::new())).collect();
+    let mut wins: Vec<(usize, Vec<(&'static str, usize)>)> = [3usize, 4, 5, 6, 7, 8, 9]
+        .iter()
+        .map(|&i| (i, Vec::new()))
+        .collect();
 
     let rep_idx = (0..groups.len()).max_by_key(|&i| groups[i].len()).unwrap();
     let (mut rep_v1, mut rep_v2) = (vec![0usize; SPAN_COLS], vec![0usize; SPAN_COLS]);
@@ -455,7 +488,16 @@ fn main() {
     }
 
     report(
-        "traces", &span_col_names, rep_idx, rep_len, &rep_v1, &rep_v2, &s_v1, &s_v2, raw_bytes, n_spans,
+        "traces",
+        &span_col_names,
+        rep_idx,
+        rep_len,
+        &rep_v1,
+        &rep_v2,
+        &s_v1,
+        &s_v2,
+        raw_bytes,
+        n_spans,
         &wins,
     );
     let traces_improve = 1.0 - s_v2.total_bytes as f64 / s_v1.total_bytes as f64;
@@ -465,12 +507,20 @@ fn main() {
     println!(
         "- logs: codec 5 total is {:.2}% {} than codec 4",
         logs_improve.abs() * 100.0,
-        if logs_improve >= 0.0 { "smaller" } else { "LARGER" }
+        if logs_improve >= 0.0 {
+            "smaller"
+        } else {
+            "LARGER"
+        }
     );
     println!(
         "- traces: codec 5 total is {:.2}% {} than codec 4",
         traces_improve.abs() * 100.0,
-        if traces_improve >= 0.0 { "smaller" } else { "LARGER" }
+        if traces_improve >= 0.0 {
+            "smaller"
+        } else {
+            "LARGER"
+        }
     );
     let pass = logs_improve >= 0.03 || traces_improve >= 0.03;
     println!(

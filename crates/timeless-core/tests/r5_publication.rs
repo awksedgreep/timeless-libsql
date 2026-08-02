@@ -340,9 +340,13 @@ fn span_entry(ts: i64, span_id: u8) -> SpanEntry {
         service: "api".to_owned(),
         kind: 1,
         status: 1,
+        status_description: "".into(),
         start_ts: ts,
         duration_ns: 10,
-        attributes: Vec::new(),
+        attributes: "{}".into(),
+        events: "[]".into(),
+        resource: "{}".into(),
+        instrumentation_scope: "{}".into(),
     }
 }
 

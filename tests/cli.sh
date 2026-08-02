@@ -1735,6 +1735,13 @@ check_eq "all 7 malformed blobs rejected" "$rejected" "7"
 count=$(sqlite3 "$F5DB" ".load $EXT" "SELECT COUNT(*) FROM l;")
 check_eq "rejections were atomic (count unchanged)" "$count" "3"
 
+echo "== section 27b: rich traces v1 fidelity and lifecycle =="
+if python3 "$ROOT/tests/traces_rich.py" "$EXT" "$TMP/traces_rich.db" > "$TMP/traces_rich.log" 2>&1; then
+  pass "$(cat "$TMP/traces_rich.log")"
+else
+  fail "rich traces regression: $(tail -3 "$TMP/traces_rich.log")"
+fi
+
 # ---------------------------------------------------------------------------
 echo "== section 28: F6 trigram message index =="
 F6DB="$TMP/f6_trigram.db"

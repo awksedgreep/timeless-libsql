@@ -13,7 +13,9 @@
 //!   CREATE TABLE x(trace_id BLOB, span_id BLOB, parent_span_id BLOB,
 //!                  name TEXT, service TEXT, kind TEXT, status TEXT,
 //!                  start_ts INTEGER, duration_ns INTEGER,
-//!                  attributes TEXT, "<table>" HIDDEN)
+//!                  attributes TEXT, status_description TEXT,
+//!                  events TEXT, resource TEXT,
+//!                  instrumentation_scope TEXT, "<table>" HIDDEN)
 //!
 //! Ids: trace_id/span_id/parent_span_id accept either a BLOB of the
 //! exact packed length (16/8/8 bytes) or a hex TEXT string (32/16/16
@@ -57,6 +59,7 @@ use timeless_core::{
 
 use crate::batch::BatchReader;
 use crate::flatjson::{pairs_to_json, parse_labels_json};
+use crate::otel_json;
 use crate::shadow_meta;
 use crate::shadow_span_store::{self, ShadowSpanStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
@@ -104,8 +107,12 @@ const COL_STATUS: usize = 6;
 const COL_START_TS: usize = 7;
 const COL_DURATION: usize = 8;
 const COL_ATTRS: usize = 9;
+const COL_STATUS_DESCRIPTION: usize = 10;
+const COL_EVENTS: usize = 11;
+const COL_RESOURCE: usize = 12;
+const COL_SCOPE: usize = 13;
 /// The hidden command column (named after the table, FTS5 idiom).
-const COL_COMMAND: usize = 10;
+const COL_COMMAND: usize = 14;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
@@ -309,6 +316,8 @@ impl TracesTab {
             "CREATE TABLE x(trace_id BLOB, span_id BLOB, parent_span_id BLOB, \
              name TEXT, service TEXT, kind TEXT, status TEXT, \
              start_ts INTEGER, duration_ns INTEGER, attributes TEXT, \
+             status_description TEXT, events TEXT, resource TEXT, \
+             instrumentation_scope TEXT, \
              \"{}\" HIDDEN)",
             escape_double_quote(&table)
         );
@@ -351,8 +360,10 @@ impl TracesTab {
         }
     }
 
-    /// F5 Tier 2 batch ingest (traces blob v0). Layout, little-endian:
-    ///   0    u8   version = 0x01
+    /// Versioned Tier 2 batch ingest. Both layouts are little-endian.
+    /// v0 (0x01) remains byte-for-byte compatible. v1 (0x02) retains
+    /// its complete prefix and appends rich columns after attributes.
+    ///   0    u8   version = 0x01 (v0) | 0x02 (v1)
     ///   1    u8   flags = 0
     ///   2    u16  reserved
     ///   4    u32  n_spans
@@ -365,29 +376,38 @@ impl TracesTab {
     ///   —    status[]    n × u8 (0..=2)
     ///   —    start_ts[]  n × i64 (ns)
     ///   —    duration[]  n × i64 (ns)
-    ///   —    attributes[] n × { u32 len, flat-JSON; '' = {} }
+    ///   —    attributes[] n × { u32 len, JSON object; '' = {} }
+    /// v1 continues with:
+    ///   —    status_description[] n × { u32 len, utf8 }
+    ///   —    events[] n × { u32 len, JSON array; '' = [] }
+    ///   —    resource[] n × { u32 len, JSON object; '' = {} }
+    ///   —    instrumentation_scope[] n × { u32 len, JSON object; '' = {} }
     ///
     /// All-or-nothing, same durability contract as row inserts.
     fn ingest_batch(&self, blob: &[u8]) -> Result<i64> {
         let mut r = BatchReader::new(blob);
         let version = r.u8("version")?;
-        if version != 0x01 {
+        if version != 0x01 && version != 0x02 {
             return Err(module_err(format!(
-                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01)"
+                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01 and v1 = 0x02)"
             )));
         }
         let flags = r.u8("flags")?;
         if flags != 0 {
             return Err(module_err(format!(
-                "batch blob: unknown flags 0x{flags:02x} (v0 defines none; must be 0)"
+                "batch blob: unknown flags 0x{flags:02x} (v0/v1 define none; must be 0)"
             )));
         }
         r.skip(2, "reserved header bytes")?;
         let n = r.u32("n_spans")? as usize;
 
-        let trace_ids = r.take(n * 16, "trace_id column")?;
-        let span_ids = r.take(n * 8, "span_id column")?;
-        let parent_ids = r.take(n * 8, "parent_id column")?;
+        let width = |bytes: usize, label: &str| {
+            n.checked_mul(bytes)
+                .ok_or_else(|| module_err(format!("batch blob: n_spans overflows {label} length")))
+        };
+        let trace_ids = r.take(width(16, "trace_id")?, "trace_id column")?;
+        let span_ids = r.take(width(8, "span_id")?, "span_id column")?;
+        let parent_ids = r.take(width(8, "parent_id")?, "parent_id column")?;
         let mut names = Vec::with_capacity(n);
         for i in 0..n {
             names.push(r.str(&format!("name {i}"))?.to_owned());
@@ -408,39 +428,97 @@ impl TracesTab {
                 "batch blob: invalid status byte {bad} (0..=2); batch rejected"
             )));
         }
-        let start_bytes = r.take(n * 8, "start_ts column")?;
-        let dur_bytes = r.take(n * 8, "duration column")?;
+        let start_bytes = r.take(width(8, "start_ts")?, "start_ts column")?;
+        let dur_bytes = r.take(width(8, "duration")?, "duration column")?;
 
-        let mut entries = Vec::with_capacity(n);
+        let mut attributes: Vec<Cow<'static, str>> = Vec::with_capacity(n);
         for i in 0..n {
-            let attrs_txt = r.str(&format!("attributes {i}"))?;
-            let attributes: Vec<(String, String)> = if attrs_txt.is_empty() {
-                Vec::new()
+            let text = r.str(&format!("attributes {i}"))?;
+            let canonical = if version == 0x01 {
+                if text.is_empty() {
+                    Cow::Borrowed("{}")
+                } else {
+                    let pairs: Vec<(String, String)> = parse_labels_json(text)
+                        .map_err(|error| {
+                            module_err(format!("batch blob: span {i} attributes: {error}"))
+                        })?
+                        .into_iter()
+                        .collect();
+                    Cow::Owned(pairs_to_json(&pairs))
+                }
             } else {
-                parse_labels_json(attrs_txt)
-                    .map_err(|e| module_err(format!("batch blob: span {i} attributes: {e}")))?
-                    .into_iter()
-                    .collect()
+                Cow::Owned(
+                    otel_json::object(Some(text), "attributes")
+                        .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
+                )
             };
-            let parent: [u8; 8] = parent_ids[i * 8..i * 8 + 8].try_into().unwrap();
-            entries.push(SpanEntry {
-                trace_id: trace_ids[i * 16..i * 16 + 16].try_into().unwrap(),
-                span_id: span_ids[i * 8..i * 8 + 8].try_into().unwrap(),
-                parent_span_id: (parent != [0u8; 8]).then_some(parent),
-                name: std::mem::take(&mut names[i]),
-                service: std::mem::take(&mut services[i]),
-                kind: kinds[i],
-                status: statuses[i],
-                start_ts: i64::from_le_bytes(start_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
-                duration_ns: i64::from_le_bytes(dur_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
-                attributes,
-            });
+            attributes.push(canonical);
         }
+
+        let mut status_descriptions = vec![Cow::Borrowed(""); n];
+        let mut events = vec![Cow::Borrowed("[]"); n];
+        let mut resources = vec![Cow::Borrowed("{}"); n];
+        let mut scopes = vec![Cow::Borrowed("{}"); n];
+        if version == 0x02 {
+            for i in 0..n {
+                status_descriptions[i] =
+                    Cow::Owned(r.str(&format!("status_description {i}"))?.to_owned());
+            }
+            for i in 0..n {
+                events[i] = Cow::Owned(
+                    otel_json::array(Some(r.str(&format!("events {i}"))?), "events")
+                        .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
+                );
+            }
+            for i in 0..n {
+                resources[i] = Cow::Owned(
+                    otel_json::object(Some(r.str(&format!("resource {i}"))?), "resource")
+                        .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
+                );
+            }
+            for i in 0..n {
+                scopes[i] = Cow::Owned(
+                    otel_json::object(
+                        Some(r.str(&format!("instrumentation_scope {i}"))?),
+                        "instrumentation_scope",
+                    )
+                    .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
+                );
+            }
+        }
+
         if r.remaining() != 0 {
             return Err(module_err(format!(
                 "batch blob: {} trailing byte(s) (corrupt or wrong n_spans)",
                 r.remaining()
             )));
+        }
+
+        let mut entries = Vec::with_capacity(n);
+        for i in 0..n {
+            let parent: [u8; 8] = parent_ids[i * 8..i * 8 + 8].try_into().unwrap();
+            let service = otel_json::derive_service(
+                attributes[i].as_ref(),
+                resources[i].as_ref(),
+                Some(std::mem::take(&mut services[i])),
+            )
+            .map_err(|error| module_err(format!("batch blob: span {i}: {error}")))?;
+            entries.push(SpanEntry {
+                trace_id: trace_ids[i * 16..i * 16 + 16].try_into().unwrap(),
+                span_id: span_ids[i * 8..i * 8 + 8].try_into().unwrap(),
+                parent_span_id: (parent != [0u8; 8]).then_some(parent),
+                name: std::mem::take(&mut names[i]),
+                service,
+                kind: kinds[i],
+                status: statuses[i],
+                status_description: std::mem::take(&mut status_descriptions[i]),
+                start_ts: i64::from_le_bytes(start_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
+                duration_ns: i64::from_le_bytes(dur_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
+                attributes: std::mem::take(&mut attributes[i]),
+                events: std::mem::take(&mut events[i]),
+                resource: std::mem::take(&mut resources[i]),
+                instrumentation_scope: std::mem::take(&mut scopes[i]),
+            });
         }
         let count = self.shared.engine.push_batch(entries).map_err(module_err)?;
         Ok(count as i64)
@@ -633,7 +711,7 @@ impl CreateVTab<'_> for TracesTab {
 impl UpdateVTab<'_> for TracesTab {
     /// INSERT. argv: [0] NULL, [1] requested rowid, then declared
     /// columns from index 2 (COL_* + 2); the hidden command column is
-    /// argv[12].
+    /// argv[16].
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
         // Connection routing + writer gate, as in metrics_vtab.rs
         // (gate is normally taken by begin(); this is the defensive
@@ -647,16 +725,15 @@ impl UpdateVTab<'_> for TracesTab {
         match args.iter().nth(cmd_idx) {
             Some(ValueRef::Null) | None => {} // plain data row
             Some(ValueRef::Blob(blob)) => {
-                // F5 Tier 2: dispatch by version byte; 0x00 and
-                // 0x02-0x08 are RESERVED so a future format fed to an
-                // old build fails loudly instead of being mis-parsed.
+                // Dispatch by version byte. v0 stays readable forever;
+                // v1 carries the rich span shape.
                 return match blob.first() {
-                    Some(0x01) => self.ingest_batch(blob),
-                    Some(b @ (0x00 | 0x02..=0x08)) => Err(module_err(format!(
-                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01)"
+                    Some(0x01 | 0x02) => self.ingest_batch(blob),
+                    Some(b @ (0x00 | 0x03..=0x08)) => Err(module_err(format!(
+                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01 and v1 = 0x02)"
                     ))),
                     Some(b) => Err(module_err(format!(
-                        "unknown blob format (first byte 0x{b:02x}; traces batch v0 starts with 0x01)"
+                        "unknown blob format (first byte 0x{b:02x}; traces batches start with 0x01/0x02)"
                     ))),
                     None => Err(module_err("empty blob".into())),
                 };
@@ -697,10 +774,7 @@ impl UpdateVTab<'_> for TracesTab {
         let Some(name) = name else {
             return Err(module_err("name is required (TEXT)".into()));
         };
-        let service: Option<String> = args.get(2 + COL_SERVICE)?;
-        let Some(service) = service else {
-            return Err(module_err("service is required (TEXT)".into()));
-        };
+        let explicit_service: Option<String> = args.get(2 + COL_SERVICE)?;
 
         // kind/status: strict vocabularies; NULL takes the OTel default
         // (kind=internal, status=unset) — the one place we default
@@ -725,20 +799,44 @@ impl UpdateVTab<'_> for TracesTab {
         let duration_ns: Option<i64> = args.get(2 + COL_DURATION)?;
         let duration_ns = duration_ns.unwrap_or(0);
 
-        // attributes: optional flat JSON object of string values (same
-        // parser as metrics labels and logs metadata — the three tables
-        // agree on the format by construction).
+        // Rich OTel fields are public typed JSON, never flattened into
+        // metrics/logs-style string pairs.
         let attrs_json: Option<String> = args.get(2 + COL_ATTRS)?;
-        let attributes: Vec<(String, String)> = match attrs_json {
-            Some(txt) => parse_labels_json(&txt)
-                .map_err(module_err)?
-                .into_iter()
-                .collect(),
-            None => Vec::new(),
+        let attributes = match attrs_json.as_deref() {
+            Some(text) => {
+                Cow::Owned(otel_json::object(Some(text), "attributes").map_err(module_err)?)
+            }
+            None => Cow::Borrowed("{}"),
         };
+        let status_description: Option<String> = args.get(2 + COL_STATUS_DESCRIPTION)?;
+        let status_description = status_description
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(""));
+        let events_json: Option<String> = args.get(2 + COL_EVENTS)?;
+        let events = match events_json.as_deref() {
+            Some(text) => Cow::Owned(otel_json::array(Some(text), "events").map_err(module_err)?),
+            None => Cow::Borrowed("[]"),
+        };
+        let resource_json: Option<String> = args.get(2 + COL_RESOURCE)?;
+        let resource = match resource_json.as_deref() {
+            Some(text) => {
+                Cow::Owned(otel_json::object(Some(text), "resource").map_err(module_err)?)
+            }
+            None => Cow::Borrowed("{}"),
+        };
+        let scope_json: Option<String> = args.get(2 + COL_SCOPE)?;
+        let instrumentation_scope = match scope_json.as_deref() {
+            Some(text) => Cow::Owned(
+                otel_json::object(Some(text), "instrumentation_scope").map_err(module_err)?,
+            ),
+            None => Cow::Borrowed("{}"),
+        };
+        let service =
+            otel_json::derive_service(attributes.as_ref(), resource.as_ref(), explicit_service)
+                .map_err(module_err)?;
 
-        // push() canonicalizes (sorts) attributes, validates, and
-        // auto-flushes at the threshold.
+        // Rich JSON is canonical now; push() validates compact enums
+        // and auto-flushes at the threshold.
         self.shared
             .engine
             .push(SpanEntry {
@@ -749,9 +847,13 @@ impl UpdateVTab<'_> for TracesTab {
                 service,
                 kind,
                 status,
+                status_description,
                 start_ts,
                 duration_ns,
                 attributes,
+                events,
+                resource,
+                instrumentation_scope,
             })
             .map_err(module_err)?;
 
@@ -842,11 +944,10 @@ impl SavepointVTab for TracesTab {
 // The cursor
 // ---------------------------------------------------------------------------
 
-/// One output row, materialized at filter() time: the decoded span plus
-/// its attributes pre-rendered to canonical sorted flat JSON.
+/// One output row, materialized at filter() time. JSON text was already
+/// canonicalized at ingest (or decoded from a compatible old block).
 struct OutRow {
     entry: SpanEntry,
-    attributes_json: String,
 }
 
 #[repr(C)]
@@ -989,13 +1090,7 @@ unsafe impl VTabCursor for TracesCursor<'_> {
                 .map_err(module_err)?
         };
 
-        self.rows = entries
-            .into_iter()
-            .map(|entry| OutRow {
-                attributes_json: pairs_to_json(&entry.attributes),
-                entry,
-            })
-            .collect();
+        self.rows = entries.into_iter().map(|entry| OutRow { entry }).collect();
         self.pos = 0;
         Ok(())
     }
@@ -1025,7 +1120,11 @@ unsafe impl VTabCursor for TracesCursor<'_> {
             COL_STATUS => ctx.set_result(&status_name(row.entry.status)),
             COL_START_TS => ctx.set_result(&row.entry.start_ts),
             COL_DURATION => ctx.set_result(&row.entry.duration_ns),
-            COL_ATTRS => ctx.set_result(&row.attributes_json),
+            COL_ATTRS => ctx.set_result(&row.entry.attributes.as_ref()),
+            COL_STATUS_DESCRIPTION => ctx.set_result(&row.entry.status_description.as_ref()),
+            COL_EVENTS => ctx.set_result(&row.entry.events.as_ref()),
+            COL_RESOURCE => ctx.set_result(&row.entry.resource.as_ref()),
+            COL_SCOPE => ctx.set_result(&row.entry.instrumentation_scope.as_ref()),
             // The hidden command column reads as NULL.
             _ => ctx.set_result(&Null),
         }

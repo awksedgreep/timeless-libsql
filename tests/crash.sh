@@ -75,7 +75,15 @@ for r in range(1, rounds + 1):
         w(f"INSERT INTO logs(ts, level, message, service) VALUES ({1700000000000 + r * 1000 + i}, '{lvl}', 'round {r} entry {i}', 'svc{i % 2}');\n")
     for i in range(t_n):
         st = "error" if i % 5 == 0 else "ok"
-        w(f"INSERT INTO traces(trace_id, span_id, name, service, status, start_ts) VALUES (x'{r * 31 + i % 7:032x}', x'{r * 1000 + i:016x}', 'op{i % 3}', 's{i % 2}', '{st}', {1700000000000000000 + r * 1000000 + i});\n")
+        ts = 1700000000000000000 + r * 1000000 + i
+        desc = "crash-path" if st == "error" else ""
+        w(f'''INSERT INTO traces(trace_id, span_id, name, service, status, start_ts, attributes, status_description, events, resource, instrumentation_scope)
+VALUES (x'{r * 31 + i % 7:032x}', x'{r * 1000 + i:016x}', 'op{i % 3}', 'must-not-win', '{st}', {ts},
+'{{"bool":true,"count":{i},"service.name":"s{i % 2}"}}', '{desc}',
+'[{{"attributes":{{"attempt":{i},"fatal":false}},"name":"checkpoint","timestamp":{ts + 1}}}]',
+'{{"deployment.environment":"crash","service.name":"resource-must-not-win"}}',
+'{{"attributes":{{"debug":false}},"name":"crash-lib","version":"1.0"}}');
+''')
     w("INSERT INTO metrics(metrics) VALUES ('flush');\n")
     w("INSERT INTO logs(logs) VALUES ('flush');\n")
     w("INSERT INTO traces(traces) VALUES ('flush');\n")
@@ -138,6 +146,24 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
   }
   IFS='|' read -r mc lc tc <<< "$counts"
   pass "reopen + full decode: metrics=$mc logs=$lc traces=$tc"
+
+  # 2a. Generation-2 rich columns must remain typed JSON after a kill,
+  #     including blocks that optimize may have rewritten.
+  rich=$(sqlite3 "$DB" ".load $EXT" \
+    "SELECT COUNT(*) FROM traces
+       WHERE service IN ('s0','s1')
+         AND json_valid(attributes) AND json_type(attributes, '$.bool')='true'
+         AND json_valid(events) AND json_type(events)='array'
+         AND json_valid(resource) AND json_type(resource)='object'
+         AND json_valid(instrumentation_scope) AND json_type(instrumentation_scope)='object';" 2>&1) || {
+    fail "rich trace fidelity query failed: $rich"
+    continue
+  }
+  if [[ "$rich" == "$tc" ]]; then
+    pass "all $tc decoded traces retain rich typed JSON post-crash"
+  else
+    fail "rich trace fidelity count $rich != trace count $tc"
+  fi
 
   # 2b. F3: every surviving rollup chunk must decode (count forces a
   #     full read of the 60s tier); errors here mean a torn rollup row

@@ -44,6 +44,7 @@ mod flatjson;
 mod health_vtab;
 mod logs_vtab;
 mod metrics_vtab;
+mod otel_json;
 pub mod query_frame;
 mod query_tvf;
 mod shadow_block_store;

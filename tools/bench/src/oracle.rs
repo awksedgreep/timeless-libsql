@@ -136,7 +136,9 @@ fn open_db(path: &str, ext: &str) -> Connection {
         CREATE TABLE plain_logs(ts INTEGER, level TEXT, message TEXT, metadata TEXT, service TEXT);
         CREATE TABLE plain_traces(trace_id BLOB, span_id BLOB, parent_span_id BLOB,
                                   name TEXT, service TEXT, kind TEXT, status TEXT,
-                                  start_ts INTEGER, duration_ns INTEGER, attributes TEXT);
+                                  start_ts INTEGER, duration_ns INTEGER, attributes TEXT,
+                                  status_description TEXT, events TEXT, resource TEXT,
+                                  instrumentation_scope TEXT);
         "#,
     )
     .expect("create tables");
@@ -240,13 +242,7 @@ fn run_seed(ext: &str, seed: u64) {
         let roll = rng.below(100);
         if roll < 85 {
             // ── insert one row into a random signal + its mirror ────
-            insert_one(
-                &conn,
-                &mut rng,
-                &mut metric_ts,
-                &mut log_seq,
-                &mut span_seq,
-            );
+            insert_one(&conn, &mut rng, &mut metric_ts, &mut log_seq, &mut span_seq);
         } else if roll < 90 {
             // ── maintenance command on a random vtab. The mirror is
             //    untouched: flush/optimize/compact must be INVISIBLE to
@@ -277,13 +273,7 @@ fn run_seed(ext: &str, seed: u64) {
             conn.execute_batch("BEGIN").expect("begin");
             let n = 1 + rng.below(20);
             for _ in 0..n {
-                insert_one(
-                    &conn,
-                    &mut rng,
-                    &mut metric_ts,
-                    &mut log_seq,
-                    &mut span_seq,
-                );
+                insert_one(&conn, &mut rng, &mut metric_ts, &mut log_seq, &mut span_seq);
                 op += 1;
             }
             // Half the transactions flush INSIDE — the R5 case where
@@ -310,13 +300,7 @@ fn run_seed(ext: &str, seed: u64) {
             // tables, and a run that prunes every ~50 ops never grows
             // deep enough to make optimize/compact merge REAL block
             // populations. ~60 prune-alls per 50k ops keeps both.
-            insert_one(
-                &conn,
-                &mut rng,
-                &mut metric_ts,
-                &mut log_seq,
-                &mut span_seq,
-            );
+            insert_one(&conn, &mut rng, &mut metric_ts, &mut log_seq, &mut span_seq);
         } else {
             // ── prune-all, mirrored by DELETE (see header) ──────────
             prunes += 1;
@@ -455,21 +439,48 @@ fn insert_one(
             let status = STATUSES[rng.below(3) as usize];
             let start_ts = 1_700_000_000_000_000_000i64 + rng.below(3_600_000_000) as i64;
             let duration = rng.below(1_000_000_000) as i64;
-            let attrs = if rng.below(3) == 0 {
-                format!(r#"{{"peer":"{service}"}}"#) // canonical (1 key)
-            } else {
-                "{}".to_string()
+            let service_source = rng.below(3);
+            let attrs = match service_source {
+                0 => format!(
+                    r#"{{"array":[1,"two",false],"bool":true,"count":{},"nested":{{"null":null,"ratio":1.5}},"peer":"{service}","service.name":"{service}"}}"#,
+                    rng.below(100)
+                ),
+                _ => format!(
+                    r#"{{"array":[1,"two",false],"bool":true,"count":{},"nested":{{"null":null,"ratio":1.5}},"peer":"{service}"}}"#,
+                    rng.below(100)
+                ),
             };
+            let resource = if service_source == 1 {
+                format!(r#"{{"deployment.environment":"oracle","service.name":"{service}"}}"#)
+            } else {
+                r#"{"deployment.environment":"oracle"}"#.to_owned()
+            };
+            let explicit_service = if service_source == 2 {
+                service
+            } else {
+                "must-not-win"
+            };
+            let status_description = if status == "error" {
+                "typed oracle failure"
+            } else {
+                ""
+            };
+            let events = format!(
+                r#"[{{"attributes":{{"attempt":{},"fatal":false}},"name":"checkpoint","timestamp":{}}}]"#,
+                rng.below(8),
+                start_ts + 1
+            );
+            let scope = r#"{"attributes":{"debug":false},"name":"oracle-lib","version":"1.0"}"#;
             conn.execute(
-                "INSERT INTO traces(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![tid_blob, span_id, parent, name, service, kind, status, start_ts, duration, attrs],
+                "INSERT INTO traces(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes, status_description, events, resource, instrumentation_scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![tid_blob, span_id, parent, name, explicit_service, kind, status, start_ts, duration, attrs, status_description, events, resource, scope],
             )
             .expect("vtab span insert");
             conn.execute(
-                "INSERT INTO plain_traces(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![tid_blob, span_id, parent, name, service, kind, status, start_ts, duration, attrs],
+                "INSERT INTO plain_traces(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes, status_description, events, resource, instrumentation_scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![tid_blob, span_id, parent, name, service, kind, status, start_ts, duration, attrs, status_description, events, resource, scope],
             )
             .expect("plain span insert");
         }
@@ -484,7 +495,10 @@ fn run_query(conn: &Connection, rng: &mut Rng, seed: u64, op: usize) {
             // metrics: name equality (the pushdown plan).
             let name = METRIC_NAMES[rng.below(6) as usize];
             check(
-                conn, seed, op, "metrics name",
+                conn,
+                seed,
+                op,
+                "metrics name",
                 "SELECT name, ts, value, labels FROM metrics WHERE name = ?1",
                 "SELECT name, ts, value, labels FROM plain_metrics WHERE name = ?1",
                 &[&name],
@@ -505,7 +519,10 @@ fn run_query(conn: &Connection, rng: &mut Rng, seed: u64, op: usize) {
         2 => {
             // metrics: full scan (no pushdown at all).
             check(
-                conn, seed, op, "metrics full",
+                conn,
+                seed,
+                op,
+                "metrics full",
                 "SELECT name, ts, value, labels FROM metrics",
                 "SELECT name, ts, value, labels FROM plain_metrics",
                 &[],
@@ -515,7 +532,10 @@ fn run_query(conn: &Connection, rng: &mut Rng, seed: u64, op: usize) {
             // logs: level equality (posting-list plan).
             let level = LEVELS[rng.below(4) as usize];
             check(
-                conn, seed, op, "logs level",
+                conn,
+                seed,
+                op,
+                "logs level",
                 "SELECT ts, level, message, metadata FROM logs WHERE level = ?1",
                 "SELECT ts, level, message, metadata FROM plain_logs WHERE level = ?1",
                 &[&level],
@@ -541,8 +561,8 @@ fn run_query(conn: &Connection, rng: &mut Rng, seed: u64, op: usize) {
                 .collect();
             check(
                 conn, seed, op, "traces trace_id",
-                "SELECT hex(trace_id), hex(span_id), name, service, kind, status, start_ts, duration_ns, attributes FROM traces WHERE trace_id = ?1",
-                "SELECT hex(trace_id), hex(span_id), name, service, kind, status, start_ts, duration_ns, attributes FROM plain_traces WHERE trace_id = ?1",
+                "SELECT hex(trace_id), hex(span_id), name, service, kind, status, start_ts, duration_ns, attributes, status_description, events, resource, instrumentation_scope FROM traces WHERE trace_id = ?1",
+                "SELECT hex(trace_id), hex(span_id), name, service, kind, status, start_ts, duration_ns, attributes, status_description, events, resource, instrumentation_scope FROM plain_traces WHERE trace_id = ?1",
                 &[&tid_blob],
             );
         }
@@ -575,21 +595,27 @@ fn run_query(conn: &Connection, rng: &mut Rng, seed: u64, op: usize) {
 /// prune-all, the final flush, and the reopen).
 fn run_all_full_checks(conn: &Connection, seed: u64, op: usize) {
     check(
-        conn, seed, op, "metrics full-check",
+        conn,
+        seed,
+        op,
+        "metrics full-check",
         "SELECT name, ts, value, labels FROM metrics",
         "SELECT name, ts, value, labels FROM plain_metrics",
         &[],
     );
     check(
-        conn, seed, op, "logs full-check",
+        conn,
+        seed,
+        op,
+        "logs full-check",
         "SELECT ts, level, message, metadata FROM logs",
         "SELECT ts, level, message, metadata FROM plain_logs",
         &[],
     );
     check(
         conn, seed, op, "traces full-check",
-        "SELECT hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THEN 'N' ELSE hex(parent_span_id) END, name, service, kind, status, start_ts, duration_ns, attributes FROM traces",
-        "SELECT hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THEN 'N' ELSE hex(parent_span_id) END, name, service, kind, status, start_ts, duration_ns, attributes FROM plain_traces",
+        "SELECT hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THEN 'N' ELSE hex(parent_span_id) END, name, service, kind, status, start_ts, duration_ns, attributes, status_description, events, resource, instrumentation_scope FROM traces",
+        "SELECT hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THEN 'N' ELSE hex(parent_span_id) END, name, service, kind, status, start_ts, duration_ns, attributes, status_description, events, resource, instrumentation_scope FROM plain_traces",
         &[],
     );
 }

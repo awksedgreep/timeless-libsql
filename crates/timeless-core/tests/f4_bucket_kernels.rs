@@ -146,9 +146,13 @@ fn trace_bucket_stats_match_naive() {
             service: format!("svc{}", rng.below(3)),
             kind: 1,
             status: (rng.below(3)) as u8,
+            status_description: "".into(),
             start_ts: 1_000_000 + rng.below(900_000) as i64,
             duration_ns: rng.below(5_000_000) as i64,
-            attributes: vec![],
+            attributes: "{}".into(),
+            events: "[]".into(),
+            resource: "{}".into(),
+            instrumentation_scope: "{}".into(),
         };
         all.push(e.clone());
         engine.push(e).unwrap();

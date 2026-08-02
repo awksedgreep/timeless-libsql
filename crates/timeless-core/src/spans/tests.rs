@@ -25,7 +25,8 @@ use super::{
     kind_from_name, status_from_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore,
     SpanEntry,
 };
-use crate::blocks::codec::{PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS};
+use crate::blocks::codec::encode_pairs_column;
+use timeless_codec::{encode_fixed_bytes, encode_i64, encode_str, encode_u8, zstd_compress};
 
 /// Deterministic 16-byte trace id from a small seed (t repeated).
 fn tid(t: u8) -> [u8; 16] {
@@ -34,6 +35,14 @@ fn tid(t: u8) -> [u8; 16] {
 
 fn sid(s: u8) -> [u8; 8] {
     [s; 8]
+}
+
+fn attrs_json(attrs: &[(&str, &str)]) -> String {
+    let value = attrs
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    serde_json::to_string(&value).unwrap()
 }
 
 fn span(
@@ -55,12 +64,13 @@ fn span(
         service: service.to_owned(),
         kind,
         status,
+        status_description: "".into(),
         start_ts,
         duration_ns: 1_000 + start_ts % 997,
-        attributes: attrs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
+        attributes: attrs_json(attrs).into(),
+        events: "[]".into(),
+        resource: "{}".into(),
+        instrumentation_scope: "{}".into(),
     }
 }
 
@@ -288,12 +298,13 @@ fn span_codec_round_trips_all_codecs() {
             service: "api".into(),
             kind: 1,
             status: 2,
+            status_description: "payment declined 🚀".into(),
             start_ts: 1_700_000_000_000_000_123,
             duration_ns: 52_000_000,
-            attributes: vec![
-                ("http.method".into(), "GET".into()),
-                ("note".into(), "空 🚀 ünïcode".into()),
-            ],
+            attributes: r#"{"http.method":"GET","nested":{"ok":true},"note":"空 🚀 ünïcode","retries":2}"#.into(),
+            events: r#"[{"attributes":{"escaped":"a\"b","retry":false},"name":"exception","timestamp":1700000000000000124}]"#.into(),
+            resource: r#"{"host":{"arch":"arm64"},"service.name":"api"}"#.into(),
+            instrumentation_scope: r#"{"name":"checkout-lib","version":"1.2.3"}"#.into(),
         },
         SpanEntry {
             trace_id: [0x00; 16],
@@ -303,9 +314,13 @@ fn span_codec_round_trips_all_codecs() {
             service: "db".into(),
             kind: 2,
             status: 0,
+            status_description: "".into(),
             start_ts: -42, // negative + out-of-order → negative delta path
             duration_ns: 0,
-            attributes: vec![],
+            attributes: "{}".into(),
+            events: "[]".into(),
+            resource: "{}".into(),
+            instrumentation_scope: "{}".into(),
         },
         SpanEntry {
             trace_id: [0xAB; 16],
@@ -315,9 +330,13 @@ fn span_codec_round_trips_all_codecs() {
             service: "db".into(),
             kind: 3,
             status: 1,
+            status_description: "".into(),
             start_ts: 1_700_000_000_000_000_999,
             duration_ns: i64::MAX, // extreme duration must survive
-            attributes: vec![("k".into(), "".into())],
+            attributes: r#"{"k":""}"#.into(),
+            events: "[]".into(),
+            resource: r#"{"service.name":"db"}"#.into(),
+            instrumentation_scope: "{}".into(),
         },
     ];
     // CODEC_ZSTD and CODEC_COLUMNAR stay in this loop FOREVER even
@@ -336,88 +355,144 @@ fn span_codec_round_trips_all_codecs() {
 }
 
 // ---------------------------------------------------------------------------
-// Codec-5 attribute shredding: the spans twin of the logs hostile
-// tests (the shredding code is SHARED — blocks/codec.rs — so this is
-// mostly proving the spans container wires it up correctly).
+// Generation-1 compatibility. This test-local writer freezes the old
+// ten-column bytes; production writes generation 2 only.
 // ---------------------------------------------------------------------------
 
-/// Strategy byte of a codec-5 span block's attributes column (10th
-/// column: header has 10 u32 lengths at offset 22, columns from 62).
-fn attributes_strategy_byte(bytes: &[u8]) -> u8 {
-    let len =
-        |i: usize| u32::from_le_bytes(bytes[22 + i * 4..26 + i * 4].try_into().unwrap()) as usize;
-    bytes[62 + (0..9).map(len).sum::<usize>()]
-}
-
-fn rt_spans_v2(entries: &[SpanEntry], expect_strategy: u8, label: &str) {
-    let (bytes, meta) = encode_span_block(entries, CODEC_COLUMNAR_V2, 7).unwrap();
-    assert_eq!(meta.codec, CODEC_COLUMNAR_V2);
-    assert_eq!(
-        attributes_strategy_byte(&bytes),
-        expect_strategy,
-        "{label}: strategy byte"
+fn encode_generation_1(
+    entries: &[SpanEntry],
+    pairs: &[Vec<(String, String)>],
+    codec: u8,
+) -> Vec<u8> {
+    let n = entries.len();
+    let mut trace = Vec::new();
+    let mut spans = Vec::new();
+    let mut parents = Vec::new();
+    let mut names = Vec::new();
+    let mut services = Vec::new();
+    let mut kinds = Vec::new();
+    let mut statuses = Vec::new();
+    let mut starts = Vec::new();
+    let mut durations = Vec::new();
+    let mut attrs = Vec::new();
+    let mut previous = 0i64;
+    for (entry, entry_pairs) in entries.iter().zip(pairs) {
+        trace.extend_from_slice(&entry.trace_id);
+        spans.extend_from_slice(&entry.span_id);
+        match entry.parent_span_id {
+            Some(parent) => {
+                parents.push(1);
+                parents.extend_from_slice(&parent);
+            }
+            None => parents.push(0),
+        }
+        for (value, out) in [(&entry.name, &mut names), (&entry.service, &mut services)] {
+            out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            out.extend_from_slice(value.as_bytes());
+        }
+        kinds.push(entry.kind);
+        statuses.push(entry.status);
+        let ts = if codec == CODEC_RAW {
+            entry.start_ts
+        } else {
+            entry.start_ts.wrapping_sub(previous)
+        };
+        previous = entry.start_ts;
+        starts.extend_from_slice(&ts.to_le_bytes());
+        durations.extend_from_slice(&entry.duration_ns.to_le_bytes());
+        attrs.extend_from_slice(&(entry_pairs.len() as u16).to_le_bytes());
+        for (key, value) in entry_pairs {
+            attrs.extend_from_slice(&(key.len() as u16).to_le_bytes());
+            attrs.extend_from_slice(key.as_bytes());
+            attrs.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            attrs.extend_from_slice(value.as_bytes());
+        }
+    }
+    let columns = if codec == CODEC_COLUMNAR || codec == CODEC_COLUMNAR_V2 {
+        let ts: Vec<i64> = entries.iter().map(|entry| entry.start_ts).collect();
+        let dur: Vec<i64> = entries.iter().map(|entry| entry.duration_ns).collect();
+        let pair_refs: Vec<&[(String, String)]> = pairs.iter().map(Vec::as_slice).collect();
+        vec![
+            encode_fixed_bytes(&trace, 16, 7).unwrap().to_bytes(),
+            encode_fixed_bytes(&spans, 8, 7).unwrap().to_bytes(),
+            zstd_compress(&parents, 7).unwrap(),
+            encode_str(entries.iter().map(|entry| entry.name.as_str()), n, 7)
+                .unwrap()
+                .to_bytes(),
+            encode_str(entries.iter().map(|entry| entry.service.as_str()), n, 7)
+                .unwrap()
+                .to_bytes(),
+            encode_u8(&kinds, 7).unwrap().to_bytes(),
+            encode_u8(&statuses, 7).unwrap().to_bytes(),
+            encode_i64(&ts, 7).unwrap().to_bytes(),
+            encode_i64(&dur, 7).unwrap().to_bytes(),
+            if codec == CODEC_COLUMNAR_V2 {
+                encode_pairs_column(&pair_refs, &attrs, 7).unwrap()
+            } else {
+                zstd_compress(&attrs, 7).unwrap()
+            },
+        ]
+    } else {
+        let raw = vec![
+            trace, spans, parents, names, services, kinds, statuses, starts, durations, attrs,
+        ];
+        if codec == CODEC_ZSTD {
+            raw.iter()
+                .map(|column| zstd_compress(column, 7).unwrap())
+                .collect()
+        } else {
+            raw
+        }
+    };
+    let mut out = vec![1, codec];
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+    out.extend_from_slice(
+        &entries
+            .iter()
+            .map(|entry| entry.start_ts)
+            .min()
+            .unwrap()
+            .to_le_bytes(),
     );
-    let back = decode_span_block(&bytes).unwrap();
-    assert_eq!(&back, entries, "{label}: round-trip");
+    out.extend_from_slice(
+        &entries
+            .iter()
+            .map(|entry| entry.start_ts)
+            .max()
+            .unwrap()
+            .to_le_bytes(),
+    );
+    for column in &columns {
+        out.extend_from_slice(&(column.len() as u32).to_le_bytes());
+    }
+    for column in columns {
+        out.extend_from_slice(&column);
+    }
+    out
 }
 
 #[test]
-fn span_codec5_shreds_hostile_attribute_shapes_exactly() {
-    // Disjoint key sets + an empty-attribute span + unicode.
-    rt_spans_v2(
-        &[
-            span(1, 1, None, "a", "api", 1, 1, 100, &[("alpha", "1")]),
-            span(1, 2, Some(1), "b", "db", 2, 1, 200, &[("ベータ", "値🔥")]),
-            span(2, 3, None, "c", "cache", 0, 1, 300, &[]),
-        ],
-        PAIRS_SHREDDED,
-        "disjoint + empty + unicode",
-    );
-
-    // All spans empty attributes; single span; all same pairs.
-    rt_spans_v2(
-        &[span(1, 1, None, "a", "api", 1, 1, 100, &[])],
-        PAIRS_SHREDDED,
-        "single, empty",
-    );
-    let same: Vec<SpanEntry> = (0..300)
-        .map(|i| {
-            span(
-                1,
-                i as u8,
-                None,
-                "op",
-                "api",
-                1,
-                1,
-                1000 + i,
-                &[("http.method", "GET"), ("http.status", "200")],
-            )
-        })
-        .collect();
-    rt_spans_v2(&same, PAIRS_SHREDDED, "all same pairs");
-}
-
-#[test]
-fn span_codec5_key_explosion_falls_back_to_legacy() {
-    // > SHRED_MAX_KEYS distinct attribute keys → LEGACY bytes verbatim
-    // (see the cap rationale in blocks/codec.rs), still exact.
-    let entries: Vec<SpanEntry> = (0..(SHRED_MAX_KEYS as i64 + 1))
-        .map(|i| {
-            span(
-                1,
-                i as u8,
-                None,
-                "op",
-                "api",
-                1,
-                1,
-                i,
-                &[(&format!("key-{i:03}") as &str, "v")],
-            )
-        })
-        .collect();
-    rt_spans_v2(&entries, PAIRS_LEGACY, "key explosion");
+fn generation_1_blocks_of_every_codec_remain_readable_with_defaults() {
+    let entries = vec![
+        span(1, 1, None, "a", "api", 1, 2, -7, &[("alpha", "1")]),
+        span(2, 2, Some(1), "ベータ", "db", 2, 1, 42, &[("note", "値🔥")]),
+    ];
+    let pairs = vec![
+        vec![("alpha".into(), "1".into())],
+        vec![("note".into(), "値🔥".into())],
+    ];
+    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR, CODEC_COLUMNAR_V2] {
+        let decoded = decode_span_block(&encode_generation_1(&entries, &pairs, codec)).unwrap();
+        assert_eq!(decoded, entries, "generation 1 codec {codec}");
+        assert!(decoded
+            .iter()
+            .all(|entry| entry.status_description.is_empty()));
+        assert!(decoded.iter().all(|entry| entry.events == "[]"));
+        assert!(decoded.iter().all(|entry| entry.resource == "{}"));
+        assert!(decoded
+            .iter()
+            .all(|entry| entry.instrumentation_scope == "{}"));
+    }
 }
 
 #[test]
@@ -864,7 +939,8 @@ fn push_validates_and_canonicalizes_attributes() {
         .push(span(1, 1, None, "op", "s", 1, 3, 1, &[]))
         .is_err());
 
-    // Unsorted + duplicate keys: sorted, last duplicate wins.
+    // The test helper canonicalizes unsorted duplicate string pairs;
+    // typed/nested validation belongs to the SQLite public boundary.
     engine
         .push(span(
             1,
@@ -879,13 +955,7 @@ fn push_validates_and_canonicalizes_attributes() {
         ))
         .unwrap();
     let got = engine.query(&full_range_query()).unwrap();
-    assert_eq!(
-        got[0].attributes,
-        vec![
-            ("a".to_string(), "2".to_string()),
-            ("z".to_string(), "3".to_string())
-        ]
-    );
+    assert_eq!(got[0].attributes, r#"{"a":"2","z":"3"}"#);
 }
 
 // ---------------------------------------------------------------------------

@@ -402,10 +402,10 @@ impl SpanBlockEngine {
         parent.added.extend(child.added.drain());
     }
 
-    /// Append one span. Validates kind/status, sorts attributes
-    /// (canonical order; last duplicate key wins, matching the logs
-    /// metadata convention), auto-flushes at the threshold.
-    pub fn push(&self, mut entry: SpanEntry) -> Result<(), String> {
+    /// Append one span. The SQLite boundary has already validated and
+    /// canonicalized its JSON fields; the engine validates compact
+    /// enums and auto-flushes at the authoritative threshold.
+    pub fn push(&self, entry: SpanEntry) -> Result<(), String> {
         if entry.kind > 4 {
             return Err(format!(
                 "invalid span kind {} (0=internal 1=server 2=client 3=producer 4=consumer)",
@@ -418,11 +418,6 @@ impl SpanBlockEngine {
                 entry.status
             ));
         }
-        entry.attributes.sort_by(|a, b| a.0.cmp(&b.0));
-        entry.attributes.reverse(); // last duplicates first...
-        entry.attributes.dedup_by(|a, b| a.0 == b.0); // ...survive dedup
-        entry.attributes.reverse(); // back to ascending key order
-
         let should_flush = {
             let mut buf = self.buffer_lock();
             buf.push(entry);
@@ -438,8 +433,8 @@ impl SpanBlockEngine {
     /// validation/normalization and auto-flush contract as push(), one
     /// buffer lock for the batch, invariants re-checked BEFORE anything
     /// is appended (all-or-nothing).
-    pub fn push_batch(&self, mut entries: Vec<SpanEntry>) -> Result<usize, String> {
-        for entry in &mut entries {
+    pub fn push_batch(&self, entries: Vec<SpanEntry>) -> Result<usize, String> {
+        for entry in &entries {
             if entry.kind > 4 {
                 return Err(format!(
                     "invalid span kind {} (0=internal 1=server 2=client 3=producer 4=consumer)",
@@ -452,10 +447,6 @@ impl SpanBlockEngine {
                     entry.status
                 ));
             }
-            entry.attributes.sort_by(|a, b| a.0.cmp(&b.0));
-            entry.attributes.reverse();
-            entry.attributes.dedup_by(|a, b| a.0 == b.0);
-            entry.attributes.reverse();
         }
         let n = entries.len();
         let should_flush = {
@@ -558,7 +549,7 @@ impl SpanBlockEngine {
     /// Two-tier compaction ('optimize' command) — the same pass as
     /// blocks/engine.rs::optimize, with STATUS partitions: raw blocks
     /// are recompressed to CODEC_COLUMNAR_V2 (codec 5, adaptive
-    /// per-column strategies + shredded attributes — legacy codec-2/4
+    /// per-column strategies + typed JSON string columns — legacy codec-2/4
     /// blocks stay decodable and upgrade whenever a merge rewrites
     /// them), small blocks merge toward
     /// merge_target_entries WITHIN their status partition only (merging

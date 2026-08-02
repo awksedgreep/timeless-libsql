@@ -50,7 +50,7 @@ What lives where:
 ### The CLI suite (the real integration harness)
 
 ```sh
-./tests/cli.sh          # ~25 sections, a few minutes; needs sqlite3 + python3
+./tests/cli.sh          # 43+ sections, a few minutes; needs sqlite3 + python3
 ```
 
 The extension is a cdylib, so end-to-end behavior is tested through the
@@ -58,6 +58,7 @@ sqlite3 CLI: vtab lifecycles for all three signals, pushdown proofs (with
 `EXPLAIN QUERY PLAN` assertions), reopen recovery, prune/optimize/compact,
 append-only enforcement, transaction rollback (including auto-flush inside
 BEGIN), Tier 2 batch blobs, malformed-input rejection, Prometheus ingest,
+rich trace row/batch fidelity at the exact 8,192-span threshold,
 two-connections-one-process sharing (section 21), and it invokes the oracle
 and crash suites as sections. Every section prints `PASS:`; the script exits
 nonzero on the first failure.

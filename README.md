@@ -97,7 +97,7 @@ sqlite3 demo.db \
 |---|---|---|---|
 | `timeless_metrics` | `(name, ts, value, labels)` | **seconds** | `name` =, `ts` ranges |
 | `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column =, exact `message_contains` = |
-| `timeless_traces` | `(trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns, attributes)` | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
+| `timeless_traces` | core IDs/timing plus typed `attributes`, `status_description`, `events`, `resource`, `instrumentation_scope` | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
 
 All three share the same lifecycle: inserts land in an in-memory buffer
 (queryable immediately, auto-flushed at a size threshold), `'flush'` encodes
@@ -518,6 +518,15 @@ SELECT hex(trace_id), name, service, status, duration_ns FROM traces
   as BLOBs; use `hex()` for display.
 - `kind` (`internal|server|client|producer|consumer`) and `status`
   (`unset|ok|error`) are strict TEXT vocabularies mapped to storage bytes.
+- `attributes`, `resource`, and `instrumentation_scope` are typed JSON
+  objects; `events` is a typed JSON array. Booleans, numbers, nulls, arrays,
+  and nested objects survive flush, optimize, and reopen.
+- `service` is derived with the same precedence as timeless_traces:
+  string `attributes["service.name"]`, then resource `service.name`, then the
+  explicit compatibility column. The derived value is what gets indexed.
+- Batch byte `0x01` is the stable core-span v0 format. Byte `0x02` is the
+  additive rich-span v1 format; both remain readable. The extension's
+  8,192-span auto-flush threshold is authoritative for both paths.
 
 **Bucket kernel** — per-service span stats per time bucket (count,
 errors, duration sum/min/max; percentiles stay above the waist):
@@ -560,10 +569,10 @@ writes ride the host transaction**: `ROLLBACK` rolls back buffered inserts
 crash-recovery code because SQLite's journal already provides it.
 
 Column encoding is adaptive per block ("codec 5"): timestamps get
-delta + pco, low-cardinality strings get RLE or dictionary encoding, JSON
-metadata/attributes are *shredded* into per-key typed columns, and
-everything else falls back to zstd — whichever is smallest wins, decided by
-the data, per column, per block.
+delta + pco, low-cardinality strings get RLE or dictionary encoding, log
+metadata is shredded by key, and rich trace JSON remains lossless in adaptive
+string columns. Everything else falls back to zstd — whichever is smallest
+wins, decided by the data, per column, per block.
 
 **Durability contract:** flushed = durable, buffered = lost with the
 process, never corrupt. Proven by `kill -9` crash rounds

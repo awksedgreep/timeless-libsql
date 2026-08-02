@@ -243,9 +243,13 @@ fn trace_duration_percentiles_match_naive() {
             service: format!("svc{}", rng.below(2)),
             kind: 1,
             status: 1,
+            status_description: "".into(),
             start_ts: 1_000 + rng.below(10_000) as i64,
             duration_ns: rng.below(1_000_000) as i64,
-            attributes: vec![],
+            attributes: "{}".into(),
+            events: "[]".into(),
+            resource: "{}".into(),
+            instrumentation_scope: "{}".into(),
         };
         all.push(e.clone());
         engine.push(e).unwrap();

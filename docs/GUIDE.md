@@ -282,12 +282,27 @@ CREATE VIRTUAL TABLE traces USING timeless_traces;
 | `span_id` | BLOB/TEXT | yes | 8-byte BLOB or 16-char hex TEXT |
 | `parent_span_id` | BLOB/TEXT | no | NULL = root span |
 | `name` | TEXT | yes | span name, e.g. `'GET /api/charge'` |
-| `service` | TEXT | yes | emitting service |
+| `service` | TEXT | conditional | compatibility value; may be derived from `service.name` below |
 | `kind` | TEXT | no | `internal` (default), `server`, `client`, `producer`, `consumer` |
 | `status` | TEXT | no | `unset` (default), `ok`, `error` |
 | `start_ts` | INTEGER | yes | unix timestamp in **nanoseconds** |
 | `duration_ns` | INTEGER | no | span duration in ns (default 0) |
-| `attributes` | TEXT | no | flat JSON object of strings |
+| `attributes` | TEXT | no | typed JSON object; nested OTel values are preserved |
+| `status_description` | TEXT | no | OTel status message (default empty) |
+| `events` | TEXT | no | typed JSON array of span events (default `[]`) |
+| `resource` | TEXT | no | typed JSON object of resource attributes (default `{}`) |
+| `instrumentation_scope` | TEXT | no | typed JSON scope object (default `{}`) |
+
+The indexed `service` value follows product semantics: a string
+`service.name` in `attributes` wins, then a string `service.name` in
+`resource`, then the explicit `service` value. At least one source must supply
+a non-empty string.
+
+Current timeless_traces behavior deliberately remains unchanged for fields
+its public Span model does not retain: OTLP links, trace state, trace flags,
+resource/scope schema URLs, and dropped attribute/event/link counts are
+ignored at ingest. They are not silently placed in a private blob. Adding any
+of them requires another additive public column and batch/codec revision.
 
 Ids are flexible on the way in — OTel tooling hands you hex strings, so hex
 TEXT and packed BLOBs are both accepted. On the way out they're always
@@ -441,7 +456,8 @@ of its shadow storage.
 | `name is required (TEXT)` / `ts is required (INTEGER)` / `value is required (REAL)` | metrics insert with a NULL/missing required column |
 | `level is required (TEXT: debug\|info\|warning\|error)` | logs `level` is NULL or not one of the four exact words — vocabularies are strict, `'warn'` and `'ERROR'` are rejected, not coerced |
 | `trace_id is required (16-byte BLOB or 32-char hex TEXT)` | wrong id length/format; same pattern for `span_id` (8 bytes / 16 hex chars) |
-| flat-JSON errors on `labels` / `metadata` / `attributes` | value must be a flat JSON object with **string** values only — no numbers, booleans, nesting |
+| flat-JSON errors on `labels` / `metadata` | value must be a flat JSON object with **string** values only |
+| JSON shape errors on trace rich fields | `attributes`, `resource`, and `instrumentation_scope` must be JSON objects; `events` must be an array; typed and nested values are supported |
 | errors on `UPDATE` / `DELETE` | by design; the store is append-only — use `prune:<ts>` for retention |
 | unknown command string | typo in a command insert, e.g. `'optimise'` — commands are exact: `flush`, `compact` (metrics), `optimize` (logs/traces), `prune:<ts>` |
 

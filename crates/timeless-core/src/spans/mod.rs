@@ -43,6 +43,8 @@
 //!     span data lives in `attributes`, which is scan-only, exactly
 //!     like non-indexed log metadata.
 
+use std::borrow::Cow;
+
 pub mod codec;
 pub mod engine;
 pub mod mem;
@@ -108,9 +110,13 @@ pub fn status_name(status: u8) -> &'static str {
 ///
 /// Ids are PACKED BINARY (the timeless_traces lesson: no hex text
 /// anywhere in storage — hex doubles the bytes and compresses worse).
-/// `attributes` is a flat (key, value) list kept SORTED by key, same
-/// contract as LogEntry.metadata (canonical JSON for free, binary-
-/// searchable, compression-friendly).
+/// The four JSON fields contain canonical JSON text. Keeping JSON at
+/// this public boundary is intentional: OTel values are typed and may
+/// be nested, so flattening them to string pairs loses information.
+/// The SQLite extension validates and canonicalizes all four values
+/// before they reach the engine. Direct engine users must provide an
+/// object for `attributes`/`resource`/`instrumentation_scope` and an
+/// array for `events`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpanEntry {
     pub trace_id: [u8; 16],
@@ -124,20 +130,21 @@ pub struct SpanEntry {
     pub kind: u8,
     /// 0=unset 1=ok 2=error (STATUS_NAMES).
     pub status: u8,
+    /// OTel status message. Empty string is the documented default for
+    /// generation-1 blocks, which did not store this field.
+    pub status_description: Cow<'static, str>,
     /// Start time in NANOSECONDS (OTel convention).
     pub start_ts: i64,
     pub duration_ns: i64,
-    pub attributes: Vec<(String, String)>,
-}
-
-impl SpanEntry {
-    /// Value for `key`, if present (attributes are sorted → binary search).
-    pub fn attr_value(&self, key: &str) -> Option<&str> {
-        self.attributes
-            .binary_search_by(|(k, _)| k.as_str().cmp(key))
-            .ok()
-            .map(|i| self.attributes[i].1.as_str())
-    }
+    /// Canonical JSON object preserving scalar types and nested values.
+    pub attributes: Cow<'static, str>,
+    /// Canonical JSON array of OTel span events.
+    pub events: Cow<'static, str>,
+    /// Canonical JSON object of resource attributes.
+    pub resource: Cow<'static, str>,
+    /// Canonical JSON object containing instrumentation scope name,
+    /// version, and attributes when supplied.
+    pub instrumentation_scope: Cow<'static, str>,
 }
 
 /// A fully-encoded span block ready to persist: payload + metadata +
