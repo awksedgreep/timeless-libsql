@@ -1,0 +1,1199 @@
+use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use fs2::FileExt;
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params, Connection};
+use serde::Serialize;
+use tokio::sync::{mpsc, oneshot, Mutex};
+
+pub const TRACE_CAPABILITY: &str = "timeless_traces/rich-span-batch-v1";
+
+const EXPECTED_COLUMNS: &[(&str, &str, i64)] = &[
+    ("trace_id", "BLOB", 0),
+    ("span_id", "BLOB", 0),
+    ("parent_span_id", "BLOB", 0),
+    ("name", "TEXT", 0),
+    ("service", "TEXT", 0),
+    ("kind", "TEXT", 0),
+    ("status", "TEXT", 0),
+    ("start_ts", "INTEGER", 0),
+    ("duration_ns", "INTEGER", 0),
+    ("attributes", "TEXT", 0),
+    ("status_description", "TEXT", 0),
+    ("events", "TEXT", 0),
+    ("resource", "TEXT", 0),
+    ("instrumentation_scope", "TEXT", 0),
+    ("traces", "", 1),
+];
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct StorageStats {
+    pub capability: String,
+    pub module: String,
+    pub retention_nanoseconds: Option<i64>,
+    pub blocks: i64,
+    pub raw_blocks: i64,
+    pub compressed_blocks: i64,
+    pub buffered_spans: i64,
+    pub bytes_on_disk: i64,
+    pub terms: i64,
+    pub trace_index_rows: i64,
+    pub oldest_timestamp_nanoseconds: Option<i64>,
+    pub newest_timestamp_nanoseconds: Option<i64>,
+
+    pub database_file_bytes: u64,
+    pub database_wal_bytes: u64,
+    pub database_shm_bytes: u64,
+    pub physical_database_bytes: u64,
+    pub sqlite_page_bytes: i64,
+    pub freelist_pages: i64,
+    pub freelist_bytes: i64,
+
+    pub writer_connections: usize,
+    pub reader_connections: usize,
+    pub command_queue_capacity_requests: usize,
+    pub admitted_requests: u64,
+    pub admitted_spans: u64,
+    pub admitted_body_bytes: u64,
+    pub completed_requests: u64,
+    pub completed_spans: u64,
+    pub completed_body_bytes: u64,
+    pub failed_requests: u64,
+    pub failed_spans: u64,
+    pub failed_body_bytes: u64,
+    pub queued_requests: u64,
+    pub queued_spans: u64,
+    pub queued_body_bytes: u64,
+    pub in_flight_requests: u64,
+    pub in_flight_spans: u64,
+    pub in_flight_body_bytes: u64,
+    pub oldest_queued_ms: u64,
+
+    pub api_admission_wait_ns: u64,
+    pub api_queue_wait_ns: u64,
+    pub api_queue_wait_max_ns: u64,
+    pub api_sqlite_insert_ns: u64,
+    pub api_stats_count: u64,
+    pub api_stats_total_ns: u64,
+    pub api_stats_sqlite_ns: u64,
+    pub api_stats_retries: u64,
+    pub api_flush_count: u64,
+    pub api_flush_total_ns: u64,
+    pub api_flush_sqlite_ns: u64,
+    pub api_flush_errors: u64,
+    pub scheduled_flush_count: u64,
+    pub scheduled_flush_total_ns: u64,
+    pub scheduled_flush_errors: u64,
+    pub optimize_count: u64,
+    pub optimize_total_ns: u64,
+    pub optimize_errors: u64,
+    pub checkpoint_count: u64,
+    pub checkpoint_total_ns: u64,
+    pub checkpoint_errors: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FlushReport {
+    pub status: String,
+    pub through_requests: u64,
+    pub through_spans: u64,
+    pub completed_requests: u64,
+    pub completed_spans: u64,
+    pub completed_body_bytes: u64,
+    pub failed_requests: u64,
+    pub failed_spans: u64,
+    pub queued_requests: u64,
+    pub queued_spans: u64,
+    pub queued_body_bytes: u64,
+    pub in_flight_requests: u64,
+    pub in_flight_spans: u64,
+    pub in_flight_body_bytes: u64,
+    pub flush_sqlite_ns: u64,
+    pub api_request_ns: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RuntimeWatermarks {
+    pub admitted_requests: u64,
+    pub admitted_spans: u64,
+    pub admitted_body_bytes: u64,
+    pub completed_requests: u64,
+    pub completed_spans: u64,
+    pub completed_body_bytes: u64,
+    pub failed_requests: u64,
+    pub failed_spans: u64,
+    pub failed_body_bytes: u64,
+    pub queued_requests: u64,
+    pub queued_spans: u64,
+    pub queued_body_bytes: u64,
+    pub in_flight_requests: u64,
+    pub in_flight_spans: u64,
+    pub in_flight_body_bytes: u64,
+    pub oldest_queued_ms: u64,
+}
+
+#[derive(Default)]
+struct ApiProfile {
+    pending: VecDeque<PendingRequest>,
+    in_flight_requests: u64,
+    in_flight_spans: u64,
+    in_flight_body_bytes: u64,
+    admitted_requests: u64,
+    admitted_spans: u64,
+    admitted_body_bytes: u64,
+    completed_requests: u64,
+    completed_spans: u64,
+    completed_body_bytes: u64,
+    failed_requests: u64,
+    failed_spans: u64,
+    failed_body_bytes: u64,
+    admission_wait_ns: u64,
+    queue_wait_ns: u64,
+    queue_wait_max_ns: u64,
+    sqlite_insert_ns: u64,
+    stats_count: u64,
+    stats_total_ns: u64,
+    stats_sqlite_ns: u64,
+    stats_retries: u64,
+    explicit_flush_count: u64,
+    explicit_flush_total_ns: u64,
+    explicit_flush_sqlite_ns: u64,
+    explicit_flush_errors: u64,
+    scheduled_flush_count: u64,
+    scheduled_flush_total_ns: u64,
+    scheduled_flush_errors: u64,
+    optimize_count: u64,
+    optimize_total_ns: u64,
+    optimize_errors: u64,
+    checkpoint_count: u64,
+    checkpoint_total_ns: u64,
+    checkpoint_errors: u64,
+    last_error: Option<String>,
+}
+
+struct PendingRequest {
+    queued_at: Instant,
+    spans: usize,
+    body_bytes: usize,
+}
+
+enum WriteCommand {
+    Ingest {
+        blob: Vec<u8>,
+        spans: usize,
+        body_bytes: usize,
+    },
+    Barrier(oneshot::Sender<Result<(), String>>),
+    Flush {
+        through_requests: u64,
+        explicit: bool,
+        reply: oneshot::Sender<Result<FlushReport, String>>,
+    },
+    Optimize(oneshot::Sender<Result<(), String>>),
+    Shutdown(oneshot::Sender<Result<(), String>>),
+}
+
+enum ReadCommand {
+    Stats(oneshot::Sender<Result<(StorageStats, u64, u64), String>>),
+    Shutdown,
+}
+
+struct StorageInner {
+    writer: mpsc::Sender<WriteCommand>,
+    readers: Vec<mpsc::Sender<ReadCommand>>,
+    next_reader: AtomicUsize,
+    profile: Arc<StdMutex<ApiProfile>>,
+    admission: Mutex<()>,
+    joins: Mutex<Vec<JoinHandle<Result<(), String>>>>,
+    lease: StdMutex<Option<File>>,
+    database_path: PathBuf,
+    retention: Option<Duration>,
+    queue_capacity: usize,
+    shutting_down: AtomicBool,
+}
+
+#[derive(Clone)]
+pub struct Storage(Arc<StorageInner>);
+
+impl Storage {
+    pub fn start(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        retention: Option<Duration>,
+    ) -> Result<Self, String> {
+        if reader_connections == 0 {
+            return Err("reader_connections must be positive".into());
+        }
+        if queue_batches == 0 {
+            return Err("command_queue_batches must be positive".into());
+        }
+        if retention.is_some_and(|duration| duration.is_zero()) {
+            return Err("retention must be positive when enabled".into());
+        }
+        if let Some(parent) = database_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!("create database directory {}: {error}", parent.display())
+            })?;
+        }
+
+        // This is deliberately acquired before SQLite is opened. A second
+        // process cannot initialize or recover the same extension state.
+        let lease = acquire_database_lease(&database_path)?;
+        let profile = Arc::new(StdMutex::new(ApiProfile::default()));
+        let (writer_tx, writer_rx) = mpsc::channel(queue_batches);
+        let (ready_tx, ready_rx) = std_mpsc::channel();
+        let writer_db = database_path.clone();
+        let writer_ext = extension_path.clone();
+        let writer_profile = Arc::clone(&profile);
+        let writer_join = thread::Builder::new()
+            .name("timeless-traces-writer".into())
+            .spawn(move || {
+                writer_main(
+                    writer_db,
+                    writer_ext,
+                    retention,
+                    writer_rx,
+                    ready_tx,
+                    writer_profile,
+                )
+            })
+            .map_err(|error| format!("spawn SQLite writer: {error}"))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                drop(writer_tx);
+                let _ = writer_join.join();
+                return Err(error);
+            }
+            Err(_) => {
+                drop(writer_tx);
+                let _ = writer_join.join();
+                return Err("SQLite writer exited during startup".into());
+            }
+        }
+
+        let mut readers = Vec::with_capacity(reader_connections);
+        let mut joins = vec![writer_join];
+        for number in 0..reader_connections {
+            let (reader_tx, reader_rx) = mpsc::channel(queue_batches);
+            let (ready_tx, ready_rx) = std_mpsc::channel();
+            let reader_db = database_path.clone();
+            let reader_ext = extension_path.clone();
+            let join = thread::Builder::new()
+                .name(format!("timeless-traces-reader-{number}"))
+                .spawn(move || reader_main(reader_db, reader_ext, retention, reader_rx, ready_tx))
+                .map_err(|error| format!("spawn SQLite reader {number}: {error}"))?;
+            match ready_rx.recv() {
+                Ok(Ok(())) => {
+                    readers.push(reader_tx);
+                    joins.push(join);
+                }
+                Ok(Err(error)) => {
+                    drop(reader_tx);
+                    let _ = join.join();
+                    drop(readers);
+                    drop(writer_tx);
+                    for join in joins {
+                        let _ = join.join();
+                    }
+                    return Err(error);
+                }
+                Err(_) => {
+                    drop(reader_tx);
+                    let _ = join.join();
+                    drop(readers);
+                    drop(writer_tx);
+                    for join in joins {
+                        let _ = join.join();
+                    }
+                    return Err(format!("SQLite reader {number} exited during startup"));
+                }
+            }
+        }
+
+        Ok(Self(Arc::new(StorageInner {
+            writer: writer_tx,
+            readers,
+            next_reader: AtomicUsize::new(0),
+            profile,
+            admission: Mutex::new(()),
+            joins: Mutex::new(joins),
+            lease: StdMutex::new(Some(lease)),
+            database_path,
+            retention,
+            queue_capacity: queue_batches,
+            shutting_down: AtomicBool::new(false),
+        })))
+    }
+
+    /// The Session 3 OTLP handler uses this seam after parsing one request
+    /// and encoding one public rich-span v1 batch. It never inserts spans one
+    /// at a time and never owns a second buffer or block policy.
+    pub async fn submit_batch(
+        &self,
+        blob: Vec<u8>,
+        spans: usize,
+        body_bytes: usize,
+    ) -> Result<(), String> {
+        let admission_started = Instant::now();
+        let _ordered = self.0.admission.lock().await;
+        if self.0.shutting_down.load(Ordering::Acquire) {
+            return Err("traces API is shutting down; admission is closed".into());
+        }
+        let permit = self
+            .0
+            .writer
+            .reserve()
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        let admission_ns = elapsed_ns(admission_started);
+        {
+            let mut profile = profile_lock(&self.0.profile);
+            profile.pending.push_back(PendingRequest {
+                queued_at: Instant::now(),
+                spans,
+                body_bytes,
+            });
+            profile.admitted_requests = profile.admitted_requests.saturating_add(1);
+            profile.admitted_spans = profile.admitted_spans.saturating_add(spans as u64);
+            profile.admitted_body_bytes = profile
+                .admitted_body_bytes
+                .saturating_add(body_bytes as u64);
+            profile.admission_wait_ns = profile.admission_wait_ns.saturating_add(admission_ns);
+        }
+        permit.send(WriteCommand::Ingest {
+            blob,
+            spans,
+            body_bytes,
+        });
+        Ok(())
+    }
+
+    /// Proves that every earlier admitted request completed its one SQLite
+    /// statement. It deliberately does not flush the extension buffer.
+    pub async fn barrier(&self) -> Result<(), String> {
+        let _ordered = self.0.admission.lock().await;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::Barrier(reply_tx))
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        drop(_ordered);
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before barrier".to_string())?
+    }
+
+    pub async fn flush(&self) -> Result<FlushReport, String> {
+        self.flush_ordered(true).await
+    }
+
+    pub async fn schedule_flush(&self) -> Result<(), String> {
+        self.flush_ordered(false).await.map(|_| ())
+    }
+
+    async fn flush_ordered(&self, explicit: bool) -> Result<FlushReport, String> {
+        let total_started = Instant::now();
+        let _ordered = self.0.admission.lock().await;
+        if self.0.shutting_down.load(Ordering::Acquire) {
+            return Err("traces API is shutting down; flush is closed".into());
+        }
+        let through_requests = profile_lock(&self.0.profile).admitted_requests;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::Flush {
+                through_requests,
+                explicit,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        drop(_ordered);
+        let result = reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before flush completed".to_string())?;
+        if explicit {
+            let mut profile = profile_lock(&self.0.profile);
+            profile.explicit_flush_count = profile.explicit_flush_count.saturating_add(1);
+            profile.explicit_flush_total_ns = profile
+                .explicit_flush_total_ns
+                .saturating_add(elapsed_ns(total_started));
+            if result.is_err() {
+                profile.explicit_flush_errors = profile.explicit_flush_errors.saturating_add(1);
+            }
+        }
+        result
+    }
+
+    pub async fn schedule_optimize(&self) -> Result<(), String> {
+        let _ordered = self.0.admission.lock().await;
+        if self.0.shutting_down.load(Ordering::Acquire) {
+            return Err("traces API is shutting down; optimize is closed".into());
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::Optimize(reply_tx))
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        drop(_ordered);
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before optimize completed".to_string())?
+    }
+
+    pub async fn stats(&self) -> Result<StorageStats, String> {
+        let total_started = Instant::now();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.reader()
+            .send(ReadCommand::Stats(reply_tx))
+            .await
+            .map_err(|_| "SQLite reader is not running".to_string())?;
+        let (mut stats, sqlite_ns, retries) = reply_rx
+            .await
+            .map_err(|_| "SQLite reader stopped before stats completed".to_string())??;
+        {
+            let mut profile = profile_lock(&self.0.profile);
+            profile.stats_count = profile.stats_count.saturating_add(1);
+            profile.stats_total_ns = profile
+                .stats_total_ns
+                .saturating_add(elapsed_ns(total_started));
+            profile.stats_sqlite_ns = profile.stats_sqlite_ns.saturating_add(sqlite_ns);
+            profile.stats_retries = profile.stats_retries.saturating_add(retries);
+            apply_profile(&mut stats, &profile);
+        }
+        stats.writer_connections = 1;
+        stats.reader_connections = self.0.readers.len();
+        stats.command_queue_capacity_requests = self.0.queue_capacity;
+        let (file, wal, shm) = database_file_sizes(&self.0.database_path);
+        stats.database_file_bytes = file;
+        stats.database_wal_bytes = wal;
+        stats.database_shm_bytes = shm;
+        stats.physical_database_bytes = file.saturating_add(wal).saturating_add(shm);
+        Ok(stats)
+    }
+
+    pub fn is_ready(&self) -> bool {
+        !self.0.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Returns host admission/completion state without waiting on SQLite.
+    /// This remains responsive while a writer is blocked and lets operators
+    /// distinguish database work from API queue saturation.
+    pub fn runtime_watermarks(&self) -> RuntimeWatermarks {
+        let profile = profile_lock(&self.0.profile);
+        RuntimeWatermarks {
+            admitted_requests: profile.admitted_requests,
+            admitted_spans: profile.admitted_spans,
+            admitted_body_bytes: profile.admitted_body_bytes,
+            completed_requests: profile.completed_requests,
+            completed_spans: profile.completed_spans,
+            completed_body_bytes: profile.completed_body_bytes,
+            failed_requests: profile.failed_requests,
+            failed_spans: profile.failed_spans,
+            failed_body_bytes: profile.failed_body_bytes,
+            queued_requests: profile.pending.len() as u64,
+            queued_spans: profile
+                .pending
+                .iter()
+                .map(|pending| pending.spans as u64)
+                .sum(),
+            queued_body_bytes: profile
+                .pending
+                .iter()
+                .map(|pending| pending.body_bytes as u64)
+                .sum(),
+            in_flight_requests: profile.in_flight_requests,
+            in_flight_spans: profile.in_flight_spans,
+            in_flight_body_bytes: profile.in_flight_body_bytes,
+            oldest_queued_ms: profile
+                .pending
+                .front()
+                .map(|pending| duration_ms(pending.queued_at.elapsed()))
+                .unwrap_or(0),
+        }
+    }
+
+    fn reader(&self) -> &mpsc::Sender<ReadCommand> {
+        let number = self.0.next_reader.fetch_add(1, Ordering::Relaxed);
+        &self.0.readers[number % self.0.readers.len()]
+    }
+
+    pub async fn shutdown(&self) -> Result<(), String> {
+        if self.0.shutting_down.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        // Serialize with admission so no accepted request can land behind the
+        // shutdown marker. All prior writer commands drain in FIFO order.
+        let _ordered = self.0.admission.lock().await;
+        for reader in &self.0.readers {
+            let _ = reader.send(ReadCommand::Shutdown).await;
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let writer_result = match self.0.writer.send(WriteCommand::Shutdown(reply_tx)).await {
+            Ok(()) => reply_rx
+                .await
+                .map_err(|_| "SQLite writer stopped during shutdown".to_string())?,
+            Err(_) => Err("SQLite writer is not running".into()),
+        };
+        drop(_ordered);
+        let joins = {
+            let mut guard = self.0.joins.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        for join in joins {
+            join.join()
+                .map_err(|_| "SQLite traces API worker panicked".to_string())??;
+        }
+        if let Some(file) = profile_lock(&self.0.lease).take() {
+            FileExt::unlock(&file)
+                .map_err(|error| format!("release database owner lease: {error}"))?;
+        }
+        writer_result
+    }
+
+    pub fn retention(&self) -> Option<Duration> {
+        self.0.retention
+    }
+}
+
+fn writer_main(
+    database_path: PathBuf,
+    extension_path: PathBuf,
+    retention: Option<Duration>,
+    mut commands: mpsc::Receiver<WriteCommand>,
+    ready: std_mpsc::Sender<Result<(), String>>,
+    profile: Arc<StdMutex<ApiProfile>>,
+) -> Result<(), String> {
+    let conn = match open_connection(&database_path, &extension_path, retention, true) {
+        Ok(conn) => {
+            let _ = ready.send(Ok(()));
+            conn
+        }
+        Err(error) => {
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let mut unreported_error: Option<String> = None;
+    while let Some(command) = commands.blocking_recv() {
+        match command {
+            WriteCommand::Ingest {
+                blob,
+                spans,
+                body_bytes,
+            } => {
+                record_queue_start(&profile, spans, body_bytes);
+                let started = Instant::now();
+                let result = insert_rich_batch(&conn, &blob, spans);
+                record_queue_completion(&profile, spans, body_bytes, elapsed_ns(started), &result);
+                if let Err(error) = result {
+                    unreported_error = Some(error);
+                }
+            }
+            WriteCommand::Barrier(reply) => {
+                let result = unreported_error.take().map_or(Ok(()), Err);
+                let _ = reply.send(result);
+            }
+            WriteCommand::Flush {
+                through_requests,
+                explicit,
+                reply,
+            } => {
+                let started = Instant::now();
+                let flush_result = run_command(&conn, "flush", "flush traces");
+                let flush_ns = elapsed_ns(started);
+                {
+                    let mut api = profile_lock(&profile);
+                    if explicit {
+                        api.explicit_flush_sqlite_ns =
+                            api.explicit_flush_sqlite_ns.saturating_add(flush_ns);
+                    } else {
+                        api.scheduled_flush_count = api.scheduled_flush_count.saturating_add(1);
+                        api.scheduled_flush_total_ns =
+                            api.scheduled_flush_total_ns.saturating_add(flush_ns);
+                        if flush_result.is_err() {
+                            api.scheduled_flush_errors =
+                                api.scheduled_flush_errors.saturating_add(1);
+                        }
+                    }
+                    if let Err(error) = &flush_result {
+                        api.last_error = Some(error.clone());
+                    }
+                }
+                let prior_error = unreported_error.take();
+                let result = match (prior_error, flush_result) {
+                    (Some(error), _) | (None, Err(error)) => Err(error),
+                    (None, Ok(())) => {
+                        let api = profile_lock(&profile);
+                        Ok(flush_report(&api, through_requests, flush_ns))
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            WriteCommand::Optimize(reply) => {
+                let started = Instant::now();
+                let result = run_command(&conn, "optimize", "optimize traces");
+                let mut api = profile_lock(&profile);
+                api.optimize_count = api.optimize_count.saturating_add(1);
+                api.optimize_total_ns = api.optimize_total_ns.saturating_add(elapsed_ns(started));
+                if let Err(error) = &result {
+                    api.optimize_errors = api.optimize_errors.saturating_add(1);
+                    api.last_error = Some(error.clone());
+                }
+                drop(api);
+                let _ = reply.send(result);
+            }
+            WriteCommand::Shutdown(reply) => {
+                let flush = run_command(&conn, "flush", "graceful traces flush");
+                let checkpoint_started = Instant::now();
+                // Attempt the checkpoint even when flush reports an error so
+                // shutdown telemetry preserves both independent operations.
+                let checkpoint = checkpoint_wal(&conn);
+                {
+                    let mut api = profile_lock(&profile);
+                    api.checkpoint_count = api.checkpoint_count.saturating_add(1);
+                    api.checkpoint_total_ns = api
+                        .checkpoint_total_ns
+                        .saturating_add(elapsed_ns(checkpoint_started));
+                    if let Err(error) = &checkpoint {
+                        api.checkpoint_errors = api.checkpoint_errors.saturating_add(1);
+                        api.last_error = Some(error.clone());
+                    }
+                }
+                let result = match (unreported_error.take(), flush, checkpoint) {
+                    (Some(error), _, _) => Err(error),
+                    (None, Err(error), _) => Err(error),
+                    (None, Ok(()), Err(error)) => Err(error),
+                    (None, Ok(()), Ok(())) => Ok(()),
+                };
+                let _ = reply.send(result.clone());
+                return result;
+            }
+        }
+    }
+    // A dropped API still flushes its accepted tail. SIGKILL cannot run this;
+    // only previously flushed/committed blocks are promised after kill -9.
+    run_command(&conn, "flush", "final traces flush after writer disconnect")?;
+    checkpoint_wal(&conn)
+}
+
+fn reader_main(
+    database_path: PathBuf,
+    extension_path: PathBuf,
+    retention: Option<Duration>,
+    mut commands: mpsc::Receiver<ReadCommand>,
+    ready: std_mpsc::Sender<Result<(), String>>,
+) -> Result<(), String> {
+    let conn = match open_connection(&database_path, &extension_path, retention, false) {
+        Ok(conn) => {
+            let _ = ready.send(Ok(()));
+            conn
+        }
+        Err(error) => {
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    while let Some(command) = commands.blocking_recv() {
+        match command {
+            ReadCommand::Stats(reply) => {
+                let started = Instant::now();
+                let mut retries = 0_u64;
+                let result = retry_read(
+                    || storage_stats(&conn),
+                    || retries = retries.saturating_add(1),
+                )
+                .map(|stats| (stats, elapsed_ns(started), retries));
+                let _ = reply.send(result);
+            }
+            ReadCommand::Shutdown => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
+fn open_connection(
+    path: &Path,
+    extension: &Path,
+    retention: Option<Duration>,
+    initialize: bool,
+) -> Result<Connection, String> {
+    let conn =
+        Connection::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    unsafe {
+        conn.load_extension_enable()
+            .map_err(|error| format!("enable extension loading: {error}"))?;
+        conn.load_extension(extension, None::<&str>)
+            .map_err(|error| format!("load {}: {error}", extension.display()))?;
+    }
+    conn.load_extension_disable()
+        .map_err(|error| format!("disable extension loading: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|error| format!("set busy timeout: {error}"))?;
+    if initialize {
+        let create = match retention {
+            Some(duration) => format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces(retention='{}s');",
+                duration.as_secs()
+            ),
+            None => "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces;".to_owned(),
+        };
+        conn.execute_batch(&format!(
+            "PRAGMA page_size = 16384;
+             PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -128000;
+             PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA mmap_size = 2147483648;
+             PRAGMA wal_autocheckpoint = 10000;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA busy_timeout = 5000;
+             {create}"
+        ))
+        .map_err(|error| format!("initialize traces database: {error}"))?;
+    } else {
+        conn.execute_batch(
+            "PRAGMA cache_size = -8000;
+             PRAGMA mmap_size = 2147483648;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA busy_timeout = 5000;",
+        )
+        .map_err(|error| format!("configure traces reader: {error}"))?;
+    }
+    verify_capability(&conn, retention, initialize)?;
+    Ok(conn)
+}
+
+fn verify_capability(
+    conn: &Connection,
+    retention: Option<Duration>,
+    probe_batch: bool,
+) -> Result<(), String> {
+    let mut statement = conn
+        .prepare("PRAGMA table_xinfo('traces')")
+        .map_err(|error| format!("inspect traces capability schema: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })
+        .map_err(|error| format!("read traces capability schema: {error}"))?;
+    let actual = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("collect traces capability schema: {error}"))?;
+    let expected = EXPECTED_COLUMNS
+        .iter()
+        .map(|(name, kind, hidden)| ((*name).to_owned(), (*kind).to_owned(), *hidden))
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(format!(
+            "incompatible timeless_traces extension: server requires {TRACE_CAPABILITY}; expected columns {expected:?}, got {actual:?}"
+        ));
+    }
+
+    let values = stat_values(conn)?;
+    match values.get("module") {
+        Some(SqlValue::Text(module)) if module == "timeless_traces" => {}
+        value => {
+            return Err(format!(
+                "incompatible timeless_traces extension: expected module timeless_traces, got {value:?}"
+            ))
+        }
+    }
+    let expected_retention = retention
+        .map(|duration| duration.as_secs())
+        .map(|seconds| seconds.saturating_mul(1_000_000_000))
+        .map(|native| i64::try_from(native).unwrap_or(i64::MAX));
+    let actual_retention = optional_integer(values.get("retention"));
+    if actual_retention != expected_retention {
+        return Err(format!(
+            "traces retention mismatch: server requested {expected_retention:?} ns but database stores {actual_retention:?} ns"
+        ));
+    }
+
+    if probe_batch {
+        // A zero-span v1 batch is a public, non-data capability probe. The
+        // schema alone cannot distinguish a rich-schema build that lacks the
+        // matching versioned batch decoder.
+        let empty_v1 = [0x02_u8, 0, 0, 0, 0, 0, 0, 0];
+        conn.execute("INSERT INTO traces(traces) VALUES (?1)", params![empty_v1])
+            .map_err(|error| {
+                format!(
+                    "incompatible timeless_traces extension: {TRACE_CAPABILITY} batch probe failed: {error}"
+                )
+            })?;
+    } else {
+        conn.prepare(
+            "SELECT status_description,events,resource,instrumentation_scope FROM traces LIMIT 0",
+        )
+        .map_err(|error| format!("connect rich traces virtual table: {error}"))?;
+    }
+    Ok(())
+}
+
+fn insert_rich_batch(conn: &Connection, blob: &[u8], spans: usize) -> Result<(), String> {
+    if blob.first() != Some(&0x02) {
+        return Err("traces API writer accepts only public rich-span batch v1 (0x02)".into());
+    }
+    let expected =
+        i64::try_from(spans).map_err(|_| "traces batch span count exceeds i64::MAX".to_string())?;
+    conn.execute("INSERT INTO traces(traces) VALUES (?1)", params![blob])
+        .map_err(|error| format!("insert traces rich batch: {error}"))?;
+    let inserted = conn.last_insert_rowid();
+    if inserted != expected {
+        return Err(format!(
+            "timeless_traces accepted {inserted} spans; API batch declared {spans}"
+        ));
+    }
+    Ok(())
+}
+
+fn run_command(conn: &Connection, command: &str, context: &str) -> Result<(), String> {
+    conn.execute("INSERT INTO traces(traces) VALUES (?1)", [command])
+        .map(|_| ())
+        .map_err(|error| format!("{context}: {error}"))
+}
+
+fn checkpoint_wal(conn: &Connection) -> Result<(), String> {
+    let (busy, _log_frames, _checkpointed): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|error| format!("checkpoint traces WAL: {error}"))?;
+    if busy != 0 {
+        return Err(format!("checkpoint traces WAL remained busy ({busy})"));
+    }
+    Ok(())
+}
+
+fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
+    let values = stat_values(conn)?;
+    let integer = |key: &str| match values.get(key) {
+        Some(SqlValue::Integer(value)) => *value,
+        Some(SqlValue::Real(value)) => *value as i64,
+        _ => 0,
+    };
+    let text = |key: &str| match values.get(key) {
+        Some(SqlValue::Text(value)) => Some(value.clone()),
+        _ => None,
+    };
+    let (page_count, page_size, freelist_pages): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT page_count FROM pragma_page_count),
+                    (SELECT page_size FROM pragma_page_size),
+                    (SELECT freelist_count FROM pragma_freelist_count)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| format!("read SQLite page accounting: {error}"))?;
+    let blocks = integer("blocks");
+    let raw_blocks = integer("raw_blocks");
+    Ok(StorageStats {
+        capability: TRACE_CAPABILITY.to_owned(),
+        module: text("module").unwrap_or_default(),
+        retention_nanoseconds: optional_integer(values.get("retention")),
+        blocks,
+        raw_blocks,
+        compressed_blocks: blocks.saturating_sub(raw_blocks),
+        buffered_spans: integer("buffered_spans"),
+        bytes_on_disk: integer("bytes_on_disk"),
+        terms: integer("terms"),
+        trace_index_rows: integer("trace_index_rows"),
+        oldest_timestamp_nanoseconds: optional_integer(values.get("ts_min")),
+        newest_timestamp_nanoseconds: optional_integer(values.get("ts_max")),
+        sqlite_page_bytes: page_count.saturating_mul(page_size),
+        freelist_pages,
+        freelist_bytes: freelist_pages.saturating_mul(page_size),
+        ..StorageStats::default()
+    })
+}
+
+fn stat_values(conn: &Connection) -> Result<HashMap<String, SqlValue>, String> {
+    let mut statement = conn
+        .prepare("SELECT key,value FROM timeless_stats('traces')")
+        .map_err(|error| format!("prepare timeless_stats for traces: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, SqlValue>(1)?))
+        })
+        .map_err(|error| format!("read timeless_stats for traces: {error}"))?;
+    let mut values = HashMap::new();
+    for row in rows {
+        let (key, value) =
+            row.map_err(|error| format!("collect timeless_stats for traces: {error}"))?;
+        values.insert(key, value);
+    }
+    Ok(values)
+}
+
+fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
+    stats.admitted_requests = profile.admitted_requests;
+    stats.admitted_spans = profile.admitted_spans;
+    stats.admitted_body_bytes = profile.admitted_body_bytes;
+    stats.completed_requests = profile.completed_requests;
+    stats.completed_spans = profile.completed_spans;
+    stats.completed_body_bytes = profile.completed_body_bytes;
+    stats.failed_requests = profile.failed_requests;
+    stats.failed_spans = profile.failed_spans;
+    stats.failed_body_bytes = profile.failed_body_bytes;
+    stats.queued_requests = profile.pending.len() as u64;
+    stats.queued_spans = profile
+        .pending
+        .iter()
+        .map(|pending| pending.spans as u64)
+        .sum();
+    stats.queued_body_bytes = profile
+        .pending
+        .iter()
+        .map(|pending| pending.body_bytes as u64)
+        .sum();
+    stats.in_flight_requests = profile.in_flight_requests;
+    stats.in_flight_spans = profile.in_flight_spans;
+    stats.in_flight_body_bytes = profile.in_flight_body_bytes;
+    stats.oldest_queued_ms = profile
+        .pending
+        .front()
+        .map(|pending| duration_ms(pending.queued_at.elapsed()))
+        .unwrap_or(0);
+    stats.api_admission_wait_ns = profile.admission_wait_ns;
+    stats.api_queue_wait_ns = profile.queue_wait_ns;
+    stats.api_queue_wait_max_ns = profile.queue_wait_max_ns;
+    stats.api_sqlite_insert_ns = profile.sqlite_insert_ns;
+    stats.api_stats_count = profile.stats_count;
+    stats.api_stats_total_ns = profile.stats_total_ns;
+    stats.api_stats_sqlite_ns = profile.stats_sqlite_ns;
+    stats.api_stats_retries = profile.stats_retries;
+    stats.api_flush_count = profile.explicit_flush_count;
+    stats.api_flush_total_ns = profile.explicit_flush_total_ns;
+    stats.api_flush_sqlite_ns = profile.explicit_flush_sqlite_ns;
+    stats.api_flush_errors = profile.explicit_flush_errors;
+    stats.scheduled_flush_count = profile.scheduled_flush_count;
+    stats.scheduled_flush_total_ns = profile.scheduled_flush_total_ns;
+    stats.scheduled_flush_errors = profile.scheduled_flush_errors;
+    stats.optimize_count = profile.optimize_count;
+    stats.optimize_total_ns = profile.optimize_total_ns;
+    stats.optimize_errors = profile.optimize_errors;
+    stats.checkpoint_count = profile.checkpoint_count;
+    stats.checkpoint_total_ns = profile.checkpoint_total_ns;
+    stats.checkpoint_errors = profile.checkpoint_errors;
+    stats.last_error.clone_from(&profile.last_error);
+}
+
+fn flush_report(profile: &ApiProfile, through_requests: u64, flush_sqlite_ns: u64) -> FlushReport {
+    FlushReport {
+        status: "ok".into(),
+        through_requests,
+        through_spans: profile.completed_spans,
+        completed_requests: profile.completed_requests,
+        completed_spans: profile.completed_spans,
+        completed_body_bytes: profile.completed_body_bytes,
+        failed_requests: profile.failed_requests,
+        failed_spans: profile.failed_spans,
+        queued_requests: profile.pending.len() as u64,
+        queued_spans: profile
+            .pending
+            .iter()
+            .map(|pending| pending.spans as u64)
+            .sum(),
+        queued_body_bytes: profile
+            .pending
+            .iter()
+            .map(|pending| pending.body_bytes as u64)
+            .sum(),
+        in_flight_requests: profile.in_flight_requests,
+        in_flight_spans: profile.in_flight_spans,
+        in_flight_body_bytes: profile.in_flight_body_bytes,
+        flush_sqlite_ns,
+        api_request_ns: 0,
+    }
+}
+
+fn record_queue_start(profile: &StdMutex<ApiProfile>, spans: usize, body_bytes: usize) {
+    let mut profile = profile_lock(profile);
+    if let Some(pending) = profile.pending.pop_front() {
+        debug_assert_eq!(pending.spans, spans);
+        debug_assert_eq!(pending.body_bytes, body_bytes);
+        let wait_ns = elapsed_ns(pending.queued_at);
+        profile.queue_wait_ns = profile.queue_wait_ns.saturating_add(wait_ns);
+        profile.queue_wait_max_ns = profile.queue_wait_max_ns.max(wait_ns);
+        profile.in_flight_requests = profile.in_flight_requests.saturating_add(1);
+        profile.in_flight_spans = profile.in_flight_spans.saturating_add(spans as u64);
+        profile.in_flight_body_bytes = profile
+            .in_flight_body_bytes
+            .saturating_add(body_bytes as u64);
+    }
+}
+
+fn record_queue_completion(
+    profile: &StdMutex<ApiProfile>,
+    spans: usize,
+    body_bytes: usize,
+    insert_ns: u64,
+    result: &Result<(), String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.in_flight_requests = profile.in_flight_requests.saturating_sub(1);
+    profile.in_flight_spans = profile.in_flight_spans.saturating_sub(spans as u64);
+    profile.in_flight_body_bytes = profile
+        .in_flight_body_bytes
+        .saturating_sub(body_bytes as u64);
+    profile.sqlite_insert_ns = profile.sqlite_insert_ns.saturating_add(insert_ns);
+    match result {
+        Ok(()) => {
+            profile.completed_requests = profile.completed_requests.saturating_add(1);
+            profile.completed_spans = profile.completed_spans.saturating_add(spans as u64);
+            profile.completed_body_bytes = profile
+                .completed_body_bytes
+                .saturating_add(body_bytes as u64);
+        }
+        Err(error) => {
+            profile.failed_requests = profile.failed_requests.saturating_add(1);
+            profile.failed_spans = profile.failed_spans.saturating_add(spans as u64);
+            profile.failed_body_bytes = profile.failed_body_bytes.saturating_add(body_bytes as u64);
+            profile.last_error = Some(error.clone());
+        }
+    }
+}
+
+fn optional_integer(value: Option<&SqlValue>) -> Option<i64> {
+    match value {
+        Some(SqlValue::Integer(value)) => Some(*value),
+        Some(SqlValue::Real(value)) => Some(*value as i64),
+        _ => None,
+    }
+}
+
+fn acquire_database_lease(database_path: &Path) -> Result<File, String> {
+    let lock_path = suffix_path(database_path, ".timeless-traces-api.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("open database owner lease {}: {error}", lock_path.display()))?;
+    file.try_lock_exclusive().map_err(|error| {
+        format!(
+            "database {} is already owned by another timeless-traces-api process: {error}",
+            database_path.display()
+        )
+    })?;
+    Ok(file)
+}
+
+fn database_file_sizes(database_path: &Path) -> (u64, u64, u64) {
+    (
+        file_size(database_path),
+        file_size(&suffix_path(database_path, "-wal")),
+        file_size(&suffix_path(database_path, "-shm")),
+    )
+}
+
+fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn retry_read<T>(
+    mut operation: impl FnMut() -> Result<T, String>,
+    mut retried: impl FnMut(),
+) -> Result<T, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if Instant::now() < deadline && is_retryable_read(&error) => {
+                retried();
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_retryable_read(error: &str) -> bool {
+    error.contains("active write transaction")
+        || error.contains("pending writer transaction")
+        || error.contains("database is locked")
+        || error.contains("database is busy")
+}
+
+fn profile_lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    duration_ns(started.elapsed())
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn owner_lease_is_exclusive_and_recoverable() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("traces.db");
+        let first = acquire_database_lease(&database).unwrap();
+        let error = acquire_database_lease(&database).unwrap_err();
+        assert!(error.contains("already owned"), "{error}");
+        FileExt::unlock(&first).unwrap();
+        acquire_database_lease(&database).unwrap();
+    }
+
+    #[test]
+    fn transient_reader_conflicts_are_retried() {
+        let attempts = Cell::new(0_u64);
+        let retries = Cell::new(0_u64);
+        let value = retry_read(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err("traces read is blocked by a pending writer transaction".into())
+                } else {
+                    Ok(42)
+                }
+            },
+            || retries.set(retries.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(retries.get(), 1);
+    }
+}
