@@ -50,6 +50,9 @@ ORDINALS_PER_SECOND = 256
 BASE_MILLISECONDS = BASE_SECONDS * 1_000
 BASE_NANOSECONDS = BASE_SECONDS * 1_000_000_000
 SIGNALS = ("metrics", "logs", "traces")
+MIN_RELEASE_SECONDS_PER_SIGNAL = 2 * 60 * 60
+RELEASE_AGGREGATE_SIGNAL_HOURS = 8
+DEFAULT_RELEASE_SECONDS = RELEASE_AGGREGATE_SIGNAL_HOURS * 60 * 60 / len(SIGNALS)
 COUNT_FIELDS = {"metrics": "total_points", "logs": "total_entries", "traces": "total_spans"}
 STATS_PATHS = {
     "metrics": "/select/metrics/stats",
@@ -1281,11 +1284,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-rss-kib", action="append", default=[])
     args = parser.parse_args()
     if args.duration_seconds is None:
-        args.duration_seconds = 120.0 if args.mode == "short" else 8 * 60 * 60.0
+        args.duration_seconds = 120.0 if args.mode == "short" else DEFAULT_RELEASE_SECONDS
     if args.sample_seconds is None:
         args.sample_seconds = 5.0 if args.mode == "short" else 30.0
     if args.duration_seconds <= 0 or args.sample_seconds <= 0 or args.write_hz <= 0 or args.query_hz <= 0:
         parser.error("durations and rates must be positive")
+    if args.mode == "release" and args.duration_seconds < MIN_RELEASE_SECONDS_PER_SIGNAL:
+        parser.error("release mode requires at least two hours per concurrently running signal")
     if args.batch <= 0 or args.batch % 4:
         parser.error("--batch must be positive and divisible by four")
     rss_limits = {"metrics": 512 * 1024, "logs": 512 * 1024, "traces": 768 * 1024}
@@ -1351,6 +1356,7 @@ def main() -> int:
         "mode": args.mode,
         "started_at": started_wall.isoformat(),
         "configured_duration_seconds": args.duration_seconds,
+        "configured_aggregate_signal_hours": args.duration_seconds * len(SIGNALS) / 3600,
         "write_hz_per_signal": args.write_hz,
         "query_hz_per_signal": args.query_hz,
         "batch_records": args.batch,
@@ -1439,6 +1445,7 @@ def main() -> int:
             sample_state(state, elapsed)
         report.update({
             "elapsed_seconds": elapsed,
+            "elapsed_aggregate_signal_hours": elapsed * len(SIGNALS) / 3600,
             "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "faults": events,
             "final_barriers": {key: value["flush"] for key, value in barriers.items()},
