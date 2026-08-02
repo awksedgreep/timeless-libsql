@@ -417,6 +417,7 @@ INSERT INTO metrics(metrics) VALUES ('compact');    -- metrics: merge small chun
 INSERT INTO logs(logs)       VALUES ('optimize');   -- logs/traces: re-encode into
 INSERT INTO traces(traces)   VALUES ('optimize');   --   larger, better-compressed blocks
 INSERT INTO logs(logs)       VALUES ('optimize:65536'); -- bounded logs source entries
+INSERT INTO traces(traces)   VALUES ('optimize:65536'); -- bounded trace source spans
 ```
 
 - **`flush`** — you know this one (section 3).
@@ -424,6 +425,11 @@ INSERT INTO logs(logs)       VALUES ('optimize:65536'); -- bounded logs source e
   blocks, which cost a little disk and read speed. Run this occasionally
   (e.g. daily, or after a big backfill) to merge them into optimally
   compressed blocks. Never required for correctness.
+- **`optimize:<entries>`** — the same optimizer with a per-call source-work
+  budget for logs or traces. One complete planner group may exceed the budget
+  so a call always makes progress. Inspect `optimize_pending_*`,
+  `optimize_merge_ready_*`, and the raw/merge phase counters in
+  `timeless_stats(...)` to schedule it without guessing at block structure.
 - **`prune:<ts>`** — retention. Drops all data older than the timestamp,
   which is given in *that table's* unit:
 

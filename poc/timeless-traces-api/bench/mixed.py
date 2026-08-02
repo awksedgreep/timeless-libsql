@@ -43,6 +43,10 @@ def percentile(values, fraction):
     return ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))]
 
 
+def counter_delta(after, before, keys):
+    return {key: after[key] - before[key] for key in keys}
+
+
 def phase(args, phase_number, query_workers):
     target = urllib.parse.urlsplit(args.url)
     before = ingest.request_json(args.url + "/select/traces/stats")
@@ -113,6 +117,28 @@ def phase(args, phase_number, query_workers):
         "query_errors": query_errors,
         "flush": flush,
         "memory": ingest.proc_memory(args.server_pid),
+        "gate_delta": counter_delta(
+            after,
+            before,
+            (
+                "extension_read_conflicts",
+                "extension_read_barge_rejections",
+                "extension_writer_wait_count",
+                "extension_writer_wait_ns",
+                "extension_writer_timeouts",
+                "api_read_retries",
+            ),
+        ),
+        "maintenance_delta": counter_delta(
+            after,
+            before,
+            (
+                "extension_optimize_count",
+                "extension_optimize_total_ns",
+                "extension_optimize_raw_entries",
+                "extension_optimize_merge_entries",
+            ),
+        ),
     }
     if completed != offered or result["failed_spans"] or write_errors or query_errors:
         raise RuntimeError(json.dumps(result, sort_keys=True))

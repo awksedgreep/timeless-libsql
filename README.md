@@ -110,15 +110,16 @@ INSERT INTO metrics(metrics) VALUES ('flush');       -- make buffered points dur
 INSERT INTO metrics(metrics) VALUES ('compact');     -- merge small chunks
 INSERT INTO logs(logs)       VALUES ('optimize');    -- re-encode into larger, purer blocks
 INSERT INTO logs(logs)       VALUES ('optimize:65536'); -- cap source entries this turn
+INSERT INTO traces(traces)   VALUES ('optimize:65536'); -- same bounded maintenance for spans
 INSERT INTO traces(traces)   VALUES ('prune:<ns>');  -- drop everything older than <ts>
 ```
 
-`optimize:<entries>` is the incremental logs maintenance form. Raw compression
-runs before eligible size-tiered merges, and one complete merge cohort may
-slightly exceed the requested budget so maintenance always makes progress.
-`timeless_stats('logs')` exposes actionable/deferred backlog plus separate raw
-and merge entry, byte, and time counters. (`prune:` takes the table's own ts
-unit: seconds / ms / ns.)
+`optimize:<entries>` is the incremental logs/traces maintenance form. Raw
+compression runs before eligible size-tiered merges, and one complete merge
+cohort may slightly exceed the requested budget so maintenance always makes
+progress. `timeless_stats('logs'|'traces')` exposes actionable/deferred backlog
+plus separate raw and merge entry, byte, and time counters. (`prune:` takes the
+table's own ts unit: seconds / ms / ns.)
 
 Retention can also be automatic — declared at CREATE, applied during the
 maintenance the engine already performs (no background threads; the vtab

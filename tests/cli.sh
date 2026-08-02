@@ -726,8 +726,15 @@ INSERT INTO traces(traces) VALUES ('flush');
 SELECT 'post', hex(trace_id), hex(span_id), CASE WHEN parent_span_id IS NULL THEN '-' ELSE hex(parent_span_id) END, name, service, kind, status, start_ts, duration_ns, attributes FROM traces ORDER BY start_ts;
 SELECT 'raw_blocks', COUNT(*) FROM traces_blocks WHERE codec = 1;
 SELECT 'ts_unit', v FROM traces_meta WHERE k = 'ts_unit';
-INSERT INTO traces(traces) VALUES ('optimize');
+INSERT INTO traces(traces) VALUES ('optimize:8192');
 SELECT 'codecs', COUNT(*) FILTER (WHERE codec = 1), COUNT(*) FILTER (WHERE codec = 5) FROM traces_blocks;
+SELECT 'maint',
+       (SELECT value FROM timeless_stats('traces') WHERE key='optimize_budgeted_count'),
+       (SELECT value FROM timeless_stats('traces') WHERE key='optimize_budget_entries'),
+       (SELECT value FROM timeless_stats('traces') WHERE key='optimize_raw_blocks'),
+       (SELECT value FROM timeless_stats('traces') WHERE key='optimize_raw_entries'),
+       (SELECT value FROM timeless_stats('traces') WHERE key='optimize_pending_raw_entries'),
+       (SELECT value FROM timeless_stats('traces') WHERE key='optimize_merge_deferred_entries');
 SELECT 'opt', hex(trace_id), name, kind, status FROM traces ORDER BY start_ts;
 SQL
 )
@@ -744,6 +751,7 @@ post|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|2222222222222222|1111111111111111|db.query
 raw_blocks|3
 ts_unit|ns
 codecs|0|3
+maint|1|8192|3|3|0|3
 opt|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|GET /checkout|server|ok
 opt|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|cache.get|internal|unset
 opt|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|db.query|client|error'

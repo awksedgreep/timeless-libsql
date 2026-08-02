@@ -980,6 +980,133 @@ fn merge_respects_ts_span_cap() {
     assert_eq!(engine.query(&full_range_query()).unwrap().len(), 30);
 }
 
+#[test]
+fn size_tiered_optimize_bounds_repeated_span_tail_rewrites() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    let spans_per_arrival = 256i64;
+    let arrivals = 40i64;
+
+    for cycle in 0..arrivals {
+        for row in 0..spans_per_arrival {
+            let ts = cycle * spans_per_arrival + row;
+            engine
+                .push(span(
+                    (cycle % 251) as u8,
+                    (row % 251) as u8,
+                    None,
+                    "tail rewrite span",
+                    "api",
+                    1,
+                    1,
+                    ts,
+                    &[],
+                ))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+        engine.optimize().unwrap();
+    }
+
+    let profile = engine.optimize_profile();
+    assert_eq!(profile.optimize_raw_blocks, arrivals as u64);
+    assert_eq!(profile.optimize_raw_entries, 10_240);
+    assert_eq!(profile.optimize_merge_groups, 2);
+    assert_eq!(profile.optimize_merge_entries, 4_096 + 8_192);
+    assert_eq!(
+        profile.optimize_raw_entries + profile.optimize_merge_entries,
+        22_528,
+        "2.2x total rewrite work replaces the former growing-tail amplification"
+    );
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 10_240);
+
+    let backlog = engine.optimize_backlog();
+    assert_eq!(backlog.raw_blocks, 0);
+    assert_eq!(backlog.merge_ready_groups, 0);
+    assert_eq!(backlog.merge_deferred_blocks, 8);
+    assert_eq!(backlog.merge_deferred_entries, 2_048);
+    assert_eq!(engine.optimize().unwrap(), (0, 0));
+}
+
+#[test]
+fn size_tiered_span_optimize_consolidates_just_over_half_tiers() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), SpanEngineConfig::default()).unwrap();
+    for cycle in 0..30i64 {
+        for row in 0..307i64 {
+            engine
+                .push(span(
+                    (cycle % 251) as u8,
+                    (row % 251) as u8,
+                    None,
+                    "uneven tier span",
+                    "api",
+                    1,
+                    1,
+                    cycle * 307 + row,
+                    &[],
+                ))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+        engine.optimize().unwrap();
+    }
+
+    let profile = engine.optimize_profile();
+    assert_eq!(profile.optimize_merge_groups, 2);
+    assert_eq!(profile.optimize_merge_entries, 4_298 + 8_596);
+    assert_eq!(engine.stats().0, 3);
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 9_210);
+    assert_eq!(engine.optimize_backlog().merge_ready_entries, 0);
+}
+
+#[test]
+fn budgeted_span_optimize_bounds_calls_and_drains_oldest_raw_groups() {
+    let engine = SpanBlockEngine::new(
+        Box::new(MemSpanStore::new()),
+        SpanEngineConfig {
+            merge_max_ts_span: 0,
+            ..SpanEngineConfig::default()
+        },
+    )
+    .unwrap();
+    for cycle in 0..4i64 {
+        for row in 0..256i64 {
+            engine
+                .push(span(
+                    cycle as u8,
+                    (row % 251) as u8,
+                    None,
+                    "budgeted span",
+                    "api",
+                    1,
+                    1,
+                    cycle,
+                    &[],
+                ))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+    }
+    assert_eq!(engine.optimize_backlog().raw_entries, 1_024);
+
+    assert_eq!(engine.optimize_budgeted(512).unwrap(), (2, 2));
+    assert_eq!(engine.optimize_backlog().raw_entries, 512);
+    let profile = engine.optimize_profile();
+    assert_eq!(profile.optimize_budgeted_count, 1);
+    assert_eq!(profile.optimize_budget_entries, 512);
+    assert_eq!(profile.optimize_budget_limited_count, 1);
+    assert_eq!(profile.optimize_raw_entries, 512);
+
+    assert_eq!(engine.optimize_budgeted(512).unwrap(), (2, 2));
+    assert_eq!(engine.optimize_backlog().raw_entries, 0);
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 1_024);
+    assert!(engine
+        .optimize_budgeted(0)
+        .unwrap_err()
+        .contains("positive"));
+}
+
 // ---------------------------------------------------------------------------
 // Recovery + prune
 // ---------------------------------------------------------------------------

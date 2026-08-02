@@ -20,11 +20,11 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 
 | variable | default | meaning |
 |---|---:|---|
-| `TIMELESS_TRACES_READER_CONNECTIONS` | `2` | bounded SQLite readers; provisional until Session 7 |
+| `TIMELESS_TRACES_READER_CONNECTIONS` | `2` | measured bounded SQLite reader default |
 | `TIMELESS_TRACES_COMMAND_QUEUE_BATCHES` | `256` | maximum queued writer requests |
 | `TIMELESS_TRACES_RETENTION_SECS` | `604800` | vtab retention; `0` disables it |
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
-| `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered extension optimize interval |
+| `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered, byte-budgeted extension optimize interval |
 
 ## Sessions 2–6 endpoints
 
@@ -74,7 +74,10 @@ The service/operation catalog is additive block metadata. Mixed databases
 containing legacy blocks fall back to exact streaming decode, so upgrading
 never silently omits an operation. `timeless_stats('traces')` exposes snapshot,
 bounded-query, discovery, payload, decode, match, return, and cancellation work
-counters.
+counters. Session 7 adds extension-owned size-tiered optimize backlog and
+raw-compression/merge phase counters. The timer derives a bounded span budget
+from that exact backlog and a 32 MiB source-byte target, then invokes the
+public `optimize:<spans>` command; it never creates or reshapes blocks itself.
 
 Startup acquires `<database>.timeless-traces-api.lock` before opening SQLite.
 It then validates the full rich-span schema, module identity, configured

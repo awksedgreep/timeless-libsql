@@ -264,6 +264,126 @@ impl SpanQueryProfile {
     }
 }
 
+/// Cumulative successful optimize work. Raw compression and compressed-block
+/// merging stay separate so direct hosts can schedule from measured rewrite
+/// work rather than treating every maintenance call as one opaque pause.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpanOptimizeProfileSnapshot {
+    pub optimize_count: u64,
+    pub optimize_total_ns: u64,
+    pub optimize_blocks_removed: u64,
+    pub optimize_blocks_written: u64,
+    pub optimize_budgeted_count: u64,
+    pub optimize_budget_entries: u64,
+    pub optimize_budget_limited_count: u64,
+    pub optimize_raw_groups: u64,
+    pub optimize_raw_blocks: u64,
+    pub optimize_raw_entries: u64,
+    pub optimize_raw_input_bytes: u64,
+    pub optimize_raw_output_bytes: u64,
+    pub optimize_raw_total_ns: u64,
+    pub optimize_merge_groups: u64,
+    pub optimize_merge_blocks: u64,
+    pub optimize_merge_entries: u64,
+    pub optimize_merge_input_bytes: u64,
+    pub optimize_merge_output_bytes: u64,
+    pub optimize_merge_total_ns: u64,
+}
+
+#[derive(Default)]
+struct SpanOptimizeProfile {
+    optimize_count: AtomicU64,
+    optimize_total_ns: AtomicU64,
+    optimize_blocks_removed: AtomicU64,
+    optimize_blocks_written: AtomicU64,
+    optimize_budgeted_count: AtomicU64,
+    optimize_budget_entries: AtomicU64,
+    optimize_budget_limited_count: AtomicU64,
+    optimize_raw_groups: AtomicU64,
+    optimize_raw_blocks: AtomicU64,
+    optimize_raw_entries: AtomicU64,
+    optimize_raw_input_bytes: AtomicU64,
+    optimize_raw_output_bytes: AtomicU64,
+    optimize_raw_total_ns: AtomicU64,
+    optimize_merge_groups: AtomicU64,
+    optimize_merge_blocks: AtomicU64,
+    optimize_merge_entries: AtomicU64,
+    optimize_merge_input_bytes: AtomicU64,
+    optimize_merge_output_bytes: AtomicU64,
+    optimize_merge_total_ns: AtomicU64,
+}
+
+impl SpanOptimizeProfile {
+    fn snapshot(&self) -> SpanOptimizeProfileSnapshot {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        SpanOptimizeProfileSnapshot {
+            optimize_count: load(&self.optimize_count),
+            optimize_total_ns: load(&self.optimize_total_ns),
+            optimize_blocks_removed: load(&self.optimize_blocks_removed),
+            optimize_blocks_written: load(&self.optimize_blocks_written),
+            optimize_budgeted_count: load(&self.optimize_budgeted_count),
+            optimize_budget_entries: load(&self.optimize_budget_entries),
+            optimize_budget_limited_count: load(&self.optimize_budget_limited_count),
+            optimize_raw_groups: load(&self.optimize_raw_groups),
+            optimize_raw_blocks: load(&self.optimize_raw_blocks),
+            optimize_raw_entries: load(&self.optimize_raw_entries),
+            optimize_raw_input_bytes: load(&self.optimize_raw_input_bytes),
+            optimize_raw_output_bytes: load(&self.optimize_raw_output_bytes),
+            optimize_raw_total_ns: load(&self.optimize_raw_total_ns),
+            optimize_merge_groups: load(&self.optimize_merge_groups),
+            optimize_merge_blocks: load(&self.optimize_merge_blocks),
+            optimize_merge_entries: load(&self.optimize_merge_entries),
+            optimize_merge_input_bytes: load(&self.optimize_merge_input_bytes),
+            optimize_merge_output_bytes: load(&self.optimize_merge_output_bytes),
+            optimize_merge_total_ns: load(&self.optimize_merge_total_ns),
+        }
+    }
+}
+
+/// Metadata-only optimizer backlog. Deferred compressed tails do not trigger
+/// maintenance until the size-tiered 2x-growth policy can merge them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpanOptimizeBacklog {
+    pub raw_blocks: u64,
+    pub raw_entries: u64,
+    pub merge_ready_groups: u64,
+    pub merge_ready_blocks: u64,
+    pub merge_ready_entries: u64,
+    pub merge_deferred_blocks: u64,
+    pub merge_deferred_entries: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SpanOptimizeKind {
+    RawCompression,
+    CompressedMerge,
+}
+
+struct SpanOptimizeGroup {
+    sources: Vec<IndexEntry>,
+    partition: Option<u8>,
+    kind: SpanOptimizeKind,
+}
+
+#[derive(Default)]
+struct SpanOptimizeOutcome {
+    blocks_removed: usize,
+    blocks_written: usize,
+    budget_limited: bool,
+    raw_groups: u64,
+    raw_blocks: u64,
+    raw_entries: u64,
+    raw_input_bytes: u64,
+    raw_output_bytes: u64,
+    raw_total_ns: u64,
+    merge_groups: u64,
+    merge_blocks: u64,
+    merge_entries: u64,
+    merge_input_bytes: u64,
+    merge_output_bytes: u64,
+    merge_total_ns: u64,
+}
+
 /// One entry in the engine's in-memory block index: persisted metadata
 /// plus the STATUS PARTITION tag — the same design as the logs
 /// IndexEntry (read blocks/engine.rs for the full "level-term weakness"
@@ -346,6 +466,7 @@ pub struct SpanBlockEngine {
     /// Last retention cutoff applied (advance guard); i64::MIN = never.
     retention_floor: AtomicI64,
     query_profile: SpanQueryProfile,
+    optimize_profile: SpanOptimizeProfile,
 }
 
 impl SpanBlockEngine {
@@ -394,6 +515,7 @@ impl SpanBlockEngine {
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
             query_profile: SpanQueryProfile::default(),
+            optimize_profile: SpanOptimizeProfile::default(),
         })
     }
 
@@ -403,6 +525,10 @@ impl SpanBlockEngine {
 
     pub fn query_profile(&self) -> SpanQueryProfileSnapshot {
         self.query_profile.snapshot()
+    }
+
+    pub fn optimize_profile(&self) -> SpanOptimizeProfileSnapshot {
+        self.optimize_profile.snapshot()
     }
 
     /// Poison-tolerant locks, same style as the rest of timeless-core.
@@ -741,12 +867,315 @@ impl SpanBlockEngine {
     /// atomically). Merged blocks recompute BOTH index row sets from
     /// the merged spans. Returns (blocks_removed, blocks_written).
     pub fn optimize(&self) -> Result<(usize, usize), String> {
-        let out = self.optimize_inner()?;
-        self.apply_retention()?;
-        Ok(out)
+        self.optimize_with_budget(None)
     }
 
-    fn optimize_inner(&self) -> Result<(usize, usize), String> {
+    pub fn optimize_budgeted(&self, max_entries: usize) -> Result<(usize, usize), String> {
+        if max_entries == 0 {
+            return Err("optimize span budget must be positive".into());
+        }
+        self.optimize_with_budget(Some(max_entries))
+    }
+
+    fn optimize_with_budget(&self, max_entries: Option<usize>) -> Result<(usize, usize), String> {
+        let started = Instant::now();
+        let out = self.optimize_inner(max_entries)?;
+        self.apply_retention()?;
+        self.optimize_profile
+            .optimize_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.optimize_profile
+            .optimize_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.optimize_profile
+            .optimize_blocks_removed
+            .fetch_add(out.blocks_removed as u64, Ordering::Relaxed);
+        self.optimize_profile
+            .optimize_blocks_written
+            .fetch_add(out.blocks_written as u64, Ordering::Relaxed);
+        if let Some(budget) = max_entries {
+            self.optimize_profile
+                .optimize_budgeted_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.optimize_profile
+                .optimize_budget_entries
+                .fetch_add(budget as u64, Ordering::Relaxed);
+        }
+        if out.budget_limited {
+            self.optimize_profile
+                .optimize_budget_limited_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        for (counter, value) in [
+            (&self.optimize_profile.optimize_raw_groups, out.raw_groups),
+            (&self.optimize_profile.optimize_raw_blocks, out.raw_blocks),
+            (&self.optimize_profile.optimize_raw_entries, out.raw_entries),
+            (
+                &self.optimize_profile.optimize_raw_input_bytes,
+                out.raw_input_bytes,
+            ),
+            (
+                &self.optimize_profile.optimize_raw_output_bytes,
+                out.raw_output_bytes,
+            ),
+            (
+                &self.optimize_profile.optimize_raw_total_ns,
+                out.raw_total_ns,
+            ),
+            (
+                &self.optimize_profile.optimize_merge_groups,
+                out.merge_groups,
+            ),
+            (
+                &self.optimize_profile.optimize_merge_blocks,
+                out.merge_blocks,
+            ),
+            (
+                &self.optimize_profile.optimize_merge_entries,
+                out.merge_entries,
+            ),
+            (
+                &self.optimize_profile.optimize_merge_input_bytes,
+                out.merge_input_bytes,
+            ),
+            (
+                &self.optimize_profile.optimize_merge_output_bytes,
+                out.merge_output_bytes,
+            ),
+            (
+                &self.optimize_profile.optimize_merge_total_ns,
+                out.merge_total_ns,
+            ),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
+        Ok((out.blocks_removed, out.blocks_written))
+    }
+
+    pub fn optimize_backlog(&self) -> SpanOptimizeBacklog {
+        let candidates: Vec<IndexEntry> = self
+            .index_lock()
+            .iter()
+            .filter(|entry| {
+                entry.meta.codec == CODEC_RAW
+                    || (entry.meta.entry_count as usize) < self.config.merge_target_entries
+            })
+            .copied()
+            .collect();
+        let groups = self.plan_optimize(&candidates);
+        let mut backlog = SpanOptimizeBacklog::default();
+        let mut ready_compressed = HashSet::new();
+        for group in &groups {
+            let entries = group
+                .sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as u64)
+                .sum::<u64>();
+            match group.kind {
+                SpanOptimizeKind::RawCompression => {
+                    backlog.raw_blocks += group.sources.len() as u64;
+                    backlog.raw_entries += entries;
+                }
+                SpanOptimizeKind::CompressedMerge => {
+                    backlog.merge_ready_groups += 1;
+                    backlog.merge_ready_blocks += group.sources.len() as u64;
+                    backlog.merge_ready_entries += entries;
+                    ready_compressed.extend(group.sources.iter().map(|entry| entry.loc.id));
+                }
+            }
+        }
+        for entry in candidates.iter().filter(|entry| {
+            entry.meta.codec != CODEC_RAW && !ready_compressed.contains(&entry.loc.id)
+        }) {
+            backlog.merge_deferred_blocks += 1;
+            backlog.merge_deferred_entries += entry.meta.entry_count as u64;
+        }
+        backlog
+    }
+
+    fn plan_optimize(&self, candidates: &[IndexEntry]) -> Vec<SpanOptimizeGroup> {
+        let mut raw_buckets: [Vec<IndexEntry>; 4] = Default::default();
+        let mut compressed_buckets: [Vec<IndexEntry>; 4] = Default::default();
+        for entry in candidates {
+            let bucket = entry.partition.map_or(3, usize::from);
+            if entry.meta.codec == CODEC_RAW {
+                raw_buckets[bucket].push(*entry);
+            } else {
+                compressed_buckets[bucket].push(*entry);
+            }
+        }
+        let mut groups = Vec::new();
+        for bucket in 0..4 {
+            let partition = (bucket < 3).then_some(bucket as u8);
+            groups
+                .extend(self.plan_raw_groups(std::mem::take(&mut raw_buckets[bucket]), partition));
+            groups.extend(self.plan_compressed_groups(
+                std::mem::take(&mut compressed_buckets[bucket]),
+                partition,
+            ));
+        }
+        groups.sort_by_key(|group| {
+            (
+                group.kind,
+                group
+                    .sources
+                    .iter()
+                    .map(|entry| entry.meta.ts_min)
+                    .min()
+                    .unwrap_or(i64::MAX),
+                group.partition,
+            )
+        });
+        groups
+    }
+
+    fn plan_raw_groups(
+        &self,
+        mut entries: Vec<IndexEntry>,
+        partition: Option<u8>,
+    ) -> Vec<SpanOptimizeGroup> {
+        entries.sort_by_key(|entry| (entry.meta.ts_min, entry.meta.ts_max));
+        let mut groups = Vec::new();
+        let mut current = Vec::new();
+        let mut current_entries = 0usize;
+        let (mut current_min, mut current_max) = (0i64, 0i64);
+        for entry in entries {
+            let fits = current.is_empty()
+                || (current_entries.saturating_add(entry.meta.entry_count as usize)
+                    <= self.config.merge_target_entries
+                    && Self::merged_span_fits(
+                        current_min,
+                        current_max,
+                        entry.meta,
+                        self.config.merge_max_ts_span,
+                    ));
+            if !fits {
+                groups.push(SpanOptimizeGroup {
+                    sources: std::mem::take(&mut current),
+                    partition,
+                    kind: SpanOptimizeKind::RawCompression,
+                });
+                current_entries = 0;
+            }
+            if current.is_empty() {
+                current_min = entry.meta.ts_min;
+                current_max = entry.meta.ts_max;
+            } else {
+                current_min = current_min.min(entry.meta.ts_min);
+                current_max = current_max.max(entry.meta.ts_max);
+            }
+            current_entries = current_entries.saturating_add(entry.meta.entry_count as usize);
+            current.push(entry);
+        }
+        if !current.is_empty() {
+            groups.push(SpanOptimizeGroup {
+                sources: current,
+                partition,
+                kind: SpanOptimizeKind::RawCompression,
+            });
+        }
+        groups
+    }
+
+    fn plan_compressed_groups(
+        &self,
+        mut entries: Vec<IndexEntry>,
+        partition: Option<u8>,
+    ) -> Vec<SpanOptimizeGroup> {
+        entries.sort_by_key(|entry| (entry.meta.ts_min, entry.meta.ts_max));
+        let mut groups = Vec::new();
+        let mut segment = Vec::new();
+        let (mut segment_min, mut segment_max) = (0i64, 0i64);
+        for entry in entries {
+            let fits = segment.is_empty()
+                || Self::merged_span_fits(
+                    segment_min,
+                    segment_max,
+                    entry.meta,
+                    self.config.merge_max_ts_span,
+                );
+            if !fits {
+                self.plan_compressed_segment(std::mem::take(&mut segment), partition, &mut groups);
+            }
+            if segment.is_empty() {
+                segment_min = entry.meta.ts_min;
+                segment_max = entry.meta.ts_max;
+            } else {
+                segment_min = segment_min.min(entry.meta.ts_min);
+                segment_max = segment_max.max(entry.meta.ts_max);
+            }
+            segment.push(entry);
+        }
+        self.plan_compressed_segment(segment, partition, &mut groups);
+        groups
+    }
+
+    fn plan_compressed_segment(
+        &self,
+        mut entries: Vec<IndexEntry>,
+        partition: Option<u8>,
+        groups: &mut Vec<SpanOptimizeGroup>,
+    ) {
+        entries.sort_by_key(|entry| (entry.meta.entry_count, entry.meta.ts_min, entry.meta.ts_max));
+        let mut current = Vec::new();
+        let mut current_entries = 0usize;
+        let merge_limit = self
+            .config
+            .merge_target_entries
+            .saturating_add(self.config.merge_target_entries.div_ceil(4));
+        for entry in entries {
+            let count = entry.meta.entry_count as usize;
+            if !current.is_empty() && current_entries.saturating_add(count) > merge_limit {
+                self.push_compressed_group(std::mem::take(&mut current), partition, groups);
+                current_entries = 0;
+            }
+            current_entries = current_entries.saturating_add(count);
+            current.push(entry);
+        }
+        self.push_compressed_group(current, partition, groups);
+    }
+
+    fn push_compressed_group(
+        &self,
+        sources: Vec<IndexEntry>,
+        partition: Option<u8>,
+        groups: &mut Vec<SpanOptimizeGroup>,
+    ) {
+        if sources.len() < 2 {
+            return;
+        }
+        let entries = sources
+            .iter()
+            .map(|entry| entry.meta.entry_count as usize)
+            .sum::<usize>();
+        let largest = sources
+            .iter()
+            .map(|entry| entry.meta.entry_count as usize)
+            .max()
+            .unwrap_or(0);
+        let minimum_fill = self.config.merge_target_entries.div_ceil(2);
+        if entries >= minimum_fill && entries >= largest.saturating_mul(2) {
+            groups.push(SpanOptimizeGroup {
+                sources,
+                partition,
+                kind: SpanOptimizeKind::CompressedMerge,
+            });
+        }
+    }
+
+    fn merged_span_fits(
+        current_min: i64,
+        current_max: i64,
+        next: BlockMeta,
+        max_span: i64,
+    ) -> bool {
+        current_max
+            .max(next.ts_max)
+            .saturating_sub(current_min.min(next.ts_min))
+            <= max_span
+    }
+
+    fn optimize_inner(&self, max_entries: Option<usize>) -> Result<SpanOptimizeOutcome, String> {
         let _transition = self.transition_write();
         let candidates: Vec<IndexEntry> = self
             .index_lock()
@@ -758,99 +1187,92 @@ impl SpanBlockEngine {
             .copied()
             .collect();
         if candidates.is_empty() {
-            return Ok((0, 0));
+            return Ok(SpanOptimizeOutcome::default());
+        }
+        let planned = self.plan_optimize(&candidates);
+        if planned.is_empty() {
+            return Ok(SpanOptimizeOutcome::default());
         }
 
-        // One bucket per pure status (0..=2) plus one for mixed legacy
-        // blocks; the greedy time-locality grouping runs INSIDE each.
-        let mut buckets: [Vec<IndexEntry>; 4] = Default::default();
-        for e in candidates {
-            let b = match e.partition {
-                Some(st) => st as usize,
-                None => 3, // the mixed bucket
-            };
-            buckets[b].push(e);
-        }
-
-        let mut groups: Vec<(Vec<IndexEntry>, Option<u8>)> = Vec::new();
-        for (b, bucket) in buckets.iter_mut().enumerate() {
-            if bucket.is_empty() {
-                continue;
-            }
-            let partition = if b < 3 { Some(b as u8) } else { None };
-            bucket.sort_by_key(|e| (e.meta.ts_min, e.meta.ts_max));
-
-            // Greedy grouping under two constraints: target span count
-            // and the merged-span hard cap (saturating_sub: spans near
-            // i64 extremes must not wrap).
-            let mut cur: Vec<IndexEntry> = Vec::new();
-            let mut cur_entries = 0usize;
-            let (mut cur_min, mut cur_max) = (0i64, 0i64);
-            for e in bucket.drain(..) {
-                let m = e.meta;
-                let fits = if cur.is_empty() {
-                    true
-                } else {
-                    let new_min = cur_min.min(m.ts_min);
-                    let new_max = cur_max.max(m.ts_max);
-                    let span_ok = new_max.saturating_sub(new_min) <= self.config.merge_max_ts_span;
-                    let size_ok =
-                        cur_entries + m.entry_count as usize <= self.config.merge_target_entries;
-                    span_ok && size_ok
-                };
-                if !fits {
-                    groups.push((std::mem::take(&mut cur), partition));
-                    cur_entries = 0;
+        let mut selected = Vec::new();
+        let mut selected_entries = 0usize;
+        let mut budget_limited = false;
+        for group in planned {
+            let entries = group
+                .sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as usize)
+                .sum::<usize>();
+            if let Some(budget) = max_entries {
+                if !selected.is_empty() && selected_entries.saturating_add(entries) > budget {
+                    budget_limited = true;
+                    break;
                 }
-                if cur.is_empty() {
-                    cur_min = m.ts_min;
-                    cur_max = m.ts_max;
-                } else {
-                    cur_min = cur_min.min(m.ts_min);
-                    cur_max = cur_max.max(m.ts_max);
-                }
-                cur_entries += m.entry_count as usize;
-                cur.push(e);
             }
-            if !cur.is_empty() {
-                groups.push((std::mem::take(&mut cur), partition));
-            }
+            selected_entries = selected_entries.saturating_add(entries);
+            selected.push(group);
         }
 
-        // Rewrite-worthiness rule unchanged from logs: any RAW block in
-        // the group (must transition to zstd) or ≥2 blocks (an actual
-        // merge); a lone small zstd block is left alone (rewriting it
-        // is write amplification for zero gain). Sequential reads on
-        // THIS thread — module header.
         let mut adds: Vec<EncodedSpanBlock> = Vec::new();
         let mut add_partitions: Vec<Option<u8>> = Vec::new();
         let mut removes: Vec<BlockLoc> = Vec::new();
-        for (group, partition) in &groups {
-            let worth_it = group.len() >= 2 || group.iter().any(|e| e.meta.codec == CODEC_RAW);
-            if !worth_it {
-                continue;
-            }
-            let mut entries: Vec<SpanEntry> = Vec::new();
-            for e in group {
-                let bytes = self.store.read_block(&e.loc)?;
+        let mut outcome = SpanOptimizeOutcome {
+            budget_limited,
+            ..SpanOptimizeOutcome::default()
+        };
+        for group in &selected {
+            let phase_started = Instant::now();
+            let expected_entries = group
+                .sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as usize)
+                .sum();
+            let mut entries: Vec<SpanEntry> = Vec::with_capacity(expected_entries);
+            let mut input_bytes = 0u64;
+            for source in &group.sources {
+                let bytes = self.store.read_block(&source.loc)?;
+                input_bytes = input_bytes.saturating_add(bytes.len() as u64);
                 entries.extend(decode_span_block(&bytes)?);
             }
-            entries.sort_by_key(|e| e.start_ts);
+            entries.sort_by_key(|entry| entry.start_ts);
             let terms = extract_terms(&entries);
             let trace_ids = extract_trace_ids(&entries);
             let (data, meta) =
                 encode_span_block(&entries, CODEC_COLUMNAR_V2, self.config.zstd_level)?;
+            let output_bytes = data.len() as u64;
             adds.push(EncodedSpanBlock {
                 meta,
                 data,
                 terms,
                 trace_ids,
             });
-            add_partitions.push(*partition);
-            removes.extend(group.iter().map(|e| e.loc));
+            add_partitions.push(group.partition);
+            removes.extend(group.sources.iter().map(|entry| entry.loc));
+            let elapsed = elapsed_ns(phase_started);
+            match group.kind {
+                SpanOptimizeKind::RawCompression => {
+                    outcome.raw_groups += 1;
+                    outcome.raw_blocks += group.sources.len() as u64;
+                    outcome.raw_entries += entries.len() as u64;
+                    outcome.raw_input_bytes = outcome.raw_input_bytes.saturating_add(input_bytes);
+                    outcome.raw_output_bytes =
+                        outcome.raw_output_bytes.saturating_add(output_bytes);
+                    outcome.raw_total_ns = outcome.raw_total_ns.saturating_add(elapsed);
+                }
+                SpanOptimizeKind::CompressedMerge => {
+                    outcome.merge_groups += 1;
+                    outcome.merge_blocks += group.sources.len() as u64;
+                    outcome.merge_entries += entries.len() as u64;
+                    outcome.merge_input_bytes =
+                        outcome.merge_input_bytes.saturating_add(input_bytes);
+                    outcome.merge_output_bytes =
+                        outcome.merge_output_bytes.saturating_add(output_bytes);
+                    outcome.merge_total_ns = outcome.merge_total_ns.saturating_add(elapsed);
+                }
+            }
         }
         if adds.is_empty() {
-            return Ok((0, 0));
+            return Ok(outcome);
         }
 
         // One atomic swap; the callback rewrites the in-memory index at
@@ -864,7 +1286,8 @@ impl SpanBlockEngine {
         // journal their locs.
         let mut j = self.txn_guard();
         let add_metas: Vec<BlockMeta> = adds.iter().map(|b| b.meta).collect();
-        let removed = removes.len();
+        outcome.blocks_removed = removes.len();
+        outcome.blocks_written = add_metas.len();
         self.store
             .replace_blocks(&adds, &removes, &mut |new_locs: &[BlockLoc]| {
                 let mut index = self.index_lock();
@@ -889,7 +1312,7 @@ impl SpanBlockEngine {
                 }
             })?;
         drop(j);
-        Ok((removed, add_metas.len()))
+        Ok(outcome)
     }
 
     /// Retention: delete every block whose ts_max < cutoff plus any

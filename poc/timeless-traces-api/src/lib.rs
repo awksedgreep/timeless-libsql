@@ -41,8 +41,9 @@ impl Default for Config {
             extension_path: PathBuf::new(),
             database_path: PathBuf::new(),
             listen: "127.0.0.1:19449".parse().unwrap(),
-            // Provisional correctness default. Session 7 must measure
-            // one/two/four/eight rather than inheriting this as an answer.
+            // Session 7 measured one/two/four/eight on the fixed 800k-span
+            // query matrix. Two retained the best useful tails while holding
+            // process HWM to 66,732 KiB (four/eight used 110/198 MiB).
             reader_connections: 2,
             command_queue_batches: 256,
             retention: Some(DEFAULT_RETENTION),
@@ -170,7 +171,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_reader_count_is_explicitly_provisional() {
+    fn measured_reader_default_is_pinned() {
         assert_eq!(Config::default().reader_connections, 2);
     }
 

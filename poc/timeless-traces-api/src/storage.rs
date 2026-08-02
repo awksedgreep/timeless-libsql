@@ -73,6 +73,40 @@ pub struct StorageStats {
     pub extension_discovery_total_ns: i64,
     pub extension_discovery_payload_bytes_read: i64,
     pub extension_discovery_decoded_spans: i64,
+    pub extension_optimize_count: i64,
+    pub extension_optimize_total_ns: i64,
+    pub extension_optimize_blocks_removed: i64,
+    pub extension_optimize_blocks_written: i64,
+    pub extension_optimize_budgeted_count: i64,
+    pub extension_optimize_budget_entries: i64,
+    pub extension_optimize_budget_limited_count: i64,
+    pub extension_optimize_raw_groups: i64,
+    pub extension_optimize_raw_blocks: i64,
+    pub extension_optimize_raw_entries: i64,
+    pub extension_optimize_raw_input_bytes: i64,
+    pub extension_optimize_raw_output_bytes: i64,
+    pub extension_optimize_raw_total_ns: i64,
+    pub extension_optimize_merge_groups: i64,
+    pub extension_optimize_merge_blocks: i64,
+    pub extension_optimize_merge_entries: i64,
+    pub extension_optimize_merge_input_bytes: i64,
+    pub extension_optimize_merge_output_bytes: i64,
+    pub extension_optimize_merge_total_ns: i64,
+    pub extension_optimize_pending_raw_blocks: i64,
+    pub extension_optimize_pending_raw_entries: i64,
+    pub extension_optimize_merge_ready_groups: i64,
+    pub extension_optimize_merge_ready_blocks: i64,
+    pub extension_optimize_merge_ready_entries: i64,
+    pub extension_optimize_merge_deferred_blocks: i64,
+    pub extension_optimize_merge_deferred_entries: i64,
+    pub extension_read_permit_count: i64,
+    pub extension_read_permit_hold_ns: i64,
+    pub extension_read_conflicts: i64,
+    pub extension_read_barge_rejections: i64,
+    pub extension_waiting_writers: i64,
+    pub extension_writer_wait_count: i64,
+    pub extension_writer_wait_ns: i64,
+    pub extension_writer_timeouts: i64,
 
     pub database_file_bytes: u64,
     pub database_wal_bytes: u64,
@@ -287,6 +321,14 @@ enum ReadCommand {
     },
     Shutdown,
 }
+
+// Maintenance planning remains extension-owned. The API timer is only a
+// wake-up: it asks timeless_stats for the exact actionable backlog, samples
+// those blocks' bytes, and converts the 32 MiB work target into a span budget.
+// 8,192 is the extension's public flush/merge target and only guarantees that
+// one complete planner group can make progress; the API never creates blocks.
+const OPTIMIZE_SOURCE_BYTE_BUDGET: u64 = 32 * 1024 * 1024;
+const OPTIMIZE_TARGET_SPANS: usize = 8192;
 
 struct StorageInner {
     writer: mpsc::Sender<WriteCommand>,
@@ -875,7 +917,7 @@ fn writer_main(
             }
             WriteCommand::Optimize(reply) => {
                 let started = Instant::now();
-                let result = run_command(&conn, "optimize", "optimize traces");
+                let result = optimize_backlog(&conn);
                 let mut api = profile_lock(&profile);
                 api.optimize_count = api.optimize_count.saturating_add(1);
                 api.optimize_total_ns = api.optimize_total_ns.saturating_add(elapsed_ns(started));
@@ -918,6 +960,56 @@ fn writer_main(
     // only previously flushed/committed blocks are promised after kill -9.
     run_command(&conn, "flush", "final traces flush after writer disconnect")?;
     checkpoint_wal(&conn)
+}
+
+fn optimize_backlog(conn: &Connection) -> Result<(), String> {
+    let stats = stat_values(conn)?;
+    let integer = |key: &str| match stats.get(key) {
+        Some(SqlValue::Integer(value)) => *value,
+        _ => 0,
+    };
+    let actionable_spans = integer("optimize_pending_raw_entries")
+        .saturating_add(integer("optimize_merge_ready_entries"))
+        .max(0) as u64;
+    if actionable_spans == 0 {
+        return Ok(());
+    }
+    let (sample_spans, sample_bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(entry_count), 0),
+                    COALESCE(SUM(length(data)), 0)
+               FROM traces_blocks
+              WHERE codec = 1 OR entry_count < 8192",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| format!("inspect traces optimize source bytes: {error}"))?;
+    let budget = optimize_span_budget(
+        actionable_spans,
+        sample_spans.max(0) as u64,
+        sample_bytes.max(0) as u64,
+    );
+    run_command(
+        conn,
+        &format!("optimize:{budget}"),
+        &format!("optimize traces with {budget}-span budget"),
+    )
+}
+
+fn optimize_span_budget(actionable_spans: u64, sample_spans: u64, sample_bytes: u64) -> usize {
+    if actionable_spans == 0 {
+        return 0;
+    }
+    let target_spans = OPTIMIZE_TARGET_SPANS as u64;
+    if sample_spans == 0 || sample_bytes == 0 {
+        return usize::try_from(actionable_spans.min(target_spans)).unwrap_or(usize::MAX);
+    }
+    let estimated = (u128::from(OPTIMIZE_SOURCE_BYTE_BUDGET)
+        .saturating_mul(u128::from(sample_spans))
+        .saturating_add(u128::from(sample_bytes - 1))
+        / u128::from(sample_bytes))
+    .min(u128::from(u64::MAX)) as u64;
+    usize::try_from(actionable_spans.min(estimated.max(target_spans))).unwrap_or(usize::MAX)
 }
 
 fn reader_main(
@@ -1218,6 +1310,40 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         extension_discovery_total_ns: integer("discovery_total_ns"),
         extension_discovery_payload_bytes_read: integer("discovery_payload_bytes_read"),
         extension_discovery_decoded_spans: integer("discovery_decoded_spans"),
+        extension_optimize_count: integer("optimize_count"),
+        extension_optimize_total_ns: integer("optimize_total_ns"),
+        extension_optimize_blocks_removed: integer("optimize_blocks_removed"),
+        extension_optimize_blocks_written: integer("optimize_blocks_written"),
+        extension_optimize_budgeted_count: integer("optimize_budgeted_count"),
+        extension_optimize_budget_entries: integer("optimize_budget_entries"),
+        extension_optimize_budget_limited_count: integer("optimize_budget_limited_count"),
+        extension_optimize_raw_groups: integer("optimize_raw_groups"),
+        extension_optimize_raw_blocks: integer("optimize_raw_blocks"),
+        extension_optimize_raw_entries: integer("optimize_raw_entries"),
+        extension_optimize_raw_input_bytes: integer("optimize_raw_input_bytes"),
+        extension_optimize_raw_output_bytes: integer("optimize_raw_output_bytes"),
+        extension_optimize_raw_total_ns: integer("optimize_raw_total_ns"),
+        extension_optimize_merge_groups: integer("optimize_merge_groups"),
+        extension_optimize_merge_blocks: integer("optimize_merge_blocks"),
+        extension_optimize_merge_entries: integer("optimize_merge_entries"),
+        extension_optimize_merge_input_bytes: integer("optimize_merge_input_bytes"),
+        extension_optimize_merge_output_bytes: integer("optimize_merge_output_bytes"),
+        extension_optimize_merge_total_ns: integer("optimize_merge_total_ns"),
+        extension_optimize_pending_raw_blocks: integer("optimize_pending_raw_blocks"),
+        extension_optimize_pending_raw_entries: integer("optimize_pending_raw_entries"),
+        extension_optimize_merge_ready_groups: integer("optimize_merge_ready_groups"),
+        extension_optimize_merge_ready_blocks: integer("optimize_merge_ready_blocks"),
+        extension_optimize_merge_ready_entries: integer("optimize_merge_ready_entries"),
+        extension_optimize_merge_deferred_blocks: integer("optimize_merge_deferred_blocks"),
+        extension_optimize_merge_deferred_entries: integer("optimize_merge_deferred_entries"),
+        extension_read_permit_count: integer("read_permit_count"),
+        extension_read_permit_hold_ns: integer("read_permit_hold_ns"),
+        extension_read_conflicts: integer("read_conflicts"),
+        extension_read_barge_rejections: integer("read_barge_rejections"),
+        extension_waiting_writers: integer("waiting_writers"),
+        extension_writer_wait_count: integer("writer_wait_count"),
+        extension_writer_wait_ns: integer("writer_wait_ns"),
+        extension_writer_timeouts: integer("writer_timeouts"),
         sqlite_page_bytes: page_count.saturating_mul(page_size),
         sqlite_index_bytes,
         freelist_pages,
@@ -1584,5 +1710,23 @@ mod tests {
         assert_eq!(value, 42);
         assert_eq!(attempts.get(), 2);
         assert_eq!(retries.get(), 1);
+    }
+
+    #[test]
+    fn optimize_budget_tracks_source_bytes_and_one_complete_extension_group() {
+        assert_eq!(optimize_span_budget(0, 0, 0), 0);
+        assert_eq!(optimize_span_budget(4_000, 4_000, 1024), 4_000);
+        assert_eq!(
+            optimize_span_budget(100_000, 100_000, 64 << 20),
+            50_000
+        );
+        assert_eq!(
+            optimize_span_budget(100_000, 100_000, 1024 << 20),
+            OPTIMIZE_TARGET_SPANS
+        );
+        assert_eq!(
+            optimize_span_budget(100_000, 0, 0),
+            OPTIMIZE_TARGET_SPANS
+        );
     }
 }

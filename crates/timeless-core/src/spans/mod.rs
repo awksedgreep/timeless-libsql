@@ -57,7 +57,8 @@ mod tests;
 
 pub use codec::{decode_span_block, encode_span_block};
 pub use engine::{
-    SpanBlockEngine, SpanEngineConfig, SpanQuery, SpanQueryOrder, SpanQueryStream, TraceBucketStat,
+    SpanBlockEngine, SpanEngineConfig, SpanOptimizeBacklog, SpanOptimizeProfileSnapshot, SpanQuery,
+    SpanQueryOrder, SpanQueryStream, TraceBucketStat,
 };
 pub use mem::MemSpanStore;
 

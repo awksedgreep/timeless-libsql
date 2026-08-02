@@ -33,7 +33,9 @@
 //! Write path:  INSERT INTO traces(trace_id, span_id, ...) — one span
 //!              into the engine buffer (auto-flush at threshold).
 //! Commands:    INSERT INTO traces(traces) VALUES ('flush' | 'optimize'
-//!              | 'prune:<ts>') — the FTS5 idiom, ts in ns.
+//!              | 'optimize:<max_spans>' | 'prune:<ts>') — the FTS5
+//!              idiom, ts in ns. The budgeted form bounds one
+//!              maintenance call while preserving the same planner.
 //! Read path:   flushed blocks + in-memory buffer merged; the HERO
 //!              query `WHERE trace_id = x'...'` goes through the
 //!              `_trace_blocks` index and decompresses only blocks
@@ -531,12 +533,23 @@ impl TracesTab {
         Ok(count as i64)
     }
 
-    /// Hidden-column command insert ('flush' | 'optimize' | 'prune:<ts>').
+    /// Hidden-column command insert ('flush' | 'optimize' |
+    /// 'optimize:<max_spans>' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "flush" {
             self.shared.engine.flush().map_err(module_err)?;
         } else if cmd == "optimize" {
             self.shared.engine.optimize().map_err(module_err)?;
+        } else if let Some(max_entries) = cmd.strip_prefix("optimize:") {
+            let max_entries: usize = max_entries.trim().parse().map_err(|_| {
+                module_err(format!(
+                    "optimize: expected 'optimize:<max_spans>', got {cmd:?}"
+                ))
+            })?;
+            self.shared
+                .engine
+                .optimize_budgeted(max_entries)
+                .map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             let ts: i64 = ts_str.trim().parse().map_err(|_| {
                 module_err(format!("prune: expected 'prune:<ts>' (ns), got {cmd:?}"))
@@ -544,7 +557,8 @@ impl TracesTab {
             self.shared.engine.prune(ts).map_err(module_err)?;
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'optimize', 'prune:<ts>'"
+                "unknown command {cmd:?}; supported: 'flush', 'optimize', \
+                 'optimize:<max_spans>', 'prune:<ts>'"
             )));
         }
         Ok(0)

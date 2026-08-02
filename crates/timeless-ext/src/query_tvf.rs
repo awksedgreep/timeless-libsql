@@ -4242,6 +4242,9 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let (blocks, raw_blocks, buffered) = shared.engine.stats();
                 let (disk_spans, counted_buffered) = shared.engine.span_counts();
                 let query = shared.engine.query_profile();
+                let optimize = shared.engine.optimize_profile();
+                let optimize_backlog = shared.engine.optimize_backlog();
+                let gate = shared.write_gate.profile();
                 debug_assert_eq!(buffered as u64, counted_buffered);
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
@@ -4351,6 +4354,136 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "discovery_decoded_spans",
                         Value::Integer(query.discovery_decoded_spans as i64),
+                    ),
+                    (
+                        "optimize_count",
+                        Value::Integer(optimize.optimize_count as i64),
+                    ),
+                    (
+                        "optimize_total_ns",
+                        Value::Integer(optimize.optimize_total_ns as i64),
+                    ),
+                    (
+                        "optimize_blocks_removed",
+                        Value::Integer(optimize.optimize_blocks_removed as i64),
+                    ),
+                    (
+                        "optimize_blocks_written",
+                        Value::Integer(optimize.optimize_blocks_written as i64),
+                    ),
+                    (
+                        "optimize_budgeted_count",
+                        Value::Integer(optimize.optimize_budgeted_count as i64),
+                    ),
+                    (
+                        "optimize_budget_entries",
+                        Value::Integer(optimize.optimize_budget_entries as i64),
+                    ),
+                    (
+                        "optimize_budget_limited_count",
+                        Value::Integer(optimize.optimize_budget_limited_count as i64),
+                    ),
+                    (
+                        "optimize_raw_groups",
+                        Value::Integer(optimize.optimize_raw_groups as i64),
+                    ),
+                    (
+                        "optimize_raw_blocks",
+                        Value::Integer(optimize.optimize_raw_blocks as i64),
+                    ),
+                    (
+                        "optimize_raw_entries",
+                        Value::Integer(optimize.optimize_raw_entries as i64),
+                    ),
+                    (
+                        "optimize_raw_input_bytes",
+                        Value::Integer(optimize.optimize_raw_input_bytes as i64),
+                    ),
+                    (
+                        "optimize_raw_output_bytes",
+                        Value::Integer(optimize.optimize_raw_output_bytes as i64),
+                    ),
+                    (
+                        "optimize_raw_total_ns",
+                        Value::Integer(optimize.optimize_raw_total_ns as i64),
+                    ),
+                    (
+                        "optimize_merge_groups",
+                        Value::Integer(optimize.optimize_merge_groups as i64),
+                    ),
+                    (
+                        "optimize_merge_blocks",
+                        Value::Integer(optimize.optimize_merge_blocks as i64),
+                    ),
+                    (
+                        "optimize_merge_entries",
+                        Value::Integer(optimize.optimize_merge_entries as i64),
+                    ),
+                    (
+                        "optimize_merge_input_bytes",
+                        Value::Integer(optimize.optimize_merge_input_bytes as i64),
+                    ),
+                    (
+                        "optimize_merge_output_bytes",
+                        Value::Integer(optimize.optimize_merge_output_bytes as i64),
+                    ),
+                    (
+                        "optimize_merge_total_ns",
+                        Value::Integer(optimize.optimize_merge_total_ns as i64),
+                    ),
+                    (
+                        "optimize_pending_raw_blocks",
+                        Value::Integer(optimize_backlog.raw_blocks as i64),
+                    ),
+                    (
+                        "optimize_pending_raw_entries",
+                        Value::Integer(optimize_backlog.raw_entries as i64),
+                    ),
+                    (
+                        "optimize_merge_ready_groups",
+                        Value::Integer(optimize_backlog.merge_ready_groups as i64),
+                    ),
+                    (
+                        "optimize_merge_ready_blocks",
+                        Value::Integer(optimize_backlog.merge_ready_blocks as i64),
+                    ),
+                    (
+                        "optimize_merge_ready_entries",
+                        Value::Integer(optimize_backlog.merge_ready_entries as i64),
+                    ),
+                    (
+                        "optimize_merge_deferred_blocks",
+                        Value::Integer(optimize_backlog.merge_deferred_blocks as i64),
+                    ),
+                    (
+                        "optimize_merge_deferred_entries",
+                        Value::Integer(optimize_backlog.merge_deferred_entries as i64),
+                    ),
+                    (
+                        "read_permit_count",
+                        Value::Integer(gate.read_permit_count as i64),
+                    ),
+                    (
+                        "read_permit_hold_ns",
+                        Value::Integer(gate.read_permit_hold_ns as i64),
+                    ),
+                    ("read_conflicts", Value::Integer(gate.read_conflicts as i64)),
+                    (
+                        "read_barge_rejections",
+                        Value::Integer(gate.read_barge_rejections as i64),
+                    ),
+                    (
+                        "waiting_writers",
+                        Value::Integer(gate.waiting_writers as i64),
+                    ),
+                    (
+                        "writer_wait_count",
+                        Value::Integer(gate.writer_wait_count as i64),
+                    ),
+                    ("writer_wait_ns", Value::Integer(gate.writer_wait_ns as i64)),
+                    (
+                        "writer_timeouts",
+                        Value::Integer(gate.writer_timeouts as i64),
                     ),
                 ]);
             }
