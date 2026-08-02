@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+
+use crate::promql;
 
 const RESERVED_PARAMS: &[&str] = &[
     "metric",
@@ -30,6 +33,10 @@ const RESERVED_PARAMS: &[&str] = &[
     "threshold_gt",
     "threshold_lt",
     "limit",
+    "query",
+    "time",
+    "match[]",
+    "match",
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -260,6 +267,27 @@ pub(crate) enum ReadRequest {
         metric: Option<String>,
         selectors: Vec<Selector>,
     },
+    Prometheus {
+        plan: PromPlan,
+        start: i64,
+        stop: i64,
+        step: i64,
+        instant: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PromPlan {
+    Selector {
+        metric: String,
+        filter: FilterPlan,
+        lookback: i64,
+    },
+    AvgOverTime {
+        metric: String,
+        filter: FilterPlan,
+        window: i64,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -268,6 +296,7 @@ pub(crate) enum ReadKind {
     Export,
     Range,
     Discovery,
+    Promql,
 }
 
 impl ReadRequest {
@@ -279,12 +308,12 @@ impl ReadRequest {
             Self::Labels { .. } | Self::LabelValues { .. } | Self::Series { .. } => {
                 ReadKind::Discovery
             }
+            Self::Prometheus { .. } => ReadKind::Promql,
         }
     }
 }
 
 pub(crate) fn latest_request(params: &Params) -> Result<ReadRequest, String> {
-    reject_promql(params)?;
     let metric = required_metric(params)?;
     Ok(ReadRequest::Latest {
         metric,
@@ -294,7 +323,6 @@ pub(crate) fn latest_request(params: &Params) -> Result<ReadRequest, String> {
 }
 
 pub(crate) fn export_request(params: &Params) -> Result<ReadRequest, String> {
-    reject_promql(params)?;
     let metric = required_metric(params)?;
     let now = now_seconds();
     let start = parse_time(
@@ -311,7 +339,6 @@ pub(crate) fn export_request(params: &Params) -> Result<ReadRequest, String> {
 }
 
 pub(crate) fn range_request(params: &Params) -> Result<ReadRequest, String> {
-    reject_promql(params)?;
     for unsupported in [
         "metrics",
         "group_by",
@@ -348,6 +375,85 @@ pub(crate) fn range_request(params: &Params) -> Result<ReadRequest, String> {
     })
 }
 
+pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest, String> {
+    let query = params
+        .get("query")
+        .ok_or_else(|| "missing required parameter: query".to_string())?;
+    let time = parse_prom_time(params.get("time"), now_seconds());
+    Ok(ReadRequest::Prometheus {
+        plan: lower_promql(query)?,
+        start: time,
+        stop: time,
+        step: 1,
+        instant: true,
+    })
+}
+
+pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, String> {
+    let query = params
+        .get("query")
+        .ok_or_else(|| "missing required parameter: query".to_string())?;
+    let now = now_seconds();
+    let start = parse_prom_time(params.get("start"), now.saturating_sub(3_600));
+    let stop = parse_prom_time(params.get("end"), now);
+    let step = parse_prom_step(params.get("step"), 60);
+    if stop < start {
+        return Err("end timestamp must not be before start timestamp".into());
+    }
+    if step <= 0 {
+        return Err("step must be positive".into());
+    }
+    let grid_points = stop.saturating_sub(start) / step + 1;
+    if grid_points > 11_000 {
+        return Err(
+            "exceeded maximum resolution of 11000 points per timeseries — decrease the query resolution (increase step)"
+                .into(),
+        );
+    }
+    Ok(ReadRequest::Prometheus {
+        plan: lower_promql(query)?,
+        start,
+        stop,
+        step,
+        instant: false,
+    })
+}
+
+fn lower_promql(input: &str) -> Result<PromPlan, String> {
+    let parsed = promql::parse(input).map_err(|error| format!("PromQL parse error: {error}"))?;
+    let lower_selector = |selector: promql::Selector| -> Result<_, String> {
+        let mut matchers = Vec::with_capacity(selector.matchers.len());
+        for matcher in selector.matchers {
+            let op = match matcher.op {
+                promql::MatcherOp::Eq => MatcherOp::Eq,
+                promql::MatcherOp::NotEq => MatcherOp::NotEq,
+                promql::MatcherOp::Regex => MatcherOp::Regex,
+                promql::MatcherOp::NotRegex => MatcherOp::NotRegex,
+            };
+            matchers.push(Matcher::new(matcher.key, op, matcher.value)?);
+        }
+        Ok((selector.metric, FilterPlan::new(matchers)))
+    };
+    match parsed {
+        promql::Plan::Selector(selector) => {
+            let (metric, filter) = lower_selector(selector)?;
+            Ok(PromPlan::Selector {
+                metric,
+                filter,
+                lookback: 300,
+            })
+        }
+        promql::Plan::AvgOverTime { selector, window } => {
+            let (metric, filter) = lower_selector(selector)?;
+            Ok(PromPlan::AvgOverTime {
+                metric,
+                filter,
+                window,
+            })
+        }
+    }
+}
+
 pub(crate) fn labels_request(params: &Params) -> Result<ReadRequest, String> {
     Ok(ReadRequest::Labels {
         selectors: parse_selectors(params)?,
@@ -375,14 +481,6 @@ pub(crate) fn series_request(
         return Err("missing required parameter: metric or match[]".into());
     }
     Ok(ReadRequest::Series { metric, selectors })
-}
-
-fn reject_promql(params: &Params) -> Result<(), String> {
-    if params.get("query").is_some() {
-        Err("PromQL routes begin in Session 4; use metric= for the native read path".into())
-    } else {
-        Ok(())
-    }
 }
 
 fn required_metric(params: &Params) -> Result<String, String> {
@@ -619,6 +717,43 @@ fn parse_time(value: Option<&str>, default: i64) -> i64 {
     parse_integer(Some(value)).unwrap_or(default)
 }
 
+fn parse_prom_time(value: Option<&str>, default: i64) -> i64 {
+    let Some(value) = value else {
+        return default;
+    };
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(value) {
+        return timestamp.timestamp();
+    }
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| value.trunc() as i64)
+        .unwrap_or(default)
+}
+
+fn parse_prom_step(value: Option<&str>, default: i64) -> i64 {
+    let Some(value) = value else {
+        return default;
+    };
+    for (suffix, multiplier) in [("s", 1), ("m", 60), ("h", 3_600), ("d", 86_400)] {
+        if let Some(number) = value.strip_suffix(suffix) {
+            if let Ok(number) = number.parse::<i64>() {
+                if number > 0 {
+                    return number.saturating_mul(multiplier);
+                }
+            }
+            return default;
+        }
+    }
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| (value.trunc() as i64).max(1))
+        .unwrap_or(default)
+}
+
 fn parse_duration(value: &str) -> Option<i64> {
     let digits = value.bytes().take_while(u8::is_ascii_digit).count();
     let number = value.get(..digits)?.parse::<i64>().ok()?;
@@ -694,7 +829,9 @@ pub(crate) fn execute(
     conn: &Connection,
     features: QueryFeatures,
     request: ReadRequest,
+    cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
     match request {
         ReadRequest::Latest {
             metric,
@@ -735,6 +872,21 @@ pub(crate) fn execute(
         ReadRequest::Series { metric, selectors } => {
             execute_series(conn, metric.as_deref(), &selectors)
         }
+        ReadRequest::Prometheus {
+            plan,
+            start,
+            stop,
+            step,
+            instant,
+        } => execute_prometheus(conn, features, &plan, start, stop, step, instant, cancelled),
+    }
+}
+
+fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("query cancelled".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -1309,6 +1461,350 @@ fn write_range_prefix(output: &mut Vec<u8>, metric: &str) -> Result<(), String> 
     write_json(output, &metric)?;
     output.extend_from_slice(b",\"series\":[");
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus(
+    conn: &Connection,
+    features: QueryFeatures,
+    plan: &PromPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    match plan {
+        PromPlan::Selector {
+            metric,
+            filter,
+            lookback,
+        } => execute_prometheus_selector(
+            conn, features, metric, filter, start, stop, step, *lookback, instant, cancelled,
+        ),
+        PromPlan::AvgOverTime {
+            metric,
+            filter,
+            window,
+        } if features.window_batches => execute_prometheus_window(
+            conn, metric, filter, start, stop, step, *window, instant, cancelled,
+        ),
+        PromPlan::AvgOverTime {
+            metric,
+            filter,
+            window,
+        } => execute_prometheus_avg_raw(
+            conn, features, metric, filter, start, stop, step, *window, instant, cancelled,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_selector(
+    conn: &Connection,
+    features: QueryFeatures,
+    metric: &str,
+    filter: &FilterPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    lookback: i64,
+    instant: bool,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let catalog = catalog(conn, metric, filter)?;
+    let raw = raw_query(
+        conn,
+        features,
+        metric,
+        filter,
+        start.saturating_sub(lookback),
+        stop,
+    )?;
+    let by_id: HashMap<_, _> = raw
+        .series
+        .iter()
+        .map(|series| (series.id, series))
+        .collect();
+    let mut body = Vec::new();
+    write_prometheus_prefix(&mut body, instant);
+    let mut emitted = 0_usize;
+    let mut points = 0_u64;
+    for meta in &catalog {
+        check_cancelled(cancelled)?;
+        let Some(series) = by_id.get(&meta.id) else {
+            continue;
+        };
+        let item_start = body.len();
+        comma(&mut body, emitted);
+        write_prometheus_item_prefix(&mut body, metric, &meta.labels, instant)?;
+        let mut lo = 0_usize;
+        let mut hi = 0_usize;
+        let mut item_points = 0_u64;
+        let mut t = start;
+        loop {
+            check_cancelled(cancelled)?;
+            while hi < series.len() && series.timestamp(raw.frame.as_deref(), hi)? <= t {
+                hi += 1;
+            }
+            let lower = t.saturating_sub(lookback);
+            while lo < hi && series.timestamp(raw.frame.as_deref(), lo)? <= lower {
+                lo += 1;
+            }
+            if hi > lo {
+                if !instant {
+                    comma(&mut body, item_points as usize);
+                }
+                write_prometheus_sample(&mut body, t, series.value(raw.frame.as_deref(), hi - 1)?)?;
+                item_points += 1;
+            }
+            if t >= stop {
+                break;
+            }
+            let Some(next) = t.checked_add(step).filter(|next| *next <= stop) else {
+                break;
+            };
+            t = next;
+        }
+        if item_points == 0 {
+            body.truncate(item_start);
+        } else {
+            write_prometheus_item_suffix(&mut body, instant);
+            emitted += 1;
+            points = points.saturating_add(item_points);
+        }
+    }
+    write_prometheus_suffix(&mut body);
+    Ok(ReadOutput {
+        body,
+        frame_bytes: raw.frame_bytes,
+        series: emitted as u64,
+        points,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_window(
+    conn: &Connection,
+    metric: &str,
+    filter: &FilterPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    window: i64,
+    instant: bool,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT labels, buckets
+               FROM timeless_window_batches('metrics', ?1, ?2, ?3, ?4, ?5, ?6, 'avg')
+              ORDER BY labels, series_id",
+        )
+        .map_err(|error| format!("prepare PromQL window batches: {error}"))?;
+    let rows = stmt
+        .query_map(
+            params![metric, filter.pushdown_json, start, stop, step, window],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .map_err(|error| format!("query PromQL window batches: {error}"))?;
+    let mut body = Vec::new();
+    write_prometheus_prefix(&mut body, instant);
+    let mut emitted = 0_usize;
+    let mut points = 0_u64;
+    let mut frame_bytes = 0_usize;
+    for row in rows {
+        check_cancelled(cancelled)?;
+        let (labels_json, buckets) =
+            row.map_err(|error| format!("read PromQL window batch: {error}"))?;
+        frame_bytes = frame_bytes.saturating_add(buckets.len());
+        let labels = decode_labels(&labels_json)?;
+        if !filter.matches(&labels) {
+            continue;
+        }
+        let decoded = decode_window_batch(&buckets)?;
+        let item_start = body.len();
+        comma(&mut body, emitted);
+        write_prometheus_item_prefix(&mut body, metric, &labels, instant)?;
+        let mut item_points = 0_u64;
+        for index in 0..decoded.len() {
+            check_cancelled(cancelled)?;
+            let Some(value) = decoded.value(index) else {
+                continue;
+            };
+            if !instant {
+                comma(&mut body, item_points as usize);
+            }
+            write_prometheus_sample(&mut body, decoded.timestamp(index), value)?;
+            item_points += 1;
+        }
+        if item_points == 0 {
+            body.truncate(item_start);
+        } else {
+            write_prometheus_item_suffix(&mut body, instant);
+            emitted += 1;
+            points = points.saturating_add(item_points);
+        }
+    }
+    write_prometheus_suffix(&mut body);
+    Ok(ReadOutput {
+        body,
+        frame_bytes,
+        series: emitted as u64,
+        points,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_avg_raw(
+    conn: &Connection,
+    features: QueryFeatures,
+    metric: &str,
+    filter: &FilterPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    window: i64,
+    instant: bool,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let catalog = catalog(conn, metric, filter)?;
+    let raw = raw_query(
+        conn,
+        features,
+        metric,
+        filter,
+        start.saturating_sub(window),
+        stop,
+    )?;
+    let by_id: HashMap<_, _> = raw
+        .series
+        .iter()
+        .map(|series| (series.id, series))
+        .collect();
+    let mut body = Vec::new();
+    write_prometheus_prefix(&mut body, instant);
+    let mut emitted = 0_usize;
+    let mut points = 0_u64;
+    for meta in &catalog {
+        check_cancelled(cancelled)?;
+        let Some(series) = by_id.get(&meta.id) else {
+            continue;
+        };
+        let item_start = body.len();
+        comma(&mut body, emitted);
+        write_prometheus_item_prefix(&mut body, metric, &meta.labels, instant)?;
+        let mut lo = 0_usize;
+        let mut hi = 0_usize;
+        let mut item_points = 0_u64;
+        let mut t = start;
+        loop {
+            check_cancelled(cancelled)?;
+            while hi < series.len() && series.timestamp(raw.frame.as_deref(), hi)? <= t {
+                hi += 1;
+            }
+            let lower = t.saturating_sub(window);
+            while lo < hi && series.timestamp(raw.frame.as_deref(), lo)? <= lower {
+                lo += 1;
+            }
+            if hi > lo {
+                let mut sum = 0.0;
+                for index in lo..hi {
+                    sum += series.value(raw.frame.as_deref(), index)?;
+                }
+                if !instant {
+                    comma(&mut body, item_points as usize);
+                }
+                write_prometheus_sample(&mut body, t, sum / (hi - lo) as f64)?;
+                item_points += 1;
+            }
+            if t >= stop {
+                break;
+            }
+            let Some(next) = t.checked_add(step).filter(|next| *next <= stop) else {
+                break;
+            };
+            t = next;
+        }
+        if item_points == 0 {
+            body.truncate(item_start);
+        } else {
+            write_prometheus_item_suffix(&mut body, instant);
+            emitted += 1;
+            points = points.saturating_add(item_points);
+        }
+    }
+    write_prometheus_suffix(&mut body);
+    Ok(ReadOutput {
+        body,
+        frame_bytes: raw.frame_bytes,
+        series: emitted as u64,
+        points,
+    })
+}
+
+fn write_prometheus_prefix(output: &mut Vec<u8>, instant: bool) {
+    output.extend_from_slice(if instant {
+        br#"{"status":"success","data":{"resultType":"vector","result":["#
+    } else {
+        br#"{"status":"success","data":{"resultType":"matrix","result":["#
+    });
+}
+
+fn write_prometheus_item_prefix(
+    output: &mut Vec<u8>,
+    metric: &str,
+    labels: &BTreeMap<String, String>,
+    instant: bool,
+) -> Result<(), String> {
+    let mut labels = labels.clone();
+    labels.insert("__name__".into(), metric.into());
+    output.extend_from_slice(b"{\"metric\":");
+    write_json(output, &labels)?;
+    output.extend_from_slice(if instant {
+        b",\"value\":"
+    } else {
+        b",\"values\":["
+    });
+    Ok(())
+}
+
+fn write_prometheus_item_suffix(output: &mut Vec<u8>, instant: bool) {
+    if instant {
+        output.push(b'}');
+    } else {
+        output.extend_from_slice(b"]}");
+    }
+}
+
+fn write_prometheus_sample(output: &mut Vec<u8>, timestamp: i64, value: f64) -> Result<(), String> {
+    output.push(b'[');
+    write_json(output, &timestamp)?;
+    output.push(b',');
+    write_json(output, &format_prometheus_value(value))?;
+    output.push(b']');
+    Ok(())
+}
+
+fn write_prometheus_suffix(output: &mut Vec<u8>) {
+    output.extend_from_slice(b"]}}");
+}
+
+fn format_prometheus_value(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".into();
+    }
+    if value == f64::INFINITY {
+        return "+Inf".into();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Inf".into();
+    }
+    let mut formatted = value.to_string();
+    if !formatted.contains(['.', 'e', 'E']) {
+        formatted.push_str(".0");
+    }
+    formatted
 }
 
 enum BucketValue {

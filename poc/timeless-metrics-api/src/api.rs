@@ -29,6 +29,14 @@ pub fn router(storage: Storage) -> Router {
         .route("/prometheus/api/v1/labels", get(labels))
         .route("/prometheus/api/v1/label/{name}/values", get(label_values))
         .route("/prometheus/api/v1/series", get(prometheus_series))
+        .route(
+            "/prometheus/api/v1/query",
+            get(prometheus_instant).post(prometheus_instant),
+        )
+        .route(
+            "/prometheus/api/v1/query_range",
+            get(prometheus_range).post(prometheus_range),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(storage)
 }
@@ -38,7 +46,12 @@ async fn latest(
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    read_route(storage, query::latest_request(&params(query, &body))).await
+    let params = params(query, &body);
+    if params.get("query").is_some() {
+        prometheus_read_route(storage, query::prometheus_instant_request(&params)).await
+    } else {
+        read_route(storage, query::latest_request(&params)).await
+    }
 }
 
 async fn export(
@@ -50,7 +63,36 @@ async fn export(
 }
 
 async fn range(State(storage): State<Storage>, RawQuery(query): RawQuery, body: Bytes) -> Response {
-    read_route(storage, query::range_request(&params(query, &body))).await
+    let params = params(query, &body);
+    if params.get("query").is_some() {
+        prometheus_read_route(storage, query::prometheus_range_request(&params)).await
+    } else {
+        read_route(storage, query::range_request(&params)).await
+    }
+}
+
+async fn prometheus_instant(
+    State(storage): State<Storage>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    prometheus_read_route(
+        storage,
+        query::prometheus_instant_request(&params(query, &body)),
+    )
+    .await
+}
+
+async fn prometheus_range(
+    State(storage): State<Storage>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    prometheus_read_route(
+        storage,
+        query::prometheus_range_request(&params(query, &body)),
+    )
+    .await
 }
 
 async fn labels(
@@ -107,6 +149,22 @@ async fn read_route(storage: Storage, request: Result<ReadRequest, String>) -> R
         )
             .into_response(),
         Err(error) => server_error(error),
+    }
+}
+
+async fn prometheus_read_route(storage: Storage, request: Result<ReadRequest, String>) -> Response {
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => return prometheus_error(StatusCode::BAD_REQUEST, "bad_data", error),
+    };
+    match storage.read(request).await {
+        Ok(output) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(output.body),
+        )
+            .into_response(),
+        Err(error) => prometheus_error(StatusCode::UNPROCESSABLE_ENTITY, "execution", error),
     }
 }
 
@@ -214,6 +272,14 @@ fn client_error(error: String) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({"status": "error", "error": error})),
+    )
+        .into_response()
+}
+
+fn prometheus_error(status: StatusCode, error_type: &str, error: String) -> Response {
+    (
+        status,
+        Json(json!({"status": "error", "errorType": error_type, "error": error})),
     )
         .into_response()
 }

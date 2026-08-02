@@ -436,10 +436,10 @@ async fn session_three_pins_mechanical_reads_discovery_and_reopen() {
             .0,
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(
-        get_json(&app, "/api/v1/query?query=contract_vm").await.0,
-        StatusCode::BAD_REQUEST
-    );
+    let promql = get_json(&app, "/api/v1/query?query=contract_vm").await;
+    assert_eq!(promql.0, StatusCode::OK);
+    assert_eq!(promql.1["data"]["resultType"], "vector");
+    assert_eq!(promql.1["data"]["result"], serde_json::json!([]));
 
     let stats = storage.stats().await.unwrap();
     assert_eq!(stats.api_read_errors, 0);
@@ -447,7 +447,8 @@ async fn session_three_pins_mechanical_reads_discovery_and_reopen() {
     assert_eq!(stats.api_export_requests, 2);
     assert_eq!(stats.api_range_requests, 2);
     assert_eq!(stats.api_discovery_requests, 6);
-    assert_eq!(stats.api_read_requests, 12);
+    assert_eq!(stats.api_promql_requests, 1);
+    assert_eq!(stats.api_read_requests, 13);
     assert!(stats.api_read_total_ns > 0);
     assert!(stats.api_read_frame_bytes > 0);
     assert!(stats.api_read_response_bytes > 0);
@@ -471,6 +472,246 @@ async fn session_three_pins_mechanical_reads_discovery_and_reopen() {
     );
     drop(reopened_app);
     reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_pins_promql_selector_window_errors_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four.db");
+    let base = 1_700_000_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        2,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"prom_cpu\",\"host\":\"a\",\"env\":\"prod\"}},",
+            "\"values\":[10.0,20.0,30.0,50.0],\"timestamps\":[{},{},{},{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"prom_cpu\",\"host\":\"b\"}},",
+            "\"values\":[80.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"prom_stale\",\"host\":\"excluded\"}},",
+            "\"values\":[1.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"prom_stale\",\"host\":\"included\"}},",
+            "\"values\":[2.0],\"timestamps\":[{}]}}"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 60) * 1_000,
+        base * 1_000,
+        (base - 300) * 1_000,
+        (base - 299) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let selector = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=prom_cpu%7Bhost%3D%22a%22%7D&start={base}&end={}&step=10",
+            base + 20
+        ),
+    )
+    .await;
+    assert_eq!(selector.0, StatusCode::OK);
+    assert_eq!(
+        selector.1,
+        serde_json::json!({
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [{
+                    "metric": {"__name__": "prom_cpu", "env": "prod", "host": "a"},
+                    "values": [[base, "10.0"], [base + 10, "20.0"], [base + 20, "30.0"]]
+                }]
+            }
+        })
+    );
+
+    let rfc3339 = get_json(
+        &app,
+        "/prometheus/api/v1/query_range?query=prom_cpu%7Bhost%3D%22a%22%7D&start=2023-11-14T22%3A13%3A20Z&end=1700000020.9&step=10s",
+    )
+    .await;
+    assert_eq!(rfc3339.0, StatusCode::OK);
+    assert_eq!(rfc3339.1, selector.1);
+
+    let partial_grid = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=prom_cpu%7Bhost%3D%22a%22%7D&start={base}&end={}&step=10",
+            base + 15
+        ),
+    )
+    .await;
+    assert_eq!(
+        partial_grid.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "10.0"], [base + 10, "20.0"]])
+    );
+
+    let average = get_json(
+        &app,
+        &format!(
+            "/api/v1/query_range?query=avg_over_time%28prom_cpu%7Bhost%3D%22a%22%7D%5B20s%5D%29&start={base}&end={}&step=10",
+            base + 20
+        ),
+    )
+    .await;
+    assert_eq!(average.0, StatusCode::OK);
+    assert_eq!(
+        average.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "10.0"], [base + 10, "15.0"], [base + 20, "25.0"]])
+    );
+    assert_eq!(
+        average.1["data"]["result"][0]["metric"],
+        serde_json::json!({"__name__": "prom_cpu", "env": "prod", "host": "a"})
+    );
+
+    let instant = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=prom_cpu%7Bhost%3D%22a%22%7D&time={}",
+            base + 20
+        ),
+    )
+    .await;
+    assert_eq!(instant.0, StatusCode::OK);
+    assert_eq!(instant.1["data"]["resultType"], "vector");
+    assert_eq!(
+        instant.1["data"]["result"][0]["value"],
+        serde_json::json!([base + 20, "30.0"])
+    );
+
+    let stale = get_json(&app, &format!("/api/v1/query?query=prom_stale&time={base}")).await;
+    assert_eq!(stale.0, StatusCode::OK);
+    assert_eq!(stale.1["data"]["result"].as_array().unwrap().len(), 1);
+    assert_eq!(stale.1["data"]["result"][0]["metric"]["host"], "included");
+
+    let duplicate = get_json(
+        &app,
+        &format!(
+            "/api/v1/query_range?query=prom_cpu%7Bhost%3D%22nope%22%2Chost%3D%22a%22%7D&start={base}&end={base}&step=10"
+        ),
+    )
+    .await;
+    assert_eq!(duplicate.0, StatusCode::OK);
+    assert_eq!(duplicate.1["data"]["result"], serde_json::json!([]));
+
+    let posted = post_form(
+        &app,
+        "/prometheus/api/v1/query_range?query=wrong&start=0&end=0&step=1",
+        &format!("query=prom_cpu%7Bhost%3D%22a%22%7D&start={base}&end={base}&step=10"),
+    )
+    .await;
+    assert_eq!(posted.0, StatusCode::OK);
+    assert_eq!(posted.1["data"]["result"][0]["values"][0][1], "10.0");
+
+    for path in [
+        "/prometheus/api/v1/query_range?start=0&end=10&step=1",
+        "/prometheus/api/v1/query_range?query=rate%28prom_cpu%5B1m%5D%29&start=0&end=10&step=1",
+        "/prometheus/api/v1/query_range?query=prom_cpu%2Bother&start=0&end=10&step=1",
+    ] {
+        let error = get_json(&app, path).await;
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1["status"], "error");
+        assert_eq!(error.1["errorType"], "bad_data");
+        assert!(error.1["error"].as_str().unwrap().len() > 8);
+    }
+
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.api_promql_requests, 8);
+    assert_eq!(stats.api_read_errors, 0);
+    assert!(stats.api_read_frame_bytes > 0);
+    assert!(stats.api_read_result_points >= 9);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = get_json(
+        &reopened_app,
+        &format!(
+            "/prometheus/api/v1/query?query=prom_cpu%7Bhost%3D%22a%22%7D&time={}",
+            base + 20
+        ),
+    )
+    .await;
+    assert_eq!(recovered.1, instant.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four_cancel.db");
+    let storage = Storage::start(database, extension, 1, 16, DEFAULT_RAW_RETENTION).unwrap();
+    let app = router(storage.clone());
+    let base = 1_700_000_000_i64;
+    let mut victoria = String::new();
+    for series in 0..4_000 {
+        use std::fmt::Write;
+        writeln!(
+            victoria,
+            "{{\"metric\":{{\"__name__\":\"cancel_metric\",\"host\":\"h{series}\"}},\"values\":[{series}.0],\"timestamps\":[{}]}}",
+            base * 1_000
+        )
+        .unwrap();
+    }
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let slow_app = app.clone();
+    let request = format!(
+        "/prometheus/api/v1/query_range?query=cancel_metric&start={base}&end={}&step=1",
+        base + 10_999
+    );
+    let task = tokio::spawn(async move {
+        slow_app
+            .oneshot(Request::get(request).body(Body::empty()).unwrap())
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    task.abort();
+    let _ = task.await;
+
+    let stats = tokio::time::timeout(std::time::Duration::from_secs(2), storage.stats())
+        .await
+        .expect("cancelled query kept the sole reader busy")
+        .unwrap();
+    assert_eq!(stats.api_read_cancelled, 1);
+    assert_eq!(stats.api_read_in_flight, 0);
+    assert_eq!(stats.api_read_errors, 0);
+
+    let fresh = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        get_json(
+            &app,
+            &format!(
+                "/prometheus/api/v1/query?query=cancel_metric%7Bhost%3D%22h0%22%7D&time={base}"
+            ),
+        ),
+    )
+    .await
+    .expect("reader did not recover after cancellation");
+    assert_eq!(fresh.0, StatusCode::OK);
+    assert_eq!(fresh.1["data"]["result"][0]["value"][1], "0.0");
+
+    drop(app);
+    storage.shutdown().await.unwrap();
 }
 
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {

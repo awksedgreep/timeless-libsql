@@ -260,18 +260,42 @@ are in
 
 ## Session 4 — First PromQL vertical slice
 
-- [ ] Port only the parser/evaluator subset required by a pinned vertical
+- [x] Port only the parser/evaluator subset required by a pinned vertical
       slice: vector selector plus one range/window aggregate already expressible
       through public raw/window surfaces.
-- [ ] Return final Prometheus vector/matrix envelopes from Rust and compare
+- [x] Return final Prometheus vector/matrix envelopes from Rust and compare
       them to the VictoriaMetrics differential corpus cases in scope.
-- [ ] Keep unsupported expressions explicit; do not silently fall back across
+- [x] Keep unsupported expressions explicit; do not silently fall back across
       the process boundary or shuttle per-series data through Elixir.
-- [ ] Separate storage-independent PromQL code from route code so logs/traces
+- [x] Separate storage-independent PromQL code from route code so logs/traces
       do not inherit metrics semantics.
 
 Exit criterion: one realistic PromQL range request is socket-to-response Rust,
 bit/semantic compatible, cancellable, and free of BEAM/NIF data transport.
+
+Result: complete. A storage-independent parser emits only selector and
+`avg_over_time(selector[window])` plans. Exact selectors use one public `TRF1`
+raw frame plus a linear lookback sweep; window averages lower directly to
+public `timeless_window_batches`. Both `/api/v1` and `/prometheus/api/v1`
+instant/range routes write the final Prometheus vector/matrix bytes in Rust.
+Unsupported functions, operators, aggregations, and name patterns return an
+explicit Prometheus `bad_data` response; no request falls back to Elixir.
+
+The extension-backed contract pins strict `(T-window,T]` boundaries, 300-second
+selector staleness, grid timestamps, duplicate matcher AND semantics, exact
+`__name__`, GET/POST precedence, duration steps, RFC3339/float timestamps,
+errors, telemetry, cancellation, and reopen. Dropping a 4,000-series,
+11,000-step request cancels SQLite/host work and leaves the sole reader
+immediately reusable. A fresh-process socket differential matched the
+Elixir+libSQL control on all six selector/window range and instant shapes over
+400,000 points.
+
+Rust p95 was 2.66x faster for the 100-series selector, 1.45x faster for exact
+window average, and 4.06x faster for the 100-series window average. Its exact
+selector range and two instant shapes were 1.42-1.95x slower but remained
+0.71-1.12ms p95. Same-lifecycle HWM was 58,272KiB versus 315,596KiB for the
+control. Full method and results are in
+`../timeless_metrics/bench/results/2026-08-01_metrics_api_session4.md`.
 
 ## Session 5 — Elixir control-plane client and isolation
 

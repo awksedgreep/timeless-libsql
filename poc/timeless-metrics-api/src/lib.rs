@@ -5,6 +5,7 @@
 //! rollups, and retention remain in the existing `timeless_metrics` extension.
 
 mod api;
+mod promql;
 mod query;
 mod storage;
 mod victoria;

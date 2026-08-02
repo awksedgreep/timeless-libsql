@@ -89,6 +89,9 @@ pub struct StorageStats {
     pub api_export_requests: u64,
     pub api_range_requests: u64,
     pub api_discovery_requests: u64,
+    pub api_promql_requests: u64,
+    pub api_read_in_flight: u64,
+    pub api_read_cancelled: u64,
     pub api_read_total_ns: u64,
     pub api_read_errors: u64,
     pub api_read_frame_bytes: u64,
@@ -165,6 +168,9 @@ struct ApiProfile {
     export_requests: u64,
     range_requests: u64,
     discovery_requests: u64,
+    promql_requests: u64,
+    read_in_flight: u64,
+    read_cancelled: u64,
     read_total_ns: u64,
     read_errors: u64,
     read_frame_bytes: u64,
@@ -243,6 +249,7 @@ enum ReadCommand {
     Stats(oneshot::Sender<Result<(StorageStats, u64, u64), String>>),
     Query {
         request: ReadRequest,
+        cancelled: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<ReadOutput, String>>,
     },
     Shutdown,
@@ -614,47 +621,56 @@ impl Storage {
     pub(crate) async fn read(&self, request: ReadRequest) -> Result<ReadOutput, String> {
         let started = Instant::now();
         let kind = request.kind();
+        {
+            let mut profile = profile_lock(&self.0.profile);
+            profile.read_requests = profile.read_requests.saturating_add(1);
+            profile.read_in_flight = profile.read_in_flight.saturating_add(1);
+            match kind {
+                ReadKind::Latest => {
+                    profile.latest_requests = profile.latest_requests.saturating_add(1)
+                }
+                ReadKind::Export => {
+                    profile.export_requests = profile.export_requests.saturating_add(1)
+                }
+                ReadKind::Range => {
+                    profile.range_requests = profile.range_requests.saturating_add(1)
+                }
+                ReadKind::Discovery => {
+                    profile.discovery_requests = profile.discovery_requests.saturating_add(1)
+                }
+                ReadKind::Promql => {
+                    profile.promql_requests = profile.promql_requests.saturating_add(1)
+                }
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut cancellation = ReadCancellation {
+            cancelled: Arc::clone(&cancelled),
+            profile: Arc::clone(&self.0.profile),
+            started,
+            armed: true,
+        };
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.reader()
+        if self
+            .reader()
             .send(ReadCommand::Query {
                 request,
+                cancelled,
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| "SQLite reader is not running".to_string())?;
+            .is_err()
+        {
+            cancellation.disarm();
+            let error = "SQLite reader is not running".to_string();
+            record_read_completion(&self.0.profile, started, &Err(error.clone()));
+            return Err(error);
+        }
         let result = reply_rx
             .await
-            .map_err(|_| "SQLite reader stopped before query completed".to_string())?;
-        let mut profile = profile_lock(&self.0.profile);
-        profile.read_requests = profile.read_requests.saturating_add(1);
-        profile.read_total_ns = profile.read_total_ns.saturating_add(elapsed_ns(started));
-        match kind {
-            ReadKind::Latest => profile.latest_requests = profile.latest_requests.saturating_add(1),
-            ReadKind::Export => profile.export_requests = profile.export_requests.saturating_add(1),
-            ReadKind::Range => profile.range_requests = profile.range_requests.saturating_add(1),
-            ReadKind::Discovery => {
-                profile.discovery_requests = profile.discovery_requests.saturating_add(1)
-            }
-        }
-        match &result {
-            Ok(output) => {
-                profile.read_frame_bytes = profile
-                    .read_frame_bytes
-                    .saturating_add(output.frame_bytes as u64);
-                profile.read_response_bytes = profile
-                    .read_response_bytes
-                    .saturating_add(output.body.len() as u64);
-                profile.read_result_series =
-                    profile.read_result_series.saturating_add(output.series);
-                profile.read_result_points =
-                    profile.read_result_points.saturating_add(output.points);
-            }
-            Err(error) => {
-                profile.read_errors = profile.read_errors.saturating_add(1);
-                profile.last_error = Some(error.clone());
-            }
-        }
-        drop(profile);
+            .unwrap_or_else(|_| Err("SQLite reader stopped before query completed".to_string()));
+        cancellation.disarm();
+        record_read_completion(&self.0.profile, started, &result);
         result
     }
 
@@ -692,6 +708,60 @@ impl Storage {
                 .map_err(|error| format!("release database owner lease: {error}"))?;
         }
         writer_result
+    }
+}
+
+struct ReadCancellation {
+    cancelled: Arc<AtomicBool>,
+    profile: Arc<StdMutex<ApiProfile>>,
+    started: Instant,
+    armed: bool,
+}
+
+impl ReadCancellation {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReadCancellation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.cancelled.store(true, Ordering::Release);
+        let mut profile = profile_lock(&self.profile);
+        profile.read_in_flight = profile.read_in_flight.saturating_sub(1);
+        profile.read_cancelled = profile.read_cancelled.saturating_add(1);
+        profile.read_total_ns = profile
+            .read_total_ns
+            .saturating_add(elapsed_ns(self.started));
+    }
+}
+
+fn record_read_completion(
+    profile: &StdMutex<ApiProfile>,
+    started: Instant,
+    result: &Result<ReadOutput, String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.read_in_flight = profile.read_in_flight.saturating_sub(1);
+    profile.read_total_ns = profile.read_total_ns.saturating_add(elapsed_ns(started));
+    match result {
+        Ok(output) => {
+            profile.read_frame_bytes = profile
+                .read_frame_bytes
+                .saturating_add(output.frame_bytes as u64);
+            profile.read_response_bytes = profile
+                .read_response_bytes
+                .saturating_add(output.body.len() as u64);
+            profile.read_result_series = profile.read_result_series.saturating_add(output.series);
+            profile.read_result_points = profile.read_result_points.saturating_add(output.points);
+        }
+        Err(error) => {
+            profile.read_errors = profile.read_errors.saturating_add(1);
+            profile.last_error = Some(error.clone());
+        }
     }
 }
 
@@ -851,8 +921,32 @@ fn reader_main(
                 .map(|stats| (stats, elapsed_ns(started), retries));
                 let _ = reply.send(result);
             }
-            ReadCommand::Query { request, reply } => {
-                let result = retry_read(|| query::execute(&conn, features, request.clone()), || {});
+            ReadCommand::Query {
+                request,
+                cancelled,
+                reply,
+            } => {
+                let progress_cancelled = Arc::clone(&cancelled);
+                let result = conn
+                    .progress_handler(
+                        1_000,
+                        Some(move || progress_cancelled.load(Ordering::Acquire)),
+                    )
+                    .map_err(|error| format!("install query cancellation handler: {error}"))
+                    .and_then(|()| {
+                        retry_read(
+                            || query::execute(&conn, features, request.clone(), &cancelled),
+                            || {},
+                        )
+                    });
+                let cleared = conn.progress_handler(0, None::<fn() -> bool>);
+                let result = match (result, cleared) {
+                    (Ok(output), Ok(())) => Ok(output),
+                    (Err(error), _) => Err(error),
+                    (Ok(_), Err(error)) => {
+                        Err(format!("clear query cancellation handler: {error}"))
+                    }
+                };
                 let _ = reply.send(result);
             }
             ReadCommand::Shutdown => return Ok(()),
@@ -1137,6 +1231,9 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.api_export_requests = profile.export_requests;
     stats.api_range_requests = profile.range_requests;
     stats.api_discovery_requests = profile.discovery_requests;
+    stats.api_promql_requests = profile.promql_requests;
+    stats.api_read_in_flight = profile.read_in_flight;
+    stats.api_read_cancelled = profile.read_cancelled;
     stats.api_read_total_ns = profile.read_total_ns;
     stats.api_read_errors = profile.read_errors;
     stats.api_read_frame_bytes = profile.read_frame_bytes;
