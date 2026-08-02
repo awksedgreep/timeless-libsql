@@ -4098,6 +4098,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let _read = read_permit(&shared, self.db, &table)?;
                 let (blocks, raw_blocks, buffered) = shared.engine.stats();
                 let (disk_spans, counted_buffered) = shared.engine.span_counts();
+                let query = shared.engine.query_profile();
                 debug_assert_eq!(buffered as u64, counted_buffered);
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
@@ -4123,6 +4124,43 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ),
                     ("ts_min", opt_ts(ts_min)),
                     ("ts_max", opt_ts(ts_max)),
+                    ("query_count", Value::Integer(query.query_count as i64)),
+                    (
+                        "query_cancelled",
+                        Value::Integer(query.query_cancelled as i64),
+                    ),
+                    (
+                        "query_total_ns",
+                        Value::Integer(query.query_total_ns as i64),
+                    ),
+                    (
+                        "query_candidate_blocks",
+                        Value::Integer(query.query_candidate_blocks as i64),
+                    ),
+                    (
+                        "query_payload_blocks_read",
+                        Value::Integer(query.query_payload_blocks_read as i64),
+                    ),
+                    (
+                        "query_payload_bytes_read",
+                        Value::Integer(query.query_payload_bytes_read as i64),
+                    ),
+                    (
+                        "query_decoded_spans",
+                        Value::Integer(query.query_decoded_spans as i64),
+                    ),
+                    (
+                        "query_buffered_spans_examined",
+                        Value::Integer(query.query_buffered_spans_examined as i64),
+                    ),
+                    (
+                        "query_matched_spans",
+                        Value::Integer(query.query_matched_spans as i64),
+                    ),
+                    (
+                        "query_returned_spans",
+                        Value::Integer(query.query_returned_spans as i64),
+                    ),
                 ]);
             }
         }

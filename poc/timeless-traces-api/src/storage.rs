@@ -13,6 +13,8 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::query::{self, ReadKind, ReadOutput, ReadRequest};
+
 pub const TRACE_CAPABILITY: &str = "timeless_traces/rich-span-batch-v1";
 
 const EXPECTED_COLUMNS: &[(&str, &str, i64)] = &[
@@ -49,6 +51,16 @@ pub struct StorageStats {
     pub trace_index_rows: i64,
     pub oldest_timestamp_nanoseconds: Option<i64>,
     pub newest_timestamp_nanoseconds: Option<i64>,
+    pub extension_query_count: i64,
+    pub extension_query_cancelled: i64,
+    pub extension_query_total_ns: i64,
+    pub extension_query_candidate_blocks: i64,
+    pub extension_query_payload_blocks_read: i64,
+    pub extension_query_payload_bytes_read: i64,
+    pub extension_query_decoded_spans: i64,
+    pub extension_query_buffered_spans_examined: i64,
+    pub extension_query_matched_spans: i64,
+    pub extension_query_returned_spans: i64,
 
     pub database_file_bytes: u64,
     pub database_wal_bytes: u64,
@@ -96,6 +108,20 @@ pub struct StorageStats {
     pub api_stats_total_ns: u64,
     pub api_stats_sqlite_ns: u64,
     pub api_stats_retries: u64,
+    pub api_read_requests: u64,
+    pub api_services_requests: u64,
+    pub api_operations_requests: u64,
+    pub api_trace_requests: u64,
+    pub api_search_requests: u64,
+    pub api_read_in_flight: u64,
+    pub api_read_cancelled: u64,
+    pub api_read_total_ns: u64,
+    pub api_read_sqlite_ns: u64,
+    pub api_read_errors: u64,
+    pub api_read_retries: u64,
+    pub api_read_response_bytes: u64,
+    pub api_read_result_traces: u64,
+    pub api_read_result_spans: u64,
     pub api_flush_count: u64,
     pub api_flush_total_ns: u64,
     pub api_flush_sqlite_ns: u64,
@@ -184,6 +210,20 @@ struct ApiProfile {
     stats_total_ns: u64,
     stats_sqlite_ns: u64,
     stats_retries: u64,
+    read_requests: u64,
+    services_requests: u64,
+    operations_requests: u64,
+    trace_requests: u64,
+    search_requests: u64,
+    read_in_flight: u64,
+    read_cancelled: u64,
+    read_total_ns: u64,
+    read_sqlite_ns: u64,
+    read_errors: u64,
+    read_retries: u64,
+    read_response_bytes: u64,
+    read_result_traces: u64,
+    read_result_spans: u64,
     explicit_flush_count: u64,
     explicit_flush_total_ns: u64,
     explicit_flush_sqlite_ns: u64,
@@ -227,6 +267,12 @@ enum WriteCommand {
 
 enum ReadCommand {
     Stats(oneshot::Sender<Result<(StorageStats, u64, u64), String>>),
+    Query {
+        request: ReadRequest,
+        cancelled: Arc<AtomicBool>,
+        interrupt: Arc<StdMutex<Option<Arc<rusqlite::InterruptHandle>>>>,
+        reply: oneshot::Sender<Result<(ReadOutput, u64, u64), String>>,
+    },
     Shutdown,
 }
 
@@ -590,6 +636,62 @@ impl Storage {
         Ok(stats)
     }
 
+    pub(crate) async fn read(&self, request: ReadRequest) -> Result<ReadOutput, String> {
+        let started = Instant::now();
+        let kind = request.kind();
+        {
+            let mut profile = profile_lock(&self.0.profile);
+            profile.read_requests = profile.read_requests.saturating_add(1);
+            profile.read_in_flight = profile.read_in_flight.saturating_add(1);
+            match kind {
+                ReadKind::Services => {
+                    profile.services_requests = profile.services_requests.saturating_add(1)
+                }
+                ReadKind::Operations => {
+                    profile.operations_requests = profile.operations_requests.saturating_add(1)
+                }
+                ReadKind::Trace => {
+                    profile.trace_requests = profile.trace_requests.saturating_add(1)
+                }
+                ReadKind::Search => {
+                    profile.search_requests = profile.search_requests.saturating_add(1)
+                }
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let interrupt = Arc::new(StdMutex::new(None));
+        let mut cancellation = ReadCancellation {
+            cancelled: Arc::clone(&cancelled),
+            interrupt: Arc::clone(&interrupt),
+            profile: Arc::clone(&self.0.profile),
+            started,
+            armed: true,
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .reader()
+            .send(ReadCommand::Query {
+                request,
+                cancelled,
+                interrupt,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            cancellation.disarm();
+            let error = "SQLite reader is not running".to_string();
+            record_read_completion(&self.0.profile, started, &Err(error.clone()));
+            return Err(error);
+        }
+        let result = reply_rx
+            .await
+            .unwrap_or_else(|_| Err("SQLite reader stopped before query completed".to_string()));
+        cancellation.disarm();
+        record_read_completion(&self.0.profile, started, &result);
+        result.map(|(output, _, _)| output)
+    }
+
     pub fn is_ready(&self) -> bool {
         !self.0.shutting_down.load(Ordering::Acquire)
     }
@@ -835,6 +937,44 @@ fn reader_main(
                 .map(|stats| (stats, elapsed_ns(started), retries));
                 let _ = reply.send(result);
             }
+            ReadCommand::Query {
+                request,
+                cancelled,
+                interrupt,
+                reply,
+            } => {
+                let handle = Arc::new(conn.get_interrupt_handle());
+                *profile_lock(&interrupt) = Some(Arc::clone(&handle));
+                if cancelled.load(Ordering::Acquire) {
+                    handle.interrupt();
+                }
+                let progress_cancelled = Arc::clone(&cancelled);
+                let started = Instant::now();
+                let mut retries = 0_u64;
+                let result = conn
+                    .progress_handler(
+                        1_000,
+                        Some(move || progress_cancelled.load(Ordering::Acquire)),
+                    )
+                    .map_err(|error| format!("install query cancellation handler: {error}"))
+                    .and_then(|()| {
+                        retry_read(
+                            || query::execute(&conn, request.clone(), &cancelled),
+                            || retries = retries.saturating_add(1),
+                        )
+                    });
+                let sqlite_ns = elapsed_ns(started);
+                let cleared = conn.progress_handler(0, None::<fn() -> bool>);
+                profile_lock(&interrupt).take();
+                let result = match (result, cleared) {
+                    (Ok(output), Ok(())) => Ok((output, sqlite_ns, retries)),
+                    (Err(error), _) => Err(error),
+                    (Ok(_), Err(error)) => {
+                        Err(format!("clear query cancellation handler: {error}"))
+                    }
+                };
+                let _ = reply.send(result);
+            }
             ReadCommand::Shutdown => return Ok(()),
         }
     }
@@ -1044,6 +1184,16 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         trace_index_rows: integer("trace_index_rows"),
         oldest_timestamp_nanoseconds: optional_integer(values.get("ts_min")),
         newest_timestamp_nanoseconds: optional_integer(values.get("ts_max")),
+        extension_query_count: integer("query_count"),
+        extension_query_cancelled: integer("query_cancelled"),
+        extension_query_total_ns: integer("query_total_ns"),
+        extension_query_candidate_blocks: integer("query_candidate_blocks"),
+        extension_query_payload_blocks_read: integer("query_payload_blocks_read"),
+        extension_query_payload_bytes_read: integer("query_payload_bytes_read"),
+        extension_query_decoded_spans: integer("query_decoded_spans"),
+        extension_query_buffered_spans_examined: integer("query_buffered_spans_examined"),
+        extension_query_matched_spans: integer("query_matched_spans"),
+        extension_query_returned_spans: integer("query_returned_spans"),
         sqlite_page_bytes: page_count.saturating_mul(page_size),
         sqlite_index_bytes,
         freelist_pages,
@@ -1118,6 +1268,20 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.api_stats_total_ns = profile.stats_total_ns;
     stats.api_stats_sqlite_ns = profile.stats_sqlite_ns;
     stats.api_stats_retries = profile.stats_retries;
+    stats.api_read_requests = profile.read_requests;
+    stats.api_services_requests = profile.services_requests;
+    stats.api_operations_requests = profile.operations_requests;
+    stats.api_trace_requests = profile.trace_requests;
+    stats.api_search_requests = profile.search_requests;
+    stats.api_read_in_flight = profile.read_in_flight;
+    stats.api_read_cancelled = profile.read_cancelled;
+    stats.api_read_total_ns = profile.read_total_ns;
+    stats.api_read_sqlite_ns = profile.read_sqlite_ns;
+    stats.api_read_errors = profile.read_errors;
+    stats.api_read_retries = profile.read_retries;
+    stats.api_read_response_bytes = profile.read_response_bytes;
+    stats.api_read_result_traces = profile.read_result_traces;
+    stats.api_read_result_spans = profile.read_result_spans;
     stats.api_flush_count = profile.explicit_flush_count;
     stats.api_flush_total_ns = profile.explicit_flush_total_ns;
     stats.api_flush_sqlite_ns = profile.explicit_flush_sqlite_ns;
@@ -1212,6 +1376,64 @@ fn record_queue_completion(
             profile.failed_requests = profile.failed_requests.saturating_add(1);
             profile.failed_spans = profile.failed_spans.saturating_add(spans as u64);
             profile.failed_body_bytes = profile.failed_body_bytes.saturating_add(body_bytes as u64);
+            profile.last_error = Some(error.clone());
+        }
+    }
+}
+
+struct ReadCancellation {
+    cancelled: Arc<AtomicBool>,
+    interrupt: Arc<StdMutex<Option<Arc<rusqlite::InterruptHandle>>>>,
+    profile: Arc<StdMutex<ApiProfile>>,
+    started: Instant,
+    armed: bool,
+}
+
+impl ReadCancellation {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReadCancellation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(interrupt) = profile_lock(&self.interrupt).as_ref() {
+            interrupt.interrupt();
+        }
+        let mut profile = profile_lock(&self.profile);
+        profile.read_in_flight = profile.read_in_flight.saturating_sub(1);
+        profile.read_cancelled = profile.read_cancelled.saturating_add(1);
+        profile.read_total_ns = profile
+            .read_total_ns
+            .saturating_add(elapsed_ns(self.started));
+    }
+}
+
+fn record_read_completion(
+    profile: &StdMutex<ApiProfile>,
+    started: Instant,
+    result: &Result<(ReadOutput, u64, u64), String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.read_in_flight = profile.read_in_flight.saturating_sub(1);
+    profile.read_total_ns = profile.read_total_ns.saturating_add(elapsed_ns(started));
+    match result {
+        Ok((output, sqlite_ns, retries)) => {
+            profile.read_sqlite_ns = profile.read_sqlite_ns.saturating_add(*sqlite_ns);
+            profile.read_retries = profile.read_retries.saturating_add(*retries);
+            profile.read_response_bytes = profile
+                .read_response_bytes
+                .saturating_add(output.body.len() as u64);
+            profile.read_result_traces = profile.read_result_traces.saturating_add(output.traces);
+            profile.read_result_spans = profile.read_result_spans.saturating_add(output.spans);
+        }
+        Err(error) if error == "query cancelled" || error.contains("interrupted") => {}
+        Err(error) => {
+            profile.read_errors = profile.read_errors.saturating_add(1);
             profile.last_error = Some(error.clone());
         }
     }

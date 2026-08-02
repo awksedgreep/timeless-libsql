@@ -7,6 +7,7 @@
 
 mod api;
 mod otlp;
+mod query;
 mod storage;
 
 use std::net::SocketAddr;

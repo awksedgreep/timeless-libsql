@@ -382,6 +382,12 @@ impl SpanBlockStore for ShadowSpanStore {
         )
     }
 
+    fn check_cancelled(&self) -> Result<(), String> {
+        Self::conn()?
+            .query_row("SELECT 1", [], |_| Ok(()))
+            .map_err(|error| format!("trace query cancellation checkpoint failed: {error}"))
+    }
+
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
         let conn = Self::conn()?;
         let mut stmt = conn

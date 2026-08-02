@@ -21,8 +21,9 @@
 use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Instant;
 
 use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR_V2, CODEC_RAW};
 use super::{status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanEntry};
@@ -88,6 +89,55 @@ pub struct SpanQuery {
     pub status: Option<u8>,
     /// Exact operation-name match.
     pub name: Option<String>,
+}
+
+/// Cumulative successful query work. Direct SQLite/libSQL users can inspect
+/// these through `timeless_stats`; hosts take before/after snapshots around a
+/// workload rather than inferring work from returned rows.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpanQueryProfileSnapshot {
+    pub query_count: u64,
+    pub query_cancelled: u64,
+    pub query_total_ns: u64,
+    pub query_candidate_blocks: u64,
+    pub query_payload_blocks_read: u64,
+    pub query_payload_bytes_read: u64,
+    pub query_decoded_spans: u64,
+    pub query_buffered_spans_examined: u64,
+    pub query_matched_spans: u64,
+    pub query_returned_spans: u64,
+}
+
+#[derive(Default)]
+struct SpanQueryProfile {
+    query_count: AtomicU64,
+    query_cancelled: AtomicU64,
+    query_total_ns: AtomicU64,
+    query_candidate_blocks: AtomicU64,
+    query_payload_blocks_read: AtomicU64,
+    query_payload_bytes_read: AtomicU64,
+    query_decoded_spans: AtomicU64,
+    query_buffered_spans_examined: AtomicU64,
+    query_matched_spans: AtomicU64,
+    query_returned_spans: AtomicU64,
+}
+
+impl SpanQueryProfile {
+    fn snapshot(&self) -> SpanQueryProfileSnapshot {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        SpanQueryProfileSnapshot {
+            query_count: load(&self.query_count),
+            query_cancelled: load(&self.query_cancelled),
+            query_total_ns: load(&self.query_total_ns),
+            query_candidate_blocks: load(&self.query_candidate_blocks),
+            query_payload_blocks_read: load(&self.query_payload_blocks_read),
+            query_payload_bytes_read: load(&self.query_payload_bytes_read),
+            query_decoded_spans: load(&self.query_decoded_spans),
+            query_buffered_spans_examined: load(&self.query_buffered_spans_examined),
+            query_matched_spans: load(&self.query_matched_spans),
+            query_returned_spans: load(&self.query_returned_spans),
+        }
+    }
 }
 
 /// One entry in the engine's in-memory block index: persisted metadata
@@ -171,6 +221,7 @@ pub struct SpanBlockEngine {
     retention_native: AtomicI64,
     /// Last retention cutoff applied (advance guard); i64::MIN = never.
     retention_floor: AtomicI64,
+    query_profile: SpanQueryProfile,
 }
 
 impl SpanBlockEngine {
@@ -218,11 +269,16 @@ impl SpanBlockEngine {
             txn: Mutex::new(TxnJournal::default()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
+            query_profile: SpanQueryProfile::default(),
         })
     }
 
     pub fn config(&self) -> &SpanEngineConfig {
         &self.config
+    }
+
+    pub fn query_profile(&self) -> SpanQueryProfileSnapshot {
+        self.query_profile.snapshot()
     }
 
     /// Poison-tolerant locks, same style as the rest of timeless-core.
@@ -805,6 +861,7 @@ impl SpanBlockEngine {
     /// filtering (block-granular indexes approximate), merge matching
     /// BUFFERED spans (queryable-before-flush), sort by start_ts.
     pub fn query(&self, q: &SpanQuery) -> Result<Vec<SpanEntry>, String> {
+        let started = Instant::now();
         let _transition = self.transition_read();
         if let Some(k) = q.kind {
             if k > 4 {
@@ -820,7 +877,8 @@ impl SpanBlockEngine {
         let locs = match &q.trace_id {
             Some(tid) => self
                 .store
-                .query_trace(tid)?
+                .query_trace(tid)
+                .map_err(|error| self.query_error(error))?
                 .into_iter()
                 .filter(|(_, m)| m.ts_min <= q.ts_max && m.ts_max >= q.ts_min)
                 .collect::<Vec<_>>(),
@@ -838,26 +896,86 @@ impl SpanBlockEngine {
                 if let Some(n) = &q.name {
                     terms.push(format!("name:{n}"));
                 }
-                self.store.query_terms(&terms, q.ts_min, q.ts_max)?
+                self.store
+                    .query_terms(&terms, q.ts_min, q.ts_max)
+                    .map_err(|error| self.query_error(error))?
             }
         };
 
+        let candidate_blocks = locs.len() as u64;
+        let mut payload_blocks_read = 0_u64;
+        let mut payload_bytes_read = 0_u64;
+        let mut decoded_spans = 0_u64;
+        let mut matched_spans = 0_u64;
         let mut out: Vec<SpanEntry> = Vec::new();
         for (loc, _meta) in &locs {
-            let bytes = self.store.read_block(loc)?;
-            for entry in decode_span_block(&bytes)? {
+            let bytes = self
+                .store
+                .read_block(loc)
+                .map_err(|error| self.query_error(error))?;
+            payload_blocks_read = payload_blocks_read.saturating_add(1);
+            payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
+            let entries = decode_span_block(&bytes)?;
+            decoded_spans = decoded_spans.saturating_add(entries.len() as u64);
+            for entry in entries {
                 if entry_matches(&entry, q) {
+                    matched_spans = matched_spans.saturating_add(1);
                     out.push(entry);
                 }
             }
         }
-        for entry in self.buffer_lock().iter() {
+        self.store
+            .check_cancelled()
+            .map_err(|error| self.query_error(error))?;
+        let buffer = self.buffer_lock();
+        let buffered_spans_examined = buffer.len() as u64;
+        for entry in buffer.iter() {
             if entry_matches(entry, q) {
+                matched_spans = matched_spans.saturating_add(1);
                 out.push(entry.clone());
             }
         }
+        drop(buffer);
         out.sort_by_key(|e| e.start_ts);
+        self.query_profile
+            .query_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.query_profile
+            .query_total_ns
+            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+        self.query_profile
+            .query_candidate_blocks
+            .fetch_add(candidate_blocks, Ordering::Relaxed);
+        self.query_profile
+            .query_payload_blocks_read
+            .fetch_add(payload_blocks_read, Ordering::Relaxed);
+        self.query_profile
+            .query_payload_bytes_read
+            .fetch_add(payload_bytes_read, Ordering::Relaxed);
+        self.query_profile
+            .query_decoded_spans
+            .fetch_add(decoded_spans, Ordering::Relaxed);
+        self.query_profile
+            .query_buffered_spans_examined
+            .fetch_add(buffered_spans_examined, Ordering::Relaxed);
+        self.query_profile
+            .query_matched_spans
+            .fetch_add(matched_spans, Ordering::Relaxed);
+        self.query_profile
+            .query_returned_spans
+            .fetch_add(out.len() as u64, Ordering::Relaxed);
         Ok(out)
+    }
+
+    fn query_error(&self, error: String) -> String {
+        if error.contains("interrupt") || error.contains("cancel") {
+            self.query_profile
+                .query_cancelled
+                .fetch_add(1, Ordering::Relaxed);
+            "span query cancelled".into()
+        } else {
+            error
+        }
     }
 
     /// F4 bucket kernel (FEATURE_PLAN.md): per-service span stats per
@@ -1051,4 +1169,8 @@ fn entry_matches(e: &SpanEntry, q: &SpanQuery) -> bool {
         }
     }
     true
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }

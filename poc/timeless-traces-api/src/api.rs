@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use axum::body::{to_bytes, Body, Bytes};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -9,6 +9,7 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use crate::otlp;
+use crate::query::{ReadRequest, SearchParams};
 use crate::{IngestTimings, Storage};
 
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -19,6 +20,13 @@ pub fn router(storage: Storage) -> Router {
         .route("/ready", get(readiness))
         .route("/health", get(readiness))
         .route("/select/traces/stats", get(stats))
+        .route("/select/jaeger/api/services", get(services))
+        .route(
+            "/select/jaeger/api/services/{service}/operations",
+            get(operations),
+        )
+        .route("/select/jaeger/api/traces", get(search_traces))
+        .route("/select/jaeger/api/traces/{trace_id}", get(trace_by_id))
         .route("/api/v1/flush", get(flush).post(flush))
         .route("/insert/opentelemetry/v1/traces", post(ingest_otlp))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -80,6 +88,40 @@ async fn readiness(State(storage): State<Storage>) -> Response {
 async fn stats(State(storage): State<Storage>) -> Response {
     match storage.stats().await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+async fn services(State(storage): State<Storage>) -> Response {
+    read_response(storage, ReadRequest::Services).await
+}
+
+async fn operations(State(storage): State<Storage>, Path(service): Path<String>) -> Response {
+    read_response(storage, ReadRequest::Operations { service }).await
+}
+
+async fn trace_by_id(State(storage): State<Storage>, Path(trace_id): Path<String>) -> Response {
+    read_response(storage, ReadRequest::Trace { trace_id }).await
+}
+
+async fn search_traces(
+    State(storage): State<Storage>,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    match ReadRequest::search(params) {
+        Ok(request) => read_response(storage, request).await,
+        Err(error) => client_error(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn read_response(storage: Storage, request: ReadRequest) -> Response {
+    match storage.read(request).await {
+        Ok(output) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(output.body),
+        )
+            .into_response(),
         Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     }
 }

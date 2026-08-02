@@ -213,6 +213,14 @@ pub trait SpanBlockStore: Send + Sync {
     /// (`WHERE trace_id = x'...'`) reads exactly these blocks.
     fn query_trace(&self, trace_id: &[u8; 16]) -> Result<Vec<(BlockLoc, BlockMeta)>, String>;
 
+    /// Portable cancellation checkpoint. SQLite-backed stores execute a
+    /// minimal statement so `sqlite3_interrupt` is observed even while a
+    /// virtual-table query is doing host-side block work. Other stores have
+    /// no ambient cancellation source.
+    fn check_cancelled(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Small key/value config persistence (ts unit, schema version).
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String>;
     fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String>;

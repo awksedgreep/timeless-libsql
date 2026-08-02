@@ -11,7 +11,7 @@
 //! One instrumented wrapper store serves every test (the logs test file
 //! grew four near-identical wrappers; learning applied).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -208,6 +208,7 @@ fn stats_concurrent_with_flush_does_not_invert_index_and_buffer() {
 struct SpyStore {
     inner: Arc<MemSpanStore>,
     reads: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicBool>,
     /// Term sets from put_blocks (flush) and replace_blocks (optimize).
     put_terms: Arc<Mutex<Vec<Vec<String>>>>,
     replace_terms: Arc<Mutex<Vec<Vec<String>>>>,
@@ -218,6 +219,7 @@ impl SpyStore {
         SpyStore {
             inner: Arc::new(MemSpanStore::new()),
             reads: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicBool::new(false)),
             put_terms: Arc::new(Mutex::new(Vec::new())),
             replace_terms: Arc::new(Mutex::new(Vec::new())),
         }
@@ -266,6 +268,13 @@ impl SpanBlockStore for SpyStore {
     }
     fn query_trace(&self, trace_id: &[u8; 16]) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
         self.inner.query_trace(trace_id)
+    }
+    fn check_cancelled(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            Err("interrupted".into())
+        } else {
+            Ok(())
+        }
     }
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
         self.inner.save_meta(key, value)
@@ -530,6 +539,7 @@ fn optimize_writes_codec_5_blocks_that_decode_exactly() {
     let store = SpyStore {
         inner: Arc::clone(&shared),
         reads: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicBool::new(false)),
         put_terms: Arc::new(Mutex::new(Vec::new())),
         replace_terms: Arc::new(Mutex::new(Vec::new())),
     };
@@ -662,6 +672,7 @@ fn flush_writes_status_pure_blocks_with_single_status_term() {
 fn trace_query_reads_only_blocks_containing_the_trace() {
     let store = SpyStore::new();
     let reads = Arc::clone(&store.reads);
+    let cancelled = Arc::clone(&store.cancelled);
     let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
 
     // Three flushes → three (ok-pure) blocks, each holding different
@@ -699,6 +710,17 @@ fn trace_query_reads_only_blocks_containing_the_trace() {
     // THE assertion: only the one block containing trace 7 was read;
     // the trace index skipped the other two without touching payloads.
     assert_eq!(reads.load(Ordering::SeqCst), 1);
+    let profile = engine.query_profile();
+    assert_eq!(profile.query_count, 1);
+    assert_eq!(profile.query_cancelled, 0);
+    assert_eq!(profile.query_candidate_blocks, 1);
+    assert_eq!(profile.query_payload_blocks_read, 1);
+    assert!(profile.query_payload_bytes_read > 0);
+    assert_eq!(profile.query_decoded_spans, 10);
+    assert_eq!(profile.query_buffered_spans_examined, 0);
+    assert_eq!(profile.query_matched_spans, 5);
+    assert_eq!(profile.query_returned_spans, 5);
+    assert!(profile.query_total_ns > 0);
 
     // Unknown trace: zero reads, zero rows (index miss, no scan).
     reads.store(0, Ordering::SeqCst);
@@ -708,6 +730,9 @@ fn trace_query_reads_only_blocks_containing_the_trace() {
     };
     assert_eq!(engine.query(&q).unwrap().len(), 0);
     assert_eq!(reads.load(Ordering::SeqCst), 0);
+    let profile = engine.query_profile();
+    assert_eq!(profile.query_count, 2);
+    assert_eq!(profile.query_candidate_blocks, 1);
 
     // Buffered spans of a trace surface too (queryable-before-flush).
     engine
@@ -718,6 +743,21 @@ fn trace_query_reads_only_blocks_containing_the_trace() {
         ..full_range_query()
     };
     assert_eq!(engine.query(&q).unwrap().len(), 6);
+    let profile = engine.query_profile();
+    assert_eq!(profile.query_count, 3);
+    assert_eq!(profile.query_candidate_blocks, 2);
+    assert_eq!(profile.query_payload_blocks_read, 2);
+    assert_eq!(profile.query_decoded_spans, 20);
+    assert_eq!(profile.query_buffered_spans_examined, 1);
+    assert_eq!(profile.query_matched_spans, 11);
+    assert_eq!(profile.query_returned_spans, 11);
+
+    cancelled.store(true, Ordering::SeqCst);
+    assert_eq!(
+        engine.query(&full_range_query()).unwrap_err(),
+        "span query cancelled"
+    );
+    assert_eq!(engine.query_profile().query_cancelled, 1);
 }
 
 // ---------------------------------------------------------------------------

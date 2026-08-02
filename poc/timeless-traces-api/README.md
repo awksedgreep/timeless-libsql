@@ -4,8 +4,8 @@ This traces-specific process-boundary POC owns HTTP scheduling and SQLite
 connections. It does not implement storage. Every span and command crosses the
 public `timeless_traces` virtual table supplied by `libtimeless_ext`.
 
-Sessions 2–3 provide the server lifecycle shell and OTLP ingest. Jaeger query
-routes intentionally remain unimplemented until Session 4.
+Sessions 2–4 provide the server lifecycle shell, OTLP ingest, and the pinned
+Jaeger read surface.
 
 ## Run
 
@@ -25,7 +25,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered extension optimize interval |
 
-## Sessions 2–3 endpoints
+## Sessions 2–4 endpoints
 
 - `GET /live` reports process liveness without touching SQLite.
 - `GET /ready` and `GET /health` verify a live reader and expose the negotiated
@@ -39,6 +39,16 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   public rich-span v1 batch, waits for its one SQLite statement, and returns
   the established `{"partialSuccess":{}}` response. Raw and decompressed
   bodies are independently capped at 10 MiB.
+- `GET /select/jaeger/api/services` and
+  `GET /select/jaeger/api/services/:service/operations` provide sorted
+  discovery.
+- `GET /select/jaeger/api/traces/:trace_id` uses the extension's packed trace
+  index and assembles every span across block boundaries in deterministic
+  start order.
+- `GET /select/jaeger/api/traces` supports the established `service`,
+  `operation`, `start`, `end`, `limit`, `minDuration`, and `maxDuration`
+  parameters. Compatibility is explicit: `limit` still counts spans before
+  grouping, not traces, so a search result may be incomplete.
 
 Startup acquires `<database>.timeless-traces-api.lock` before opening SQLite.
 It then validates the full rich-span schema, module identity, configured
@@ -73,4 +83,8 @@ mismatch, body rejection before admission, a physically saturated one-request
 writer queue, exact drain watermarks, explicit flush, rich-field cold reopen,
 WAL checkpoint, graceful process termination, kill-9 recovery, JSON/protobuf/
 gzip parity, atomic malformed-request rejection, decompression bounds, and the
-8,191-to-8,192 automatic-flush boundary through HTTP.
+8,191-to-8,192 automatic-flush boundary through HTTP. They also cover the
+Session 0 Jaeger oracle, rich tags/logs/processes/references, span-limit-before-
+grouping behavior, traces split across multiple extension blocks, scoped
+SQLite interruption, cancellation during extension work, progress-handler
+cleanup, and reuse of the same reader after cancellation.

@@ -1364,7 +1364,9 @@ SELECT 'sm', key, value FROM timeless_stats('m')
 SELECT 'sl', key, value FROM timeless_stats('l')
  WHERE key IN ('module','blocks','buffered_entries','terms');
 SELECT 'st', key, value FROM timeless_stats('t')
- WHERE key IN ('module','buffered_spans','disk_spans','total_spans','ts_min');
+ WHERE key IN ('module','buffered_spans','disk_spans','total_spans','ts_min',
+               'query_count','query_cancelled','query_candidate_blocks','query_payload_blocks_read',
+               'query_decoded_spans','query_matched_spans','query_returned_spans');
 .print -- prune reflected in catalog
 INSERT INTO m(m) VALUES ('flush');
 INSERT INTO m(m) VALUES ('prune:160');
@@ -1392,7 +1394,14 @@ check_eq "traces stats keys" "$(grep '^st|' <<<"$got")" \
 st|buffered_spans|1
 st|disk_spans|0
 st|total_spans|1
-st|ts_min|5000'
+st|ts_min|5000
+st|query_count|0
+st|query_cancelled|0
+st|query_candidate_blocks|0
+st|query_payload_blocks_read|0
+st|query_decoded_spans|0
+st|query_matched_spans|0
+st|query_returned_spans|0'
 # prune is CHUNK-granular: cpu-a's {100,200} chunk straddles the cutoff
 # and survives whole; cpu-b's chunk dies, leaving an empty cataloged
 # series (empty series persist — documented limit).
