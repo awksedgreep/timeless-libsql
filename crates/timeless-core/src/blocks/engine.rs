@@ -1930,6 +1930,74 @@ impl BlockEngine {
         }
     }
 
+    /// Return the lexicographically first `max_values` distinct string
+    /// projections for one metadata key across the exact query predicate.
+    ///
+    /// The scan owns at most one decoded block and `max_values + 1` strings at
+    /// a time. Keeping the smallest values, rather than stopping after the
+    /// first full set, makes the result deterministic across compaction and
+    /// block-layout changes without materializing every matching entry.
+    pub fn field_values(
+        &self,
+        q: &LogQuery,
+        key: &str,
+        max_values: usize,
+    ) -> Result<Vec<String>, String> {
+        self.field_values_after_snapshot(q, key, max_values, || {})
+    }
+
+    pub fn field_values_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        key: &str,
+        max_values: usize,
+        after_snapshot: F,
+    ) -> Result<Vec<String>, String>
+    where
+        F: FnOnce(),
+    {
+        if key.is_empty() {
+            return Err("log field-values key must not be empty".into());
+        }
+
+        let snapshot = self.snapshot_query(q, false)?;
+        after_snapshot();
+        let mut values = BTreeSet::new();
+
+        for entry in &snapshot.buffered {
+            if let Some(value) = entry.meta_value(key) {
+                Self::retain_field_value(&mut values, value, max_values);
+            }
+        }
+
+        for block in snapshot.blocks {
+            let bytes = match (block.payload, block.location) {
+                (Some(bytes), None) => bytes,
+                (None, Some(location)) => self.store.read_block(&location)?,
+                _ => return Err("invalid log field-values block snapshot".into()),
+            };
+            for entry in decode_block(&bytes)? {
+                if entry_matches(&entry, q) {
+                    if let Some(value) = entry.meta_value(key) {
+                        Self::retain_field_value(&mut values, value, max_values);
+                    }
+                }
+            }
+        }
+
+        Ok(values.into_iter().collect())
+    }
+
+    fn retain_field_value(values: &mut BTreeSet<String>, value: &str, max_values: usize) {
+        if max_values == 0 {
+            return;
+        }
+        values.insert(value.to_owned());
+        if values.len() > max_values {
+            let _ = values.pop_last();
+        }
+    }
+
     /// Count exact matches without materializing a rowset. Fully covered
     /// blocks are answered from `entry_count` when every filter is proven by
     /// the block itself (unfiltered blocks, or a matching level-pure block).

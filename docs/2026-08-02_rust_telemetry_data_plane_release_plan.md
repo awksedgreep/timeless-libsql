@@ -447,6 +447,9 @@ restart/drain/reap independently and cannot own the same target twice.
 
 ### Session 5 — switch adapters/defaults and freeze compatibility
 
+Status: complete. Evidence:
+[`2026-08-02_rust_telemetry_data_plane_session5.md`](2026-08-02_rust_telemetry_data_plane_session5.md).
+
 - Route existing metrics, logs, and traces application adapters and dashboard
   historical reads to their signal Rust process after successful detection or
   cutover. Make libSQL/Rust the fresh-install and post-migration default.

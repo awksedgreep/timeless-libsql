@@ -28,6 +28,7 @@ pub(crate) enum ReadRequest {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SearchParams {
     pub service: Option<String>,
     pub operation: Option<String>,
@@ -40,6 +41,7 @@ pub(crate) struct SearchParams {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DashboardSearchParams {
     pub name: Option<String>,
     pub service: Option<String>,
@@ -80,6 +82,7 @@ pub(crate) struct ReadOutput {
     pub body: Vec<u8>,
     pub traces: u64,
     pub spans: u64,
+    pub rows: u64,
 }
 
 impl ReadRequest {
@@ -605,6 +608,7 @@ fn dashboard_trace_envelope(spans: Vec<SpanRow>) -> Result<ReadOutput, String> {
         body,
         traces,
         spans: span_count,
+        rows: span_count,
     })
 }
 
@@ -639,6 +643,7 @@ fn dashboard_search_envelope(
         body,
         traces: trace_count,
         spans: span_count,
+        rows: span_count,
     })
 }
 
@@ -700,6 +705,7 @@ fn envelope(
         body,
         traces,
         spans,
+        rows: total,
     })
 }
 

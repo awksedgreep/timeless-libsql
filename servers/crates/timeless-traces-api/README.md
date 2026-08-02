@@ -1,9 +1,12 @@
 # timeless-traces-api release server
 
-This first-class traces-specific server was promoted from the completed
-process-boundary POC. It owns HTTP scheduling and SQLite connections but does
-not implement storage. Every span and command crosses the public
+This first-class traces-specific release server was promoted from the
+completed process-boundary POC. It owns HTTP scheduling and SQLite connections
+but does not implement storage. Every span and command crosses the public
 `timeless_traces` virtual table supplied by `libtimeless_ext`.
+
+The release binary requires Phoenix-managed policy authentication by default;
+cluster, user, session, and token administration remain in Phoenix.
 
 Sessions 2–6 provide the server lifecycle shell, OTLP ingest, the pinned
 Jaeger read surface, the reusable bounded/streaming extension read path, and a
@@ -13,9 +16,13 @@ narrow lossless historical-query surface for TimelessTracesDashboard.
 
 ```sh
 cargo build -p timeless-ext
-cargo run --manifest-path servers/Cargo.toml -p timeless-traces-api -- \
+TIMELESS_AUTH_MODE=disabled cargo run --manifest-path servers/Cargo.toml -p timeless-traces-api -- \
   target/debug/libtimeless_ext.so /tmp/traces.db
 ```
+
+`TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
+release omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
+`TIMELESS_TENANT` through the Phoenix supervisor.
 
 The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 
@@ -27,7 +34,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered, byte-budgeted extension optimize interval |
 
-## Sessions 2–6 endpoints
+## Implemented endpoints
 
 - `GET /live` reports process liveness without touching SQLite.
 - `GET /ready` and `GET /health` verify a live reader and expose the negotiated

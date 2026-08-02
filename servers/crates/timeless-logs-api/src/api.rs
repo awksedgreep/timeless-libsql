@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use axum::body::Body;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{DefaultBodyLimit, Form, Query, State};
 use axum::http::{header, Response, StatusCode};
 use axum::response::IntoResponse;
@@ -9,7 +11,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use timeless_api_common::server_build_identity;
+use timeless_api_common::{server_build_identity, RESULT_ROWS_HEADER};
 
 use crate::storage::{LogEntry, QueryRow, QuerySpec, TimestampUnit};
 use crate::Storage;
@@ -23,8 +25,10 @@ pub fn router(storage: Storage) -> Router {
         .route("/health", get(health))
         .route("/insert/jsonline", post(ingest))
         .route("/select/logsql/query", get(query_get).post(query_post))
+        .route("/select/logsql/field_values", get(field_values))
         .route("/select/logsql/stats", get(stats))
         .route("/api/v1/flush", get(flush))
+        .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(storage)
 }
@@ -94,10 +98,14 @@ async fn ingest(
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct GetQuery {
     level: Option<String>,
     message: Option<String>,
     service: Option<String>,
+    host: Option<String>,
+    path: Option<String>,
+    status: Option<String>,
     start: Option<String>,
     end: Option<String>,
     limit: Option<usize>,
@@ -107,11 +115,47 @@ struct GetQuery {
 
 async fn query_get(
     State(storage): State<Storage>,
-    Query(query): Query<GetQuery>,
-) -> impl IntoResponse {
+    query: Result<Query<GetQuery>, QueryRejection>,
+) -> Response<Body> {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return client_error("unsupported_query_parameters"),
+    };
+    let spec = get_query_spec(query, storage.timestamp_unit());
+    query_response(&storage, spec).await
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FieldValuesQuery {
+    field: String,
+    level: Option<String>,
+    message: Option<String>,
+    service: Option<String>,
+    host: Option<String>,
+    path: Option<String>,
+    status: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn field_values(
+    State(storage): State<Storage>,
+    query: Result<Query<FieldValuesQuery>, QueryRejection>,
+) -> Response<Body> {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return client_error("unsupported_query_parameters"),
+    };
+    if !matches!(query.field.as_str(), "service" | "host" | "path" | "status") {
+        return client_error("unsupported_log_field").into_response();
+    }
+    let limit = query.limit.unwrap_or(1_000);
     let spec = QuerySpec {
         level: query.level,
         service: query.service,
+        metadata_eq: metadata_filters(query.host, query.path, query.status),
         message: query.message,
         ts_min: query
             .start
@@ -121,11 +165,20 @@ async fn query_get(
             .end
             .as_deref()
             .and_then(|value| parse_query_time(value, storage.timestamp_unit())),
-        limit: query.limit.unwrap_or(100),
-        offset: query.offset.unwrap_or(0),
-        descending: query.order.as_deref() != Some("asc"),
+        limit,
+        ..QuerySpec::default()
     };
-    query_response(&storage, spec).await
+    match storage.field_values(spec, query.field, limit).await {
+        Ok(values) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(RESULT_ROWS_HEADER, values.len())
+            .body(Body::from(
+                serde_json::to_vec(&json!({"values": values})).unwrap_or_default(),
+            ))
+            .unwrap(),
+        Err(error) => server_error(error),
+    }
 }
 
 #[derive(Deserialize)]
@@ -137,13 +190,16 @@ async fn query_post(
     State(storage): State<Storage>,
     Form(form): Form<QueryForm>,
 ) -> impl IntoResponse {
-    let (spec, count) = parse_logsql(
+    let (spec, count) = match parse_logsql(
         form.query.as_deref().unwrap_or("*"),
         storage.timestamp_unit(),
-    );
+    ) {
+        Ok(parsed) => parsed,
+        Err(_) => return client_error("unsupported_logsql"),
+    };
     if count {
         match storage.count(spec).await {
-            Ok(total) => ndjson_response(format!("{}\n", json!({"total": total}))),
+            Ok(total) => ndjson_response(format!("{}\n", json!({"total": total})), 1),
             Err(error) => server_error(error),
         }
     } else {
@@ -154,6 +210,7 @@ async fn query_post(
 async fn query_response(storage: &Storage, spec: QuerySpec) -> Response<Body> {
     match storage.query(spec).await {
         Ok(rows) => {
+            let row_count = rows.len();
             let mut body = String::new();
             for row in rows {
                 match response_row(row, storage.timestamp_unit()) {
@@ -164,7 +221,7 @@ async fn query_response(storage: &Storage, spec: QuerySpec) -> Response<Body> {
                     Err(error) => return server_error(error),
                 }
             }
-            ndjson_response(body)
+            ndjson_response(body, row_count)
         }
         Err(error) => server_error(error),
     }
@@ -184,10 +241,11 @@ async fn flush(State(storage): State<Storage>) -> impl IntoResponse {
     }
 }
 
-fn ndjson_response(body: String) -> Response<Body> {
+fn ndjson_response(body: String, rows: usize) -> Response<Body> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(RESULT_ROWS_HEADER, rows)
         .body(Body::from(body))
         .unwrap()
 }
@@ -198,6 +256,49 @@ fn server_error(error: String) -> Response<Body> {
         Json(json!({"error": error})),
     )
         .into_response()
+}
+
+fn client_error(code: &str) -> Response<Body> {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"error": "unsupported_capability", "reason": code})),
+    )
+        .into_response()
+}
+
+async fn unsupported() -> Response<Body> {
+    client_error("unsupported_route")
+}
+
+fn get_query_spec(query: GetQuery, timestamp_unit: TimestampUnit) -> QuerySpec {
+    QuerySpec {
+        level: query.level,
+        service: query.service,
+        metadata_eq: metadata_filters(query.host, query.path, query.status),
+        message: query.message,
+        ts_min: query
+            .start
+            .as_deref()
+            .and_then(|value| parse_query_time(value, timestamp_unit)),
+        ts_max: query
+            .end
+            .as_deref()
+            .and_then(|value| parse_query_time(value, timestamp_unit)),
+        limit: query.limit.unwrap_or(100),
+        offset: query.offset.unwrap_or(0),
+        descending: query.order.as_deref() != Some("asc"),
+    }
+}
+
+fn metadata_filters(
+    host: Option<String>,
+    path: Option<String>,
+    status: Option<String>,
+) -> BTreeMap<String, String> {
+    [("host", host), ("path", path), ("status", status)]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
+        .collect()
 }
 
 fn parse_ndjson(
@@ -330,64 +431,109 @@ fn parse_query_time(value: &str, timestamp_unit: TimestampUnit) -> Option<i64> {
         })
 }
 
-fn parse_logsql(query: &str, timestamp_unit: TimestampUnit) -> (QuerySpec, bool) {
+fn parse_logsql(query: &str, timestamp_unit: TimestampUnit) -> Result<(QuerySpec, bool), String> {
     let mut spec = QuerySpec {
         limit: 100,
         descending: true,
         ..QuerySpec::default()
     };
     let mut count = false;
-    let lower = query.to_ascii_lowercase();
-    if lower.contains("stats count(") {
-        count = true;
+    let mut segments = query.split('|');
+    let base = segments.next().unwrap_or_default().trim();
+    if base.is_empty() {
+        return Err("LogsQL query is empty".into());
     }
-    if let Some(level) = find_field(query, "level:") {
-        spec.level = Some(level);
-    }
-    if let Some(service) = find_field(query, "service:") {
-        spec.service = Some(service);
-    }
-    if let Some(window) = find_field(query, "_time:") {
-        if let Some(duration_ms) = parse_duration_ms(&window) {
-            spec.ts_min = Some(
-                now(timestamp_unit)
-                    .saturating_sub(duration_from_millis(duration_ms, timestamp_unit)),
-            );
+    for term in logsql_terms(base)? {
+        match term {
+            LogsqlTerm::Token(token) if token == "*" => {}
+            LogsqlTerm::Token(token) if token.starts_with("level:") => {
+                let level = required_logsql_value(&token, "level:")?;
+                if !matches!(
+                    level.as_str(),
+                    "debug"
+                        | "info"
+                        | "notice"
+                        | "warning"
+                        | "error"
+                        | "critical"
+                        | "alert"
+                        | "emergency"
+                ) {
+                    return Err(format!("unsupported LogsQL level {level:?}"));
+                }
+                spec.level = Some(level);
+            }
+            LogsqlTerm::Token(token) if token.starts_with("service:") => {
+                spec.service = Some(required_logsql_value(&token, "service:")?);
+            }
+            LogsqlTerm::Token(token) if token.starts_with("_time:") => {
+                let window = required_logsql_value(&token, "_time:")?;
+                let duration_ms = parse_duration_ms(&window)
+                    .ok_or_else(|| format!("unsupported LogsQL time window {window:?}"))?;
+                spec.ts_min = Some(
+                    now(timestamp_unit)
+                        .saturating_sub(duration_from_millis(duration_ms, timestamp_unit)),
+                );
+            }
+            LogsqlTerm::Message(message) if spec.message.is_none() => {
+                spec.message = Some(message);
+            }
+            LogsqlTerm::Message(_) => return Err("multiple LogsQL message terms".into()),
+            LogsqlTerm::Token(token) => {
+                return Err(format!("unsupported LogsQL term {token:?}"));
+            }
         }
     }
-    if let Some(message) = first_quoted(query) {
-        spec.message = Some(message);
+    for segment in segments {
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        match words.as_slice() {
+            ["limit", value] => {
+                spec.limit = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid LogsQL limit {value:?}"))?;
+            }
+            ["stats", "count(*)" | "count()"] if !count => count = true,
+            [] => return Err("empty LogsQL pipeline".into()),
+            _ => return Err(format!("unsupported LogsQL pipeline {segment:?}")),
+        }
     }
-    if let Some(limit) = pipe_limit(query) {
-        spec.limit = limit;
-    }
-    (spec, count)
+    Ok((spec, count))
 }
 
-fn find_field(query: &str, prefix: &str) -> Option<String> {
-    query.split_whitespace().find_map(|token| {
-        token
-            .strip_prefix(prefix)
-            .map(|value| value.trim_matches(['"', '\'', '|', ',']).to_string())
-            .filter(|value| !value.is_empty())
-    })
+enum LogsqlTerm {
+    Token(String),
+    Message(String),
 }
 
-fn first_quoted(query: &str) -> Option<String> {
-    let start = query.find('"')? + 1;
-    let end = query[start..].find('"')? + start;
-    Some(query[start..end].to_string())
-}
-
-fn pipe_limit(query: &str) -> Option<usize> {
-    let tokens: Vec<&str> = query.split_whitespace().collect();
-    tokens.windows(2).find_map(|pair| {
-        if pair[0] == "limit" {
-            pair[1].parse().ok()
+fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, String> {
+    let mut terms = Vec::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(quoted) = rest.strip_prefix('"') {
+            let end = quoted
+                .find('"')
+                .ok_or_else(|| "unterminated LogsQL message term".to_string())?;
+            terms.push(LogsqlTerm::Message(quoted[..end].to_string()));
+            rest = &quoted[end + 1..];
         } else {
-            None
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            terms.push(LogsqlTerm::Token(rest[..end].to_string()));
+            rest = &rest[end..];
         }
-    })
+    }
+    Ok(terms)
+}
+
+fn required_logsql_value(token: &str, prefix: &str) -> Result<String, String> {
+    token
+        .strip_prefix(prefix)
+        .map(|value| value.trim_matches(['"', '\'']).to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("LogsQL {prefix} term requires a value"))
 }
 
 fn parse_duration_ms(value: &str) -> Option<i64> {
@@ -476,7 +622,8 @@ mod tests {
         let (spec, count) = parse_logsql(
             "_time:5m level:error | limit 100",
             TimestampUnit::Microseconds,
-        );
+        )
+        .unwrap();
         assert_eq!(spec.level.as_deref(), Some("error"));
         assert_eq!(spec.limit, 100);
         assert!(spec.ts_min.is_some());
@@ -485,14 +632,29 @@ mod tests {
         let (spec, count) = parse_logsql(
             "_time:1h level:error | stats count(*)",
             TimestampUnit::Microseconds,
-        );
+        )
+        .unwrap();
         assert_eq!(spec.level.as_deref(), Some("error"));
         assert!(count);
 
         let (spec, _) = parse_logsql(
             "_time:15m \"timeout\" | limit 50",
             TimestampUnit::Microseconds,
-        );
+        )
+        .unwrap();
         assert_eq!(spec.message.as_deref(), Some("timeout"));
+
+        for unsupported in [
+            "severity:error",
+            "level:error | sort by (_time)",
+            "level:error or level:critical",
+            "_time:5q",
+            "level:made-up",
+        ] {
+            assert!(
+                parse_logsql(unsupported, TimestampUnit::Microseconds).is_err(),
+                "{unsupported:?} silently broadened"
+            );
+        }
     }
 }

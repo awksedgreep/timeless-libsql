@@ -30,12 +30,14 @@ durability. `/api/v1/flush` is the explicit ordered durability barrier.
 - `GET /health`
 - `POST /insert/jsonline`
 - `GET /select/logsql/query`
-- `POST /select/logsql/query` for the current benchmark's LogsQL shapes
+- `POST /select/logsql/query` for the frozen narrow LogsQL grammar
+- `GET /select/logsql/field_values`
 - `GET /select/logsql/stats`
 - `GET /api/v1/flush`
 
-Auth, backup, cluster administration, and generic metrics/traces abstractions
-are deliberately absent.
+The release binary requires Phoenix-managed policy authentication by default.
+Backup and cluster administration remain in Phoenix; this process deliberately
+contains no generic metrics/traces abstraction.
 
 ## Run
 
@@ -43,11 +45,15 @@ are deliberately absent.
 cargo build -p timeless-ext --release
 cargo build --manifest-path servers/Cargo.toml --release
 
-servers/target/release/timeless-logs-api \
+TIMELESS_AUTH_MODE=disabled servers/target/release/timeless-logs-api \
   target/release/libtimeless_ext.so \
   /tmp/timeless-logs-api.db \
   127.0.0.1:19429
 ```
+
+`TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
+release omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
+`TIMELESS_TENANT` through the Phoenix supervisor.
 
 `TIMELESS_LOGS_READER_CONNECTIONS` selects the positive SQLite reader-pool
 size. The measured default is two: one reader materially increased query tail
@@ -78,7 +84,7 @@ and that reaching exactly 8,192 entries triggers the extension's own four
 level-partitioned raw blocks with zero compressed blocks. No API flush occurs
 between those requests.
 
-## Current POC result
+## POC performance history
 
 The deterministic Session 1 baseline reaches 478.7K completed entries/s with
 no queries. With one and two query workers, it saturates at 162.3K and 85.5K

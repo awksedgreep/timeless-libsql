@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use serde_json::json;
-use timeless_api_common::server_build_identity;
+use timeless_api_common::{server_build_identity, RESULT_ROWS_HEADER};
 
 use crate::query::{self, Params, ReadRequest};
 use crate::{victoria, Storage};
@@ -40,6 +40,7 @@ pub fn router(storage: Storage) -> Router {
             "/prometheus/api/v1/query_range",
             get(prometheus_range).post(prometheus_range),
         )
+        .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(storage)
 }
@@ -151,7 +152,10 @@ async fn read_route(storage: Storage, request: Result<ReadRequest, String>) -> R
     match storage.read(request).await {
         Ok(output) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
+            [
+                (header::CONTENT_TYPE.as_str(), "application/json".to_owned()),
+                (RESULT_ROWS_HEADER, output.rows.to_string()),
+            ],
             Bytes::from(output.body),
         )
             .into_response(),
@@ -167,7 +171,10 @@ async fn prometheus_read_route(storage: Storage, request: Result<ReadRequest, St
     match storage.read(request).await {
         Ok(output) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
+            [
+                (header::CONTENT_TYPE.as_str(), "application/json".to_owned()),
+                (RESULT_ROWS_HEADER, output.rows.to_string()),
+            ],
             Bytes::from(output.body),
         )
             .into_response(),
@@ -287,6 +294,14 @@ fn client_error(error: String) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({"status": "error", "error": error})),
+    )
+        .into_response()
+}
+
+async fn unsupported() -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"error": "unsupported_capability", "reason": "unsupported_route"})),
     )
         .into_response()
 }

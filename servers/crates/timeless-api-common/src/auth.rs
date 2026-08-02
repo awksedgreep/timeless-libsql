@@ -21,6 +21,7 @@ use tokio::sync::Notify;
 const MAX_POLICY_BYTES: u64 = 1_048_576;
 const MAX_TOKEN_BYTES: usize = 32_768;
 const CLOCK_SKEW_SECONDS: i64 = 30;
+pub const RESULT_ROWS_HEADER: &str = "x-timeless-result-rows";
 
 #[derive(Clone)]
 pub struct AuthConfig {
@@ -338,7 +339,19 @@ async fn authorize(State(config): State<AuthConfig>, request: Request, next: Nex
     } else {
         next.run(request).await
     };
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
+    if let Some(rows) = parts
+        .headers
+        .get(RESULT_ROWS_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        if rows > claims.limits.max_query_rows {
+            return AuthError::limit(StatusCode::UNPROCESSABLE_ENTITY, "query_rows_exceeded")
+                .response();
+        }
+    }
+    parts.headers.remove(RESULT_ROWS_HEADER);
     match to_bytes(body, claims.limits.max_response_bytes).await {
         Ok(body) => Response::from_parts(parts, Body::from(body)),
         Err(_) => {
@@ -367,9 +380,9 @@ fn required_scope(signal: &str, method: &Method, path: &str) -> String {
         "stats"
     } else if path.ends_with("/flush") || path.ends_with("/optimize") {
         "maintenance"
-    } else if *method == Method::GET || *method == Method::HEAD {
-        "read"
-    } else if path.contains("query")
+    } else if *method == Method::GET
+        || *method == Method::HEAD
+        || path.contains("query")
         || path.contains("series")
         || path.contains("labels")
         || path.contains("search")
@@ -1025,6 +1038,22 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["reason"], "query_rows_exceeded");
+
+        let actual_rows_app = protect_router(
+            Router::new().route(
+                "/actual-rows",
+                get(|| async { ([(RESULT_ROWS_HEADER, "1001")], "complete") }),
+            ),
+            AuthConfig::enforced("metrics", "tenant-a", &policy_path),
+        );
+        assert_case(
+            &actual_rows_app,
+            "/actual-rows",
+            Some(&query_token),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "query_rows_exceeded",
+        )
+        .await;
 
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());

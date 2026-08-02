@@ -62,7 +62,7 @@ else:
 
 db.execute(
     "CREATE VIRTUAL TABLE logs USING timeless_logs("
-    "index_keys='service', timestamp_unit='us')"
+    "index_keys='service,host', timestamp_unit='us')"
 )
 assert db.execute(
     "SELECT CAST(v AS TEXT) FROM logs_meta WHERE k='timestamp_unit'"
@@ -77,9 +77,9 @@ typed = {
     "service": "api",
 }
 entries = [
-    (timestamp, "notice", "b-message", typed),
-    (timestamp, "critical", "a-message", {"service": "api", "code": 503}),
-    (timestamp + 1, "emergency", "c-message", {"service": "ops", "fatal": True}),
+    (timestamp, "notice", "b-message", {**typed, "host": "web-c"}),
+    (timestamp, "critical", "a-message", {"service": "api", "host": "web-a", "code": 503}),
+    (timestamp + 1, "emergency", "c-message", {"service": "ops", "host": "web-b", "fatal": True}),
 ]
 db.execute("INSERT INTO logs(logs) VALUES (?)", (rich_batch(entries),))
 assert db.execute("SELECT COUNT(*) FROM logs").fetchone()[0] == 3
@@ -111,8 +111,9 @@ assert rows[1][1] == "notice"
 assert rows[2][1] == "emergency"
 assert rows[3][1] == "info"
 assert rows[1][0] == timestamp
-assert json.loads(rows[1][3]) == typed
-assert rows[1][3] == json.dumps(typed, sort_keys=True, separators=(",", ":"))
+typed_with_host = {**typed, "host": "web-c"}
+assert json.loads(rows[1][3]) == typed_with_host
+assert rows[1][3] == json.dumps(typed_with_host, sort_keys=True, separators=(",", ":"))
 
 assert db.execute(
     "SELECT COUNT(*) FROM logs WHERE level='notice'"
@@ -135,6 +136,26 @@ assert {(group, count) for _, group, count in groups} == {
     ("emergency", 1),
     ("info", 1),
 }
+
+# Direct users can discover exact field values through the public extension
+# without exposing shadow term tables or materializing every matching log.
+values = db.execute(
+    "SELECT value FROM timeless_log_values("
+    "'logs','host','{\"service\":\"api\"}',NULL,?,?,10)",
+    (timestamp, timestamp),
+).fetchall()
+assert values == [("web-a",), ("web-c",)]
+assert db.execute(
+    "SELECT value FROM timeless_log_values('logs','host',NULL,NULL,NULL,NULL,2)"
+).fetchall() == [("web-a",), ("web-b",)]
+try:
+    db.execute(
+        "SELECT value FROM timeless_log_values('logs','host',NULL,NULL,NULL,NULL,100001)"
+    ).fetchall()
+except sqlite3.DatabaseError as error:
+    assert "limit must be between 0 and 100000" in str(error)
+else:
+    raise AssertionError("unbounded log field-values limit was accepted")
 
 # At equal timestamps both ASC and DESC retain the product's canonical payload
 # tie-breaker; only timestamp direction reverses.

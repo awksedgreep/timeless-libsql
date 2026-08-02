@@ -23,6 +23,35 @@ use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
 /// The same ladder currently created by `TimelessMetrics.LibsqlEngine`.
 pub const DEFAULT_ROLLUPS: &str = "3600s@2592000s,86400s@31536000s,2592000s@0";
 
+/// The release migration and embedded Elixir engine have always used
+/// `metric_samples`. The POC server used `metrics` before the release boundary
+/// was established, so it remains a supported single-table database shape.
+/// Keeping the name as a closed enum makes every formatted SQL identifier
+/// trusted while preventing the server from opening two independent stores.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum MetricsTable {
+    #[default]
+    Canonical,
+    Poc,
+}
+
+impl MetricsTable {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Canonical => "metric_samples",
+            Self::Poc => "metrics",
+        }
+    }
+
+    fn chunks(self) -> String {
+        format!("{}_chunks", self.name())
+    }
+
+    fn series(self) -> String {
+        format!("{}_series", self.name())
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct StorageStats {
     pub module: String,
@@ -317,8 +346,8 @@ impl Storage {
             .name("timeless-metrics-writer".into())
             .spawn(move || writer_main(writer_db, writer_ext, writer_rx, ready_tx, writer_profile))
             .map_err(|error| format!("spawn SQLite writer: {error}"))?;
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
+        let table = match ready_rx.recv() {
+            Ok(Ok(table)) => table,
             Ok(Err(error)) => {
                 drop(writer_tx);
                 let _ = writer_join.join();
@@ -329,7 +358,7 @@ impl Storage {
                 let _ = writer_join.join();
                 return Err("SQLite writer exited during startup".into());
             }
-        }
+        };
 
         let mut readers = Vec::with_capacity(reader_connections);
         let mut joins = vec![writer_join];
@@ -340,7 +369,7 @@ impl Storage {
             let reader_ext = extension_path.clone();
             let join = thread::Builder::new()
                 .name(format!("timeless-metrics-reader-{number}"))
-                .spawn(move || reader_main(reader_db, reader_ext, reader_rx, ready_tx))
+                .spawn(move || reader_main(reader_db, reader_ext, table, reader_rx, ready_tx))
                 .map_err(|error| format!("spawn SQLite reader {number}: {error}"))?;
             match ready_rx.recv() {
                 Ok(Ok(())) => {
@@ -777,13 +806,13 @@ fn writer_main(
     database_path: PathBuf,
     extension_path: PathBuf,
     mut commands: mpsc::Receiver<WriteCommand>,
-    ready: std_mpsc::Sender<Result<(), String>>,
+    ready: std_mpsc::Sender<Result<MetricsTable, String>>,
     profile: Arc<StdMutex<ApiProfile>>,
 ) -> Result<(), String> {
-    let conn = match open_connection(&database_path, &extension_path, true) {
-        Ok(conn) => {
-            let _ = ready.send(Ok(()));
-            conn
+    let (conn, table) = match open_connection(&database_path, &extension_path, true, None) {
+        Ok(opened) => {
+            let _ = ready.send(Ok(opened.1));
+            opened
         }
         Err(error) => {
             let _ = ready.send(Err(error.clone()));
@@ -800,10 +829,11 @@ fn writer_main(
             } => {
                 record_queue_start(&profile, Some(points), body_bytes);
                 let started = Instant::now();
-                let result = insert_named_batch(&conn, &blob, points).map(|()| IngestOutcome {
-                    points,
-                    import_errors: 0,
-                });
+                let result =
+                    insert_named_batch(&conn, table, &blob, points).map(|()| IngestOutcome {
+                        points,
+                        import_errors: 0,
+                    });
                 let insert_ns = elapsed_ns(started);
                 record_queue_completion(&profile, Some(points), body_bytes, insert_ns, &result);
                 if let Err(error) = result {
@@ -813,7 +843,7 @@ fn writer_main(
             WriteCommand::IngestPrometheus { body, body_bytes } => {
                 record_queue_start(&profile, None, body_bytes);
                 let started = Instant::now();
-                let result = insert_prometheus_body(&conn, body.as_ref());
+                let result = insert_prometheus_body(&conn, table, body.as_ref());
                 let insert_ns = elapsed_ns(started);
                 record_queue_completion(&profile, None, body_bytes, insert_ns, &result);
                 if let Err(error) = result {
@@ -830,7 +860,7 @@ fn writer_main(
                 reply,
             } => {
                 let started = Instant::now();
-                let flush_result = run_command(&conn, "flush", "flush metrics");
+                let flush_result = run_command(&conn, table, "flush", "flush metrics");
                 let flush_ns = elapsed_ns(started);
                 {
                     let mut api = profile_lock(&profile);
@@ -862,7 +892,7 @@ fn writer_main(
             }
             WriteCommand::Compact(reply) => {
                 let started = Instant::now();
-                let result = run_command(&conn, "compact", "compact and roll up metrics");
+                let result = run_command(&conn, table, "compact", "compact and roll up metrics");
                 record_maintenance(&profile, Maintenance::Compact, started.elapsed(), &result);
                 let _ = reply.send(result);
             }
@@ -873,6 +903,7 @@ fn writer_main(
                 let started = Instant::now();
                 let result = run_command(
                     &conn,
+                    table,
                     &format!("prune:{cutoff_seconds}"),
                     "prune raw metrics",
                 );
@@ -880,7 +911,7 @@ fn writer_main(
                 let _ = reply.send(result);
             }
             WriteCommand::Shutdown(reply) => {
-                let result = run_command(&conn, "flush", "graceful metrics flush");
+                let result = run_command(&conn, table, "flush", "graceful metrics flush");
                 let _ = reply.send(result.clone());
                 return result;
             }
@@ -889,6 +920,7 @@ fn writer_main(
     // A dropped API still makes its admitted buffered points durable.
     run_command(
         &conn,
+        table,
         "flush",
         "final metrics flush after writer disconnect",
     )
@@ -897,17 +929,18 @@ fn writer_main(
 fn reader_main(
     database_path: PathBuf,
     extension_path: PathBuf,
+    table: MetricsTable,
     mut commands: mpsc::Receiver<ReadCommand>,
     ready: std_mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    let conn = match open_connection(&database_path, &extension_path, false) {
-        Ok(conn) => conn,
+    let conn = match open_connection(&database_path, &extension_path, false, Some(table)) {
+        Ok((conn, _)) => conn,
         Err(error) => {
             let _ = ready.send(Err(error.clone()));
             return Err(error);
         }
     };
-    let features = match QueryFeatures::discover(&conn) {
+    let features = match QueryFeatures::discover(&conn, table) {
         Ok(features) => {
             let _ = ready.send(Ok(()));
             features
@@ -923,7 +956,7 @@ fn reader_main(
                 let started = Instant::now();
                 let mut retries = 0_u64;
                 let result = retry_read(
-                    || storage_stats(&conn),
+                    || storage_stats(&conn, table),
                     || retries = retries.saturating_add(1),
                 )
                 .map(|stats| (stats, elapsed_ns(started), retries));
@@ -963,7 +996,12 @@ fn reader_main(
     Ok(())
 }
 
-fn open_connection(path: &Path, extension: &Path, initialize: bool) -> Result<Connection, String> {
+fn open_connection(
+    path: &Path,
+    extension: &Path,
+    initialize: bool,
+    expected_table: Option<MetricsTable>,
+) -> Result<(Connection, MetricsTable), String> {
     let conn =
         Connection::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
     unsafe {
@@ -980,10 +1018,20 @@ fn open_connection(path: &Path, extension: &Path, initialize: bool) -> Result<Co
     };
     let capabilities = preflight_extension(&conn, spec)?;
     preflight_database(&conn, spec.signal)?;
+    let discovered = discover_metrics_table(&conn)?;
+    if let (Some(expected), Some(actual)) = (expected_table, discovered) {
+        if expected != actual {
+            return Err(format!(
+                "metrics virtual table changed during startup: writer selected {:?}, reader found {:?}",
+                expected.name(),
+                actual.name()
+            ));
+        }
+    }
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|error| format!("set busy timeout: {error}"))?;
-    if initialize {
-        conn.execute_batch(&format!(
+    let table = if initialize {
+        conn.execute_batch(
             "PRAGMA page_size = 16384;
              PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -992,12 +1040,23 @@ fn open_connection(path: &Path, extension: &Path, initialize: bool) -> Result<Co
              PRAGMA mmap_size = 2147483648;
              PRAGMA wal_autocheckpoint = 10000;
              PRAGMA temp_store = MEMORY;
-             PRAGMA busy_timeout = 5000;
-             CREATE VIRTUAL TABLE IF NOT EXISTS metrics USING timeless_metrics(
-               rollups='{DEFAULT_ROLLUPS}');"
-        ))
+             PRAGMA busy_timeout = 5000;",
+        )
         .map_err(|error| format!("initialize metrics database: {error}"))?;
+        let table = match discovered {
+            Some(table) => table,
+            None => {
+                conn.execute_batch(&format!(
+                    "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(
+                       rollups='{DEFAULT_ROLLUPS}');"
+                ))
+                .map_err(|error| format!("create canonical metrics virtual table: {error}"))?;
+                MetricsTable::Canonical
+            }
+        };
+        validate_metrics_table(&conn, table)?;
         apply_schema_ledger(&conn, spec, &capabilities)?;
+        table
     } else {
         require_current_schema(&conn, spec.signal)?;
         conn.execute_batch(
@@ -1007,19 +1066,75 @@ fn open_connection(path: &Path, extension: &Path, initialize: bool) -> Result<Co
              PRAGMA busy_timeout = 5000;",
         )
         .map_err(|error| format!("configure metrics reader: {error}"))?;
-        // Force xConnect during startup rather than returning a superficially
-        // ready reader whose first production request discovers incompatibility.
-        conn.prepare("SELECT name FROM metrics LIMIT 0")
-            .map_err(|error| format!("connect metrics virtual table: {error}"))?;
-    }
-    Ok(conn)
+        let table = discovered.ok_or_else(|| {
+            "metrics database has no supported virtual table; expected exactly one of metric_samples or metrics"
+                .to_string()
+        })?;
+        validate_metrics_table(&conn, table)?;
+        table
+    };
+    Ok((conn, table))
 }
 
-fn insert_named_batch(conn: &Connection, blob: &[u8], points: usize) -> Result<(), String> {
+fn discover_metrics_table(conn: &Connection) -> Result<Option<MetricsTable>, String> {
+    let canonical: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='metric_samples')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect canonical metrics virtual table: {error}"))?;
+    let poc: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='metrics')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect POC metrics virtual table: {error}"))?;
+    match (canonical, poc) {
+        (false, false) => Ok(None),
+        (true, false) => Ok(Some(MetricsTable::Canonical)),
+        (false, true) => Ok(Some(MetricsTable::Poc)),
+        (true, true) => Err(
+            "ambiguous metrics database contains both metric_samples and metrics virtual tables; refuse to choose a storage owner"
+                .into(),
+        ),
+    }
+}
+
+fn validate_metrics_table(conn: &Connection, table: MetricsTable) -> Result<(), String> {
+    // Force xConnect and the public stats resolver during startup. A plain
+    // table with a recognized name must never be mistaken for extension-owned
+    // storage.
+    conn.prepare(&format!("SELECT name FROM {} LIMIT 0", table.name()))
+        .map_err(|error| format!("connect {} metrics virtual table: {error}", table.name()))?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM timeless_stats(?1)",
+        [table.name()],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(|error| {
+        format!(
+            "validate {} through public timeless_stats: {error}",
+            table.name()
+        )
+    })?;
+    Ok(())
+}
+
+fn insert_named_batch(
+    conn: &Connection,
+    table: MetricsTable,
+    blob: &[u8],
+    points: usize,
+) -> Result<(), String> {
     let expected = i64::try_from(points)
         .map_err(|_| "metrics named batch point count exceeds i64::MAX".to_string())?;
-    conn.execute("INSERT INTO metrics(metrics) VALUES (?1)", params![blob])
-        .map_err(|error| format!("insert metrics named batch: {error}"))?;
+    conn.execute(
+        &format!("INSERT INTO {0}({0}) VALUES (?1)", table.name()),
+        params![blob],
+    )
+    .map_err(|error| format!("insert metrics named batch: {error}"))?;
     let inserted = conn.last_insert_rowid();
     if inserted != expected {
         return Err(format!(
@@ -1029,7 +1144,11 @@ fn insert_named_batch(conn: &Connection, blob: &[u8], points: usize) -> Result<(
     Ok(())
 }
 
-fn insert_prometheus_body(conn: &Connection, body: &[u8]) -> Result<IngestOutcome, String> {
+fn insert_prometheus_body(
+    conn: &Connection,
+    table: MetricsTable,
+    body: &[u8],
+) -> Result<IngestOutcome, String> {
     if body.is_empty() {
         return Ok(IngestOutcome {
             points: 0,
@@ -1047,7 +1166,10 @@ fn insert_prometheus_body(conn: &Connection, body: &[u8]) -> Result<IngestOutcom
     }
 
     let execution = conn
-        .execute("INSERT INTO metrics(metrics) VALUES (?1)", params![body])
+        .execute(
+            &format!("INSERT INTO {0}({0}) VALUES (?1)", table.name()),
+            params![body],
+        )
         .map_err(|error| format!("insert Prometheus exposition: {error}"));
 
     match execution {
@@ -1078,14 +1200,22 @@ fn insert_prometheus_body(conn: &Connection, body: &[u8]) -> Result<IngestOutcom
     }
 }
 
-fn run_command(conn: &Connection, command: &str, context: &str) -> Result<(), String> {
-    conn.execute("INSERT INTO metrics(metrics) VALUES (?1)", [command])
-        .map(|_| ())
-        .map_err(|error| format!("{context}: {error}"))
+fn run_command(
+    conn: &Connection,
+    table: MetricsTable,
+    command: &str,
+    context: &str,
+) -> Result<(), String> {
+    conn.execute(
+        &format!("INSERT INTO {0}({0}) VALUES (?1)", table.name()),
+        [command],
+    )
+    .map(|_| ())
+    .map_err(|error| format!("{context}: {error}"))
 }
 
-fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
-    let values = stat_values(conn)?;
+fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats, String> {
+    let values = stat_values(conn, table)?;
     let integer = |key: &str| match values.get(key) {
         Some(SqlValue::Integer(value)) => *value,
         Some(SqlValue::Real(value)) => *value as i64,
@@ -1102,16 +1232,23 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
     };
     let (raw_tier_chunks, raw_points, rollup_entries): (i64, i64, i64) = conn
         .query_row(
-            "SELECT COALESCE(SUM(resolution = 0), 0),
+            &format!(
+                "SELECT COALESCE(SUM(resolution = 0), 0),
                     COALESCE(SUM(CASE WHEN resolution = 0 THEN point_count ELSE 0 END), 0),
                     COALESCE(SUM(resolution > 0), 0)
-               FROM metrics_chunks",
+               FROM {}",
+                table.chunks()
+            ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| format!("read metrics chunk units: {error}"))?;
     let series_index_entries: i64 = conn
-        .query_row("SELECT COUNT(*) FROM metrics_series", [], |row| row.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {}", table.series()),
+            [],
+            |row| row.get(0),
+        )
         .map_err(|error| format!("read metrics series index entries: {error}"))?;
     let (page_count, page_size, freelist_pages): (i64, i64, i64) = conn
         .query_row(
@@ -1124,13 +1261,16 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         .map_err(|error| format!("read SQLite page accounting: {error}"))?;
     let sqlite_index_bytes: i64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(pgsize), 0)
+            &format!(
+                "SELECT COALESCE(SUM(pgsize), 0)
                FROM dbstat
               WHERE name IN (
-                'metrics_chunks_series_ts',
-                'sqlite_autoindex_metrics_series_1',
-                'sqlite_autoindex_metrics_meta_1'
+                '{0}_chunks_series_ts',
+                'sqlite_autoindex_{0}_series_1',
+                'sqlite_autoindex_{0}_meta_1'
               )",
+                table.name()
+            ),
             [],
             |row| row.get(0),
         )
@@ -1167,12 +1307,15 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
     })
 }
 
-fn stat_values(conn: &Connection) -> Result<HashMap<String, SqlValue>, String> {
+fn stat_values(
+    conn: &Connection,
+    table: MetricsTable,
+) -> Result<HashMap<String, SqlValue>, String> {
     let mut stmt = conn
-        .prepare("SELECT key, value FROM timeless_stats('metrics')")
+        .prepare("SELECT key, value FROM timeless_stats(?1)")
         .map_err(|error| format!("prepare timeless_stats: {error}"))?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([table.name()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, SqlValue>(1)?))
         })
         .map_err(|error| format!("read timeless_stats: {error}"))?;

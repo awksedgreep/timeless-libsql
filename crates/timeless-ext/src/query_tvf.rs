@@ -94,6 +94,13 @@
 //! counts without payload reads. All other blocks decode one at a time, so
 //! exact counts never materialize a database-sized rowset.
 //!
+//! Bounded field discovery uses the identical exact predicate and returns the
+//! lexicographically first distinct values while decoding at most one block
+//! and retaining at most `limit + 1` strings:
+//!
+//!   SELECT value FROM timeless_log_values(
+//!     'logs', 'host', '{"level":"error"}', NULL, :start, :stop, 1000);
+//!
 //! F9 — both kernel TVFs take an optional trailing fill argument:
 //! 'none' (default, sparse) or 'null' (dense: every grid point emitted
 //! per matched series, value NULL where the window/lookback is empty).
@@ -309,6 +316,8 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     db.create_module(c"timeless_log_buckets", &LOG_BUCKETS, None::<()>)?;
     const LOG_COUNT: Module<LogCountTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_log_count", &LOG_COUNT, None::<()>)?;
+    const LOG_VALUES: Module<LogValuesTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_log_values", &LOG_VALUES, None::<()>)?;
     const TRACE_DISCOVERY: Module<TraceDiscoveryTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_trace_services", &TRACE_DISCOVERY, None::<()>)?;
     db.create_module(c"timeless_trace_operations", &TRACE_DISCOVERY, None::<()>)?;
@@ -3060,6 +3069,182 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
 
     fn rowid(&self) -> Result<i64> {
         Ok(0)
+    }
+}
+
+/// timeless_log_values('logs', key, filter_json, message_contains,
+///                     start, stop, limit)
+/// → bounded distinct TEXT rows in lexical order. `tbl` and `key` are
+/// required. The remaining arguments share timeless_log_count semantics;
+/// limit defaults to 1,000 and is capped at 100,000.
+const LOG_VALUES_ARGS: &[&str] = &[
+    "tbl",
+    "key",
+    "filter",
+    "message_contains",
+    "start",
+    "stop",
+    "max_values",
+];
+const LOG_VALUES_REQUIRED: c_int = 0b0000011;
+const LOG_VALUES_FIRST_ARG: c_int = 1;
+
+#[repr(C)]
+pub(crate) struct LogValuesTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+unsafe impl<'vtab> VTab<'vtab> for LogValuesTab {
+    type Aux = ();
+    type Cursor = LogValuesCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(value TEXT, tbl HIDDEN, key HIDDEN, filter HIDDEN, \
+                                  message_contains HIDDEN, start HIDDEN, stop HIDDEN, \
+                                  max_values HIDDEN)",
+            ),
+            LogValuesTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, LOG_VALUES_FIRST_ARG, LOG_VALUES_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<LogValuesCursor<'vtab>> {
+        Ok(LogValuesCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            values: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LogValuesCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    values: Vec<String>,
+    pos: usize,
+    phantom: PhantomData<&'vtab LogValuesTab>,
+}
+
+unsafe impl VTabCursor for LogValuesCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_log_values";
+        let slots = named_slots(M, LOG_VALUES_ARGS, LOG_VALUES_REQUIRED, idx_num)?;
+        let required_text = |slot: Option<usize>, name: &str| -> Result<String> {
+            let value: Option<String> = args.get(slot.expect("required slot validated"))?;
+            value
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| module_err(format!("{M}: {name} must not be NULL or empty")))
+        };
+        let table_spec = required_text(slots[0], "tbl")?;
+        let key = required_text(slots[1], "key")?;
+        let (database, table) = split_spec(&table_spec);
+        let filter_json: Option<String> = match slots[2] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
+        let message_contains: Option<String> = match slots[3] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
+        let ts_min = match slots[4] {
+            Some(slot) => args.get::<Option<i64>>(slot)?.unwrap_or(i64::MIN),
+            None => i64::MIN,
+        };
+        let ts_max = match slots[5] {
+            Some(slot) => args.get::<Option<i64>>(slot)?.unwrap_or(i64::MAX),
+            None => i64::MAX,
+        };
+        let limit = match slots[6] {
+            Some(slot) => args.get::<Option<i64>>(slot)?.unwrap_or(1_000),
+            None => 1_000,
+        };
+        if !(0..=100_000).contains(&limit) {
+            return Err(module_err(format!(
+                "{M}: limit must be between 0 and 100000"
+            )));
+        }
+
+        let mut level = None;
+        let mut severity = None;
+        let mut metadata_eq = Vec::new();
+        if let Some(text) = filter_json.filter(|text| !text.is_empty()) {
+            for (filter_key, value) in parse_labels_json(&text)
+                .map_err(|error| module_err(format!("{M}: filter: {error}")))?
+            {
+                if filter_key == "level" {
+                    let canonical =
+                        timeless_core::canonical_severity(&value).map_err(module_err)?;
+                    level = Some(timeless_core::level_from_name(canonical).map_err(module_err)?);
+                    severity = Some(canonical.to_owned());
+                } else {
+                    metadata_eq.push((filter_key, value));
+                }
+            }
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
+        let read = read_permit(&shared, self.db, &table)?;
+        self.values = shared
+            .engine
+            .field_values_after_snapshot(
+                &LogQuery {
+                    ts_min,
+                    ts_max,
+                    level,
+                    severity,
+                    metadata_eq,
+                    message_contains,
+                    message_like_prune: None,
+                },
+                &key,
+                limit as usize,
+                move || drop(read),
+            )
+            .map_err(module_err)?;
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.values.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(&self.values[self.pos]),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
     }
 }
 

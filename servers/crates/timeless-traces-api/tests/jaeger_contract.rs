@@ -119,6 +119,20 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     assert_eq!(bad.0, StatusCode::BAD_REQUEST);
     assert!(bad.1["error"].as_str().unwrap().contains("duration"));
 
+    let unsupported = get_json(
+        &app,
+        "/select/jaeger/api/traces?tags=%7B%22db%22%3A%22x%22%7D",
+    )
+    .await;
+    assert_eq!(unsupported.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        unsupported.1,
+        serde_json::json!({
+            "error": "unsupported_capability",
+            "reason": "unsupported_query_parameters"
+        })
+    );
+
     let stats = storage.stats().await.unwrap();
     assert_eq!(stats.api_services_requests, 1);
     assert_eq!(stats.api_operations_requests, 1);

@@ -27,8 +27,9 @@ retention commands.
 The Session 4 PromQL slice supports an instant vector selector and
 `avg_over_time(selector[window])`. It deliberately rejects every other
 function, operator, aggregation, subquery, offset, or modifier with a
-Prometheus `bad_data` response. There is no hidden Elixir fallback and still
-no auth, cluster, or product route. The
+Prometheus `bad_data` response. There is no hidden Elixir fallback. The
+release binary requires Phoenix-managed policy authentication by default;
+cluster and product control routes remain in Phoenix. The
 Prometheus route keeps the request as a reference-counted body and passes the
 complete exposition through the extension's public ingest surface; Rust does
 not parse or copy it at the API boundary. The VictoriaMetrics route parses the
@@ -88,11 +89,15 @@ PromQL requests plus current/cancelled API reads.
 cargo build -p timeless-ext --release
 cargo build --manifest-path servers/Cargo.toml --release
 
-servers/target/release/timeless-metrics-api \
+TIMELESS_AUTH_MODE=disabled servers/target/release/timeless-metrics-api \
   target/release/libtimeless_ext.so \
   /tmp/timeless-metrics-api.db \
   127.0.0.1:19439
 ```
+
+`TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
+release omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
+`TIMELESS_TENANT` through the Phoenix supervisor.
 
 The measured default is two readers. The Session 6 1/2/4/8 sweep found that
 four readers improved saturated query p95 by only 1.06ms while adding 10.7MiB
@@ -102,12 +107,11 @@ available for query-heavy deployments.
 
 ## Elixir control-plane integration
 
-Session 5 keeps this binary's data/query surface unchanged and proves the
-process boundary from `timeless_ui`. `TimelessUI.MetricsDataPlane.Process`
+Release Session 5 freezes this binary's data/query surface and proves the
+default process boundary from `timeless_ui`. `TimelessUI.MetricsDataPlane.Process`
 supervises the executable through an Erlang port, and its thin Req client owns
-no telemetry connection. The opt-in Canvas source routes only historical graph
-ranges through `GET /api/v1/export`; every product-oriented Canvas callback
-stays in Elixir.
+no telemetry connection. Canvas routes historical graph ranges through
+`GET /api/v1/export`; every product-oriented Canvas callback stays in Elixir.
 
 The integration gate rejects a second owner, flushes data, kills this process
 with `SIGKILL`, waits for OTP to restart it, and checks the exact same result

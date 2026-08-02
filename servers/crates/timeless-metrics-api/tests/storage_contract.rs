@@ -34,12 +34,121 @@ fn future_metrics_schema_fails_before_vtab_initialization() {
     let conn = Connection::open(database).unwrap();
     let created: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE name='metrics'",
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('metric_samples','metrics')",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(created, 0, "downgrade refusal must precede vtab creation");
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn migrated_canonical_metrics_table_is_the_only_store_and_is_queried_in_place() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("migrated-metrics.db");
+    let conn = open_with_extension(&database, &extension);
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(
+           rollups='3600s@2592000s,86400s@31536000s,2592000s@0');",
+    )
+    .unwrap();
+    let batch = named_batch(2, 1_700_000_000);
+    conn.execute(
+        "INSERT INTO metric_samples(metric_samples) VALUES (?1)",
+        [&batch],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO metric_samples(metric_samples) VALUES ('flush')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let storage = Storage::start(database.clone(), extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.total_points, 2);
+    assert_eq!(stats.series, 1);
+    let app = router(storage.clone());
+    let latest = get_json(&app, "/api/v1/query?metric=session_one_metric").await;
+    assert_eq!(latest.0, StatusCode::OK);
+    assert_eq!(latest.1["timestamp"], 1_700_000_001_i64);
+    assert_eq!(latest.1["value"], 1.0);
+    drop(app);
+    storage.shutdown().await.unwrap();
+
+    let conn = Connection::open(database).unwrap();
+    let names: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_schema
+              WHERE type='table' AND name IN ('metric_samples','metrics')
+              ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(names, ["metric_samples"]);
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn single_poc_metrics_table_remains_compatible_without_copying_storage() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("poc-metrics.db");
+    let conn = open_with_extension(&database, &extension);
+    conn.execute_batch("CREATE VIRTUAL TABLE metrics USING timeless_metrics;")
+        .unwrap();
+    drop(conn);
+
+    let storage = Storage::start(database.clone(), extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    storage
+        .submit_named_batch(named_batch(1, 1_700_000_000), 1)
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    assert_eq!(storage.stats().await.unwrap().total_points, 1);
+    storage.shutdown().await.unwrap();
+
+    let conn = Connection::open(database).unwrap();
+    let names: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_schema
+              WHERE type='table' AND name IN ('metric_samples','metrics')
+              ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(names, ["metrics"]);
+}
+
+#[test]
+#[ignore = "requires a built timeless_ext shared library"]
+fn ambiguous_metrics_virtual_tables_fail_closed() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("ambiguous-metrics.db");
+    let conn = open_with_extension(&database, &extension);
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;
+         CREATE VIRTUAL TABLE metrics USING timeless_metrics;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let error = match Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION) {
+        Ok(_) => panic!("ambiguous metrics database unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(error.contains("both metric_samples and metrics"), "{error}");
+    assert!(error.contains("refuse to choose"), "{error}");
 }
 
 /// This is intentionally an extension contract test, not an API-owned storage
@@ -825,19 +934,24 @@ fn assert_no_content(response: (StatusCode, Vec<u8>)) {
 }
 
 fn persisted_rows(database: &Path, extension: &Path) -> Vec<(String, i64, f64)> {
+    let conn = open_with_extension(database, extension);
+    let mut stmt = conn
+        .prepare("SELECT name, ts, value FROM metric_samples ORDER BY name, ts, value")
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn open_with_extension(database: &Path, extension: &Path) -> rusqlite::Connection {
     let conn = rusqlite::Connection::open(database).unwrap();
     unsafe {
         conn.load_extension_enable().unwrap();
         conn.load_extension(extension, None::<&str>).unwrap();
     }
     conn.load_extension_disable().unwrap();
-    let mut stmt = conn
-        .prepare("SELECT name, ts, value FROM metrics ORDER BY name, ts, value")
-        .unwrap();
-    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    conn
 }
 
 fn extension_path() -> PathBuf {

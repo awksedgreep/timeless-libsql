@@ -1424,6 +1424,45 @@ fn bounded_query_stops_on_block_bounds_and_reports_bounded_work() {
     assert_eq!(profile.query_returned_entries, 2);
 }
 
+#[test]
+fn field_values_are_exact_deterministic_and_bounded_across_buffer_and_blocks() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&["host"])).unwrap();
+    for (ts, level, host) in [(10, 3, "web-c"), (20, 2, "web-warning"), (30, 3, "web-a")] {
+        engine
+            .push(entry(ts, level, host, &[("host", host), ("env", "prod")]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    engine
+        .push(entry(40, 3, "web-b", &[("host", "web-b"), ("env", "prod")]))
+        .unwrap();
+    engine
+        .push(entry(
+            50,
+            3,
+            "dev-only",
+            &[("host", "web-0"), ("env", "dev")],
+        ))
+        .unwrap();
+
+    let query = LogQuery {
+        level: Some(3),
+        severity: Some("error".into()),
+        metadata_eq: vec![("env".into(), "prod".into())],
+        ..full_range_query()
+    };
+    assert_eq!(
+        engine.field_values(&query, "host", 2).unwrap(),
+        ["web-a", "web-b"]
+    );
+    assert_eq!(
+        engine.field_values(&query, "host", 10).unwrap(),
+        ["web-a", "web-b", "web-c"]
+    );
+    assert!(engine.field_values(&query, "host", 0).unwrap().is_empty());
+    assert!(engine.field_values(&query, "", 1).is_err());
+}
+
 // ---------------------------------------------------------------------------
 // Prune, recovery, validation odds and ends
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::promql;
+use crate::storage::MetricsTable;
 
 const RESERVED_PARAMS: &[&str] = &[
     "metric",
@@ -75,6 +76,18 @@ impl Params {
             .filter(|(key, _)| keys.contains(&key.as_str()))
             .map(|(_, value)| value.clone())
             .collect()
+    }
+
+    fn ensure_only(&self, allowed: &[&str]) -> Result<(), String> {
+        let unknown = self
+            .pairs
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .find(|key| !allowed.contains(key));
+        match unknown {
+            Some(key) => Err(format!("unsupported query parameter: {key}")),
+            None => Ok(()),
+        }
     }
 
     fn label_matchers(&self, extended: bool) -> Result<Vec<Matcher>, String> {
@@ -196,16 +209,17 @@ pub(crate) enum Aggregate {
 }
 
 impl Aggregate {
-    fn parse(value: Option<&str>) -> Self {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
         match value {
-            Some("min") => Self::Min,
-            Some("max") => Self::Max,
-            Some("sum") => Self::Sum,
-            Some("count") => Self::Count,
-            Some("last") => Self::Last,
-            Some("first") => Self::First,
-            Some("rate") => Self::Rate,
-            _ => Self::Avg,
+            None | Some("avg") => Ok(Self::Avg),
+            Some("min") => Ok(Self::Min),
+            Some("max") => Ok(Self::Max),
+            Some("sum") => Ok(Self::Sum),
+            Some("count") => Ok(Self::Count),
+            Some("last") => Ok(Self::Last),
+            Some("first") => Ok(Self::First),
+            Some("rate") => Ok(Self::Rate),
+            Some(value) => Err(format!("unsupported native aggregate: {value}")),
         }
     }
 
@@ -371,11 +385,12 @@ pub(crate) fn range_request(params: &Params) -> Result<ReadRequest, String> {
         start,
         stop,
         step,
-        aggregate: Aggregate::parse(params.get("aggregate")),
+        aggregate: Aggregate::parse(params.get("aggregate"))?,
     })
 }
 
 pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest, String> {
+    params.ensure_only(&["query", "time"])?;
     let query = params
         .get("query")
         .ok_or_else(|| "missing required parameter: query".to_string())?;
@@ -390,6 +405,7 @@ pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest,
 }
 
 pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, String> {
+    params.ensure_only(&["query", "start", "end", "step"])?;
     let query = params
         .get("query")
         .ok_or_else(|| "missing required parameter: query".to_string())?;
@@ -455,12 +471,14 @@ fn lower_promql(input: &str) -> Result<PromPlan, String> {
 }
 
 pub(crate) fn labels_request(params: &Params) -> Result<ReadRequest, String> {
+    params.ensure_only(&["match[]", "match"])?;
     Ok(ReadRequest::Labels {
         selectors: parse_selectors(params)?,
     })
 }
 
 pub(crate) fn label_values_request(params: &Params, name: String) -> Result<ReadRequest, String> {
+    params.ensure_only(&["metric", "match[]", "match"])?;
     Ok(ReadRequest::LabelValues {
         name,
         metric: params.get("metric").map(ToOwned::to_owned),
@@ -472,6 +490,7 @@ pub(crate) fn series_request(
     params: &Params,
     prometheus_alias: bool,
 ) -> Result<ReadRequest, String> {
+    params.ensure_only(&["metric", "match[]", "match"])?;
     let selectors = parse_selectors(params)?;
     let metric = params.get("metric").map(ToOwned::to_owned);
     if prometheus_alias && selectors.is_empty() {
@@ -791,13 +810,14 @@ fn now_seconds() -> i64 {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct QueryFeatures {
+    table: MetricsTable,
     latest_frame: bool,
     raw_frame: bool,
     window_batches: bool,
 }
 
 impl QueryFeatures {
-    pub(crate) fn discover(conn: &Connection) -> Result<Self, String> {
+    pub(crate) fn discover(conn: &Connection, table: MetricsTable) -> Result<Self, String> {
         let mut stmt = conn
             .prepare(
                 "SELECT name FROM pragma_module_list
@@ -811,6 +831,7 @@ impl QueryFeatures {
             .collect::<Result<HashSet<_>, _>>()
             .map_err(|error| format!("collect query modules: {error}"))?;
         Ok(Self {
+            table,
             latest_frame: modules.contains("timeless_latest_frame"),
             raw_frame: modules.contains("timeless_raw_frame"),
             window_batches: modules.contains("timeless_window_batches"),
@@ -823,6 +844,7 @@ pub(crate) struct ReadOutput {
     pub frame_bytes: usize,
     pub series: u64,
     pub points: u64,
+    pub rows: u64,
 }
 
 pub(crate) fn execute(
@@ -863,14 +885,14 @@ pub(crate) fn execute(
                 aggregate,
             },
         ),
-        ReadRequest::Labels { selectors } => execute_labels(conn, &selectors),
+        ReadRequest::Labels { selectors } => execute_labels(conn, features.table, &selectors),
         ReadRequest::LabelValues {
             name,
             metric,
             selectors,
-        } => execute_label_values(conn, &name, metric.as_deref(), &selectors),
+        } => execute_label_values(conn, features.table, &name, metric.as_deref(), &selectors),
         ReadRequest::Series { metric, selectors } => {
-            execute_series(conn, metric.as_deref(), &selectors)
+            execute_series(conn, features.table, metric.as_deref(), &selectors)
         }
         ReadRequest::Prometheus {
             plan,
@@ -900,15 +922,17 @@ struct SeriesMeta {
 
 fn catalog(
     conn: &Connection,
+    table: MetricsTable,
     metric: &str,
     filter: &FilterPlan,
 ) -> Result<Vec<SeriesMeta>, String> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT series_id, labels
-               FROM timeless_series('metrics', ?1, ?2)
+               FROM timeless_series('{}', ?1, ?2)
               ORDER BY labels, series_id",
-        )
+            table.name()
+        ))
         .map_err(|error| format!("prepare series catalog: {error}"))?;
     let rows = stmt
         .query_map(params![metric, filter.pushdown_json], |row| {
@@ -931,13 +955,14 @@ fn catalog(
     Ok(output)
 }
 
-fn catalog_all(conn: &Connection) -> Result<Vec<SeriesMeta>, String> {
+fn catalog_all(conn: &Connection, table: MetricsTable) -> Result<Vec<SeriesMeta>, String> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT series_id, name, labels
-               FROM timeless_series('metrics')
+               FROM timeless_series('{}')
               ORDER BY name, labels, series_id",
-        )
+            table.name()
+        ))
         .map_err(|error| format!("prepare complete series catalog: {error}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -962,9 +987,12 @@ fn catalog_all(conn: &Connection) -> Result<Vec<SeriesMeta>, String> {
     Ok(output)
 }
 
-fn all_metrics(conn: &Connection) -> Result<Vec<String>, String> {
+fn all_metrics(conn: &Connection, table: MetricsTable) -> Result<Vec<String>, String> {
     let mut stmt = conn
-        .prepare("SELECT DISTINCT name FROM timeless_series('metrics') ORDER BY name")
+        .prepare(&format!(
+            "SELECT DISTINCT name FROM timeless_series('{}') ORDER BY name",
+            table.name()
+        ))
         .map_err(|error| format!("prepare metric discovery: {error}"))?;
     let metrics = stmt
         .query_map([], |row| row.get(0))
@@ -985,12 +1013,15 @@ fn execute_latest(
     filter: &FilterPlan,
     stop: i64,
 ) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, metric, filter)?;
+    let catalog = catalog(conn, features.table, metric, filter)?;
     let by_id: HashMap<_, _> = catalog.iter().map(|meta| (meta.id, meta)).collect();
     let (mut rows, frame_bytes) = if features.latest_frame {
         let frame: Option<Vec<u8>> = conn
             .query_row(
-                "SELECT frame FROM timeless_latest_frame('metrics', ?1, ?2, 0, ?3)",
+                &format!(
+                    "SELECT frame FROM timeless_latest_frame('{}', ?1, ?2, 0, ?3)",
+                    features.table.name()
+                ),
                 params![metric, filter.pushdown_json, stop],
                 |row| row.get(0),
             )
@@ -1004,7 +1035,7 @@ fn execute_latest(
             None => (Vec::new(), 0),
         }
     } else {
-        (latest_rows(conn, metric, filter, stop)?, 0)
+        (latest_rows(conn, features.table, metric, filter, stop)?, 0)
     };
     rows.retain(|row| by_id.contains_key(&row.id));
     rows.sort_by(|left, right| {
@@ -1029,6 +1060,7 @@ fn execute_latest(
         frame_bytes,
         series: rows.len() as u64,
         points: rows.len() as u64,
+        rows: rows.len() as u64,
     })
 }
 
@@ -1041,15 +1073,17 @@ struct LatestRow {
 
 fn latest_rows(
     conn: &Connection,
+    table: MetricsTable,
     metric: &str,
     filter: &FilterPlan,
     stop: i64,
 ) -> Result<Vec<LatestRow>, String> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT series_id, ts, value
-               FROM timeless_latest('metrics', ?1, ?2, 0, ?3)",
-        )
+               FROM timeless_latest('{}', ?1, ?2, 0, ?3)",
+            table.name()
+        ))
         .map_err(|error| format!("prepare latest rows: {error}"))?;
     let rows = stmt
         .query_map(params![metric, filter.pushdown_json, stop], |row| {
@@ -1088,7 +1122,7 @@ fn execute_export(
     start: i64,
     stop: i64,
 ) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, metric, filter)?;
+    let catalog = catalog(conn, features.table, metric, filter)?;
     let raw = raw_query(conn, features, metric, filter, start, stop)?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -1130,6 +1164,7 @@ fn execute_export(
         frame_bytes: raw.frame_bytes,
         series: emitted,
         points,
+        rows: points,
     })
 }
 
@@ -1212,7 +1247,10 @@ fn raw_query(
     if features.raw_frame {
         let frame: Option<Vec<u8>> = conn
             .query_row(
-                "SELECT frame FROM timeless_raw_frame('metrics', ?1, ?2, ?3, ?4)",
+                &format!(
+                    "SELECT frame FROM timeless_raw_frame('{}', ?1, ?2, ?3, ?4)",
+                    features.table.name()
+                ),
                 params![metric, filter.pushdown_json, start, stop],
                 |row| row.get(0),
             )
@@ -1236,11 +1274,12 @@ fn raw_query(
     }
 
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT series_id, ts, value
-               FROM timeless_raw('metrics', ?1, ?2, ?3, ?4)
+               FROM timeless_raw('{}', ?1, ?2, ?3, ?4)
               ORDER BY series_id, ts",
-        )
+            features.table.name()
+        ))
         .map_err(|error| format!("prepare raw row fallback: {error}"))?;
     let mut rows = stmt
         .query(params![metric, filter.pushdown_json, start, stop])
@@ -1304,22 +1343,27 @@ fn execute_range(
         && span % query.step == 0
         && span / query.step <= 1_000_000;
     if native {
-        return execute_native_range(conn, query);
+        return execute_native_range(conn, features.table, query);
     }
     execute_raw_range(conn, features, query)
 }
 
-fn execute_native_range(conn: &Connection, query: RangeQuery<'_>) -> Result<ReadOutput, String> {
+fn execute_native_range(
+    conn: &Connection,
+    table: MetricsTable,
+    query: RangeQuery<'_>,
+) -> Result<ReadOutput, String> {
     let window_start = query
         .start
         .checked_add(query.step - 1)
         .ok_or_else(|| "range window start overflow".to_string())?;
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT series_id, labels, buckets
-               FROM timeless_window_batches('metrics', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+               FROM timeless_window_batches('{}', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
               ORDER BY labels, series_id",
-        )
+            table.name()
+        ))
         .map_err(|error| format!("prepare window batches: {error}"))?;
     let rows = stmt
         .query_map(
@@ -1391,6 +1435,7 @@ fn execute_native_range(conn: &Connection, query: RangeQuery<'_>) -> Result<Read
         frame_bytes,
         series: emitted as u64,
         points,
+        rows: points,
     })
 }
 
@@ -1399,7 +1444,7 @@ fn execute_raw_range(
     features: QueryFeatures,
     query: RangeQuery<'_>,
 ) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, query.metric, query.filter)?;
+    let catalog = catalog(conn, features.table, query.metric, query.filter)?;
     let raw = raw_query(
         conn,
         features,
@@ -1453,6 +1498,7 @@ fn execute_raw_range(
         frame_bytes: raw.frame_bytes,
         series: emitted as u64,
         points: point_count,
+        rows: point_count,
     })
 }
 
@@ -1487,7 +1533,16 @@ fn execute_prometheus(
             filter,
             window,
         } if features.window_batches => execute_prometheus_window(
-            conn, metric, filter, start, stop, step, *window, instant, cancelled,
+            conn,
+            features.table,
+            metric,
+            filter,
+            start,
+            stop,
+            step,
+            *window,
+            instant,
+            cancelled,
         ),
         PromPlan::AvgOverTime {
             metric,
@@ -1512,7 +1567,7 @@ fn execute_prometheus_selector(
     instant: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, metric, filter)?;
+    let catalog = catalog(conn, features.table, metric, filter)?;
     let raw = raw_query(
         conn,
         features,
@@ -1580,12 +1635,14 @@ fn execute_prometheus_selector(
         frame_bytes: raw.frame_bytes,
         series: emitted as u64,
         points,
+        rows: points,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn execute_prometheus_window(
     conn: &Connection,
+    table: MetricsTable,
     metric: &str,
     filter: &FilterPlan,
     start: i64,
@@ -1596,11 +1653,12 @@ fn execute_prometheus_window(
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT labels, buckets
-               FROM timeless_window_batches('metrics', ?1, ?2, ?3, ?4, ?5, ?6, 'avg')
+               FROM timeless_window_batches('{}', ?1, ?2, ?3, ?4, ?5, ?6, 'avg')
               ORDER BY labels, series_id",
-        )
+            table.name()
+        ))
         .map_err(|error| format!("prepare PromQL window batches: {error}"))?;
     let rows = stmt
         .query_map(
@@ -1652,6 +1710,7 @@ fn execute_prometheus_window(
         frame_bytes,
         series: emitted as u64,
         points,
+        rows: points,
     })
 }
 
@@ -1668,7 +1727,7 @@ fn execute_prometheus_avg_raw(
     instant: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, metric, filter)?;
+    let catalog = catalog(conn, features.table, metric, filter)?;
     let raw = raw_query(
         conn,
         features,
@@ -1740,6 +1799,7 @@ fn execute_prometheus_avg_raw(
         frame_bytes: raw.frame_bytes,
         series: emitted as u64,
         points,
+        rows: points,
     })
 }
 
@@ -1908,8 +1968,12 @@ fn aggregate_rate(points: &[(i64, f64)], start: i64, step: i64) -> Vec<(i64, Buc
     output
 }
 
-fn execute_labels(conn: &Connection, selectors: &[Selector]) -> Result<ReadOutput, String> {
-    let series = selected_series(conn, selectors)?;
+fn execute_labels(
+    conn: &Connection,
+    table: MetricsTable,
+    selectors: &[Selector],
+) -> Result<ReadOutput, String> {
+    let series = selected_series(conn, table, selectors)?;
     let mut names = BTreeSet::new();
     names.insert("__name__".to_string());
     for meta in &series {
@@ -1920,12 +1984,13 @@ fn execute_labels(conn: &Connection, selectors: &[Selector]) -> Result<ReadOutpu
 
 fn execute_label_values(
     conn: &Connection,
+    table: MetricsTable,
     name: &str,
     metric: Option<&str>,
     selectors: &[Selector],
 ) -> Result<ReadOutput, String> {
     let values = if !selectors.is_empty() {
-        let series = selected_series(conn, selectors)?;
+        let series = selected_series(conn, table, selectors)?;
         let values = series
             .iter()
             .filter_map(|meta| {
@@ -1938,13 +2003,13 @@ fn execute_label_values(
             .collect::<BTreeSet<_>>();
         return success_array(values, 0, series.len() as u64);
     } else if name == "__name__" && metric.is_none() {
-        all_metrics(conn)?.into_iter().collect()
+        all_metrics(conn, table)?.into_iter().collect()
     } else if let Some(metric) = metric {
-        direct_label_values(conn, metric, name)?
+        direct_label_values(conn, table, metric, name)?
     } else {
         let mut values = BTreeSet::new();
-        for metric in all_metrics(conn)? {
-            values.extend(direct_label_values(conn, &metric, name)?);
+        for metric in all_metrics(conn, table)? {
+            values.extend(direct_label_values(conn, table, &metric, name)?);
         }
         values
     };
@@ -1953,11 +2018,15 @@ fn execute_label_values(
 
 fn direct_label_values(
     conn: &Connection,
+    table: MetricsTable,
     metric: &str,
     name: &str,
 ) -> Result<BTreeSet<String>, String> {
     let mut stmt = conn
-        .prepare("SELECT value FROM timeless_label_values('metrics', ?1, ?2) ORDER BY value")
+        .prepare(&format!(
+            "SELECT value FROM timeless_label_values('{}', ?1, ?2) ORDER BY value",
+            table.name()
+        ))
         .map_err(|error| format!("prepare label values: {error}"))?;
     let values = stmt
         .query_map(params![metric, name], |row| row.get(0))
@@ -1969,17 +2038,19 @@ fn direct_label_values(
 
 fn execute_series(
     conn: &Connection,
+    table: MetricsTable,
     metric: Option<&str>,
     selectors: &[Selector],
 ) -> Result<ReadOutput, String> {
     let mut series = if selectors.is_empty() {
         catalog(
             conn,
+            table,
             metric.expect("native series requires metric"),
             &FilterPlan::new(Vec::new()),
         )?
     } else {
-        selected_series(conn, selectors)?
+        selected_series(conn, table, selectors)?
     };
     series.sort_by(|left, right| {
         left.metric
@@ -2007,25 +2078,30 @@ fn execute_series(
         frame_bytes: 0,
         series: series.len() as u64,
         points: 0,
+        rows: series.len() as u64,
     })
 }
 
-fn selected_series(conn: &Connection, selectors: &[Selector]) -> Result<Vec<SeriesMeta>, String> {
+fn selected_series(
+    conn: &Connection,
+    table: MetricsTable,
+    selectors: &[Selector],
+) -> Result<Vec<SeriesMeta>, String> {
     if selectors.is_empty() {
-        return catalog_all(conn);
+        return catalog_all(conn, table);
     }
     let mut all_metric_names = None;
     let mut unique = BTreeMap::<(String, String), SeriesMeta>::new();
     for selector in selectors {
         if let MetricSelection::Exact(metric) = &selector.metric {
-            for meta in catalog(conn, metric, &selector.filter)? {
+            for meta in catalog(conn, table, metric, &selector.filter)? {
                 unique.insert((meta.metric.clone(), meta.labels_json.clone()), meta);
             }
             continue;
         }
         let metrics = match &all_metric_names {
             Some(metrics) => metrics,
-            None => all_metric_names.insert(all_metrics(conn)?),
+            None => all_metric_names.insert(all_metrics(conn, table)?),
         };
         for metric in metrics {
             let selected = match &selector.metric {
@@ -2034,7 +2110,7 @@ fn selected_series(conn: &Connection, selectors: &[Selector]) -> Result<Vec<Seri
                 MetricSelection::Exact(_) => unreachable!("handled above"),
             };
             if selected {
-                for meta in catalog(conn, metric, &selector.filter)? {
+                for meta in catalog(conn, table, metric, &selector.filter)? {
                     unique.insert((meta.metric.clone(), meta.labels_json.clone()), meta);
                 }
             }
@@ -2048,6 +2124,7 @@ fn success_array<T: Serialize + Ord>(
     frame_bytes: usize,
     series: u64,
 ) -> Result<ReadOutput, String> {
+    let rows = values.len() as u64;
     let body = serde_json::to_vec(&json!({"status": "success", "data": values}))
         .map_err(|error| format!("encode discovery response: {error}"))?;
     Ok(ReadOutput {
@@ -2055,6 +2132,7 @@ fn success_array<T: Serialize + Ord>(
         frame_bytes,
         series,
         points: 0,
+        rows,
     })
 }
 
@@ -2316,6 +2394,21 @@ mod tests {
             params.all(&["match[]"]),
             vec!["a{x=\"1\"}", "d{y=~\"z.*\"}"]
         );
+    }
+
+    #[test]
+    fn unsupported_parameters_and_native_aggregates_fail_instead_of_broadening() {
+        let instant = Params::parse(Some("query=cpu&silently_ignored=true"), b"");
+        assert!(prometheus_instant_request(&instant).is_err());
+
+        let labels = Params::parse(Some("start=1700000000"), b"");
+        assert!(labels_request(&labels).is_err());
+
+        let range = Params::parse(
+            Some("metric=cpu&start=1&end=2&step=1&aggregate=median"),
+            b"",
+        );
+        assert!(range_request(&range).is_err());
     }
 
     #[test]

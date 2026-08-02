@@ -7,7 +7,7 @@
 
 mod auth;
 
-pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims};
+pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims, RESULT_ROWS_HEADER};
 
 use std::fs::{File, OpenOptions};
 use std::future::Future;

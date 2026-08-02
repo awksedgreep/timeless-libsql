@@ -45,6 +45,7 @@ pub struct LogEntry {
 pub struct QuerySpec {
     pub level: Option<String>,
     pub service: Option<String>,
+    pub metadata_eq: BTreeMap<String, String>,
     pub message: Option<String>,
     pub ts_min: Option<i64>,
     pub ts_max: Option<i64>,
@@ -189,6 +190,12 @@ enum WriteCommand {
 enum ReadCommand {
     Query(QuerySpec, oneshot::Sender<Result<Vec<QueryRow>, String>>),
     Count(QuerySpec, oneshot::Sender<Result<i64, String>>),
+    FieldValues(
+        QuerySpec,
+        String,
+        usize,
+        oneshot::Sender<Result<Vec<String>, String>>,
+    ),
     Stats(oneshot::Sender<Result<StorageStats, String>>),
     Shutdown,
 }
@@ -409,6 +416,22 @@ impl Storage {
             .map_err(|_| "SQLite reader stopped before count completed".to_string())?
     }
 
+    pub async fn field_values(
+        &self,
+        spec: QuerySpec,
+        key: String,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.reader()
+            .send(ReadCommand::FieldValues(spec, key, limit, reply_tx))
+            .await
+            .map_err(|_| "SQLite reader is not running".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "SQLite reader stopped before field discovery completed".to_string())?
+    }
+
     pub async fn stats(&self) -> Result<StorageStats, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.reader()
@@ -622,6 +645,12 @@ fn reader_main(
                 record_query(&profile, started.elapsed());
                 let _ = reply.send(result);
             }
+            ReadCommand::FieldValues(spec, key, limit, reply) => {
+                let started = Instant::now();
+                let result = retry_read(|| query_field_values(&conn, &spec, &key, limit));
+                record_query(&profile, started.elapsed());
+                let _ = reply.send(result);
+            }
             ReadCommand::Stats(reply) => {
                 let _ = reply.send(retry_read(|| storage_stats(&conn)));
             }
@@ -801,7 +830,7 @@ fn push_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn query_parts(spec: &QuerySpec) -> (String, Vec<SqlValue>) {
+fn query_parts(spec: &QuerySpec) -> Result<(String, Vec<SqlValue>), String> {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
     if let Some(level) = &spec.level {
@@ -811,6 +840,19 @@ fn query_parts(spec: &QuerySpec) -> (String, Vec<SqlValue>) {
     if let Some(service) = &spec.service {
         clauses.push("service = ?");
         values.push(SqlValue::Text(service.clone()));
+    }
+    for (key, value) in &spec.metadata_eq {
+        if !matches!(key.as_str(), "service" | "host" | "path" | "status") {
+            return Err(format!("unsupported indexed log metadata field {key:?}"));
+        }
+        clauses.push(match key.as_str() {
+            "service" => "service = ?",
+            "host" => "host = ?",
+            "path" => "path = ?",
+            "status" => "status = ?",
+            _ => unreachable!("metadata field validated above"),
+        });
+        values.push(SqlValue::Text(value.clone()));
     }
     if let Some(message) = &spec.message {
         clauses.push("message_contains = ?");
@@ -829,11 +871,11 @@ fn query_parts(spec: &QuerySpec) -> (String, Vec<SqlValue>) {
     } else {
         format!(" WHERE {}", clauses.join(" AND "))
     };
-    (where_sql, values)
+    Ok((where_sql, values))
 }
 
 fn query_rows(conn: &Connection, spec: &QuerySpec) -> Result<Vec<QueryRow>, String> {
-    let (where_sql, mut values) = query_parts(spec);
+    let (where_sql, mut values) = query_parts(spec)?;
     let order = if spec.descending { "DESC" } else { "ASC" };
     let sql = format!(
         "SELECT ts, level, message, metadata FROM logs{where_sql} \
@@ -866,6 +908,9 @@ fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
     if let Some(service) = &spec.service {
         filter.insert("service", service);
     }
+    for (key, value) in &spec.metadata_eq {
+        filter.insert(key, value);
+    }
     let filter_json = if filter.is_empty() {
         None
     } else {
@@ -885,6 +930,54 @@ fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
         |row| row.get(0),
     )
     .map_err(|e| format!("count logs: {e}"))
+}
+
+fn query_field_values(
+    conn: &Connection,
+    spec: &QuerySpec,
+    key: &str,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    if !matches!(key, "service" | "host" | "path" | "status") {
+        return Err(format!("unsupported indexed log field {key:?}"));
+    }
+    let mut filter = BTreeMap::new();
+    if let Some(level) = &spec.level {
+        filter.insert("level", level);
+    }
+    if let Some(service) = &spec.service {
+        filter.insert("service", service);
+    }
+    for (filter_key, value) in &spec.metadata_eq {
+        filter.insert(filter_key, value);
+    }
+    let filter_json = if filter.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&filter)
+                .map_err(|error| format!("encode field-values filter: {error}"))?,
+        )
+    };
+    let mut statement = conn
+        .prepare("SELECT value FROM timeless_log_values('logs', ?1, ?2, ?3, ?4, ?5, ?6)")
+        .map_err(|error| format!("prepare log field-values query: {error}"))?;
+    let values = statement
+        .query_map(
+            params![
+                key,
+                filter_json,
+                spec.message.as_deref(),
+                spec.ts_min,
+                spec.ts_max,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("query log field values: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read log field value: {error}"))?;
+    Ok(values)
 }
 
 fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {

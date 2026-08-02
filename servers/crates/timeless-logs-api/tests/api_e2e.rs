@@ -100,6 +100,43 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert!(stats.read_permit_count > 0);
     assert_eq!(stats.waiting_writers, 0);
 
+    // Dashboard grouping stays inside the public extension through the
+    // bounded field-values TVF. Host equality is also an indexed API filter;
+    // neither path scans a private shadow table or falls back to BEAM.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/select/logsql/field_values?field=host&level=error&start=1700000000&end=1700010000&limit=10",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], br#"{"values":["host-api"]}"#);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/select/logsql/query?host=host-api&level=error&limit=10000&order=asc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        body.split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count(),
+        410
+    );
+
     // Count is a scalar engine operation, not COUNT(*) over a materialized
     // vtab rowset. Rich log blocks retain the product's exact severities, so
     // an `error` predicate must decode its coarse error-family partition to
@@ -120,14 +157,58 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(&body[..], b"{\"total\":410}\n");
     let stats = storage.stats().await.unwrap();
-    assert_eq!(stats.api_query_count, 2);
-    assert_eq!(stats.query_count, 1, "native count is not a row query");
+    assert_eq!(stats.api_query_count, 4);
+    assert_eq!(stats.query_count, 2, "native count is not a row query");
     assert_eq!(stats.native_count_count, 1);
     assert_eq!(stats.native_count_metadata_blocks, 0);
     assert_eq!(stats.native_count_metadata_entries, 0);
     assert_eq!(stats.native_count_decoded_blocks, 1);
     assert_eq!(stats.native_count_decoded_entries, 410);
     assert!(stats.native_count_payload_bytes_read > 0);
+
+    // A syntactically valid but unsupported LogsQL pipeline must not be
+    // silently reduced to a broader query or cross into another owner.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/select/logsql/query")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("query=level%3Aerror+%7C+sort+by+%28_time%29"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({
+            "error": "unsupported_capability",
+            "reason": "unsupported_logsql"
+        })
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/select/logsql/query?regex=request")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({
+            "error": "unsupported_capability",
+            "reason": "unsupported_query_parameters"
+        })
+    );
 
     // The API maintenance tick asks the extension for its exact actionable
     // backlog, derives a bounded source-byte budget, and invokes the public
@@ -249,7 +330,7 @@ fn make_lines(start: usize, count: usize) -> String {
             )
         };
         body.push_str(&format!(
-            "{{\"_time\":{},\"_msg\":\"request {i}\",\"level\":\"{level}\",\"service\":\"{service}\",\"status\":\"200\"}}\n",
+            "{{\"_time\":{},\"_msg\":\"request {i}\",\"level\":\"{level}\",\"service\":\"{service}\",\"host\":\"host-{service}\",\"status\":\"200\"}}\n",
             1_700_000_000 + i
         ));
     }

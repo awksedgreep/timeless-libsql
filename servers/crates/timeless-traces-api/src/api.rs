@@ -1,13 +1,14 @@
 use std::time::Instant;
 
 use axum::body::{to_bytes, Body, Bytes};
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use timeless_api_common::{server_build_identity, VerifiedClaims};
+use timeless_api_common::{server_build_identity, VerifiedClaims, RESULT_ROWS_HEADER};
 
 use crate::otlp;
 use crate::query::{DashboardSearchParams, ReadRequest, SearchParams};
@@ -35,6 +36,7 @@ pub fn router(storage: Storage) -> Router {
         )
         .route("/api/v1/flush", get(flush).post(flush))
         .route("/insert/opentelemetry/v1/traces", post(ingest_otlp))
+        .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(storage)
 }
@@ -113,8 +115,12 @@ async fn trace_by_id(State(storage): State<Storage>, Path(trace_id): Path<String
 
 async fn search_traces(
     State(storage): State<Storage>,
-    Query(params): Query<SearchParams>,
+    params: Result<Query<SearchParams>, QueryRejection>,
 ) -> Response {
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(_) => return unsupported_query_parameters(),
+    };
     match ReadRequest::search(params) {
         Ok(request) => read_response(storage, request).await,
         Err(error) => client_error(StatusCode::BAD_REQUEST, error),
@@ -127,8 +133,12 @@ async fn dashboard_trace(State(storage): State<Storage>, Path(trace_id): Path<St
 
 async fn dashboard_search(
     State(storage): State<Storage>,
-    Query(params): Query<DashboardSearchParams>,
+    params: Result<Query<DashboardSearchParams>, QueryRejection>,
 ) -> Response {
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(_) => return unsupported_query_parameters(),
+    };
     match ReadRequest::dashboard_search(params) {
         Ok(request) => read_response(storage, request).await,
         Err(error) => client_error(StatusCode::BAD_REQUEST, error),
@@ -139,7 +149,10 @@ async fn read_response(storage: Storage, request: ReadRequest) -> Response {
     match storage.read(request).await {
         Ok(output) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
+            [
+                (header::CONTENT_TYPE.as_str(), "application/json".to_owned()),
+                (RESULT_ROWS_HEADER, output.rows.to_string()),
+            ],
             Bytes::from(output.body),
         )
             .into_response(),
@@ -289,4 +302,23 @@ fn server_error(status: StatusCode, error: String) -> Response {
 
 fn client_error(status: StatusCode, error: String) -> Response {
     (status, Json(json!({"error": error}))).into_response()
+}
+
+async fn unsupported() -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"error": "unsupported_capability", "reason": "unsupported_route"})),
+    )
+        .into_response()
+}
+
+fn unsupported_query_parameters() -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({
+            "error": "unsupported_capability",
+            "reason": "unsupported_query_parameters"
+        })),
+    )
+        .into_response()
 }
