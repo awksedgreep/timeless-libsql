@@ -417,7 +417,12 @@ pub fn require_current_schema(conn: &Connection, signal: &str) -> Result<(), Str
 }
 
 pub fn validate_loopback(address: SocketAddr) -> Result<(), String> {
-    if address.ip().is_loopback() {
+    let allow_non_loopback = matches!(
+        std::env::var("TIMELESS_ALLOW_NON_LOOPBACK").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    );
+
+    if address.ip().is_loopback() || allow_non_loopback {
         Ok(())
     } else {
         Err(format!(
@@ -550,8 +555,16 @@ mod tests {
 
     #[test]
     fn loopback_is_the_only_tcp_default() {
+        unsafe { std::env::remove_var("TIMELESS_ALLOW_NON_LOOPBACK") };
         assert!(validate_loopback("127.0.0.1:1".parse().unwrap()).is_ok());
         assert!(validate_loopback("[::1]:1".parse().unwrap()).is_ok());
         assert!(validate_loopback("0.0.0.0:1".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn explicit_container_override_allows_non_loopback() {
+        unsafe { std::env::set_var("TIMELESS_ALLOW_NON_LOOPBACK", "1") };
+        assert!(validate_loopback("0.0.0.0:1".parse().unwrap()).is_ok());
+        unsafe { std::env::remove_var("TIMELESS_ALLOW_NON_LOOPBACK") };
     }
 }
