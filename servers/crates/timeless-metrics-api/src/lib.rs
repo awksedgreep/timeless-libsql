@@ -7,6 +7,7 @@
 mod api;
 mod promql;
 mod query;
+mod scrape;
 mod storage;
 mod victoria;
 
@@ -20,6 +21,9 @@ use timeless_api_common::{
 use tokio::net::TcpListener;
 
 pub use api::router;
+pub use scrape::{
+    ScrapeAuth, ScrapeTarget, ScrapeTargetReport, ScrapeTargetSet, ScrapeTargetSetReport,
+};
 pub use storage::{FlushReport, Storage, StorageStats};
 pub use timeless_api_common::BackupReport;
 

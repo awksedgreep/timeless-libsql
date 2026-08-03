@@ -10,7 +10,7 @@ use serde_json::json;
 use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
 
 use crate::query::{self, Params, ReadRequest};
-use crate::{victoria, Storage};
+use crate::{victoria, ScrapeTargetSet, Storage};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
@@ -24,6 +24,10 @@ pub fn router(storage: Storage) -> Router {
         .route("/api/v1/backup", post(backup))
         .route("/api/v1/import", post(import_victoria))
         .route("/api/v1/import/prometheus", post(import_prometheus))
+        .route(
+            "/api/v1/scrape/targets",
+            get(scrape_targets).put(replace_scrape_targets),
+        )
         .route("/api/v1/query", get(latest).post(latest))
         .route("/api/v1/export", get(export))
         .route("/api/v1/query_range", get(range).post(range))
@@ -214,6 +218,20 @@ async fn import_victoria(State(storage): State<Storage>, body: Bytes) -> Respons
 
 async fn import_prometheus(State(storage): State<Storage>, body: Bytes) -> Response {
     match storage.submit_prometheus(body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => server_error(error),
+    }
+}
+
+async fn scrape_targets(State(storage): State<Storage>) -> Response {
+    (StatusCode::OK, Json(storage.scrape_targets().await)).into_response()
+}
+
+async fn replace_scrape_targets(
+    State(storage): State<Storage>,
+    Json(targets): Json<ScrapeTargetSet>,
+) -> Response {
+    match storage.replace_scrape_targets(targets).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => server_error(error),
     }

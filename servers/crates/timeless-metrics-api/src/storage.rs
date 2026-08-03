@@ -19,6 +19,7 @@ use timeless_api_common::{
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
+use crate::scrape::{ScrapeController, ScrapeTargetSet, ScrapeTargetSetReport};
 
 /// The same ladder currently created by `TimelessMetrics.LibsqlEngine`.
 pub const DEFAULT_ROLLUPS: &str = "3600s@2592000s,86400s@31536000s,2592000s@0";
@@ -316,6 +317,7 @@ struct StorageInner {
     raw_retention: Duration,
     queue_capacity: usize,
     shutting_down: AtomicBool,
+    scrape: ScrapeController,
 }
 
 #[derive(Clone)]
@@ -324,6 +326,14 @@ pub struct Storage(Arc<StorageInner>);
 impl Storage {
     pub fn is_ready(&self) -> bool {
         !self.0.shutting_down.load(Ordering::Acquire)
+    }
+
+    pub async fn replace_scrape_targets(&self, set: ScrapeTargetSet) -> Result<(), String> {
+        self.0.scrape.replace(self.clone(), set).await
+    }
+
+    pub async fn scrape_targets(&self) -> ScrapeTargetSetReport {
+        self.0.scrape.report().await
     }
 
     pub fn start(
@@ -427,6 +437,7 @@ impl Storage {
             raw_retention,
             queue_capacity: queue_batches,
             shutting_down: AtomicBool::new(false),
+            scrape: ScrapeController::default(),
         })))
     }
 
@@ -759,6 +770,7 @@ impl Storage {
         if self.0.shutting_down.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        self.0.scrape.shutdown().await;
         for reader in &self.0.readers {
             let _ = reader.send(ReadCommand::Shutdown).await;
         }
