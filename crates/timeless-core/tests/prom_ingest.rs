@@ -7,7 +7,7 @@
 //! 2. Explicit timestamps > 1e12 (the Prometheus wire unit: epoch
 //!    MILLISECONDS) are normalized to SECONDS (/1000). This is the fact
 //!    that forces the vtab's "default_ts is seconds" unit decision.
-//! 3. Malformed non-comment lines and NaN values are COUNTED as errors
+//! 3. Malformed non-comment lines and non-finite values are COUNTED as errors
 //!    but never abort the body — partial success is the contract.
 //! 4. Comments / HELP / TYPE / blank lines are free: neither samples nor
 //!    errors.
@@ -38,13 +38,18 @@ fn prometheus_ingest_semantics() {
                  http_requests_total 1027\n\
                  node_temp_celsius{sensor=\"cpu0\",host=\"pvm1\"} 42.5 1753000000123\n\
                  this line is definitely not prometheus !!!\n\
-                 bad_metric NaN\n";
+                 bad_metric NaN\n\
+                 positive_inf Inf\n\
+                 negative_inf -Inf\n";
 
     // default_ts is deterministic here (no wall clock in a unit test).
     let default_ts: i64 = 1_800_000_000;
     let (count, errors) = engine.ingest_prometheus(body, default_ts).unwrap();
     assert_eq!(count, 2, "counter + gauge ingested; comments are free");
-    assert_eq!(errors, 2, "malformed line + NaN line each count once");
+    assert_eq!(
+        errors, 4,
+        "malformed line + three non-finite lines count once"
+    );
 
     // Rule 1: no-timestamp sample carries default_ts VERBATIM (seconds).
     let sid = engine
@@ -73,6 +78,29 @@ fn prometheus_ingest_semantics() {
         "explicit 1753000000123 ms must be stored as 1753000000 s"
     );
 
+    let escaped_body =
+        b"escaped_labels{path=\"a\\\"b\",note=\"x\\\\y\"} 7 1800000000000\r\ncrlf_metric 9\r\n";
+    let (count, errors) = engine.ingest_prometheus(escaped_body, default_ts).unwrap();
+    assert_eq!((count, errors), (2, 0));
+    let escaped: HashMap<String, String> = [
+        ("path".to_string(), r#"a\"b"#.to_string()),
+        ("note".to_string(), r#"x\\y"#.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let sid = engine.resolve_cached("escaped_labels", &escaped).unwrap();
+    assert_eq!(
+        engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap(),
+        vec![(1_800_000_000, 7.0)]
+    );
+    let sid = engine
+        .resolve_cached("crlf_metric", &HashMap::new())
+        .unwrap();
+    assert_eq!(
+        engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap(),
+        vec![(default_ts, 9.0)]
+    );
+
     // Rule 3 corollary: an all-garbage body yields (0, N) — the vtab
     // turns exactly that shape into its "0 samples ingested" error.
     let (count, errors) = engine
@@ -81,9 +109,9 @@ fn prometheus_ingest_semantics() {
     assert_eq!((count, errors), (0, 2));
 
     let info = engine.info();
-    assert_eq!(info.prometheus_ingest_batches, 2);
-    assert_eq!(info.prometheus_ingest_points, 2);
-    assert_eq!(info.prometheus_ingest_errors, 4);
+    assert_eq!(info.prometheus_ingest_batches, 3);
+    assert_eq!(info.prometheus_ingest_points, 4);
+    assert_eq!(info.prometheus_ingest_errors, 6);
     assert!(info.prometheus_ingest_total_ns > 0);
 
     engine.shutdown().unwrap();
