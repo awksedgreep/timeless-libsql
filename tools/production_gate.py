@@ -9,8 +9,8 @@ same database and checks exact logical counts plus a semantic sentinel.
 
 The short gate accelerates maintenance so CI crosses real flush/optimize/
 compact boundaries. The release gate uses production defaults and runs all
-three signals together for eight hours; that is also at least two hours for
-each individual signal.
+three signals concurrently for 160 minutes: eight aggregate signal-hours and
+at least two continuous hours for each individual signal.
 """
 
 from __future__ import annotations
