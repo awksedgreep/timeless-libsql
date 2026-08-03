@@ -1,7 +1,7 @@
 # Rust telemetry data-plane release-promotion plan
 
 Date: 2026-08-02  
-Status: Sessions 0–4 complete; implementation sessions 5–8 pending
+Status: Sessions 0–8 complete; release with named limitations
 Branch: `release/rust-telemetry-data-plane`
 
 This plan promotes the completed metrics, logs, and traces Rust API POCs into
@@ -492,6 +492,10 @@ unsupported downgrade fails before mutation.
 
 ### Session 7 — sustained production fault, soak, and resource gates
 
+Status: complete. Short fault, migration-under-load, control-plane, clean-CI,
+packaging, and the exact-build 160-minute sustained gate pass. Results are in
+[`2026-08-02_rust_telemetry_data_plane_session7.md`](2026-08-02_rust_telemetry_data_plane_session7.md).
+
 - Run short CI fault versions plus release gates of at least two hours per
   signal and eight hours combined across real maintenance intervals.
 - Cover sustained mixed writes/reads, migration under bounded load, slow and
@@ -511,6 +515,11 @@ automatic where declared and actionable/closed elsewhere. Any failed gate is
 fixed with a regression or listed as a release blocker—never averaged away.
 
 ### Session 8 — release verdict and operator handoff
+
+Status: complete. Operator, compatibility, artifact, cleanup, rollback, and
+release-handoff documents are checked in under `timeless_stack/docs`; final
+evidence and the release-with-named-limitations verdict are recorded in
+[`2026-08-02_rust_telemetry_data_plane_session8.md`](2026-08-02_rust_telemetry_data_plane_session8.md).
 
 - Produce the exact compatibility and migration statement, operator runbook,
   install/backup/restore/upgrade/rollback/cleanup procedures, limits/SLO/alert
