@@ -682,3 +682,34 @@ rejection, shutdown, and cold reopen. Section 33 executes both joins plus a
 one-side uniqueness preflight using public grids. No extension opcode, private
 table, storage format, batching, compression, rollup, retention, transaction,
 or migration behavior changed.
+
+## Session 5 `PQL-O09` cross-series sum
+
+The checked-in
+[`2026-08-04_session5_pql_o09.json`](evidence/2026-08-04_session5_pql_o09.json)
+was captured from exact build `e91ca730c80170c5212e65d24a29967fa6ebf049`.
+The narrow shape sums one selected host by `host`; the wide shape sums a
+512-series, four-step grid into the two `service` groups.
+
+| shape | input series/step | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host | 1 | 1 | 116 | 0.438 | 0.555 | 0.614 | 1 | 32 | 524 |
+| all series, two groups × four steps | 512 | 8 | 313 | 3.861 | 4.120 | 4.512 | 512 | 16,384 | 268,304 |
+
+The wide result materializes 2,048 bounded child points, then reduces them in
+Rust without another storage read or extension primitive. Per query it reads
+53,831 persisted payload bytes and returns 16,384 raw stored points through
+the public packed frame; cardinality collapses only after exact PromQL
+grouping. The narrow filter prunes to one series and one chunk. This is the
+expected cost boundary: direct SQLite/libSQL users perform the same numeric
+reduction with ordinary `SUM` over `timeless_grid`.
+
+The run durably completed all 18,496 fixture points with zero failed or queued
+work, retained a 672,688-byte live SQLite/WAL/SHM footprint, and reached
+35,956 KiB RSS HWM. The real-extension regression covers pre-decode work
+limits and shutdown/reopen; the common dropped-request contract covers
+cancellation. Pinned Prometheus API and promtool cases prove `by`, `without`,
+empty/missing groups, explicit `__name__` grouping, sparse range grids, and
+IEEE results. `QSF-035` records the discovered removal of the obsolete
+BEAM-era non-finite exposition restriction; batching, compression, indexes,
+rollups, retention, transactions, and packed formats are unchanged.
