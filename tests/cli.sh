@@ -4106,6 +4106,39 @@ assert changes_values == [
     ('{"case":"singleton"}', 60, 0),
 ]
 
+resets_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,raw.ts sample_ts,raw.value"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    "),sequenced AS ("
+    " SELECT *,ROW_NUMBER() OVER (PARTITION BY series_id,ts ORDER BY sample_ts)"
+    " sample_number,LAG(value) OVER (PARTITION BY series_id,ts ORDER BY sample_ts)"
+    " previous_value FROM selected"
+    ") SELECT labels,ts,SUM(CASE WHEN sample_number>1 AND value<previous_value"
+    " THEN 1 ELSE 0 END) value FROM sequenced"
+    " GROUP BY series_id,labels,ts ORDER BY labels,ts"
+)
+resets_values = db.execute(
+    resets_sql,
+    {
+        'metric': 'rate_counter',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+    },
+).fetchall()
+assert resets_values == [
+    ('{"case":"reset"}', 60, 1),
+    ('{"case":"steady"}', 60, 0),
+]
+
 minimum = db.execute(
     "SELECT value FROM timeless_window("
     "'metrics','min_window',NULL,30,30,1,20,'min')"

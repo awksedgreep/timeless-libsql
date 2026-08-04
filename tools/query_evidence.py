@@ -896,6 +896,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        range_resets_narrow = measure(
+            "metrics-range-resets-narrow",
+            lambda: promql('resets(query_contract_cpu{host="h0000"}[5m])'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        range_resets_wide = measure(
+            "metrics-range-resets-wide",
+            lambda: promql_range("resets(query_contract_cpu[5m])", at - 30, at, 10),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         range_last_narrow = measure(
             "metrics-range-last-narrow",
             lambda: promql('last_over_time(query_contract_cpu{host="h0000"}[5m])'),
@@ -1506,6 +1524,8 @@ def metrics_evidence(
                 "range_predict_linear_wide": range_predict_linear_wide,
                 "range_changes_narrow": range_changes_narrow,
                 "range_changes_wide": range_changes_wide,
+                "range_resets_narrow": range_resets_narrow,
+                "range_resets_wide": range_resets_wide,
                 "range_last_narrow": range_last_narrow,
                 "range_last_wide": range_last_wide,
                 "unary_minus_narrow": unary_narrow,

@@ -412,6 +412,7 @@ enum PromRangeOp {
     Deriv,
     PredictLinear,
     Changes,
+    Resets,
     Last,
 }
 
@@ -435,6 +436,7 @@ impl PromRangeOp {
             Self::Deriv => "deriv",
             Self::PredictLinear => "predict_linear",
             Self::Changes => "changes",
+            Self::Resets => "resets",
             Self::Last => "last_over_time",
         }
     }
@@ -458,6 +460,7 @@ impl PromRangeOp {
             | Self::Deriv
             | Self::PredictLinear
             | Self::Changes
+            | Self::Resets
             | Self::Last => None,
         }
     }
@@ -481,6 +484,7 @@ impl PromRangeOp {
             | Self::Deriv
             | Self::PredictLinear
             | Self::Changes
+            | Self::Resets
             | Self::Last => None,
         }
     }
@@ -1035,6 +1039,7 @@ fn lower_promql_expr(
                     | "idelta"
                     | "deriv"
                     | "changes"
+                    | "resets"
                     | "last_over_time"
             ) =>
         {
@@ -1054,6 +1059,7 @@ fn lower_promql_expr(
                 "idelta" => PromRangeOp::IDelta,
                 "deriv" => PromRangeOp::Deriv,
                 "changes" => PromRangeOp::Changes,
+                "resets" => PromRangeOp::Resets,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
@@ -4508,6 +4514,9 @@ fn prometheus_range_reduction(
     if matches!(op, PromRangeOp::Changes) {
         return prometheus_changes(points, cancelled).map(Some);
     }
+    if matches!(op, PromRangeOp::Resets) {
+        return prometheus_resets(points, cancelled).map(Some);
+    }
     if matches!(op, PromRangeOp::Quantile) {
         let quantile = parameter
             .ok_or_else(|| "quantile_over_time is missing its scalar parameter".to_string())?;
@@ -4685,6 +4694,20 @@ fn prometheus_changes(
     }
     check_cancelled(cancelled)?;
     Ok(changes as f64)
+}
+
+fn prometheus_resets(points: &[(i64, f64)], cancelled: &AtomicBool) -> Result<f64, String> {
+    let mut resets = 0_u64;
+    let mut previous = points[0].1;
+    for &(_, current) in &points[1..] {
+        check_cancelled(cancelled)?;
+        if current < previous {
+            resets += 1;
+        }
+        previous = current;
+    }
+    check_cancelled(cancelled)?;
+    Ok(resets as f64)
 }
 
 fn empty_prometheus_matrix(limits: PromQueryLimits) -> Result<ReadOutput, String> {
@@ -5308,6 +5331,18 @@ fn execute_prometheus_range_raw(
                             previous = current;
                         }
                         Some(changes as f64)
+                    } else if matches!(op, PromRangeOp::Resets) {
+                        let mut resets = 0_u64;
+                        let mut previous = series.value(raw.frame.as_deref(), lo)?;
+                        for index in lo + 1..hi {
+                            check_cancelled(cancelled)?;
+                            let current = series.value(raw.frame.as_deref(), index)?;
+                            if current < previous {
+                                resets += 1;
+                            }
+                            previous = current;
+                        }
+                        Some(resets as f64)
                     } else if matches!(op, PromRangeOp::Last) {
                         Some(series.value(raw.frame.as_deref(), hi - 1)?)
                     } else {
@@ -6492,6 +6527,40 @@ mod tests {
 
         cancelled.store(true, Ordering::Relaxed);
         assert!(prometheus_changes(&[(10_000, 1.0)], &cancelled)
+            .unwrap_err()
+            .contains("cancelled"));
+    }
+
+    #[test]
+    fn prometheus_resets_counts_only_strict_float_decreases() {
+        let cancelled = AtomicBool::new(false);
+        for (points, expected) in [
+            (
+                vec![(10_000, 100.0), (30_000, 150.0), (50_000, 20.0)],
+                1.0,
+            ),
+            (
+                vec![
+                    (10_000, 1.0),
+                    (20_000, 1.0),
+                    (30_000, 2.0),
+                    (40_000, 2.0),
+                    (50_000, 1.0),
+                ],
+                1.0,
+            ),
+            (vec![(20_000, f64::NAN), (40_000, 2.0)], 0.0),
+            (vec![(20_000, 0.0), (40_000, -0.0)], 0.0),
+            (vec![(20_000, 1.0), (40_000, f64::INFINITY)], 0.0),
+            (vec![(20_000, f64::INFINITY), (40_000, 1.0)], 1.0),
+            (vec![(20_000, 1.0), (40_000, f64::NEG_INFINITY)], 1.0),
+            (vec![(50_000, 5.0)], 0.0),
+        ] {
+            assert_eq!(prometheus_resets(&points, &cancelled).unwrap(), expected);
+        }
+
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(prometheus_resets(&[(10_000, 1.0)], &cancelled)
             .unwrap_err()
             .contains("cancelled"));
     }

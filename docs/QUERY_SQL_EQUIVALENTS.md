@@ -78,6 +78,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-034`](#sql-prom-034-deriv) | `PQL-R17` | current foundation | finite float-gauge least-squares slope over timestamp-centered public raw rows; API owns compensated/IEEE arithmetic, language, labels, limits, and envelopes |
 | [`SQL-PROM-035`](#sql-prom-035-predict_linear) | `PQL-R18` | current foundation | finite float-gauge least-squares forecast relative to each evaluation timestamp; API owns scalar-expression and compensated/IEEE semantics, labels, limits, and envelopes |
 | [`SQL-PROM-036`](#sql-prom-036-changes) | `PQL-R19` | current | exact ordered float-transition count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
+| [`SQL-PROM-037`](#sql-prom-037-resets) | `PQL-R20` | current | exact ordered strict float-decrease count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1220,6 +1221,76 @@ limits, cancellation, and HTTP envelopes. No transition-specific extension
 primitive is justified. Direct regression: `tests/cli.sh` section 45;
 HTTP/oracle/reopen regression:
 `session_seven_promql_changes_counts_float_transitions`.
+
+### SQL-PROM-037: `resets`
+
+Count adjacent strict decreases in every float-counter slice in
+`(T-window,T]`:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.ts AS sample_ts,
+    raw.value
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+), sequenced AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY series_id, ts ORDER BY sample_ts
+    ) AS sample_number,
+    LAG(value) OVER (
+      PARTITION BY series_id, ts ORDER BY sample_ts
+    ) AS previous_value
+  FROM selected
+)
+SELECT
+  labels,
+  ts,
+  SUM(
+    CASE
+      WHEN sample_number > 1 AND value < previous_value THEN 1
+      ELSE 0
+    END
+  ) AS value
+FROM sequenced
+GROUP BY series_id, labels, ts
+ORDER BY labels, ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
+seconds. `:filter_json` is the public matcher JSON accepted by `timeless_raw`,
+or NULL. Grid bounds are inclusive; windows are exactly `(T-window,T]`; a
+singleton emits `0`; canonical label/timestamp ordering is deterministic.
+Prometheus normally admits one float sample per series/timestamp; direct
+duplicates require an additional stable tie order.
+
+This recipe deliberately uses only IEEE `<`: equal values and either
+signed-zero order are not resets; a NaN comparison is false; finite-to-`+Inf`
+is not a reset; `+Inf`-to-finite and finite-to-`-Inf` are resets.
+`timeless_raw` exposes stored NaN as SQL NULL on ordinary row projection, for
+which the comparison is likewise not true. The Rust API scans the bit-exact
+packed raw frame once without allocating another value vector and owns PromQL
+syntax, metric-name removal, modifiers, subqueries, limits, cancellation, and
+HTTP envelopes. The extension's mechanical reset-corrected increase/rate
+kernels do not expose this count and are not relabeled; ordinary SQL is exact,
+so no reset-count primitive is justified. Direct regression: `tests/cli.sh`
+section 45; HTTP/oracle/reopen regression:
+`session_seven_promql_resets_counts_strict_float_decreases`.
 
 ### SQL-PROM-006: range selector
 

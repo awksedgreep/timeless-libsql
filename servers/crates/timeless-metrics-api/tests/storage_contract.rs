@@ -7475,6 +7475,186 @@ async fn session_seven_promql_changes_counts_float_transitions() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_seven_promql_resets_counts_strict_float_decreases() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_seven_resets.db");
+    let base = 1_700_780_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_resets{{case=\"steady\"}} 100 {}\n",
+            "range_resets{{case=\"steady\"}} 300 {}\n",
+            "range_resets{{case=\"steady\"}} 500 {}\n",
+            "range_resets{{case=\"reset\"}} 100 {}\n",
+            "range_resets{{case=\"reset\"}} 150 {}\n",
+            "range_resets{{case=\"reset\"}} 20 {}\n",
+            "range_resets{{case=\"repeated\"}} 1 {}\n",
+            "range_resets{{case=\"repeated\"}} 1 {}\n",
+            "range_resets{{case=\"repeated\"}} 2 {}\n",
+            "range_resets{{case=\"repeated\"}} 2 {}\n",
+            "range_resets{{case=\"repeated\"}} 1 {}\n",
+            "range_resets{{case=\"singleton\"}} 5 {}\n",
+            "range_resets{{case=\"nan\"}} NaN {}\n",
+            "range_resets{{case=\"nan\"}} 2 {}\n",
+            "range_resets{{case=\"zero_sign\"}} 0 {}\n",
+            "range_resets{{case=\"zero_sign\"}} -0 {}\n",
+            "range_resets{{case=\"pos_inf\"}} 1 {}\n",
+            "range_resets{{case=\"pos_inf\"}} +Inf {}\n",
+            "range_resets{{case=\"inf_drop\"}} +Inf {}\n",
+            "range_resets{{case=\"inf_drop\"}} 1 {}\n",
+            "range_resets{{case=\"neg_inf\"}} 1 {}\n",
+            "range_resets{{case=\"neg_inf\"}} -Inf {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 40) * 1_000,
+        (base + 50) * 1_000,
+        (base + 50) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let reset = prom_query(&app, "resets(range_resets{case=\"reset\"}[60s])", base + 60).await;
+    assert_eq!(reset.0, StatusCode::OK, "{}", reset.1);
+    assert_eq!(
+        reset.1["data"]["result"],
+        serde_json::json!([{"metric": {"case": "reset"}, "value": [base + 60, "1"]}])
+    );
+    for (case, expected) in [
+        ("steady", "0"),
+        ("repeated", "1"),
+        ("singleton", "0"),
+        ("nan", "0"),
+        ("zero_sign", "0"),
+        ("pos_inf", "0"),
+        ("inf_drop", "1"),
+        ("neg_inf", "1"),
+    ] {
+        let response = prom_query(
+            &app,
+            &format!("resets(range_resets{{case=\"{case}\"}}[60s])"),
+            base + 60,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+        assert_eq!(response.1["data"]["result"][0]["metric"]["__name__"], Value::Null);
+    }
+    let boundary = prom_query(
+        &app,
+        "resets(range_resets{case=\"reset\"}[40s])",
+        base + 50,
+    )
+    .await;
+    assert_eq!(boundary.0, StatusCode::OK, "{}", boundary.1);
+    assert_eq!(boundary.1["data"]["result"][0]["value"][1], "1");
+    let offset = prom_query(
+        &app,
+        "resets(range_resets{case=\"reset\"}[40s] offset 10s)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(offset.0, StatusCode::OK, "{}", offset.1);
+    assert_eq!(offset.1, reset.1);
+    let subquery = prom_query(
+        &app,
+        "resets(range_resets{case=\"reset\"}[40s:10s])",
+        base + 60,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(subquery.1["data"]["result"][0]["value"][1], "1");
+    let range = prom_query_range(
+        &app,
+        "resets(range_resets{case=\"reset\"}[40s])",
+        base + 50,
+        base + 60,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "reset"},
+            "values": [[base + 50, "1"], [base + 60, "1"]]
+        }])
+    );
+    let invalid = prom_query(&app, "resets(range_resets)", base + 60).await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
+    assert_eq!(invalid.1["errorType"], "bad_data");
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "resets(range_resets{case=\"reset\"}[60s])",
+        base + 60,
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 1 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "resets(range_resets{case=\"reset\"}[60s])",
+            base + 60,
+        )
+        .await
+        .1,
+        reset.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

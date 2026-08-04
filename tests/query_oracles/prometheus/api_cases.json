@@ -1778,6 +1778,102 @@
       "drop_metric_name": true
     },
     {
+      "id": "PQL-R20-resets-steady-zero",
+      "query": "resets(oracle_counter{case=\"steady\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-one-decrease",
+      "query": "resets(oracle_counter{case=\"reset\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-repeated-values",
+      "query": "resets(oracle_counter{case=\"repeated\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "repeated", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-singleton-zero",
+      "query": "resets(oracle_counter{case=\"singleton\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "singleton", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-nan-transition-is-not-decrease",
+      "query": "resets(oracle_counter{case=\"nan\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "nan", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-signed-zero-is-not-decrease",
+      "query": "resets(oracle_counter{case=\"zero_sign\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "zero_sign", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-finite-to-positive-infinity",
+      "query": "resets(oracle_counter{case=\"pos_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "pos_inf", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-positive-infinity-to-finite",
+      "query": "resets(oracle_counter{case=\"inf_drop\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "inf_drop", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-finite-to-negative-infinity",
+      "query": "resets(oracle_counter{case=\"neg_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "neg_inf", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-open-left-boundary",
+      "query": "resets(oracle_counter{case=\"reset\"}[40s])",
+      "evaluation_offset_ms": 50000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-offset-keeps-output-time",
+      "query": "resets(oracle_counter{case=\"reset\"}[40s] offset 10s)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R20-resets-over-subquery",
+      "query": "resets(oracle_counter{case=\"reset\"}[40s:10s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
       "id": "PQL-O14-topk-tie-input-order",
       "query": "topk(1, oracle_rank_tie)",
       "evaluation_offset_ms": 30000,
