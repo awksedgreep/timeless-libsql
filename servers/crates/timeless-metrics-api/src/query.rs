@@ -2216,6 +2216,12 @@ fn execute_prometheus_avg_subquery(
     )?;
     let frame_bytes = inner.frame_bytes;
     let intermediate_points = inner.intermediate_points.saturating_add(inner.points);
+    if intermediate_points > limits.max_work_points as u64 {
+        return Err(format!(
+            "query exceeded the maximum intermediate-work limit of {} points",
+            limits.max_work_points
+        ));
+    }
     let intermediate = decode_prometheus_matrix(&inner.body, limits, cancelled)?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);

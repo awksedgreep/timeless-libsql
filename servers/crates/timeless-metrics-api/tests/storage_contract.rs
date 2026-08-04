@@ -1573,6 +1573,32 @@ async fn session_three_promql_subqueries_align_bound_cancel_and_reopen() {
         .unwrap()
         .contains("maximum intermediate-work limit of 2 points"));
 
+    let nested_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 7,
+            ..PromQueryLimits::default()
+        },
+    );
+    let nested_rejected = get_json(
+        &nested_limited,
+        &format!(
+            "/prometheus/api/v1/query?query=avg_over_time%28avg_over_time%28subquery_metric%5B40s%3A10s%5D%29%5B40s%3A10s%5D%29&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(nested_rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        nested_rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("maximum intermediate-work limit of 7 points"),
+        "{}",
+        nested_rejected.1
+    );
+
+    drop(nested_limited);
     drop(limited);
     drop(app);
     storage.shutdown().await.unwrap();
