@@ -169,3 +169,32 @@ SQLite/WAL/SHM footprint. Pinned Prometheus cases prove double-quoted escape,
 backtick raw-string, millisecond timestamp, and range-query error behavior.
 The real-extension regression repeats the query after a clean shutdown and
 reopen. No extension state or format changed.
+
+## Session 2 `PQL-S16` grid and lookback result
+
+The checked-in
+[`2026-08-04_session2_pql_s16.json`](evidence/2026-08-04_session2_pql_s16.json)
+was captured from exact build `5332eaddfacbb6a0197ce3f3101d5551f71481f8`.
+Both shapes evaluate a 21-point, 500 ms grid over ten seconds with a
+10,001 ms request lookback. Storage contains ten-second, whole-second samples,
+so each matched series reads three raw points and reuses them across all grid
+evaluations.
+
+| shape | series | API points/query | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension returned points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host | 1 | 21 | 547 | 0.495 | 0.795 | 1.087 | 1 | 32 | 3 |
+| all 512 series | 512 | 10,752 | 258,433 | 3.679 | 3.838 | 3.939 | 512 | 16,384 | 1,536 |
+
+The wide evaluator expands 1,536 stored samples into 10,752 exact grid values
+without another extension read per step. Its 3.84 ms p95 is acceptable for a
+258 KiB response, and label selection still prunes the narrow shape to one
+chunk. The process reached 20,532 KiB RSS HWM, completed all 16,384 fixture
+points durably with zero failed or queued work, and retained the 525,016-byte
+live SQLite/WAL/SHM footprint.
+
+The pinned Prometheus harness now Remote Writes a real sample before proving
+the open-left lookback boundary, one-millisecond inclusion, and explicit-zero
+default. It also pins a non-aligned range end. Real-extension tests cover those
+semantics on retained storage and invalid input; unit regressions cover
+negative/non-finite duration safety and extreme-grid overflow. Cancellation,
+shutdown, batching, compression, rollups, retention, and formats are unchanged.

@@ -88,5 +88,8 @@ The manifest is
 The rule smoke fixture pins selector and `avg_over_time` sample semantics. The
 row-addressed API fixture pins result types and exact HTTP error envelopes; the
 refresh command starts and removes only its uniquely named temporary
-Prometheus container. Later sessions extend these fixtures before
-implementation.
+Prometheus container. For lookback semantics, the harness encodes one
+dependency-free protobuf/raw-Snappy Remote Write sample, waits for its `204`
+durability response, then tests the exact boundary, millisecond inclusion, and
+zero/default behavior against that real series. Later sessions extend these
+fixtures before implementation.
