@@ -87,6 +87,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-043`](#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions) | `PQL-F06` | current foundation | bounded SQLite inverse math transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-PROM-044`](#sql-prom-044-trigonometric-and-hyperbolic-functions) | `PQL-F07` | current foundation | bounded SQLite trigonometric and hyperbolic transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-PROM-045`](#sql-prom-045-deg-rad-and-pi) | `PQL-F08` | current foundation | bounded degree/radian conversion plus scalar pi through standard SQLite math; API owns packed NaN, names, types, limits, and envelopes |
+| [`SQL-PROM-046`](#sql-prom-046-label_join) | `PQL-F10` | current foundation | ordered arbitrary-arity label joining over public JSON labels; API owns language parsing, names, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1606,6 +1607,84 @@ primitive is justified.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_angle_transforms_and_pi_preserve_types_and_reopen`.
+
+### SQL-PROM-046: `label_join`
+
+Bind the ordered source-label names as a JSON array. This statement handles
+arbitrary arity, missing labels, overwrite/removal, and `__name__` without
+constructing unsafe dynamic JSON paths:
+
+```sql
+WITH selected AS (
+  SELECT :metric AS name, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+), joined AS (
+  SELECT selected.*,
+         COALESCE((
+           SELECT group_concat(component, :separator)
+           FROM (
+             SELECT CASE
+                      WHEN source.value = '__name__' THEN selected.name
+                      ELSE COALESCE((
+                        SELECT label.value
+                        FROM json_each(selected.labels) AS label
+                        WHERE label.key = source.value
+                      ), '')
+                    END AS component
+             FROM json_each(:source_labels_json) AS source
+             ORDER BY CAST(source.key AS INTEGER)
+           )
+         ), '') AS joined_value
+  FROM selected
+)
+SELECT
+  CASE WHEN :destination = '__name__'
+       THEN NULLIF(joined_value, '')
+       ELSE name
+  END AS name,
+  CASE WHEN :destination = '__name__' THEN labels
+       ELSE COALESCE((
+         SELECT json_group_object(label_key, label_value)
+         FROM (
+           SELECT existing.key AS label_key, existing.value AS label_value
+           FROM json_each(joined.labels) AS existing
+           WHERE existing.key <> :destination
+           UNION ALL
+           SELECT :destination, joined_value
+           WHERE joined_value <> ''
+           ORDER BY label_key
+         )
+       ), '{}')
+  END AS labels,
+  ts,
+  value
+FROM joined
+ORDER BY labels, ts;
+```
+
+`:source_labels_json` is an ordered JSON array such as
+`["service","zone"]`; `[]` is valid. Every missing source contributes the
+empty string, duplicate sources are retained, and separators occur between
+every source position. Sources are read from the original label set before
+the destination is changed. An empty joined value removes the destination;
+for `__name__`, SQL `NULL` represents a nameless output series. Rebuilding the
+ordinary JSON object by key also permits Prometheus 3's nonempty UTF-8 label
+names without dynamic JSON-path quoting.
+
+Grid bounds are inclusive, lookback is open-left, and timestamps use the
+metric table's configured unit (integer seconds for the default table). The
+statement preserves sample values and timestamps and emits deterministic
+label-key and row ordering. The Rust API owns PromQL parsing and types,
+response assembly, exact range-series identity, cumulative work and response
+limits, cancellation, and error envelopes. This is ordinary public SQLite
+composition over one bounded extension read; no label-specific extension
+primitive is justified.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_label_join_pins_sources_names_limits_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

@@ -3575,6 +3575,11 @@ db.executemany(
         ('math_metric', '{"case":"hundred"}', 100, 100.0),
         ('math_metric', '{"case":"negative"}', 100, -4.0),
         ('math_metric', '{"case":"two"}', 100, 2.0),
+        ('label_join_metric',
+         '{"case":"both","joined":"old","service":"api","zone":"west"}',
+         100, 1.0),
+        ('label_join_metric', '{"case":"missing","service":"api"}',
+         100, 2.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3797,6 +3802,85 @@ assert angles == [('{"case":"one"}', 100, 180.0 / math.pi, math.pi / 180.0)]
 assert db.execute("WITH evaluation(ts) AS (SELECT :at) SELECT ts,pi() FROM evaluation", {
     'at': 100,
 }).fetchall() == [(100, math.pi)]
+
+label_join_sql = (
+    "WITH selected AS ("
+    " SELECT :metric AS name,labels,ts,value FROM timeless_grid("
+    " 'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    "), joined AS ("
+    " SELECT selected.*,COALESCE((SELECT group_concat(component,:separator)"
+    " FROM (SELECT CASE WHEN source.value='__name__' THEN selected.name"
+    " ELSE COALESCE((SELECT label.value FROM json_each(selected.labels) label"
+    " WHERE label.key=source.value),'') END component"
+    " FROM json_each(:source_labels_json) source"
+    " ORDER BY CAST(source.key AS INTEGER))), '') joined_value FROM selected"
+    ") SELECT CASE WHEN :destination='__name__' THEN NULLIF(joined_value,'')"
+    " ELSE name END name,CASE WHEN :destination='__name__' THEN labels"
+    " ELSE COALESCE((SELECT json_group_object(label_key,label_value) FROM ("
+    " SELECT existing.key label_key,existing.value label_value"
+    " FROM json_each(joined.labels) existing WHERE existing.key<>:destination"
+    " UNION ALL SELECT :destination,joined_value WHERE joined_value<>''"
+    " ORDER BY label_key)), '{}') END labels,ts,value FROM joined"
+    " ORDER BY labels,ts"
+)
+label_join_params = {
+    'metric': 'label_join_metric',
+    'filter_json': '{"case":"both"}',
+    'start': 100,
+    'end': 100,
+    'step': 1,
+    'lookback': 1,
+    'destination': 'joined',
+    'separator': '/',
+    'source_labels_json': '["service","zone"]',
+}
+joined_labels = db.execute(label_join_sql, label_join_params).fetchall()
+assert joined_labels == [(
+    'label_join_metric',
+    '{"case":"both","joined":"api/west","service":"api","zone":"west"}',
+    100,
+    1.0,
+)]
+missing_join = db.execute(
+    label_join_sql,
+    {
+        **label_join_params,
+        'filter_json': '{"case":"missing"}',
+    },
+).fetchone()
+assert missing_join[1] == '{"case":"missing","joined":"api/","service":"api"}'
+original_destination = db.execute(
+    label_join_sql,
+    {
+        **label_join_params,
+        'destination': 'zone',
+        'separator': ':',
+        'source_labels_json': '["zone","service"]',
+    },
+).fetchone()
+assert original_destination[1] == (
+    '{"case":"both","joined":"old","service":"api","zone":"west:api"}'
+)
+removed_destination = db.execute(
+    label_join_sql,
+    {
+        **label_join_params,
+        'source_labels_json': '[]',
+    },
+).fetchone()
+assert removed_destination[1] == (
+    '{"case":"both","service":"api","zone":"west"}'
+)
+renamed_metric = db.execute(
+    label_join_sql,
+    {
+        **label_join_params,
+        'destination': '__name__',
+        'separator': ':',
+        'source_labels_json': '["case","service"]',
+    },
+).fetchone()
+assert renamed_metric[0] == 'both:api'
 
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("

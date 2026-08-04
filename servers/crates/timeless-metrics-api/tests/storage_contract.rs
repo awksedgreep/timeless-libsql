@@ -9036,6 +9036,22 @@ async fn session_eight_promql_label_replace_pins_regex_labels_limits_and_reopen(
         from_name.1["data"]["result"][0]["metric"]["original"],
         "label_replace_metric_copy"
     );
+    let replacement_escapes = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"capture\"}, \"expanded\", \"$$$1-${missing}-$\", \"service\", \"(.*)\")",
+        base,
+    )
+    .await;
+    assert_eq!(
+        replacement_escapes.0,
+        StatusCode::OK,
+        "{}",
+        replacement_escapes.1
+    );
+    assert_eq!(
+        replacement_escapes.1["data"]["result"][0]["metric"]["expanded"],
+        "$api:west--$"
+    );
     let named = prom_query(
         &app,
         "label_replace(label_replace_metric{case=\"named\"}, \"region\", \"$region\", \"service\", \"(?P<region>[^-]+)-.*\")",
@@ -9136,7 +9152,38 @@ async fn session_eight_promql_label_replace_pins_regex_labels_limits_and_reopen(
         rejected.1
     );
 
-    drop((limited, app));
+    let response_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_response_bytes: 256,
+            ..PromQueryLimits::default()
+        },
+    );
+    let repeated_captures = "$1".repeat(100);
+    let inflated = prom_query(
+        &response_limited,
+        &format!(
+            "label_replace(label_replace_metric{{case=\"capture\"}}, \"expanded\", \"{repeated_captures}\", \"service\", \"(.*)\")"
+        ),
+        base,
+    )
+    .await;
+    assert_eq!(
+        inflated.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        inflated.1
+    );
+    assert!(
+        inflated.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("response-size limit"),
+        "{}",
+        inflated.1
+    );
+
+    drop((response_limited, limited, app));
     storage.shutdown().await.unwrap();
     drop(storage);
     let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
@@ -9150,6 +9197,241 @@ async fn session_eight_promql_label_replace_pins_regex_labels_limits_and_reopen(
         .await
         .1,
         capture.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_label_join_pins_sources_names_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_label_join.db");
+    let base = 1_700_890_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "label_join_metric{{case=\"both\",service=\"api\",zone=\"west\",joined=\"old\"}} 1 {}\n",
+            "label_join_metric{{case=\"both\",service=\"api\",zone=\"west\",joined=\"old\"}} 6 {}\n",
+            "label_join_metric{{case=\"missing\",service=\"api\"}} 2 {}\n",
+            "label_join_metric{{case=\"empty\",service=\"\",zone=\"\"}} 3 {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let joined = prom_query(
+        &app,
+        "label_join(label_join_metric{case=\"both\"}, \"joined\", \"/\", \"service\", \"zone\")",
+        base,
+    )
+    .await;
+    assert_eq!(joined.0, StatusCode::OK, "{}", joined.1);
+    assert_eq!(
+        joined.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {
+                "__name__": "label_join_metric",
+                "case": "both",
+                "joined": "api/west",
+                "service": "api",
+                "zone": "west"
+            },
+            "value": [base, "1"]
+        }])
+    );
+
+    for (query, expected) in [
+        (
+            "label_join(label_join_metric{case=\"missing\"}, \"joined\", \"/\", \"service\", \"zone\")",
+            serde_json::json!({
+                "__name__": "label_join_metric", "case": "missing", "joined": "api/", "service": "api"
+            }),
+        ),
+        (
+            "label_join(label_join_metric{case=\"empty\"}, \"joined\", \"/\", \"service\", \"zone\")",
+            serde_json::json!({
+                "__name__": "label_join_metric", "case": "empty", "joined": "/", "service": "", "zone": ""
+            }),
+        ),
+        (
+            "label_join(label_join_metric{case=\"both\"}, \"joined\", \"/\", \"service\", \"service\")",
+            serde_json::json!({
+                "__name__": "label_join_metric", "case": "both", "joined": "api/api", "service": "api", "zone": "west"
+            }),
+        ),
+        (
+            "label_join(label_join_metric{case=\"both\"}, \"original\", \":\", \"__name__\", \"case\")",
+            serde_json::json!({
+                "__name__": "label_join_metric", "case": "both", "joined": "old", "original": "label_join_metric:both", "service": "api", "zone": "west"
+            }),
+        ),
+        (
+            "label_join(label_join_metric{case=\"both\"}, \"__name__\", \":\", \"case\", \"service\")",
+            serde_json::json!({
+                "__name__": "both:api", "case": "both", "joined": "old", "service": "api", "zone": "west"
+            }),
+        ),
+        (
+            "label_join(label_join_metric{case=\"both\"}, \"zone\", \":\", \"zone\", \"service\")",
+            serde_json::json!({
+                "__name__": "label_join_metric", "case": "both", "joined": "old", "service": "api", "zone": "west:api"
+            }),
+        ),
+        (
+            "label_join(label_join_metric{case=\"both\"}, \"joined\", \"\")",
+            serde_json::json!({
+                "__name__": "label_join_metric", "case": "both", "service": "api", "zone": "west"
+            }),
+        ),
+        (
+            "label_join(label_join_metric{case=\"both\"}, \"bad-name\", \"\", \"service\", \"zone\")",
+            serde_json::json!({
+                "__name__": "label_join_metric", "bad-name": "apiwest", "case": "both", "joined": "old", "service": "api", "zone": "west"
+            }),
+        ),
+    ] {
+        let response = prom_query(&app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["metric"], expected);
+    }
+
+    let nested = prom_query(
+        &app,
+        "label_replace(label_join(label_join_metric{case=\"both\"}, \"node\", \"-\", \"service\", \"zone\"), \"region\", \"$1\", \"node\", \"[^-]+-(.*)\")",
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["metric"]["region"], "west");
+
+    let range = prom_query_range(
+        &app,
+        "label_join(label_join_metric{case=\"both\"}, \"joined\", \"/\", \"service\", \"zone\")",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0],
+        serde_json::json!({
+            "metric": {
+                "__name__": "label_join_metric", "case": "both", "joined": "api/west", "service": "api", "zone": "west"
+            },
+            "values": [[base, "1"], [base + 10, "6"]]
+        })
+    );
+
+    for query in [
+        "label_join(1, \"joined\", \"/\", \"service\")",
+        "label_join(label_join_metric[1m], \"joined\", \"/\", \"service\")",
+        "label_join(label_join_metric, \"joined\", 1, \"service\")",
+    ] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    let invalid = prom_query(
+        &app,
+        "label_join(label_join_metric, \"\", \"/\", \"service\")",
+        base,
+    )
+    .await;
+    assert_eq!(invalid.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", invalid.1);
+    assert_eq!(invalid.1["errorType"], "execution");
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "label_join(label_join_metric, \"joined\", \"/\", \"service\", \"zone\")",
+        base,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_response_bytes: 256,
+            ..PromQueryLimits::default()
+        },
+    );
+    let sources = (0..100)
+        .map(|_| "\"service\"")
+        .collect::<Vec<_>>()
+        .join(",");
+    let inflated = prom_query(
+        &response_limited,
+        &format!("label_join(label_join_metric{{case=\"both\"}}, \"joined\", \"/\", {sources})"),
+        base,
+    )
+    .await;
+    assert_eq!(
+        inflated.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        inflated.1
+    );
+    assert!(
+        inflated.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("response-size limit"),
+        "{}",
+        inflated.1
+    );
+    assert_eq!(
+        prom_query(
+            &response_limited,
+            "label_join(label_join_metric{case=\"both\"}, \"joined\", \"/\", \"service\", \"zone\")",
+            base,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    drop((response_limited, limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "label_join(label_join_metric{case=\"both\"}, \"joined\", \"/\", \"service\", \"zone\")",
+            base,
+        )
+        .await
+        .1,
+        joined.1
     );
     drop(reopened_app);
     reopened.shutdown().await.unwrap();

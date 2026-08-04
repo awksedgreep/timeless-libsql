@@ -904,7 +904,23 @@ public JSON functions can set or remove a known constant label, but ordinary
 SQLite has no portable RE2-compatible capture-and-expand operation. The
 `PQL-F09` matrix foundation is therefore honestly `none`, and the cookbook
 does not claim a general SQL equivalent or add an extension primitive solely
-for language syntax.
+for language syntax. Replacement expansion consumes the response byte budget
+incrementally, before amplified destination strings can accumulate.
+Ordered label joining is also bounded API composition:
+
+```promql
+label_join(http_requests_total, "node", "/", "service", "instance")
+```
+
+Source labels are read in argument order from the original series. Missing
+labels contribute empty strings, duplicate sources remain duplicated, and
+zero source labels are valid. An empty joined value removes the destination;
+`__name__` can be a source or destination. Values, timestamps, and the metric
+name are otherwise preserved. An empty destination returns an `execution`
+error. Direct SQLite/libSQL users can perform the same arbitrary-arity
+operation with the parameterized public-JSON statement in
+[`SQL-PROM-046`](QUERY_SQL_EQUIVALENTS.md#sql-prom-046-label_join). Joined
+destination strings use the same incremental response byte budget.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

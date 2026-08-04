@@ -387,6 +387,7 @@ pub(crate) enum PromPlan {
     Unary(Box<PromPlan>),
     Function(PromFunctionPlan),
     LabelReplace(PromLabelReplacePlan),
+    LabelJoin(PromLabelJoinPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -520,6 +521,14 @@ pub(crate) struct PromLabelReplacePlan {
     replacement: String,
     source: String,
     pattern: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromLabelJoinPlan {
+    inner: Box<PromPlan>,
+    destination: String,
+    separator: String,
+    sources: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -804,6 +813,7 @@ impl PromPlan {
             Self::Unary(inner) => inner.value_type(),
             Self::Function(_) => PromValueType::Vector,
             Self::LabelReplace(_) => PromValueType::Vector,
+            Self::LabelJoin(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1261,10 +1271,45 @@ fn lower_promql_expr(
             }
             Ok(PromPlan::LabelReplace(PromLabelReplacePlan {
                 inner: Box::new(inner),
-                destination: promql_string_argument(destination, "destination label")?,
-                replacement: promql_string_argument(replacement, "replacement")?,
-                source: promql_string_argument(source, "source label")?,
-                pattern: promql_string_argument(pattern, "regular expression")?,
+                destination: promql_string_argument(
+                    destination,
+                    "label_replace",
+                    "destination label",
+                )?,
+                replacement: promql_string_argument(replacement, "label_replace", "replacement")?,
+                source: promql_string_argument(source, "label_replace", "source label")?,
+                pattern: promql_string_argument(
+                    pattern,
+                    "label_replace",
+                    "regular expression",
+                )?,
+            }))
+        }
+        promql::Expr::Call(call) if call.func.name == "label_join" => {
+            let [argument, destination, separator, sources @ ..] = call.args.args.as_slice()
+            else {
+                return Err(
+                    "label_join requires an instant vector, destination label, separator, and optional source labels"
+                        .into(),
+                );
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err("label_join requires an instant vector".into());
+            }
+            let sources = sources
+                .iter()
+                .map(|source| promql_string_argument(source, "label_join", "source label"))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(PromPlan::LabelJoin(PromLabelJoinPlan {
+                inner: Box::new(inner),
+                destination: promql_string_argument(
+                    destination,
+                    "label_join",
+                    "destination label",
+                )?,
+                separator: promql_string_argument(separator, "label_join", "separator")?,
+                sources,
             }))
         }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
@@ -1399,9 +1444,13 @@ fn lower_promql_expr(
     }
 }
 
-fn promql_string_argument(argument: &promql::Expr, name: &str) -> Result<String, String> {
+fn promql_string_argument(
+    argument: &promql::Expr,
+    function: &str,
+    name: &str,
+) -> Result<String, String> {
     let promql::Expr::StringLiteral(value) = argument else {
-        return Err(format!("label_replace {name} must be a string literal"));
+        return Err(format!("{function} {name} must be a string literal"));
     };
     Ok(value.val.clone())
 }
@@ -1623,6 +1672,7 @@ fn lower_promql_subquery(
             | PromPlan::Unary(_)
             | PromPlan::Function(_)
             | PromPlan::LabelReplace(_)
+            | PromPlan::LabelJoin(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -2999,6 +3049,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::LabelJoin(label_join) => execute_prometheus_label_join(
+            conn,
+            features,
+            label_join,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -3965,6 +4028,7 @@ fn execute_prometheus_label_replace(
     else {
         unreachable!("label_replace input type was checked while lowering")
     };
+    let mut generated_label_bytes = 0_usize;
     for item in &mut series {
         check_cancelled(cancelled)?;
         let source = item
@@ -3975,11 +4039,23 @@ fn execute_prometheus_label_replace(
         let Some(captures) = pattern.captures(&source) else {
             continue;
         };
-        let mut replacement = String::new();
-        captures.expand(&label_replace.replacement, &mut replacement);
+        let remaining = limits
+            .max_response_bytes
+            .saturating_sub(generated_label_bytes);
+        let replacement = expand_prometheus_replacement_bounded(
+            &captures,
+            &label_replace.replacement,
+            remaining,
+            limits,
+        )?;
         if replacement.is_empty() {
             item.labels.remove(&label_replace.destination);
         } else {
+            generated_label_bytes = generated_label_bytes
+                .checked_add(label_replace.destination.len())
+                .and_then(|bytes| bytes.checked_add(replacement.len()))
+                .filter(|bytes| *bytes <= limits.max_response_bytes)
+                .ok_or_else(|| prometheus_response_limit_error(limits))?;
             item.labels
                 .insert(label_replace.destination.clone(), replacement);
         }
@@ -3991,6 +4067,162 @@ fn execute_prometheus_label_replace(
         intermediate_points,
         limits,
         cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_label_join(
+    conn: &Connection,
+    features: QueryFeatures,
+    label_join: &PromLabelJoinPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    if label_join.destination.is_empty() {
+        return Err("invalid destination label name in label_join(): \"\"".into());
+    }
+    let child = execute_prometheus(
+        conn,
+        features,
+        &label_join.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let frame_bytes = child.frame_bytes;
+    let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("label_join input type was checked while lowering")
+    };
+    let mut generated_label_bytes = 0_usize;
+    for item in &mut series {
+        check_cancelled(cancelled)?;
+        let mut joined = String::new();
+        let remaining = limits
+            .max_response_bytes
+            .saturating_sub(generated_label_bytes);
+        for (index, source) in label_join.sources.iter().enumerate() {
+            if index > 0 {
+                push_prometheus_label_fragment(
+                    &mut joined,
+                    &label_join.separator,
+                    remaining,
+                    limits,
+                )?;
+            }
+            if let Some(value) = item.labels.get(source) {
+                push_prometheus_label_fragment(&mut joined, value, remaining, limits)?;
+            }
+        }
+        if joined.is_empty() {
+            item.labels.remove(&label_join.destination);
+        } else {
+            generated_label_bytes = generated_label_bytes
+                .checked_add(label_join.destination.len())
+                .and_then(|bytes| bytes.checked_add(joined.len()))
+                .filter(|bytes| *bytes <= limits.max_response_bytes)
+                .ok_or_else(|| prometheus_response_limit_error(limits))?;
+            item.labels.insert(label_join.destination.clone(), joined);
+        }
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn expand_prometheus_replacement_bounded(
+    captures: &regex::Captures<'_>,
+    replacement: &str,
+    limit: usize,
+    limits: PromQueryLimits,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut remaining = replacement;
+    while let Some(dollar) = remaining.find('$') {
+        push_prometheus_label_fragment(&mut output, &remaining[..dollar], limit, limits)?;
+        remaining = &remaining[dollar + 1..];
+        if let Some(rest) = remaining.strip_prefix('$') {
+            push_prometheus_label_fragment(&mut output, "$", limit, limits)?;
+            remaining = rest;
+            continue;
+        }
+        let (reference, rest) = if let Some(braced) = remaining.strip_prefix('{') {
+            let Some(end) = braced.find('}') else {
+                push_prometheus_label_fragment(&mut output, "$", limit, limits)?;
+                continue;
+            };
+            (&braced[..end], &braced[end + 1..])
+        } else {
+            let end = remaining
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .count();
+            if end == 0 {
+                push_prometheus_label_fragment(&mut output, "$", limit, limits)?;
+                continue;
+            }
+            (&remaining[..end], &remaining[end..])
+        };
+        remaining = rest;
+        let captured =
+            if !reference.is_empty() && reference.bytes().all(|byte| byte.is_ascii_digit()) {
+                reference
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| captures.get(index))
+            } else {
+                captures.name(reference)
+            };
+        if let Some(captured) = captured {
+            push_prometheus_label_fragment(&mut output, captured.as_str(), limit, limits)?;
+        }
+    }
+    push_prometheus_label_fragment(&mut output, remaining, limit, limits)?;
+    Ok(output)
+}
+
+fn push_prometheus_label_fragment(
+    output: &mut String,
+    fragment: &str,
+    limit: usize,
+    limits: PromQueryLimits,
+) -> Result<(), String> {
+    if output.len().saturating_add(fragment.len()) > limit {
+        return Err(prometheus_response_limit_error(limits));
+    }
+    output.push_str(fragment);
+    Ok(())
+}
+
+fn prometheus_response_limit_error(limits: PromQueryLimits) -> String {
+    format!(
+        "query exceeded the maximum response-size limit of {} bytes",
+        limits.max_response_bytes
     )
 }
 
