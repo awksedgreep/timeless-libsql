@@ -889,3 +889,33 @@ range evaluation, cumulative limits, cancellation, and cold reopen. The
 ordinary public-SQL recipe is explicitly finite-only rather than obscuring
 SQLite's NaN-to-NULL boundary. Storage format, batching, compression, indexes,
 rollups, retention, transactions, migrations, and packed frames are unchanged.
+
+## Session 5 `PQL-O16` counts by sample value
+
+The checked-in
+[`2026-08-04_session5_pql_o16.json`](evidence/2026-08-04_session5_pql_o16.json)
+was captured from exact build `01d9d32fb6bc9d3b056c60c69ad864dc8cd63f1e`.
+The narrow shape counts one selected host value. The deliberately adversarial
+wide shape groups 512 input series by service and distinct value at each of
+four steps, retaining all 2,048 points across 1,028 output label sets.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact-host `count_values` | 1 | 113 | 0.375 | 0.481 | 0.486 | 1 | 32 | 524 |
+| grouped wide, 512 series × four steps | 2,048 | 91,789 | 5.074 | 5.291 | 5.550 | 2,048 | 16,384 | 268,304 |
+
+Unlike scalar reductions, the wide fixture intentionally cannot collapse
+cardinality because its values differ. The 91,789-byte response and 1,028
+matrix series are the honest language result, not storage amplification.
+Result-point and response-byte limits bound it; grouping consumes the one
+admitted child vector, uses memory proportional to bounded output, and makes
+no additional extension read.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and RSS HWM was 37,332
+KiB. Pinned Prometheus and real-extension cases cover grouping, input-label
+overwrite, fixed shortest finite formatting, exponent expansion, signed zero,
+infinities, NaN, invalid label names, range counts, output limits,
+cancellation, and cold reopen. Direct SQL groups the public grid's raw numeric
+value; no extension primitive, format, batching, compression, index, rollup,
+retention, transaction, or migration behavior changed.
