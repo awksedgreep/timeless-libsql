@@ -2077,3 +2077,38 @@ labels/names, nested ranges, errors, shutdown, and cold reopen. `QSF-057`
 records the cross-language overflow boundary. No extension, frame, batching,
 compression, index, rollup, retention, transaction, migration, or storage
 contract changed.
+
+## Session 8 `PQL-F18` UTC calendar extraction, part two
+
+The checked-in
+[`2026-08-04_session8_pql_f18.json`](evidence/2026-08-04_session8_pql_f18.json)
+was captured from exact extension and server build
+`67c0ffe0d6caea8d74fba829f46fdd683ec88527`. The narrow shape extracts the
+year from one selected series; the wide shape extracts one-indexed day-of-year
+values from 512 selected series.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, instant `year(metric{host="h0000"})` | 1 | 134 | 0.447 | 0.727 | 0.983 | 1 | 31 | 1 | 32 | 131 |
+| 512 series, instant `day_of_year(metric)` | 512 | 36,158 | 4.036 | 4.451 | 5.064 | 512 | 15,872 | 512 | 16,384 | 53,831 |
+
+These four functions reuse the same bounded calendar plan as F17. Gregorian
+leap-year and civil-date arithmetic run over the already-decoded values; the
+wide shape has exactly the selector's candidate chunks, decoded points,
+returned points, and packed bytes. There is no second read, new frame, or
+storage amplification. At 4.451 ms wide p95, API-local composition remains
+the correct boundary. Direct SQLite/libSQL users have the executable ordinary-
+SQL and leap-year foundation in `SQL-PROM-053`; no extension primitive is
+justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 35,928 KiB. No benchmark request required cancellation; focused work-
+limit and shared dropped-request regressions pin bounded execution,
+cancellation, and reader reuse. Pinned oracle and real-extension tests cover
+one-indexed day-of-year and month, leap February length, UTC year, optional
+evaluation-time defaults, fractional truncation, NaN/infinity/overflow
+sentinels, labels/names, nested ranges, errors, shutdown, and cold reopen.
+The previously recorded `QSF-057` conversion boundary applies unchanged. No
+extension, frame, batching, compression, index, rollup, retention,
+transaction, migration, or storage contract changed.
