@@ -800,3 +800,32 @@ HWM was 36,536 KiB. Pinned Prometheus API and promtool fixtures cover `by`,
 real-extension regression adds empty grouping, range grids, shutdown, and
 cold reopen. Batching, compression, indexes, rollups, retention, transactions,
 migrations, and packed formats are unchanged.
+
+## Session 5 `PQL-O13` population dispersion
+
+The checked-in
+[`2026-08-04_session5_pql_o13.json`](evidence/2026-08-04_session5_pql_o13.json)
+was captured from exact build `b211dfbee6a1fad6e45d99222d10f9f79add6174`.
+The narrow shape computes `stdvar` for one host; the wide shape computes
+`stddev` for 512 series grouped into two services over four timestamps.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact-host `stdvar` | 1 | 115 | 0.316 | 0.865 | 0.959 | 1 | 32 | 524 |
+| all-series grouped `stddev` | 8 | 417 | 3.956 | 5.890 | 10.636 | 512 | 16,384 | 268,304 |
+
+Storage work and the 2,048-point wide intermediate charge are identical to
+the other cross-series aggregations. The wide run retained a machine-local
+tail above its 3.956 ms median; exact counters show no extra read, candidate,
+decode, or allocation path. The result is recorded rather than hidden, and
+does not motivate an extension primitive. Each group uses constant memory and
+Prometheus's one-pass population-variance update.
+
+The run durably completed all 18,496 fixture points with zero failed or queued
+work, retained the 672,688-byte SQLite/WAL/SHM footprint, and reached 37,088
+KiB RSS HWM. Oracle and real-extension cases cover grouped population
+variance/deviation, singleton zero, NaN/infinity propagation, range grids,
+cancellation, and cold reopen. The executable public-SQL second-moment recipe
+is explicitly limited to finite, well-scaled values; no storage, packed-frame,
+batching, compression, index, rollup, retention, transaction, or migration
+behavior changed.
