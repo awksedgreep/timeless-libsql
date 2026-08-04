@@ -5362,6 +5362,30 @@ async fn session_six_promql_last_over_time_preserves_name_ieee_limits_and_reopen
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_six_promql_first_over_time_is_explicitly_experimental() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_six_first_over_time_experimental.db");
+    let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let app = router(storage.clone());
+
+    let response = prom_query(&app, "first_over_time(vector(1)[1m:])", 2).await;
+    assert_eq!(response.0, StatusCode::BAD_REQUEST, "{}", response.1);
+    assert_eq!(response.1["status"], "error");
+    assert_eq!(response.1["errorType"], "bad_data");
+    assert_eq!(
+        response.1["error"],
+        "invalid parameter \"query\": first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
+    );
+    assert_eq!(response.1.as_object().unwrap().len(), 3);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

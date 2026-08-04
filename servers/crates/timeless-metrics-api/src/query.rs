@@ -898,6 +898,10 @@ fn lower_promql_expr(
             lookback,
             depth + 1,
         )?)),
+        promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
+            "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
+                .into(),
+        ),
         promql::Expr::Call(call)
             if matches!(
                 call.func.name,

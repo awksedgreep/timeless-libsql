@@ -945,6 +945,17 @@
   ],
   "cases": [
     {
+      "id": "PQL-R07-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "first_over_time(vector(1)[1m:])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"first_over_time\" is not enabled"
+      }
+    },
+    {
       "id": "PQL-O03-scalar-comparison-bool-true",
       "endpoint": "/api/v1/query",
       "params": {"query": "1 < bool 2", "time": "2"},
