@@ -1424,3 +1424,36 @@ constant infinities, singleton omission, invalid types, work limits,
 shutdown, and cold reopen. No extension signature, storage/frame format,
 batching, compression, index, rollup, retention, transaction, or migration
 behavior changed, and this row produced no new storage finding.
+
+## Session 7 `PQL-R18` float-gauge linear forecast
+
+The checked-in
+[`2026-08-04_session7_pql_r18.json`](evidence/2026-08-04_session7_pql_r18.json)
+was captured from exact extension and server build
+`84c6c4a00fbbb197d54a295b35a6d3e9d1452829`. Both measured shapes evaluate
+the scalar horizon on the outer grid, perform one bounded public packed raw
+read, and apply the Rust PromQL evaluation-time-centered compensated
+least-squares forecast.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `predict_linear(...[5m], 60)` | 1 | 132 | 0.537 | 0.821 | 0.956 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `predict_linear(...[5m], 60)` | 2,048 | 67,644 | 3.790 | 4.336 | 4.442 | 4 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly the same 16,384 bounded raw gauge
+samples as `deriv`, emits 2,048 forecasts, and materializes only the four
+scalar horizon values—not a series matrix. The 4.336 ms p95 and identical
+storage work support retaining public packed raw plus the executable finite
+SQL recipe rather than adding a forecast-specific extension primitive.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,748 KiB. No benchmark request required cancellation; the shared
+range-executor and regression-fold tests cover cancellation and reader reuse.
+Pinned oracle and real-extension regressions cover positive, zero, negative,
+expression, NaN, and infinite horizons; linear, nonlinear, constant, and
+constant-infinite inputs; exact modifier/evaluation-time anchoring;
+subqueries; singleton omission; invalid arity/types; limits; shutdown; and
+cold reopen. No extension signature, storage/frame format, batching,
+compression, index, rollup, retention, transaction, or migration behavior
+changed, and this row produced no new storage finding.
