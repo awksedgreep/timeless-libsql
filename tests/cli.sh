@@ -3843,6 +3843,45 @@ assert rate_values == [
     ('{"case":"steady"}', 60, 10.0),
 ]
 
+irate_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),ranked AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,raw.ts sample_ts,raw.value,"
+    " ROW_NUMBER() OVER (PARTITION BY raw.series_id,evaluation.ts"
+    " ORDER BY raw.ts DESC) recency"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    "),final_pair AS ("
+    " SELECT series_id,labels,ts,"
+    " MAX(CASE WHEN recency=1 THEN sample_ts END) last_ts,"
+    " MAX(CASE WHEN recency=1 THEN value END) last_value,"
+    " MAX(CASE WHEN recency=2 THEN sample_ts END) previous_ts,"
+    " MAX(CASE WHEN recency=2 THEN value END) previous_value"
+    " FROM ranked WHERE recency<=2 GROUP BY series_id,labels,ts"
+    ") SELECT labels,ts,CASE WHEN last_value<previous_value THEN last_value"
+    " ELSE last_value-previous_value END/(last_ts-previous_ts) value"
+    " FROM final_pair WHERE previous_ts IS NOT NULL AND last_ts>previous_ts"
+    " ORDER BY labels,ts"
+)
+irate_values = db.execute(
+    irate_sql,
+    {
+        'metric': 'rate_counter',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+    },
+).fetchall()
+assert irate_values == [
+    ('{"case":"reset"}', 60, 1.0),
+    ('{"case":"steady"}', 60, 10.0),
+]
+
 minimum = db.execute(
     "SELECT value FROM timeless_window("
     "'metrics','min_window',NULL,30,30,1,20,'min')"

@@ -839,9 +839,11 @@ storage statistic, but neither it nor the native `rate` fold implements
 Prometheus edge extrapolation and zero-point clamping. For exact float-series
 PromQL `rate`, use executable recipe
 [`SQL-PROM-029`](QUERY_SQL_EQUIVALENTS.md#sql-prom-029-rate) or the Rust metrics
-API. Prefer the native kernel only when its explicitly mechanical semantics are
-the desired contract; it decompresses once in the engine and ships grid points
-rather than raw samples over sqld/HTTP.
+API. Exact last-two-sample PromQL `irate` is documented separately as
+[`SQL-PROM-030`](QUERY_SQL_EQUIVALENTS.md#sql-prom-030-irate). Prefer the native
+kernel only when its explicitly mechanical semantics are the desired contract;
+it decompresses once in the engine and ships grid points rather than raw
+samples over sqld/HTTP.
 
 ## Top-k per bucket
 

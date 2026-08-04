@@ -367,6 +367,8 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
         ("zero", [(1.0, 10_000), (101.0, 30_000)]),
         ("singleton", [(5.0, 50_000)]),
         ("nan", [(float("nan"), 20_000), (2.0, 40_000)]),
+        ("pos_inf", [(1.0, 20_000), (float("inf"), 40_000)]),
+        ("neg_inf", [(1.0, 20_000), (float("-inf"), 40_000)]),
     ]:
         write_request += series(
             "oracle_counter",

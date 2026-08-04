@@ -405,6 +405,7 @@ enum PromRangeOp {
     StdDev,
     StdVar,
     Rate,
+    IRate,
     Last,
 }
 
@@ -421,6 +422,7 @@ impl PromRangeOp {
             Self::StdDev => "stddev_over_time",
             Self::StdVar => "stdvar_over_time",
             Self::Rate => "rate",
+            Self::IRate => "irate",
             Self::Last => "last_over_time",
         }
     }
@@ -433,7 +435,12 @@ impl PromRangeOp {
             Self::Sum => Some("sum"),
             Self::Count => Some("count"),
             Self::Present => Some("count"),
-            Self::Quantile | Self::StdDev | Self::StdVar | Self::Rate | Self::Last => None,
+            Self::Quantile
+            | Self::StdDev
+            | Self::StdVar
+            | Self::Rate
+            | Self::IRate
+            | Self::Last => None,
         }
     }
 
@@ -446,7 +453,7 @@ impl PromRangeOp {
             Self::Count => Some(PromAggregateOp::Count),
             Self::StdDev => Some(PromAggregateOp::StdDev),
             Self::StdVar => Some(PromAggregateOp::StdVar),
-            Self::Present | Self::Quantile | Self::Rate | Self::Last => None,
+            Self::Present | Self::Quantile | Self::Rate | Self::IRate | Self::Last => None,
         }
     }
 
@@ -966,6 +973,7 @@ fn lower_promql_expr(
                     | "stddev_over_time"
                     | "stdvar_over_time"
                     | "rate"
+                    | "irate"
                     | "last_over_time"
             ) =>
         {
@@ -979,6 +987,7 @@ fn lower_promql_expr(
                 "stddev_over_time" => PromRangeOp::StdDev,
                 "stdvar_over_time" => PromRangeOp::StdVar,
                 "rate" => PromRangeOp::Rate,
+                "irate" => PromRangeOp::IRate,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
@@ -4399,6 +4408,9 @@ fn prometheus_range_reduction(
     if matches!(op, PromRangeOp::Rate) {
         return prometheus_extrapolated_rate(points, range_start, range_end, true, true, cancelled);
     }
+    if matches!(op, PromRangeOp::IRate) {
+        return prometheus_instant_delta(points, true, cancelled);
+    }
     if matches!(op, PromRangeOp::Quantile) {
         let quantile = parameter
             .ok_or_else(|| "quantile_over_time is missing its scalar parameter".to_string())?;
@@ -4473,6 +4485,33 @@ fn prometheus_extrapolated_rate(
     }
     check_cancelled(cancelled)?;
     Ok(Some(result * factor))
+}
+
+fn prometheus_instant_delta(
+    points: &[(i64, f64)],
+    is_rate: bool,
+    cancelled: &AtomicBool,
+) -> Result<Option<f64>, String> {
+    if points.len() < 2 {
+        return Ok(None);
+    }
+    let previous = points[points.len() - 2];
+    let last = points[points.len() - 1];
+    let sampled_interval = last.0 - previous.0;
+    if sampled_interval <= 0 {
+        return Ok(None);
+    }
+    check_cancelled(cancelled)?;
+    let mut result = if is_rate && last.1 < previous.1 {
+        last.1
+    } else {
+        last.1 - previous.1
+    };
+    if is_rate {
+        result /= sampled_interval as f64 / 1_000.0;
+    }
+    check_cancelled(cancelled)?;
+    Ok(Some(result))
 }
 
 fn empty_prometheus_matrix(limits: PromQueryLimits) -> Result<ReadOutput, String> {
@@ -5042,6 +5081,26 @@ fn execute_prometheus_range_raw(
                         )?;
                         check_cancelled(cancelled)?;
                         value
+                    } else if matches!(op, PromRangeOp::IRate) {
+                        if hi - lo < 2 {
+                            None
+                        } else {
+                            let values = [
+                                (
+                                    seconds_to_millis(
+                                        series.timestamp(raw.frame.as_deref(), hi - 2)?,
+                                    ),
+                                    series.value(raw.frame.as_deref(), hi - 2)?,
+                                ),
+                                (
+                                    seconds_to_millis(
+                                        series.timestamp(raw.frame.as_deref(), hi - 1)?,
+                                    ),
+                                    series.value(raw.frame.as_deref(), hi - 1)?,
+                                ),
+                            ];
+                            prometheus_instant_delta(&values, true, cancelled)?
+                        }
                     } else if matches!(op, PromRangeOp::Last) {
                         Some(series.value(raw.frame.as_deref(), hi - 1)?)
                     } else {
@@ -6057,6 +6116,37 @@ mod tests {
             0,
             60_000,
             true,
+            true,
+            &cancelled,
+        )
+        .unwrap()
+        .unwrap()
+        .is_nan());
+    }
+
+    #[test]
+    fn prometheus_irate_uses_only_the_last_two_samples_and_requires_nonzero_interval() {
+        let cancelled = AtomicBool::new(false);
+        for (points, expected) in [
+            (
+                vec![(10_000, 100.0), (30_000, 300.0), (50_000, 500.0)],
+                Some(10.0),
+            ),
+            (
+                vec![(10_000, 100.0), (30_000, 150.0), (50_000, 20.0)],
+                Some(1.0),
+            ),
+            (vec![(30_000, 100.0), (40_000, 200.0)], Some(10.0)),
+            (vec![(50_000, 5.0)], None),
+            (vec![(50_000, 5.0), (50_000, 6.0)], None),
+        ] {
+            assert_eq!(
+                prometheus_instant_delta(&points, true, &cancelled).unwrap(),
+                expected
+            );
+        }
+        assert!(prometheus_instant_delta(
+            &[(20_000, f64::NAN), (40_000, 2.0)],
             true,
             &cancelled,
         )

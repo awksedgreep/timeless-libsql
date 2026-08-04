@@ -1136,8 +1136,102 @@
       "drop_metric_name": true
     },
     {
+      "id": "PQL-R12-rate-positive-infinity",
+      "query": "rate(oracle_counter{case=\"pos_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "pos_inf", "job": "oracle"},
+      "expected_values": ["+Inf"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-negative-infinity",
+      "query": "rate(oracle_counter{case=\"neg_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "neg_inf", "job": "oracle"},
+      "expected_values": ["-Inf"],
+      "drop_metric_name": true
+    },
+    {
       "id": "PQL-R12-rate-singleton-omitted",
       "query": "rate(oracle_counter{case=\"singleton\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-R13-irate-steady-last-two",
+      "query": "irate(oracle_counter{case=\"steady\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-reset-uses-last-value",
+      "query": "irate(oracle_counter{case=\"reset\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-sparse-interval",
+      "query": "irate(oracle_counter{case=\"sparse\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "sparse", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-open-left-boundary",
+      "query": "irate(oracle_counter{case=\"steady\"}[40s])",
+      "evaluation_offset_ms": 50000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-offset-keeps-output-time",
+      "query": "irate(oracle_counter{case=\"steady\"}[40s] offset 10s)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-over-subquery",
+      "query": "irate(oracle_counter{case=\"steady\"}[40s:10s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-nan",
+      "query": "irate(oracle_counter{case=\"nan\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "nan", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-positive-infinity",
+      "query": "irate(oracle_counter{case=\"pos_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "pos_inf", "job": "oracle"},
+      "expected_values": ["+Inf"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-negative-infinity",
+      "query": "irate(oracle_counter{case=\"neg_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "neg_inf", "job": "oracle"},
+      "expected_values": ["-Inf"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R13-irate-singleton-omitted",
+      "query": "irate(oracle_counter{case=\"singleton\"}[60s])",
       "evaluation_offset_ms": 60000,
       "expected_empty": true
     },
