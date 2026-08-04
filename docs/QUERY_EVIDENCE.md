@@ -1782,3 +1782,39 @@ tests cover conversion order, scalar instant and range types, finite values,
 NaN, infinities, signed zero, range grids, nesting, invalid types, limits,
 shutdown, and cold reopen. No new storage finding arose, and no extension or
 storage contract changed.
+
+## Session 8 `PQL-F09` label replacement
+
+The checked-in
+[`2026-08-04_session8_pql_f09.json`](evidence/2026-08-04_session8_pql_f09.json)
+was captured from exact extension and server build
+`356a4e1412a845adcbae2ddd7a1b8a17e4aaa202`. Both shapes perform one bounded
+public packed-raw read, decode the selected vector once, and apply the
+full-match capture expansion in place.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `label_replace(metric, "node", "$1", "host", "(.*)")` | 1 | 179 | 0.755 | 0.983 | 1.011 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, same replacement | 2,048 | 91,684 | 4.213 | 4.570 | 5.091 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The label operation adds no second read and no point amplification. Candidate
+chunks, decoded and returned samples, and packed extension payload bytes are
+identical to neighboring one-vector transforms; the larger response is the
+expected repeated `node` label. At 4.570 ms wide p95, bounded Rust language
+composition remains the correct boundary. SQLite has no portable
+RE2-compatible capture-and-expand operation, and these counters provide no
+evidence for adding a PromQL-specific extension primitive.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 36,300 KiB. No benchmark request required cancellation; the focused limit
+and cancellation regressions pin reader reuse. Pinned oracle and real-
+extension tests cover numbered and named captures, missing and empty sources,
+unmatched identity, destination overwrite and deletion, metric names,
+Prometheus 3 UTF-8 label names, full-match dot-all behavior, range grids,
+nesting, errors, limits, shutdown, and cold reopen. `QSF-053` records the
+upstream label-name scheme and honest lack of a complete SQL foundation;
+`QSF-054` records and fixes standard exposition label escapes on an uncommon
+allocation-only path. No extension signature, storage/frame format, batching,
+compression, index, rollup, retention, transaction, or migration contract
+changed.
