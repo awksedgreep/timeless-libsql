@@ -643,3 +643,42 @@ adds range behavior, cumulative-work rejection, shutdown, and cold reopen.
 Section 33 executes both JSON-label SQL joins through public grids. No
 extension opcode, private table, storage format, batching, compression,
 rollup, retention, transaction, or migration behavior changed.
+
+## Session 4 `PQL-O07` group-matching result
+
+The checked-in
+[`2026-08-04_session4_pql_o07.json`](evidence/2026-08-04_session4_pql_o07.json)
+was captured from exact extension and server build
+`b00c93aa240f3ec1295d2591cef7b8631514b895`. This fixture adds two
+32-point service-factor series—one unique side for each of the `api` and
+`worker` groups—to the established 512-series workload. The narrow shape uses
+one CPU series against both factors with `group_left(team)`; the wide shape
+uses the two factors against all CPU series with `group_right(team)`.
+
+| shape | final points | intermediate points/query | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `+ group_left(team)` | 1 | 3 | 150 | 0.626 | 0.986 | 1.181 | 96 |
+| 2 one-side × 512 many-side × four points, `- group_right(team)` | 2,048 | 2,056 | 78,618 | 6.749 | 7.217 | 7.497 | 16,448 |
+
+Each request reads each operand exactly once. The wide shape considers 514
+candidate chunks, decodes 512 CPU plus two factor series, and charges 2,048
+many-side plus eight one-side child points as intermediate work. It is faster
+than a 512-by-512 self-join because the one side is genuinely small; no group
+operation triggers per-many-series storage reads. The retained result bytes
+include the copied `team` label.
+
+The run durably completed all 118,521 main and boundary-fixture points with
+zero failed or queued work. The two added persisted series raised logical
+payload bytes to 64,361, while total SQLite/WAL/SHM storage remained 672,688
+bytes. Whole-process RSS HWM was 35,500 KiB. Intermediate, result, response,
+deadline, and cancellation limits cover both child vectors, per-step matching,
+label construction, uniqueness checks, and serialization.
+
+Prometheus 3.13.2 API and promtool fixtures pin both group directions,
+operation direction, comparison left-value/right-name behavior, included and
+absent labels, unique-side cardinality, and post-copy result uniqueness. The
+real-extension regression adds range grids, exact ordering, cumulative-work
+rejection, shutdown, and cold reopen. Section 33 executes both joins plus a
+one-side uniqueness preflight using public grids. No extension opcode, private
+table, storage format, batching, compression, rollup, retention, transaction,
+or migration behavior changed.
