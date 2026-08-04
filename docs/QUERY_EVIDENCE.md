@@ -338,6 +338,7 @@ fixtures with zero failed or queued points. Live SQLite/WAL/SHM storage was
 672,688 bytes. Each query used only `timeless_series` and bounded
 `timeless_raw_frame` calls; no shadow table, storage format, batching,
 compression, rollup, retention, transaction, or migration behavior changed.
+
 The real-extension contract covers instant/range/function use, missing labels,
 invalid empty-matching selectors, result/catalog limits, cancellation, clean
 shutdown, and cold reopen. The pinned Prometheus rule oracle matches exact
@@ -451,3 +452,42 @@ work-limit error, public intermediate counter, clean shutdown, and cold
 reopen. Section 45 executes the equivalent aligned selector grid using only
 public SQL. No extension opcode, private table, storage format, batching,
 compression, rollup, retention, transaction, or migration behavior changed.
+
+## Session 4 `PQL-O01` unary-minus result
+
+The checked-in
+[`2026-08-04_session4_pql_o01.json`](evidence/2026-08-04_session4_pql_o01.json)
+was captured from exact extension and server build
+`20583fb8e95f92a9968a5990a5983d0948601605`. The narrow shape negates one
+exact-host instant sample. The wide shape negates a four-point range grid for
+all 512 series.
+
+| shape | final points | intermediate points/query | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `-metric` | 1 | 1 | 133 | 0.448 | 0.802 | 0.880 | 32 |
+| 512 series × four points, `-metric` | 2,048 | 2,048 | 69,668 | 4.348 | 4.810 | 5.242 | 16,384 |
+
+The same-run comparable 512-series × four-point selector grid measured
+3.076/3.454/4.949 ms p50/p95/p99. Unary composition therefore adds 1.272 ms
+p50 and 1.355 ms p95 for bounded JSON decode, value negation, name removal,
+and canonical re-encoding. Candidate chunks, payload bytes, decoded points,
+and returned storage points are identical between the two shapes: negation
+causes no additional extension read. Its response is smaller because the
+pinned Prometheus rule removes `__name__` from every output vector.
+
+The run durably completed all 118,457 main and limit-fixture points with zero
+failed or queued work. Live SQLite/WAL/SHM storage remained 672,688 bytes and
+whole-process RSS HWM was 35,536 KiB, below Session 3's 36,332 KiB run. Child
+points are reported through `api_promql_intermediate_points` and share the
+hard cumulative work limit; cancellation is checked during decode,
+transformation, and output. Ordinary selector/window hot paths remain
+streaming.
+
+Prometheus 3.13.2 API and promtool fixtures pin scalars, range grids, nested
+range functions, unary nodes inside subqueries, double negation, type errors,
+IEEE strings, timestamps, and metric-name/non-name-label policy. The
+real-extension regression adds limits, shutdown, and cold reopen. Section 33
+executes ordinary SQLite unary arithmetic through the public grid. No
+extension opcode, private table, storage format, batching, compression,
+rollup, retention, transaction, or migration behavior changed; the measured
+host-only cost does not justify an extension primitive.
