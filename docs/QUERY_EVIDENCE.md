@@ -2041,3 +2041,39 @@ stored NaN, instant and range results, errors, shutdown, and cold reopen.
 `QSF-056` records the provenance boundary. No storage, frame, batching,
 compression, index, rollup, retention, transaction, migration, or extension
 contract changed.
+
+## Session 8 `PQL-F17` UTC calendar extraction, part one
+
+The checked-in
+[`2026-08-04_session8_pql_f17.json`](evidence/2026-08-04_session8_pql_f17.json)
+was captured from exact extension and server build
+`9867a85aa406c759c9c5f8edf804650de94dd6ea`. The narrow shape extracts the
+minute from one selected series; the wide shape extracts Sunday-zero weekday
+values from 512 selected series.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, instant `minute(metric{host="h0000"})` | 1 | 131 | 0.368 | 0.538 | 0.588 | 1 | 31 | 1 | 32 | 131 |
+| 512 series, instant `day_of_week(metric)` | 512 | 36,158 | 3.942 | 4.260 | 4.413 | 512 | 15,872 | 512 | 16,384 | 53,831 |
+
+The calendar plan transforms the already-bounded packed vector once, removes
+only metric names, and preserves cardinality and all other labels. Optional
+zero-argument forms compose `vector(time())` without storage. The wide shape
+retains exactly the selector's 512 candidate chunks, 16,384 decoded points,
+and 53,831 packed bytes; there is no second read or calendar-specific storage
+amplification. At 4.260 ms wide p95, API-local composition remains the correct
+boundary. Direct SQLite/libSQL users have the executable finite-calendar
+foundation in `SQL-PROM-052`; no extension primitive is justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 37,224 KiB. No benchmark request required cancellation; focused work-
+limit and shared dropped-request regressions pin bounded execution,
+cancellation, and reader reuse. Pinned oracle and real-extension tests cover
+UTC minute/hour/weekday/month-day values, optional evaluation-time defaults,
+Sunday-zero numbering, positive and negative fractional truncation, NaN,
+infinities, both overflow directions and the minimum-int64 float boundary,
+labels/names, nested ranges, errors, shutdown, and cold reopen. `QSF-057`
+records the cross-language overflow boundary. No extension, frame, batching,
+compression, index, rollup, retention, transaction, migration, or storage
+contract changed.
