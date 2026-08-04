@@ -1190,3 +1190,36 @@ The finite-value recursive Welford SQL recipe executes through public raw
 rows. No extension primitive or storage, frame, batching, compression, index,
 rollup, retention, transaction, or migration behavior changed, and this row
 produced no new storage finding.
+
+## Session 6 `PQL-R11` population variance over time
+
+The checked-in
+[`2026-08-04_session6_pql_r11.json`](evidence/2026-08-04_session6_pql_r11.json)
+was captured from exact extension and server build
+`0dbbadc45d36181fe65423e2947969ecf2dc24e7`. Both measured shapes use one
+bounded public packed raw read followed by the same population Welford state
+as `stddev_over_time`, returning the variance without the final square root.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `stdvar_over_time(...[5m])` | 1 | 147 | 0.741 | 0.912 | 0.927 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `stdvar_over_time(...[5m])` | 2,048 | 88,894 | 3.601 | 3.887 | 5.165 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 bounded raw inputs and
+emits 2,048 population variances without an intermediate matrix. Its work and
+allocation shape matches the neighboring deviation query, so no
+variance-specific extension primitive is justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,048 KiB. No benchmark request required cancellation; the shared
+range-executor cancellation regression covers cancellation and reader reuse.
+Pinned oracle and real-extension regressions cover exact open-left boundaries,
+population rather than sample variance, singleton and empty windows, wide
+magnitudes, NaN, infinities, both zero signs, subqueries, invalid argument
+types, work limits, shutdown, and cold reopen. The finite-value recursive
+Welford SQL recipe executes both deviation and variance through public raw
+rows. `QSF-047` records Prometheus's distinct scalar versus vector/matrix float
+formatting and `QSF-048` records the corrected pre-existing ranking fixture.
+No extension primitive or storage, frame, batching, compression, index,
+rollup, retention, transaction, or migration behavior changed.
