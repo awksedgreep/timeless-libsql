@@ -743,3 +743,31 @@ finite overflow fallback, IEEE values, grouping labels, limits, and reopen.
 The SQL cookbook executes ordinary `AVG` and explicitly states where its
 accumulation differs from Prometheus's compensated evaluator. No storage or
 packed-format change was made.
+
+## Session 5 `PQL-O11` cross-series extrema
+
+The checked-in
+[`2026-08-04_session5_pql_o11.json`](evidence/2026-08-04_session5_pql_o11.json)
+was captured from exact build `a3842405bdbe2040cb89d582aedf26b8537ea5ea`.
+The narrow shape runs `min` over one host; the wide shape runs `max` over 512
+series grouped into two services across four timestamps.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact-host `min` | 1 | 116 | 0.687 | 0.979 | 1.103 | 1 | 32 | 524 |
+| all-series grouped `max` | 8 | 297 | 3.864 | 4.321 | 4.418 | 512 | 16,384 | 268,304 |
+
+Both operations have the same storage and 2,048-point wide intermediate-work
+shape as `sum`/`avg`. The narrow run retained a machine-local scheduling tail;
+the exact storage counters show no additional reads or decode, so no latency
+regression is inferred from that isolated p95. Ordinary public-grid `MIN` and
+`MAX` remain sufficient for direct SQL users; packed bits are required only
+to distinguish an all-NaN group from SQL NULL.
+
+The run completed all 18,496 fixture points durably with zero failed or queued
+work, kept physical SQLite/WAL/SHM storage at 672,688 bytes, and reached
+35,656 KiB RSS HWM. Pinned Prometheus and real-extension cases cover grouped
+finite values, infinities, mixed/all NaNs, sparse range grids, deterministic
+Timeless output, cancellation, and cold reopen. No extension primitive,
+storage format, batching, compression, index, rollup, retention, transaction,
+or migration behavior changed.
