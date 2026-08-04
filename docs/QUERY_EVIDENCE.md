@@ -1967,3 +1967,39 @@ metric names and child label policy, nested and empty vectors, range-matrix
 ordering, type errors, limits, shutdown, and cold reopen. No storage, frame,
 batching, compression, index, rollup, retention, transaction, migration, or
 extension contract changed, and no new query-storage finding arose.
+
+## Session 8 `PQL-F15` scalar/vector conversion
+
+The checked-in
+[`2026-08-04_session8_pql_f15.json`](evidence/2026-08-04_session8_pql_f15.json)
+was captured from exact extension and server build
+`1ee2a786284951b5425df4752a81e0d1175ae056`. The narrow shape converts one
+selected sample to a scalar; the wide shape reads 512 series and proves that
+multiple samples at the evaluation step produce one scalar NaN rather than an
+empty result.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, instant `scalar(metric{host="h0000"})` | 1 | 78 | 0.384 | 0.505 | 0.684 | 2 | 31 | 1 | 32 | 131 |
+| 512 series, instant `scalar(metric)` | 1 | 79 | 3.468 | 3.585 | 3.591 | 513 | 15,872 | 512 | 16,384 | 53,831 |
+
+The conversion adds no storage read or frame copy. It charges every child
+sample plus the inspected outer step, then returns the exact sole value or
+NaN for zero/multiple cardinality. The companion `vector(scalar)` conversion
+reads no storage beyond its scalar child and attaches one empty label set.
+Both preserve Prometheus's distinct scalar/vector instant and range result
+types. At 3.585 ms wide p95, ordinary Rust cardinality composition over one
+bounded packed read remains the correct boundary. Direct SQLite/libSQL users
+have the executable per-step cardinality and nameless-vector statements in
+`SQL-PROM-050`; no conversion primitive is justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 36,932 KiB. No benchmark request required cancellation; focused empty-
+input grid-work coverage and the shared dropped-request regression pin limits,
+cancellation, and reader reuse. Pinned oracle and real-extension tests cover
+zero/one/multiple series, stored/result NaN, per-step range conversion,
+nameless vectors, nested conversions, type errors, limits, shutdown, and cold
+reopen. No storage, frame, batching, compression, index, rollup, retention,
+transaction, migration, or extension contract changed, and no new query-
+storage finding arose.
