@@ -829,3 +829,34 @@ cancellation, and cold reopen. The executable public-SQL second-moment recipe
 is explicitly limited to finite, well-scaled values; no storage, packed-frame,
 batching, compression, index, rollup, retention, transaction, or migration
 behavior changed.
+
+## Session 5 `PQL-O14` step-local ranking
+
+The checked-in
+[`2026-08-04_session5_pql_o14.json`](evidence/2026-08-04_session5_pql_o14.json)
+was captured from exact build `27ddda571ae11ac28626a9c4ca525f80fc69abd3`.
+The narrow shape ranks one selected host with `topk(1, ...)`; the wide shape
+selects the bottom four series in each of two services at each of four steps.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact-host `topk(1)` | 1 | 164 | 0.377 | 0.619 | 0.702 | 2 | 32 | 524 |
+| grouped `bottomk(4)`, 512 series × four steps | 32 | 1,346 | 4.192 | 5.415 | 8.111 | 2,052 | 16,384 | 268,304 |
+
+The parameter contributes one scalar point per evaluation step, explaining
+the wide shape's 2,048 child plus four parameter points. Ranking is bounded by
+the already-admitted child vector, retains original series labels, and makes
+no second storage read. The wide run retained an 8.111 ms machine-local p99;
+candidate, decoded, packed-frame, and persisted-byte counters are identical to
+the preceding aggregation shapes, so the tail is reported without attributing
+it to new storage work.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and RSS HWM was 35,756
+KiB. Pinned Prometheus and real-extension cases cover scalar expressions,
+fractional/zero/NaN/infinite parameters, grouped top and bottom selection,
+numeric-before-NaN ranking, original labels and metric names, per-step sparse
+ranges, cumulative work limits, cancellation, and cold reopen. Public
+window-function SQL remains the direct-user foundation. No extension
+primitive, storage format, batching, compression, index, rollup, retention,
+transaction, or migration behavior changed.
