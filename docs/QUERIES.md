@@ -921,6 +921,19 @@ error. Direct SQLite/libSQL users can perform the same arbitrary-arity
 operation with the parameterized public-JSON statement in
 [`SQL-PROM-046`](QUERY_SQL_EQUIVALENTS.md#sql-prom-046-label_join). Joined
 destination strings use the same incremental response byte budget.
+PromQL absence is evaluated at every outer timestamp:
+
+```promql
+absent(up{job="api", instance=~"web-.*"})
+```
+
+The result is empty whenever any input series has a sample. Otherwise it is a
+single value `1`; range queries assemble one sparse series from absent steps.
+Only unique, nonempty equality matchers from a direct (optionally
+parenthesized) selector become output labels. `__name__`, regex, negative,
+empty, duplicate, and composed-expression matchers do not. NaN is still a
+present sample. The executable public-grid equivalent is
+[`SQL-PROM-047`](QUERY_SQL_EQUIVALENTS.md#sql-prom-047-absent).
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

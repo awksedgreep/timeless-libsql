@@ -2532,6 +2532,84 @@
       "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
       "expected_metric": {"__name__": "oracle_label_replace", "case": "capture", "job": "oracle", "joined": "api:west/old", "service": "api:west", "zone": "old"},
       "expected_values": [1, 6]
+    },
+    {
+      "id": "PQL-F11-present-vector-is-empty",
+      "query": "absent(oracle_label_replace{case=\"capture\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-F11-unique-nonempty-equality-labels",
+      "query": "absent(oracle_label_replace{case=\"nope\",service=\"api\",zone!=\"x\",other=~\"foo\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "nope", "service": "api"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-metric-name-is-not-derived",
+      "query": "absent({__name__=\"does_not_exist\",job=\"oracle\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-regex-label-is-not-derived",
+      "query": "absent(oracle_label_replace{case=~\"nope\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-empty-equality-label-is-not-derived",
+      "query": "absent({__name__=\"does_not_exist\",service=\"\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-parenthesized-selector-derives-labels",
+      "query": "absent((oracle_label_replace{case=\"nope\",service=\"api\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "nope", "service": "api"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-composed-expression-does-not-derive-labels",
+      "query": "absent(abs(oracle_math{case=\"does_not_exist\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-duplicate-matcher-label-is-not-derived",
+      "query": "absent(oracle_label_replace{case=\"nope\",case!=\"other\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-nan-counts-as-present",
+      "query": "absent(oracle_math{case=\"nan\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-F11-range-is-step-local-and-sparse",
+      "query": "absent(oracle_label_replace{case=\"capture\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_offsets_ms": [10000],
+      "expected_metric": {"case": "capture"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F11-range-fully-absent-grid",
+      "query": "absent(oracle_label_replace{case=\"nope\",service=\"api\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "nope", "service": "api"},
+      "expected_values": [1, 1, 1]
     }
   ],
   "operator_error_cases": [
@@ -2626,6 +2704,14 @@
     {
       "id": "PQL-F10-vector-argument-type-errors",
       "query": "label_join(1, \"joined\", \"/\", \"service\")",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-F11-argument-type-errors",
+      "query": "absent(1)",
       "evaluation_offset_ms": 30000,
       "status": 400,
       "error_type": "bad_data",

@@ -3580,6 +3580,7 @@ db.executemany(
          100, 1.0),
         ('label_join_metric', '{"case":"missing","service":"api"}',
          100, 2.0),
+        ('absent_late', '{"case":"late","service":"api"}', 110, 7.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3881,6 +3882,47 @@ renamed_metric = db.execute(
     },
 ).fetchone()
 assert renamed_metric[0] == 'both:api'
+
+absent_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "), present AS (SELECT DISTINCT ts FROM timeless_grid("
+    " 'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    ") SELECT :output_labels_json labels,evaluation.ts,1.0 value"
+    " FROM evaluation LEFT JOIN present USING(ts)"
+    " WHERE present.ts IS NULL ORDER BY evaluation.ts"
+)
+absent_sparse = db.execute(
+    absent_sql,
+    {
+        'metric': 'absent_late',
+        'filter_json': '{"case":"late","service":"api"}',
+        'output_labels_json': '{"case":"late","service":"api"}',
+        'start': 100,
+        'end': 120,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert absent_sparse == [('{"case":"late","service":"api"}', 100, 1.0)]
+absent_all = db.execute(
+    absent_sql,
+    {
+        'metric': 'absent_late',
+        'filter_json': '{"case":"missing"}',
+        'output_labels_json': '{"case":"missing"}',
+        'start': 100,
+        'end': 120,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert absent_all == [
+    ('{"case":"missing"}', 100, 1.0),
+    ('{"case":"missing"}', 110, 1.0),
+    ('{"case":"missing"}', 120, 1.0),
+]
 
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("

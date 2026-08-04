@@ -9437,6 +9437,177 @@ async fn session_eight_promql_label_join_pins_sources_names_limits_and_reopen() 
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_absent_derives_labels_per_step_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_absent.db");
+    let base = 1_700_900_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "absent_metric{{case=\"present\",service=\"api\"}} 1 {}\n",
+            "absent_metric{{case=\"late\",service=\"api\"}} NaN {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let present = prom_query(&app, "absent(absent_metric{case=\"present\"})", base).await;
+    assert_eq!(present.0, StatusCode::OK, "{}", present.1);
+    assert_eq!(present.1["data"]["result"], serde_json::json!([]));
+
+    let missing = prom_query(
+        &app,
+        "absent(absent_metric{case=\"missing\",service=\"worker\",zone!=\"east\",host=~\"web.*\"})",
+        base,
+    )
+    .await;
+    assert_eq!(missing.0, StatusCode::OK, "{}", missing.1);
+    assert_eq!(
+        missing.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "missing", "service": "worker"},
+            "value": [base, "1"]
+        }])
+    );
+
+    for (query, expected) in [
+        (
+            "absent({__name__=\"does_not_exist\",service=\"api\"})",
+            serde_json::json!({"service": "api"}),
+        ),
+        (
+            "absent(absent_metric{case=~\"missing\"})",
+            serde_json::json!({}),
+        ),
+        (
+            "absent({__name__=\"does_not_exist\",service=\"\"})",
+            serde_json::json!({}),
+        ),
+        (
+            "absent((absent_metric{case=\"missing\",service=\"api\"}))",
+            serde_json::json!({"case": "missing", "service": "api"}),
+        ),
+        (
+            "absent(abs(absent_metric{case=\"missing\"}))",
+            serde_json::json!({}),
+        ),
+        (
+            "absent(absent_metric{case=\"missing\",case!=\"other\"})",
+            serde_json::json!({}),
+        ),
+    ] {
+        let response = prom_query(&app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["metric"], expected);
+        assert_eq!(
+            response.1["data"]["result"][0]["value"],
+            serde_json::json!([base, "1"])
+        );
+    }
+
+    let nan_present = prom_query(&app, "absent(absent_metric{case=\"late\"})", base + 10).await;
+    assert_eq!(nan_present.0, StatusCode::OK, "{}", nan_present.1);
+    assert_eq!(nan_present.1["data"]["result"], serde_json::json!([]));
+
+    let sparse = prom_query_range(
+        &app,
+        "absent(absent_metric{case=\"late\",service=\"api\"})",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(sparse.0, StatusCode::OK, "{}", sparse.1);
+    assert_eq!(
+        sparse.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "late", "service": "api"},
+            "values": [[base, "1"]]
+        }])
+    );
+    let absent_range = prom_query_range(
+        &app,
+        "absent(absent_metric{case=\"missing\",service=\"worker\"})",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(absent_range.0, StatusCode::OK, "{}", absent_range.1);
+    assert_eq!(
+        absent_range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base + 10, "1"], [base + 20, "1"]])
+    );
+
+    for query in ["absent(1)", "absent(absent_metric[1m])"] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "absent(absent_metric{case=\"missing\"})",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("intermediate-work limit"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "absent(absent_metric{case=\"missing\",service=\"worker\"})",
+            base,
+        )
+        .await
+        .1,
+        missing.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

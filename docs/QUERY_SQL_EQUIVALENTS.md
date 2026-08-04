@@ -88,6 +88,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-044`](#sql-prom-044-trigonometric-and-hyperbolic-functions) | `PQL-F07` | current foundation | bounded SQLite trigonometric and hyperbolic transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-PROM-045`](#sql-prom-045-deg-rad-and-pi) | `PQL-F08` | current foundation | bounded degree/radian conversion plus scalar pi through standard SQLite math; API owns packed NaN, names, types, limits, and envelopes |
 | [`SQL-PROM-046`](#sql-prom-046-label_join) | `PQL-F10` | current foundation | ordered arbitrary-arity label joining over public JSON labels; API owns language parsing, names, limits, cancellation, and envelopes |
+| [`SQL-PROM-047`](#sql-prom-047-absent) | `PQL-F11` | current foundation | exact step-local absence over a bounded public grid; API owns selector-derived labels, AST composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1685,6 +1686,54 @@ primitive is justified.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_label_join_pins_sources_names_limits_and_reopen`.
+
+### SQL-PROM-047: `absent`
+
+Generate the requested evaluation grid and retain only timestamps with no
+selected sample from any series:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+), present AS (
+  SELECT DISTINCT ts
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT :output_labels_json AS labels,
+       evaluation.ts,
+       1.0 AS value
+FROM evaluation
+LEFT JOIN present USING (ts)
+WHERE present.ts IS NULL
+ORDER BY evaluation.ts;
+```
+
+`:start`, `:end`, `:step`, and `:lookback` use the metric table's configured
+timestamp unit (integer seconds for the default table). Bounds are inclusive,
+lookback is open-left, and `:step` must be positive. A stored NaN still emits a
+grid row—its row-visible `value` may be SQL NULL, but that timestamp is
+correctly present because this statement never filters on the value. If no
+series or samples match, every evaluation timestamp returns `1.0`.
+
+For a direct selector, bind `:output_labels_json` to the canonical object
+containing each unique, nonempty equality matcher except `__name__`; regex,
+negative, empty, and duplicate matcher names contribute no output label. Bind
+`{}` for a composed input expression. That label derivation and arbitrary AST
+composition remain Rust API responsibilities; direct SQL callers already
+know the bounded selection they are testing and can bind the intended output
+object explicitly. The API also owns parser types, sparse matrix assembly,
+cumulative grid work, result/response limits, cancellation, and Prometheus
+error envelopes. No absence-specific extension primitive is warranted.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_absent_derives_labels_per_step_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

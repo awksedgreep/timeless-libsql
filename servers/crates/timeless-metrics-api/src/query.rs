@@ -388,6 +388,7 @@ pub(crate) enum PromPlan {
     Function(PromFunctionPlan),
     LabelReplace(PromLabelReplacePlan),
     LabelJoin(PromLabelJoinPlan),
+    Absent(PromAbsentPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -529,6 +530,12 @@ pub(crate) struct PromLabelJoinPlan {
     destination: String,
     separator: String,
     sources: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromAbsentPlan {
+    inner: Box<PromPlan>,
+    labels: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -814,6 +821,7 @@ impl PromPlan {
             Self::Function(_) => PromValueType::Vector,
             Self::LabelReplace(_) => PromValueType::Vector,
             Self::LabelJoin(_) => PromValueType::Vector,
+            Self::Absent(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1312,6 +1320,20 @@ fn lower_promql_expr(
                 sources,
             }))
         }
+        promql::Expr::Call(call) if call.func.name == "absent" => {
+            let [argument] = call.args.args.as_slice() else {
+                return Err("absent requires one instant vector".into());
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err("absent requires an instant vector".into());
+            }
+            let labels = absent_output_labels(&inner);
+            Ok(PromPlan::Absent(PromAbsentPlan {
+                inner: Box::new(inner),
+                labels,
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1453,6 +1475,24 @@ fn promql_string_argument(
         return Err(format!("{function} {name} must be a string literal"));
     };
     Ok(value.val.clone())
+}
+
+fn absent_output_labels(inner: &PromPlan) -> BTreeMap<String, String> {
+    let PromPlan::Selector { selector, .. } = inner else {
+        return BTreeMap::new();
+    };
+    let mut labels = BTreeMap::new();
+    let mut seen = HashSet::new();
+    for matcher in &selector.filter.matchers {
+        if !seen.insert(matcher.key.as_str()) {
+            labels.remove(&matcher.key);
+            continue;
+        }
+        if matcher.op == MatcherOp::Eq && !matcher.value.is_empty() {
+            labels.insert(matcher.key.clone(), matcher.value.clone());
+        }
+    }
+    labels
 }
 
 fn lower_promql_aggregate(
@@ -1673,6 +1713,7 @@ fn lower_promql_subquery(
             | PromPlan::Function(_)
             | PromPlan::LabelReplace(_)
             | PromPlan::LabelJoin(_)
+            | PromPlan::Absent(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -3062,6 +3103,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::Absent(absent) => execute_prometheus_absent(
+            conn,
+            features,
+            absent,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -4223,6 +4277,87 @@ fn prometheus_response_limit_error(limits: PromQueryLimits) -> String {
     format!(
         "query exceeded the maximum response-size limit of {} bytes",
         limits.max_response_bytes
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_absent(
+    conn: &Connection,
+    features: QueryFeatures,
+    absent: &PromAbsentPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let child = execute_prometheus(
+        conn,
+        features,
+        &absent.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let frame_bytes = child.frame_bytes;
+    let child_points = child.points;
+    let mut intermediate_points = child.intermediate_points.saturating_add(child_points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let IntermediateValue::Vector(series) = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("absent input type was checked while lowering")
+    };
+    let present: HashSet<i64> = series
+        .iter()
+        .flat_map(|item| item.points.iter().map(|(timestamp, _)| *timestamp))
+        .collect();
+    let mut points = Vec::new();
+    let mut timestamp = start;
+    loop {
+        check_cancelled(cancelled)?;
+        intermediate_points = intermediate_points.saturating_add(1);
+        enforce_intermediate_work(intermediate_points, limits)?;
+        if !present.contains(&timestamp) {
+            points.push((timestamp, 1.0));
+        }
+        if timestamp >= stop {
+            break;
+        }
+        let Some(next) = timestamp.checked_add(step).filter(|next| *next <= stop) else {
+            break;
+        };
+        timestamp = next;
+    }
+    let output = if points.is_empty() {
+        Vec::new()
+    } else {
+        vec![IntermediateSeries {
+            labels: absent.labels.clone(),
+            points,
+        }]
+    };
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(output),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
     )
 }
 
