@@ -284,12 +284,62 @@
       "query": "oracle_temporal or oracle_lookback",
       "evaluation_offset_ms": 30000,
       "expected_values": [7]
+    },
+    {
+      "id": "PQL-O06-on-keeps-only-matching-labels",
+      "query": "oracle_matching_lhs + on(host) oracle_matching_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a"},
+      "expected_values": [10]
+    },
+    {
+      "id": "PQL-O06-ignoring-removes-ignored-output-labels",
+      "query": "oracle_matching_lhs + ignoring(zone) oracle_matching_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle", "shared": "x"},
+      "expected_values": [10]
+    },
+    {
+      "id": "PQL-O06-comparison-on-drops-nonmatching-labels-and-name",
+      "query": "oracle_matching_lhs == on(host) oracle_matching_lhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a"},
+      "expected_values": [8]
+    },
+    {
+      "id": "PQL-O06-set-on-retains-complete-left-labelset",
+      "query": "oracle_matching_lhs and on(host) oracle_matching_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_matching_lhs", "host": "a", "job": "oracle", "shared": "x", "zone": "east"},
+      "expected_values": [8]
+    },
+    {
+      "id": "PQL-O06-missing-on-label-matches-empty",
+      "query": "oracle_matching_lhs + on(missing) oracle_matching_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [10]
+    },
+    {
+      "id": "PQL-O06-empty-on-list-matches-empty",
+      "query": "oracle_matching_lhs + on() oracle_matching_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [10]
     }
   ],
   "operator_error_cases": [
     {
       "id": "PQL-O05-duplicate-default-signature-errors",
       "query": "oracle_arithmetic_lhs + {__name__=~\"oracle_arithmetic_rhs(_duplicate)?\"}",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "many-to-many matching not allowed"
+    },
+    {
+      "id": "PQL-O06-duplicate-on-signature-errors",
+      "query": "oracle_matching_lhs + on(host) {__name__=~\"oracle_matching_rhs(_duplicate)?\"}",
       "evaluation_offset_ms": 30000,
       "status": 422,
       "error_type": "execution",

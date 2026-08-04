@@ -2025,6 +2025,8 @@ INSERT INTO ck(name, labels, ts, value) VALUES
   ('set_rhs', '{"host":"a"}', 60, 100.0),
   ('set_rhs', '{"host":"b"}', 60, 200.0),
   ('set_rhs', '{"host":"d"}', 60, 400.0),
+  ('matching_lhs', '{"host":"a","shared":"x","zone":"east"}', 60, 8.0),
+  ('matching_rhs', '{"host":"a","shared":"x","zone":"west"}', 60, 2.0),
   ('lat', '{}', 0, 10.0), ('lat', '{}', 10, 11.0), ('lat', '{}', 20, 12.0),
   ('lat', '{}', 30, 13.0), ('lat', '{}', 40, 10.0), ('lat', '{}', 50, 11.0),
   ('lat', '{}', 60, 12.0), ('lat', '{}', 70, 13.0), ('lat', '{}', 80, 10.0),
@@ -2163,6 +2165,31 @@ SELECT 'set_or',labels,ts,value FROM (
      SELECT 1 FROM lhs WHERE lhs.labels=rhs.labels AND lhs.ts=rhs.ts
    )
 ) ORDER BY labels,ts;
+-- SQL-PROM-013: explicit on/ignoring label keys over public grids
+WITH lhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','matching_lhs',NULL,60,60,60,60)
+), rhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','matching_rhs',NULL,60,60,60,60)
+)
+SELECT 'matching_on',
+       json_object('host',COALESCE(json_extract(lhs.labels,'$.host'),'')),
+       lhs.ts,lhs.value+rhs.value
+  FROM lhs JOIN rhs
+    ON rhs.ts=lhs.ts
+   AND COALESCE(json_extract(rhs.labels,'$.host'),'') =
+       COALESCE(json_extract(lhs.labels,'$.host'),'')
+ ORDER BY 2,3;
+WITH lhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','matching_lhs',NULL,60,60,60,60)
+), rhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','matching_rhs',NULL,60,60,60,60)
+)
+SELECT 'matching_ignoring',json_remove(lhs.labels,'$.zone'),
+       lhs.ts,lhs.value+rhs.value
+  FROM lhs JOIN rhs
+    ON rhs.ts=lhs.ts
+   AND json_remove(rhs.labels,'$.zone')=json_remove(lhs.labels,'$.zone')
+ ORDER BY 2,3;
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2214,6 +2241,9 @@ $'comparison_filter|{"host":"a"}|60|10.0\ncomparison_bool|{"host":"a"}|0|0.0\nco
 check_eq "SQL-PROM-012 executes step-local many-to-many set membership" \
   "$(grep -E '^set_(and|unless|or)\|' <<<"$got")" \
 $'set_and|{"host":"a"}|60|10.0\nset_and|{"host":"b"}|60|20.0\nset_unless|{"host":"c"}|60|30.0\nset_or|{"host":"a"}|60|10.0\nset_or|{"host":"b"}|60|20.0\nset_or|{"host":"c"}|60|30.0\nset_or|{"host":"d"}|60|400.0'
+check_eq "SQL-PROM-013 executes on/ignoring keys and result projection" \
+  "$(grep -E '^matching_(on|ignoring)\|' <<<"$got")" \
+$'matching_on|{"host":"a"}|60|10.0\nmatching_ignoring|{"host":"a","shared":"x"}|60|10.0'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="

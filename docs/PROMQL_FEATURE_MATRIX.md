@@ -85,7 +85,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O03` | comparisons `== != > < >= <=` and `bool` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-011-comparison-filter-and-bool)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O04` | set operators `and`, `or`, `unless` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-012-set-membership)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O05` | one-to-one vector matching ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O06` | `on(...)` and `ignoring(...)` | missing | yes | `SQL` | `API` | P0 |
+| `PQL-O06` | `on(...)` and `ignoring(...)` | in progress | yes | `SQL` | `API` | P0 |
 | `PQL-O07` | `group_left` and `group_right` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O08` | trigonometric binary `atan2` | missing | no | `SQL` | `API` | P1 |
 | `PQL-O09` | `sum` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label)) | missing | yes | `SQL` | `API` | P0 |

@@ -30,6 +30,10 @@ tests:
         values: '4 5 6'
       - series: 'query_contract_arithmetic_rhs_duplicate{host="a",zone="east"}'
         values: '3 4 5'
+      - series: 'query_contract_matching_lhs{host="a",shared="x",zone="east"}'
+        values: '6 7 8'
+      - series: 'query_contract_matching_rhs{host="a",shared="x",zone="west"}'
+        values: '1 2 3'
     promql_expr_test:
       - expr: 'query_contract_cpu{host="a"}'
         eval_time: 20s
@@ -217,3 +221,33 @@ tests:
             value: 10
           - labels: 'query_contract_arithmetic_lhs{host="b",zone="west"}'
             value: 12
+      - expr: 'query_contract_matching_lhs + on(host) query_contract_matching_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a"}'
+            value: 11
+      - expr: 'query_contract_matching_lhs + ignoring(zone) query_contract_matching_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",shared="x"}'
+            value: 11
+      - expr: 'query_contract_matching_lhs == on(host) query_contract_matching_lhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a"}'
+            value: 8
+      - expr: 'query_contract_matching_lhs and on(host) query_contract_matching_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_matching_lhs{host="a",shared="x",zone="east"}'
+            value: 8
+      - expr: 'query_contract_matching_lhs + on(missing) query_contract_matching_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{}'
+            value: 11
+      - expr: 'query_contract_matching_lhs + on() query_contract_matching_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{}'
+            value: 11

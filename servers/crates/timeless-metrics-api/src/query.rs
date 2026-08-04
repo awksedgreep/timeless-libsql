@@ -420,6 +420,48 @@ enum PromBinaryOp {
     Unless,
 }
 
+#[derive(Clone, Debug, Default)]
+enum PromVectorMatching {
+    #[default]
+    Default,
+    On(BTreeSet<String>),
+    Ignoring(BTreeSet<String>),
+}
+
+impl PromVectorMatching {
+    fn key(&self, labels: &BTreeMap<String, String>) -> PromMatchingKey {
+        match self {
+            Self::Default => labels
+                .iter()
+                .filter(|(name, _)| name.as_str() != "__name__")
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            Self::On(names) => names
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        labels.get(name).cloned().unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            Self::Ignoring(names) => labels
+                .iter()
+                .filter(|(name, _)| name.as_str() != "__name__" && !names.contains(*name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        }
+    }
+
+    fn project_one_to_one_result(&self, labels: &mut BTreeMap<String, String>) {
+        match self {
+            Self::Default => {}
+            Self::On(names) => labels.retain(|name, _| names.contains(name)),
+            Self::Ignoring(names) => labels.retain(|name, _| !names.contains(name)),
+        }
+    }
+}
+
 impl PromBinaryOp {
     fn is_arithmetic(self) -> bool {
         matches!(
@@ -469,6 +511,7 @@ pub(crate) struct PromBinaryPlan {
     lhs: Box<PromPlan>,
     rhs: Box<PromPlan>,
     return_bool: bool,
+    matching: PromVectorMatching,
 }
 
 impl PromPlan {
@@ -786,6 +829,7 @@ fn lower_promql_binary(
     depth: usize,
 ) -> Result<PromPlan, String> {
     use promql_parser::parser::token;
+    use promql_parser::parser::LabelModifier;
     use promql_parser::parser::VectorMatchCardinality;
 
     let op = match binary.op.id() {
@@ -812,14 +856,26 @@ fn lower_promql_binary(
         .modifier
         .as_ref()
         .is_some_and(|modifier| modifier.return_bool);
+    let matching = match binary
+        .modifier
+        .as_ref()
+        .and_then(|modifier| modifier.matching.as_ref())
+    {
+        None => PromVectorMatching::Default,
+        Some(LabelModifier::Include(labels)) => {
+            PromVectorMatching::On(labels.labels.iter().cloned().collect())
+        }
+        Some(LabelModifier::Exclude(labels)) => {
+            PromVectorMatching::Ignoring(labels.labels.iter().cloned().collect())
+        }
+    };
     if let Some(modifier) = &binary.modifier {
         let expected_cardinality = if op.is_set() {
             matches!(modifier.card, VectorMatchCardinality::ManyToMany)
         } else {
             matches!(modifier.card, VectorMatchCardinality::OneToOne)
         };
-        if modifier.matching.is_some()
-            || !expected_cardinality
+        if !expected_cardinality
             || modifier.fill_values.lhs.is_some()
             || modifier.fill_values.rhs.is_some()
         {
@@ -856,6 +912,7 @@ fn lower_promql_binary(
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
         return_bool,
+        matching,
     }))
 }
 
@@ -2479,7 +2536,14 @@ fn execute_prometheus_binary(
     let frame_bytes = lhs.frame_bytes.saturating_add(rhs.frame_bytes);
     let lhs = decode_prometheus_intermediate(&lhs.body, lhs_type, instant, limits, cancelled)?;
     let rhs = decode_prometheus_intermediate(&rhs.body, rhs_type, instant, limits, cancelled)?;
-    let value = apply_prometheus_binary(binary.op, binary.return_bool, lhs, rhs, cancelled)?;
+    let value = apply_prometheus_binary(
+        binary.op,
+        binary.return_bool,
+        &binary.matching,
+        lhs,
+        rhs,
+        cancelled,
+    )?;
     encode_prometheus_intermediate(
         value,
         instant,
@@ -2493,6 +2557,7 @@ fn execute_prometheus_binary(
 fn apply_prometheus_binary(
     op: PromBinaryOp,
     return_bool: bool,
+    matching: &PromVectorMatching,
     lhs: IntermediateValue,
     rhs: IntermediateValue,
     cancelled: &AtomicBool,
@@ -2500,7 +2565,9 @@ fn apply_prometheus_binary(
     if op.is_set() {
         return match (lhs, rhs) {
             (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => Ok(
-                IntermediateValue::Vector(apply_set_vectors(op, lhs, rhs, cancelled)?),
+                IntermediateValue::Vector(apply_set_vectors(
+                    op, matching, lhs, rhs, cancelled,
+                )?),
             ),
             _ => Err("PromQL set operators require instant-vector operands".into()),
         };
@@ -2546,6 +2613,7 @@ fn apply_prometheus_binary(
             Ok(IntermediateValue::Vector(apply_one_to_one_vectors(
                 op,
                 return_bool,
+                matching,
                 lhs,
                 rhs,
                 cancelled,
@@ -2556,6 +2624,7 @@ fn apply_prometheus_binary(
 
 fn apply_set_vectors(
     op: PromBinaryOp,
+    matching: &PromVectorMatching,
     lhs: Vec<IntermediateSeries>,
     rhs: Vec<IntermediateSeries>,
     cancelled: &AtomicBool,
@@ -2563,11 +2632,11 @@ fn apply_set_vectors(
     debug_assert!(op.is_set());
     let lhs_keys: Vec<_> = lhs
         .iter()
-        .map(|series| default_matching_key(&series.labels))
+        .map(|series| matching.key(&series.labels))
         .collect();
     let rhs_keys: Vec<_> = rhs
         .iter()
-        .map(|series| default_matching_key(&series.labels))
+        .map(|series| matching.key(&series.labels))
         .collect();
     let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
     let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
@@ -2681,14 +2750,6 @@ fn apply_scalar_to_vector(
     normalize_prometheus_vector(vector, cancelled)
 }
 
-fn default_matching_key(labels: &BTreeMap<String, String>) -> PromMatchingKey {
-    labels
-        .iter()
-        .filter(|(name, _)| name.as_str() != "__name__")
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
-}
-
 fn samples_by_timestamp(
     series: &[IntermediateSeries],
     cancelled: &AtomicBool,
@@ -2714,17 +2775,18 @@ fn duplicate_matching_error(key: &[(String, String)]) -> String {
 fn apply_one_to_one_vectors(
     op: PromBinaryOp,
     return_bool: bool,
+    matching: &PromVectorMatching,
     lhs: Vec<IntermediateSeries>,
     rhs: Vec<IntermediateSeries>,
     cancelled: &AtomicBool,
 ) -> Result<Vec<IntermediateSeries>, String> {
     let lhs_keys: Vec<_> = lhs
         .iter()
-        .map(|series| default_matching_key(&series.labels))
+        .map(|series| matching.key(&series.labels))
         .collect();
     let rhs_keys: Vec<_> = rhs
         .iter()
-        .map(|series| default_matching_key(&series.labels))
+        .map(|series| matching.key(&series.labels))
         .collect();
     let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
     let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
@@ -2777,6 +2839,7 @@ fn apply_one_to_one_vectors(
                 if op.is_arithmetic() || return_bool {
                     series.labels.remove("__name__");
                 }
+                matching.project_one_to_one_result(&mut series.labels);
                 series.points = points;
                 Some(series)
             }

@@ -201,6 +201,21 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
         [(3.0, timestamp_ms + 30_000)],
         {"host": "a", "zone": "east"},
     )
+    write_request += series(
+        "oracle_matching_lhs",
+        [(8.0, timestamp_ms + 30_000)],
+        {"host": "a", "shared": "x", "zone": "east"},
+    )
+    write_request += series(
+        "oracle_matching_rhs",
+        [(2.0, timestamp_ms + 30_000)],
+        {"host": "a", "shared": "x", "zone": "west"},
+    )
+    write_request += series(
+        "oracle_matching_rhs_duplicate",
+        [(3.0, timestamp_ms + 30_000)],
+        {"host": "a", "shared": "x", "zone": "north"},
+    )
     return snappy_literal(write_request)
 
 
@@ -478,7 +493,7 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                         for index in range(len(values))
                     ]
                 result = [{
-                    "metric": {"job": "oracle"},
+                    "metric": dict(case.get("expected_metric", {"job": "oracle"})),
                     "values": [
                         [timestamp / 1_000, str(value)]
                         for timestamp, value in zip(timestamps, values)
@@ -500,10 +515,10 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 endpoint = "/api/v1/query"
                 result_type = "vector"
                 result = [{
-                    "metric": {"job": "oracle"},
+                    "metric": dict(case.get("expected_metric", {"job": "oracle"})),
                     "value": [evaluation_ms / 1_000, str(case["expected_values"][0])],
                 }]
-            if result and not case.get("drop_metric_name"):
+            if result and "expected_metric" not in case and not case.get("drop_metric_name"):
                 result[0]["metric"]["__name__"] = "oracle_temporal"
             url = base + endpoint + "?" + urllib.parse.urlencode(params)
             with urllib.request.urlopen(url, timeout=10) as response:

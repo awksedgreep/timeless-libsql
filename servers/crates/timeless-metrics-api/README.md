@@ -36,7 +36,10 @@ samples, and rejects duplicate match signatures. All six comparisons support
 Prometheus filter and `bool` behavior: filters retain original vector values
 and names, while `bool` emits `0`/`1` and removes names. Set `and`, `or`, and
 `unless` use step-local many-to-many matching and preserve the contributing
-sample's value, labels, and metric name. Selectors and range selectors accept signed
+sample's value, labels, and metric name. Vector/vector operators accept
+`on(...)` and `ignoring(...)`, including empty lists and missing-label
+matching, with Prometheus output-label and duplicate-cardinality rules.
+Selectors and range selectors accept signed
 `offset` plus numeric/`start()`/`end()` `@` modifiers. Selector and shipped
 range-function expressions may be evaluated as bounded subqueries with
 `[range:resolution]`, including omitted/default resolution, nesting, and

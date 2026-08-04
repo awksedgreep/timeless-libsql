@@ -54,6 +54,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-010`](#sql-prom-010-unary-minus) | `PQL-O01` | current foundation | exact numeric negation over a bounded public grid; API owns types, envelopes, metric-name policy, limits, and cancellation |
 | [`SQL-PROM-011`](#sql-prom-011-comparison-filter-and-bool) | `PQL-O03` | current foundation | exact SQLite predicate/CASE over public grids; API owns AST types, name policy, matching, limits, and envelopes |
 | [`SQL-PROM-012`](#sql-prom-012-set-membership) | `PQL-O04` | current foundation | exact step-local many-to-many membership over public grids; API owns language, names, bounds, limits, and envelopes |
+| [`SQL-PROM-013`](#sql-prom-013-on-and-ignoring-label-matching) | `PQL-O06` | current foundation | explicit JSON-label projection/equality over public grids; API owns AST/cardinality/name/error semantics |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -468,6 +469,89 @@ intermediate/result/response limits, cancellation, and Prometheus envelopes.
 Direct executable regression: `tests/cli.sh` section 33; HTTP/oracle/reopen
 regression:
 `session_four_promql_set_operators_are_many_to_many_stepwise_and_reopen`.
+
+### SQL-PROM-013: `on` and `ignoring` label matching
+
+For `lhs + on(host) rhs`, treat an absent matching label as the empty string,
+join by that value and timestamp, and project only the matching label:
+
+```sql
+WITH
+lhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+),
+rhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  json_object(
+    'host', COALESCE(json_extract(lhs.labels, '$.host'), '')
+  ) AS labels,
+  lhs.ts,
+  lhs.value + rhs.value AS value
+FROM lhs
+JOIN rhs
+  ON rhs.ts = lhs.ts
+ AND COALESCE(json_extract(rhs.labels, '$.host'), '') =
+     COALESCE(json_extract(lhs.labels, '$.host'), '')
+ORDER BY labels, lhs.ts;
+```
+
+For `lhs + ignoring(zone) rhs`, remove the ignored key before comparing and
+projecting the left labels:
+
+```sql
+WITH
+lhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+),
+rhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  json_remove(lhs.labels, '$.zone') AS labels,
+  lhs.ts,
+  lhs.value + rhs.value AS value
+FROM lhs
+JOIN rhs
+  ON rhs.ts = lhs.ts
+ AND json_remove(rhs.labels, '$.zone') =
+     json_remove(lhs.labels, '$.zone')
+ORDER BY labels, lhs.ts;
+```
+
+Pass more JSON paths to `json_remove` for a multi-label `ignoring` list. For
+multi-label `on`, compare each named `COALESCE(json_extract(...), '')` term
+and construct the projected canonical label object in lexical key order.
+`on()` has no label terms, so every series at a timestamp belongs to one match
+group; one-to-one language operations must reject a group with duplicates.
+
+All time parameters use the table's native unit; grids have inclusive output
+bounds and open-left lookback windows. Missing samples do not participate.
+For arithmetic and `bool`, the metric name is absent; a comparison filter with
+`on` also projects only the named labels, while `ignoring` removes only the
+listed labels. Set operators use the modified comparison signature but retain
+the full contributing labelset. The Rust API enforces those per-operator name
+rules, one-to-one cardinality errors, AST validation, bounded work,
+cancellation, and Prometheus envelopes. Direct executable regression:
+`tests/cli.sh` section 33; HTTP/oracle/reopen regression:
+`session_four_promql_on_ignoring_match_labels_names_limits_and_reopen`.
 
 ### SQL-PROM-003: cross-series sum by label
 

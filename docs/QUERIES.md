@@ -316,6 +316,37 @@ users can implement the exact membership foundation with `EXISTS`,
 `NOT EXISTS`, and a left-preferred `UNION ALL`; see executable
 [`SQL-PROM-012`](QUERY_SQL_EQUIVALENTS.md#sql-prom-012-set-membership).
 
+## PromQL explicit vector matching
+
+Vector/vector arithmetic, comparisons, and set operators accept both stable
+matching modifiers:
+
+```promql
+errors_total / on(service, method) requests_total
+desired_replicas == ignoring(source) current_replicas
+primary or on(instance) fallback
+```
+
+`on(...)` builds the match key from exactly the listed labels; a missing label
+has the empty-string value. `on()` therefore places every present sample at a
+step in one match group. `ignoring(...)` builds the key from every label except
+`__name__` and the listed labels; `ignoring()` is default matching. Duplicate
+keys fail one-to-one arithmetic/comparisons, while set operators deliberately
+remain many-to-many.
+
+For a one-to-one result, `on(...)` retains only the named labels and
+`ignoring(...)` removes the ignored labels from the left result. Arithmetic
+and `bool` also remove `__name__`; an `on(...)` comparison filter has only its
+named labels. Set operators do not project labels and retain the complete
+contributing side. Matching is repeated per evaluation timestamp and is
+covered by the same cumulative work, result, byte, deadline, and cancellation
+limits as default matching.
+
+Direct SQLite/libSQL users can make the label key explicit with SQLite JSON
+functions over public grids; executable
+[`SQL-PROM-013`](QUERY_SQL_EQUIVALENTS.md#sql-prom-013-on-and-ignoring-label-matching)
+shows both forms.
+
 ## Scalar aggregate without raw materialization
 
 ```sql

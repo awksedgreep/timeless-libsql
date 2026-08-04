@@ -2285,6 +2285,168 @@ async fn session_four_promql_set_operators_are_many_to_many_stepwise_and_reopen(
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_promql_on_ignoring_match_labels_names_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four_on_ignoring.db");
+    let base = 1_700_440_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut victoria = String::new();
+    for (metric, zone, first, second) in [
+        ("match_lhs", "east", 8.0, 18.0),
+        ("match_rhs", "west", 2.0, 12.0),
+        ("match_rhs_duplicate", "north", 3.0, 13.0),
+    ] {
+        use std::fmt::Write;
+        writeln!(
+            victoria,
+            "{{\"metric\":{{\"__name__\":\"{metric}\",\"host\":\"a\",\"shared\":\"x\",\"zone\":\"{zone}\"}},\"values\":[{first},{second}],\"timestamps\":[{},{}]}}",
+            base * 1_000,
+            (base + 10) * 1_000,
+        )
+        .unwrap();
+    }
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let on = prom_query(&app, "match_lhs + on(host) match_rhs", base + 10).await;
+    assert_eq!(on.0, StatusCode::OK, "{}", on.1);
+    assert_eq!(
+        on.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a"},
+            "value": [base + 10, "30"]
+        }])
+    );
+
+    let ignoring = prom_query(
+        &app,
+        "match_lhs + ignoring(zone) match_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(ignoring.0, StatusCode::OK, "{}", ignoring.1);
+    assert_eq!(
+        ignoring.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a", "shared": "x"},
+            "value": [base + 10, "30"]
+        }])
+    );
+
+    let comparison = prom_query(
+        &app,
+        "match_lhs == on(host) match_lhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(comparison.0, StatusCode::OK, "{}", comparison.1);
+    assert_eq!(comparison.1["data"]["result"][0]["metric"], serde_json::json!({"host": "a"}));
+
+    let set = prom_query(
+        &app,
+        "match_lhs and on(host) match_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(set.0, StatusCode::OK, "{}", set.1);
+    assert_eq!(
+        set.1["data"]["result"][0]["metric"],
+        serde_json::json!({
+            "__name__": "match_lhs", "host": "a", "shared": "x", "zone": "east"
+        })
+    );
+
+    for query in [
+        "match_lhs + on(missing) match_rhs",
+        "match_lhs + on() match_rhs",
+    ] {
+        let empty_key = prom_query(&app, query, base + 10).await;
+        assert_eq!(empty_key.0, StatusCode::OK, "{}", empty_key.1);
+        assert_eq!(empty_key.1["data"]["result"][0]["metric"], serde_json::json!({}));
+        assert_eq!(empty_key.1["data"]["result"][0]["value"][1], "30");
+    }
+
+    let duplicate = prom_query(
+        &app,
+        "match_lhs + on(host) {__name__=~\"match_rhs(_duplicate)?\"}",
+        base + 10,
+    )
+    .await;
+    assert_eq!(duplicate.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(duplicate.1["errorType"], "execution");
+    assert!(duplicate.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("many-to-many matching not allowed"));
+
+    let range = prom_query_range(
+        &app,
+        "match_lhs + ignoring(zone) match_rhs",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0],
+        serde_json::json!({
+            "metric": {"host": "a", "shared": "x"},
+            "values": [[base, "10"], [base + 10, "30"]]
+        })
+    );
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 3,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "match_lhs + on(host) match_rhs",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 3 points"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = prom_query(
+        &reopened_app,
+        "match_lhs + ignoring(zone) match_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(recovered.1, ignoring.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
