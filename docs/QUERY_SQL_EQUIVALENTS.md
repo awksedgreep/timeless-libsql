@@ -60,6 +60,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-016`](#sql-prom-016-cross-series-minimum-and-maximum) | `PQL-O11` | current foundation | bounded cross-series extrema; API owns all-NaN behavior, grouping syntax, labels, limits, and envelopes |
 | [`SQL-PROM-017`](#sql-prom-017-cross-series-count-and-group) | `PQL-O12` | current foundation | bounded cross-series row count/presence; API owns grouping syntax, labels, limits, and envelopes |
 | [`SQL-PROM-018`](#sql-prom-018-cross-series-population-variance-and-standard-deviation) | `PQL-O13` | current foundation | bounded population second moment; API owns Welford/IEEE arithmetic, language, labels, limits, and envelopes |
+| [`SQL-PROM-019`](#sql-prom-019-cross-series-quantile) | `PQL-O15` | current foundation | bounded finite-value linear interpolation; API owns language, raw-NaN rank, parameters, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -834,6 +835,79 @@ envelopes. The SQL is an honest efficient foundation for normal finite data,
 not a claim of bit-identical adversarial arithmetic. It executes in
 `tests/cli.sh` section 45; the exact API contract is
 `session_five_promql_stddev_stdvar_are_population_grouped_and_reopenable`.
+
+### SQL-PROM-019: cross-series quantile
+
+For a finite `:q` between zero and one and finite sample values, window
+functions provide the same `q * (N - 1)` linear interpolation over each
+service and evaluation timestamp:
+
+```sql
+WITH selected AS (
+  SELECT
+    ts,
+    COALESCE(json_extract(labels, '$.service'), '') AS service,
+    value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+  WHERE value IS NOT NULL
+), ranked AS (
+  SELECT
+    service,
+    ts,
+    value,
+    ROW_NUMBER() OVER (
+      PARTITION BY service, ts ORDER BY value
+    ) - 1 AS value_index,
+    COUNT(*) OVER (PARTITION BY service, ts) AS value_count
+  FROM selected
+), positions AS (
+  SELECT DISTINCT
+    service,
+    ts,
+    value_count,
+    CAST(:q AS REAL) * (value_count - 1) AS rank
+  FROM ranked
+), bounds AS (
+  SELECT
+    *,
+    CAST(rank AS INTEGER) AS lower_index,
+    MIN(CAST(rank AS INTEGER) + 1, value_count - 1) AS upper_index
+  FROM positions
+)
+SELECT
+  json_object('service', bounds.service) AS labels,
+  bounds.ts,
+  lower.value * (1.0 - (bounds.rank - bounds.lower_index))
+    + upper.value * (bounds.rank - bounds.lower_index) AS value
+FROM bounds
+JOIN ranked AS lower
+  ON lower.service = bounds.service
+ AND lower.ts = bounds.ts
+ AND lower.value_index = bounds.lower_index
+JOIN ranked AS upper
+  ON upper.service = bounds.service
+ AND upper.ts = bounds.ts
+ AND upper.value_index = bounds.upper_index
+ORDER BY bounds.service, bounds.ts;
+```
+
+`:metric`, `:filter_json`, and the epoch-second temporal parameters have the
+same types and bounds as `SQL-PROM-018`; `:q` is REAL in `[0,1]`. Missing
+`service` is normalized to empty, empty input emits no row, and ordering is
+deterministic. A singleton returns its value.
+
+The finite restriction is intentional. SQLite exposes a packed IEEE NaN as
+SQL NULL, whereas PromQL sorts raw NaN before numeric samples and lets it
+participate in the interpolation rank. PromQL also maps `q < 0` to `-Inf`,
+`q > 1` to `+Inf`, and `q = NaN` to NaN. The Rust API operates on packed raw
+bits and owns those edge rules, scalar parameter expressions, `by`/`without`,
+labels, limits, cancellation, and envelopes. This executable SQL is the
+public direct-user foundation for normal finite data, not a false IEEE-parity
+claim. It runs in `tests/cli.sh` section 45; the exact API contract is
+`session_five_promql_quantile_interpolates_per_step_and_reopens`.
 
 ### SQL-PROM-004: vector arithmetic with label matching
 

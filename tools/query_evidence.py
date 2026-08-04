@@ -817,6 +817,26 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        quantile_narrow = measure(
+            "metrics-quantile-narrow",
+            lambda: promql('quantile(0.5, query_contract_cpu{host="h0000"})'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        quantile_wide = measure(
+            "metrics-quantile-wide",
+            lambda: promql_range(
+                "quantile by(service) (0.95, query_contract_cpu)", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            8,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -1098,6 +1118,8 @@ def metrics_evidence(
                 "stddev_by_wide": stddev_wide,
                 "topk_narrow": topk_narrow,
                 "bottomk_wide": bottomk_wide,
+                "quantile_narrow": quantile_narrow,
+                "quantile_wide": quantile_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

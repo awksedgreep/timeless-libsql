@@ -557,6 +557,46 @@
       "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
       "expected_metric": {"__name__": "oracle_aggregation", "host": "c", "job": "oracle", "region": "west"},
       "expected_values": [5, 6]
+    },
+    {
+      "id": "PQL-O15-quantile-by",
+      "query": "quantile by (region) (1 / 2, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 3.5},
+        {"metric": {"region": "west"}, "value": 6}
+      ]
+    },
+    {
+      "id": "PQL-O15-quantile-ieee",
+      "query": "quantile by (case) (0.75, oracle_avg_ieee)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "nan"}, "value": "NaN"},
+        {"metric": {"case": "positive"}, "value": "+Inf"},
+        {"metric": {"case": "mixed"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-O15-quantile-nan-parameter",
+      "query": "quantile(NaN, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-O15-quantile-low-parameter",
+      "query": "quantile(-1, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": ["-Inf"]
+    },
+    {
+      "id": "PQL-O15-quantile-high-parameter",
+      "query": "quantile(2, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": ["+Inf"]
     }
   ],
   "operator_error_cases": [

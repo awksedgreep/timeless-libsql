@@ -416,6 +416,9 @@ complete original labels and metric name. Fractional `k` truncates toward
 zero; values below one return no series; NaN and positive overflow are errors.
 Numeric values outrank NaN in both directions, so NaN is returned only when a
 partition has fewer than `k` numeric samples.
+`quantile(q, vector)` sorts each group at each evaluation step and linearly
+interpolates rank `q * (N - 1)`. Raw NaN participates at the low end of the
+rank; `q < 0`, `q > 1`, and NaN `q` produce `-Inf`, `+Inf`, and NaN.
 
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
@@ -437,6 +440,9 @@ provides an executable second-moment recipe and states why the API's Welford
 arithmetic is required for exact edge semantics.
 Step-local ranking is executable as ordinary window-function SQL in
 [`SQL-PROM-005`](QUERY_SQL_EQUIVALENTS.md#sql-prom-005-top-k-per-evaluation-step).
+Finite cross-series interpolation is executable in
+[`SQL-PROM-019`](QUERY_SQL_EQUIVALENTS.md#sql-prom-019-cross-series-quantile);
+the recipe states why packed raw bits are needed for PromQL's NaN rank.
 
 ## Scalar aggregate without raw materialization
 

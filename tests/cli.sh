@@ -3725,6 +3725,41 @@ assert cross_dispersion == [
     ('api', 110, 25.0, 5.0),
 ]
 
+cross_quantile = db.execute(
+    "WITH selected AS ("
+    " SELECT ts,COALESCE(json_extract(labels,'$.service'),'') service,value"
+    " FROM timeless_grid('metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    " WHERE value IS NOT NULL"
+    "), ranked AS ("
+    " SELECT service,ts,value,ROW_NUMBER() OVER ("
+    "  PARTITION BY service,ts ORDER BY value)-1 value_index,"
+    " COUNT(*) OVER (PARTITION BY service,ts) value_count FROM selected"
+    "), positions AS ("
+    " SELECT DISTINCT service,ts,value_count,CAST(:q AS REAL)*(value_count-1) rank"
+    " FROM ranked"
+    "), bounds AS ("
+    " SELECT *,CAST(rank AS INTEGER) lower_index,"
+    " MIN(CAST(rank AS INTEGER)+1,value_count-1) upper_index FROM positions"
+    ") SELECT bounds.service,bounds.ts,"
+    " lower.value*(1.0-(bounds.rank-bounds.lower_index))"
+    " +upper.value*(bounds.rank-bounds.lower_index)"
+    " FROM bounds JOIN ranked lower ON lower.service=bounds.service"
+    " AND lower.ts=bounds.ts AND lower.value_index=bounds.lower_index"
+    " JOIN ranked upper ON upper.service=bounds.service"
+    " AND upper.ts=bounds.ts AND upper.value_index=bounds.upper_index"
+    " ORDER BY bounds.service,bounds.ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+        'q': 0.5,
+    },
+).fetchall()
+assert cross_quantile == [('api', 100, 15.0), ('api', 110, 25.0)]
+
 ratio = db.execute(
     "WITH errors AS ("
     " SELECT ts,labels,json_extract(labels,'$.host') host,value"

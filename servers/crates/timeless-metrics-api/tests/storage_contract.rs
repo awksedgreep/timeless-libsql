@@ -3425,6 +3425,150 @@ async fn session_five_promql_topk_bottomk_rank_per_step_and_reopen() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_quantile_interpolates_per_step_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_quantile.db");
+    let base = 1_700_560_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let values = format!(
+        concat!(
+            "aggregate_quantile{{host=\"a\",region=\"east\"}} 1 {}\n",
+            "aggregate_quantile{{host=\"b\",region=\"east\"}} 2 {}\n",
+            "aggregate_quantile{{host=\"c\",region=\"east\"}} 3 {}\n",
+            "aggregate_quantile{{host=\"d\",region=\"east\"}} 4 {}\n",
+            "aggregate_quantile{{host=\"w\",region=\"west\"}} 7 {}\n",
+            "aggregate_quantile{{host=\"n1\",region=\"nan\"}} NaN {}\n",
+            "aggregate_quantile{{host=\"n2\",region=\"nan\"}} 1 {}\n",
+            "aggregate_quantile{{host=\"n3\",region=\"nan\"}} 3 {}\n",
+            "aggregate_quantile{{host=\"a\",region=\"east\"}} 2 {}\n",
+            "aggregate_quantile{{host=\"b\",region=\"east\"}} 4 {}\n",
+            "aggregate_quantile{{host=\"c\",region=\"east\"}} 6 {}\n",
+            "aggregate_quantile{{host=\"d\",region=\"east\"}} 8 {}\n",
+            "aggregate_quantile_limit{{host=\"a\"}} 1 {}\n",
+            "aggregate_quantile_limit{{host=\"b\"}} 2 {}\n",
+            "aggregate_quantile_limit{{host=\"c\"}} 3 {}\n",
+            "aggregate_quantile_limit{{host=\"d\"}} 4 {}\n",
+            "aggregate_quantile_limit{{host=\"e\"}} 5 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", values.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let median = prom_query(
+        &app,
+        "quantile by (region) (1 / 2, aggregate_quantile{region!=\"nan\"})",
+        base,
+    )
+    .await;
+    assert_eq!(median.0, StatusCode::OK, "{}", median.1);
+    assert_eq!(
+        median.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base, "2.5"]},
+            {"metric": {"region": "west"}, "value": [base, "7"]}
+        ])
+    );
+    let ieee = prom_query(
+        &app,
+        "quantile by (region) (0.75, aggregate_quantile{region=\"nan\"})",
+        base,
+    )
+    .await;
+    assert_eq!(ieee.0, StatusCode::OK, "{}", ieee.1);
+    assert_eq!(ieee.1["data"]["result"][0]["value"][1], "2");
+    for (parameter, expected) in [("NaN", "NaN"), ("-1", "-Inf"), ("2", "+Inf")] {
+        let response = prom_query(
+            &app,
+            &format!("quantile({parameter}, aggregate_quantile{{region=\"east\"}})"),
+            base,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{}: {}", parameter, response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+    let range = prom_query_range(
+        &app,
+        "quantile by (region) (0.5, aggregate_quantile{region=\"east\"})",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "values": [[base, "2.5"], [base + 10, "5"]]}
+        ])
+    );
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 5,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "quantile(0.5, aggregate_quantile_limit)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 5 points"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "quantile by (region) (1 / 2, aggregate_quantile{region!=\"nan\"})",
+            base,
+        )
+        .await
+        .1,
+        median.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

@@ -395,3 +395,10 @@ tests:
             value: 3
           - labels: 'query_contract_aggregation{host="c",region="west"}'
             value: 6
+      - expr: 'quantile by (region) (0.5, query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 3.5
+          - labels: '{region="west"}'
+            value: 6

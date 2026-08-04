@@ -414,6 +414,7 @@ enum PromAggregateOp {
     StdVar,
     TopK,
     BottomK,
+    Quantile,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -882,11 +883,15 @@ fn lower_promql_aggregate(
         token::T_STDVAR => PromAggregateOp::StdVar,
         token::T_TOPK => PromAggregateOp::TopK,
         token::T_BOTTOMK => PromAggregateOp::BottomK,
+        token::T_QUANTILE => PromAggregateOp::Quantile,
         _ => {
             return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
         }
     };
-    let requires_param = matches!(op, PromAggregateOp::TopK | PromAggregateOp::BottomK);
+    let requires_param = matches!(
+        op,
+        PromAggregateOp::TopK | PromAggregateOp::BottomK | PromAggregateOp::Quantile
+    );
     let param = match (requires_param, aggregate.param) {
         (true, Some(param)) => {
             let param = lower_promql_expr(*param, lookback, depth)?;
@@ -2659,6 +2664,13 @@ fn execute_prometheus_aggregate(
             instant,
             cancelled,
         )?
+    } else if aggregate.op == PromAggregateOp::Quantile {
+        apply_prometheus_quantile(
+            aggregate,
+            series,
+            params.as_deref().unwrap_or_default(),
+            cancelled,
+        )?
     } else {
         apply_prometheus_aggregate(aggregate, series, cancelled)?
     };
@@ -2776,6 +2788,61 @@ fn prometheus_rank_order(op: PromAggregateOp, left: f64, right: f64) -> std::cmp
     }
 }
 
+fn apply_prometheus_quantile(
+    aggregate: &PromAggregatePlan,
+    series: Vec<IntermediateSeries>,
+    params: &[(i64, f64)],
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let params: BTreeMap<i64, f64> = params.iter().copied().collect();
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, Vec<f64>>> = BTreeMap::new();
+    for item in series {
+        check_cancelled(cancelled)?;
+        let labels = aggregate.grouping.output_labels(&item.labels);
+        let group = groups.entry(labels).or_default();
+        for (timestamp, value) in item.points {
+            check_cancelled(cancelled)?;
+            group.entry(timestamp).or_default().push(value);
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(labels, points)| IntermediateSeries {
+            labels,
+            points: points
+                .into_iter()
+                .filter_map(|(timestamp, mut values)| {
+                    let quantile = params.get(&timestamp)?;
+                    Some((timestamp, prometheus_quantile(*quantile, &mut values)))
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+fn prometheus_quantile(quantile: f64, values: &mut [f64]) -> f64 {
+    if values.is_empty() || quantile.is_nan() {
+        return f64::NAN;
+    }
+    if quantile < 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if quantile > 1.0 {
+        return f64::INFINITY;
+    }
+    values.sort_by(|left, right| match (left.is_nan(), right.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => left.total_cmp(right),
+    });
+    let rank = quantile * (values.len() as f64 - 1.0);
+    let lower = rank.floor().max(0.0) as usize;
+    let upper = (lower + 1).min(values.len() - 1);
+    let weight = rank - rank.floor();
+    values[lower] * (1.0 - weight) + values[upper] * weight
+}
+
 fn apply_prometheus_aggregate(
     aggregate: &PromAggregatePlan,
     series: Vec<IntermediateSeries>,
@@ -2884,7 +2951,7 @@ impl PromAggregateState {
                 self.mean += delta / self.count;
                 self.variance += delta * (value - self.mean);
             }
-            PromAggregateOp::TopK | PromAggregateOp::BottomK => {
+            PromAggregateOp::TopK | PromAggregateOp::BottomK | PromAggregateOp::Quantile => {
                 unreachable!("ranking aggregations do not use reduction state")
             }
         }
@@ -2900,7 +2967,7 @@ impl PromAggregateState {
             PromAggregateOp::Group => 1.0,
             PromAggregateOp::StdDev => (self.variance / self.count).sqrt(),
             PromAggregateOp::StdVar => self.variance / self.count,
-            PromAggregateOp::TopK | PromAggregateOp::BottomK => {
+            PromAggregateOp::TopK | PromAggregateOp::BottomK | PromAggregateOp::Quantile => {
                 unreachable!("ranking aggregations do not use reduction state")
             }
         }
