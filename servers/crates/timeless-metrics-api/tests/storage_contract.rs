@@ -1225,6 +1225,79 @@ async fn session_two_promql_grid_and_lookback_match_prometheus() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_promql_value_types_match_prometheus() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two_promql_types.db");
+    let base = 1_700_000_000_i64;
+    let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        "{{\"metric\":{{\"__name__\":\"type_metric\",\"host\":\"a\"}},\"values\":[10.0],\"timestamps\":[{}]}}\n",
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (path, result_type, result_len) in [
+        (
+            format!("/api/v1/query?query=type_metric&time={base}"),
+            "vector",
+            1,
+        ),
+        (
+            format!("/api/v1/query?query=missing_metric&time={base}"),
+            "vector",
+            0,
+        ),
+        (
+            format!("/api/v1/query?query=type_metric%5B1s%5D&time={base}"),
+            "matrix",
+            1,
+        ),
+        (
+            format!("/api/v1/query?query=missing_metric%5B1s%5D&time={base}"),
+            "matrix",
+            0,
+        ),
+    ] {
+        let response = get_json(&app, &path).await;
+        assert_eq!(response.0, StatusCode::OK, "{path}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], result_type);
+        assert_eq!(
+            response.1["data"]["result"].as_array().unwrap().len(),
+            result_len
+        );
+    }
+
+    let scalar = get_json(&app, &format!("/api/v1/query?query=1&time={base}")).await;
+    assert_eq!(scalar.0, StatusCode::OK, "{}", scalar.1);
+    assert_eq!(scalar.1["data"]["resultType"], "scalar");
+    assert_eq!(scalar.1["data"]["result"], serde_json::json!([base, "1"]));
+
+    let string = get_json(
+        &app,
+        &format!("/api/v1/query?query=%22value%22&time={base}"),
+    )
+    .await;
+    assert_eq!(string.0, StatusCode::OK, "{}", string.1);
+    assert_eq!(string.1["data"]["resultType"], "string");
+    assert_eq!(
+        string.1["data"]["result"],
+        serde_json::json!([base, "value"])
+    );
+
+    let range_scalar = get_json(&app, "/api/v1/query_range?query=1&start=0&end=1&step=1").await;
+    assert_eq!(range_scalar.0, StatusCode::OK, "{}", range_scalar.1);
+    assert_eq!(range_scalar.1["data"]["resultType"], "matrix");
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

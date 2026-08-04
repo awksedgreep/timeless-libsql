@@ -67,7 +67,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S15` | line comments | missing | no | none | `API` | P2 | Parser-only, but still requires complete-expression tests. |
 | `PQL-S16` | exact query grid and configurable lookback | shipped | yes | `GRID`, `RAW` | `API` | P0 | Request-scoped `lookback_delta`, the zero/default rule, exact millisecond open-left boundaries, non-aligned ends, and overflow-safe 11,000-point grids apply to every shipped expression. |
 | `PQL-S17` | Prometheus stale-marker semantics | partial | partial | `RAW` | `EXT` | P1 | See `QSF-004`; first decide whether ingest/storage preserves stale markers. The API consumes the resulting contract. |
-| `PQL-S18` | instant vector, range vector, scalar, and string types | partial | yes | `SQL` | `API` | P0 | Current Rust plans only produce vectors/matrices. |
+| `PQL-S18` | instant vector, range vector, scalar, and string types | in progress | yes | none | `API` | P0 | Revalidate exact type dispatch and empty results across the value implementations shipped by `PQL-S06`, `PQL-S11`, and `PQL-S13`; Prometheus envelopes have no honest SQL equivalent. |
 | `PQL-S19` | deterministic Prometheus error/result envelopes | partial | yes | none | `API` | P0 | Extend stable `bad_data` behavior to the whole grammar. |
 | `PQL-S20` | 11,000 points/series, sample, row, response, and deadline limits | partial | yes | none | `API` | P0 | Limits must cover intermediate values, not only output. |
 | `PQL-S21` | cancellation and SQLite reader reuse | shipped | n/a | all | `API` | P0 | Every new evaluator loop must check the same cancellation token. |

@@ -39,6 +39,22 @@
       }
     },
     {
+      "id": "PQL-S18-empty-instant-vector-type",
+      "endpoint": "/api/v1/query",
+      "params": {
+        "query": "up",
+        "time": "2.5"
+      },
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {
+          "resultType": "vector",
+          "result": []
+        }
+      }
+    },
+    {
       "id": "PQL-S06-root-range-vector-range-error",
       "endpoint": "/api/v1/query_range",
       "params": {
