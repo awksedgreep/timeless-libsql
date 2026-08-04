@@ -1252,8 +1252,42 @@ HWM was 35,836 KiB. No benchmark request required cancellation; the shared
 range-executor cancellation regression covers cancellation and reader reuse.
 Pinned oracle and real-extension regressions cover ordinary counters, resets,
 sparse edges, zero-point clamping, exact open-left boundaries, offset output
-timestamps, subqueries, NaN, singleton omission, invalid types, work limits,
-shutdown, and cold reopen. `QSF-049` records the correction of stale
-unsupported-function error fixtures. No extension signature, storage/frame
+timestamps, subqueries, NaN, both infinities, singleton omission, invalid
+types, work limits, shutdown, and cold reopen. `QSF-049` records the correction
+of stale unsupported-function error fixtures. No extension signature, storage/frame
 format, batching, compression, index, rollup, retention, transaction, or
 migration behavior changed.
+
+## Session 7 `PQL-R13` instantaneous float-counter rate
+
+The checked-in
+[`2026-08-04_session7_pql_r13.json`](evidence/2026-08-04_session7_pql_r13.json)
+was captured from exact extension and server build
+`37a8661f199ac496f18759488eb5902babb8c16c`. Both measured shapes use one
+bounded public packed raw read followed by the Rust PromQL final-pair reset and
+actual-interval fold.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `irate(...[5m])` | 1 | 133 | 0.601 | 0.903 | 0.907 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `irate(...[5m])` | 2,048 | 67,902 | 3.367 | 3.900 | 4.239 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 bounded raw samples and
+emits 2,048 instantaneous rates without an intermediate matrix. Although only
+the final pair contributes to each answer, the existing public packed raw
+surface must return each bounded input. At 3.900 ms p95 for the wide shape,
+that measured crossing cost does not justify a last-pair-specific extension
+primitive; direct SQLite/libSQL users have the executable finite-counter SQL
+recipe.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,232 KiB. No benchmark request required cancellation; the shared
+range-executor cancellation regression covers cancellation and reader reuse.
+Pinned oracle and real-extension regressions cover ordinary counters, reset
+substitution, sparse intervals, exact open-left boundaries, offset output
+timestamps, subqueries, NaN, both infinities, singleton and zero-interval
+omission, invalid types, work limits, shutdown, and cold reopen. No extension
+signature, storage/frame format, batching, compression, index, rollup,
+retention, transaction, or migration behavior changed, and this row produced
+no new storage finding.
