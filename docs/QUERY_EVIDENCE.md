@@ -919,3 +919,38 @@ infinities, NaN, invalid label names, range counts, output limits,
 cancellation, and cold reopen. Direct SQL groups the public grid's raw numeric
 value; no extension primitive, format, batching, compression, index, rollup,
 retention, transaction, or migration behavior changed.
+
+## Session 6 `PQL-R01` compensated range average
+
+The checked-in
+[`2026-08-04_session6_pql_r01.json`](evidence/2026-08-04_session6_pql_r01.json)
+was captured from exact extension and server build
+`3fdff94781b567715d3fde5eaf68370d2a878027`. Direct shapes use the public
+packed window kernel; subquery shapes materialize their already-bounded inner
+matrix from the public packed raw frame before applying the same compensated
+average in Rust.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, native `avg_over_time(...[5m])` | 1 | 134 | 0.388 | 0.593 | 0.665 | 0 | 1 | 32 | 131 |
+| 512 series × four steps, native `avg_over_time(...[5m])` | 2,048 | 70,633 | 2.974 | 3.546 | 4.107 | 0 | 512 | 16,384 | 53,831 |
+| exact host, `avg_over_time(...[5m:10s])` | 1 | 134 | 0.402 | 0.520 | 0.600 | 30 | 1 | 32 | 131 |
+| 512 series × four steps, `avg_over_time(...[5m:10s])` | 2,048 | 70,633 | 8.466 | 8.863 | 8.949 | 16,384 | 512 | 16,384 | 53,831 |
+
+The direct wide query returns 2,048 sparse grid points after one packed
+window call; the new public counters report exactly 512 considered series,
+512 candidate chunks, 16,384 decoded inputs, and 2,048 returned window
+points per request. The subquery wide shape reads the same chunks/inputs but
+also owns 16,384 intermediate points, explaining its additional Rust
+composition time without attributing that cost to storage.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,324 KiB. Pinned Prometheus and real-extension cases cover exact
+`(T-window,T]` boundaries, sparse/empty windows, cancellation-sensitive
+finite sums, overflow fallback, NaN/infinities, subqueries, work limits,
+shutdown, and cold reopen. `tests/cli.sh` executes the compensated public SQL
+recipe and exact `window_batch_query_*` stats. The correction changes only a
+general reduction result and additive observability: batching, compression,
+indexes, rollups, retention, transactions, migrations, and packed-frame
+formats remain intact.
