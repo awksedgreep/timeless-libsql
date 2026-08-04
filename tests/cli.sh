@@ -3531,6 +3531,11 @@ db.executemany(
         ('min_window', '{}', 30, 4.0),
         ('min_zero', '{}', 20, 0.0),
         ('min_zero', '{}', 30, -0.0),
+        ('max_window', '{}', 10, 5.0),
+        ('max_window', '{}', 20, 3.0),
+        ('max_window', '{}', 30, 4.0),
+        ('max_zero', '{}', 20, -0.0),
+        ('max_zero', '{}', 30, 0.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3678,6 +3683,17 @@ first_zero = db.execute(
     "'metrics','min_zero',NULL,30,30,1,20,'min')"
 ).fetchone()[0]
 assert first_zero == 0.0 and math.copysign(1.0, first_zero) == 1.0
+
+maximum = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','max_window',NULL,30,30,1,20,'max')"
+).fetchone()[0]
+assert maximum == 4.0
+reverse_zero = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','max_zero',NULL,30,30,1,20,'max')"
+).fetchone()[0]
+assert reverse_zero == 0.0 and math.copysign(1.0, reverse_zero) == -1.0
 
 cross_sum = db.execute(
     "WITH selected AS ("

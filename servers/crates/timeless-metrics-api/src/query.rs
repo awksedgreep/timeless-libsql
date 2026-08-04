@@ -397,6 +397,7 @@ pub(crate) enum PromPlan {
 enum PromRangeOp {
     Avg,
     Min,
+    Max,
 }
 
 impl PromRangeOp {
@@ -404,6 +405,7 @@ impl PromRangeOp {
         match self {
             Self::Avg => "avg_over_time",
             Self::Min => "min_over_time",
+            Self::Max => "max_over_time",
         }
     }
 
@@ -411,6 +413,7 @@ impl PromRangeOp {
         match self {
             Self::Avg => "avg",
             Self::Min => "min",
+            Self::Max => "max",
         }
     }
 
@@ -418,6 +421,7 @@ impl PromRangeOp {
         match self {
             Self::Avg => PromAggregateOp::Avg,
             Self::Min => PromAggregateOp::Min,
+            Self::Max => PromAggregateOp::Max,
         }
     }
 }
@@ -878,10 +882,16 @@ fn lower_promql_expr(
             lookback,
             depth + 1,
         )?)),
-        promql::Expr::Call(call) if matches!(call.func.name, "avg_over_time" | "min_over_time") => {
+        promql::Expr::Call(call)
+            if matches!(
+                call.func.name,
+                "avg_over_time" | "min_over_time" | "max_over_time"
+            ) =>
+        {
             let op = match call.func.name {
                 "avg_over_time" => PromRangeOp::Avg,
                 "min_over_time" => PromRangeOp::Min,
+                "max_over_time" => PromRangeOp::Max,
                 _ => unreachable!("guarded range function"),
             };
             let [argument] = call.args.args.as_slice() else {

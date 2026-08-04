@@ -350,6 +350,7 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
         ("mixed", [float("nan"), 2.0]),
         ("infinite", [float("-inf"), float("inf")]),
         ("zero", [0.0, -0.0]),
+        ("zero_reverse", [-0.0, 0.0]),
     ]:
         write_request += series(
             "oracle_range_extrema",

@@ -3123,7 +3123,7 @@ impl Engine {
     //   - Min uses an ordered comparison seeded by the first sample: an
     //     incoming NaN is ignored, a leading NaN is replaced by the first
     //     ordered value, and equal signed zeros retain the first sample.
-    //   - Max uses f64::max seeded by the first sample.
+    //   - Max mirrors Min's ordered comparison and first-sample stability.
     // A naive evaluator over the same raw samples must agree on every
     // bit, which is what makes these kernels safe to push down.
 
@@ -3196,9 +3196,13 @@ impl Engine {
                         acc
                     }
                 }),
-                AggFn::Max => win[1..]
-                    .iter()
-                    .fold(win[0].1, |acc, &(_, v)| f64::max(acc, v)),
+                AggFn::Max => win[1..].iter().fold(win[0].1, |acc, &(_, value)| {
+                    if acc < value || acc.is_nan() {
+                        value
+                    } else {
+                        acc
+                    }
+                }),
             }),
             WindowOp::Delta => Some(win[win.len() - 1].1 - win[0].1),
             WindowOp::Increase => Some(Self::increase_of(win)),

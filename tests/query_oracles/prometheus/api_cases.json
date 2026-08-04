@@ -690,12 +690,48 @@
         {"metric": {"case": "all_nan", "job": "oracle"}, "value": "NaN"},
         {"metric": {"case": "mixed", "job": "oracle"}, "value": 2},
         {"metric": {"case": "infinite", "job": "oracle"}, "value": "-Inf"},
-        {"metric": {"case": "zero", "job": "oracle"}, "value": 0}
+        {"metric": {"case": "zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "zero_reverse", "job": "oracle"}, "value": "-0"}
       ]
     },
     {
       "id": "PQL-R02-min-over-time-empty",
       "query": "min_over_time(oracle_temporal[20s])",
+      "evaluation_offset_ms": 600000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-R03-max-over-time-boundary",
+      "query": "max_over_time(oracle_temporal[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [7],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R03-max-over-subquery-boundary",
+      "query": "max_over_time(oracle_temporal[20s:10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [7],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R03-max-over-time-ieee",
+      "query": "max_over_time(oracle_range_extrema[20s])",
+      "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "all_nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "mixed", "job": "oracle"}, "value": 2},
+        {"metric": {"case": "infinite", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "zero_reverse", "job": "oracle"}, "value": "-0"}
+      ]
+    },
+    {
+      "id": "PQL-R03-max-over-time-empty",
+      "query": "max_over_time(oracle_temporal[20s])",
       "evaluation_offset_ms": 600000,
       "expected_empty": true
     },
