@@ -68,6 +68,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-024`](#sql-prom-024-count_over_time) | `PQL-R05` | current | exact float-sample window count |
 | [`SQL-PROM-025`](#sql-prom-025-last_over_time) | `PQL-R06` | current | exact last stored float in each window |
 | [`SQL-PROM-026`](#sql-prom-026-present_over_time) | `PQL-R08` | current | exact non-empty float-window presence |
+| [`SQL-PROM-027`](#sql-prom-027-quantile_over_time) | `PQL-R09` | current foundation | exact finite-value linear interpolation per float window; API owns raw IEEE edge semantics |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -329,6 +330,87 @@ outer millisecond timestamps, subquery composition, limits, cancellation, and
 result envelopes. Native histogram samples are not stored. Direct regression:
 `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_six_promql_present_over_time_tracks_presence_limits_and_reopen`.
+
+### SQL-PROM-027: `quantile_over_time`
+
+For a finite `:q` in `[0,1]` and finite sample values, rank each series and
+evaluation window independently and linearly interpolate at `q * (N - 1)`:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.value
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+  WHERE raw.value IS NOT NULL
+), ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY series_id, ts ORDER BY value
+    ) - 1 AS value_index,
+    COUNT(*) OVER (PARTITION BY series_id, ts) AS value_count
+  FROM selected
+), positions AS (
+  SELECT DISTINCT
+    series_id,
+    labels,
+    ts,
+    value_count,
+    CAST(:q AS REAL) * (value_count - 1) AS rank
+  FROM ranked
+), bounds AS (
+  SELECT
+    *,
+    CAST(rank AS INTEGER) AS lower_index,
+    MIN(CAST(rank AS INTEGER) + 1, value_count - 1) AS upper_index
+  FROM positions
+)
+SELECT
+  bounds.labels,
+  bounds.ts,
+  lower.value * (1.0 - (bounds.rank - bounds.lower_index))
+    + upper.value * (bounds.rank - bounds.lower_index) AS value
+FROM bounds
+JOIN ranked AS lower
+  ON lower.series_id = bounds.series_id
+ AND lower.ts = bounds.ts
+ AND lower.value_index = bounds.lower_index
+JOIN ranked AS upper
+  ON upper.series_id = bounds.series_id
+ AND upper.ts = bounds.ts
+ AND upper.value_index = bounds.upper_index
+ORDER BY bounds.labels, bounds.ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
+seconds; `:q` is REAL. Output grid bounds are inclusive, while every sample
+window is exactly `(T-window,T]`. Empty windows emit no row, and output is
+ordered by canonical labels then timestamp. The explicit raw join is required:
+the public `pXX` window vocabulary is a fixed nearest-rank storage statistic,
+not PromQL's scalar-parameter linear interpolation.
+
+This SQL is exact for finite values. SQLite exposes a packed IEEE NaN as SQL
+NULL and does not promise Prometheus's stable signed-zero tie order. The Rust
+API reads the public packed raw frame and owns raw-NaN-low ranking, signed-zero
+order, infinities, `q = NaN`, out-of-range `q` mapping to infinities, scalar
+expression evaluation, metric-name removal, millisecond outer timestamps,
+subqueries, limits, cancellation, and envelopes. This is an honest public SQL
+foundation rather than an IEEE-parity claim. Direct regression:
+`tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_six_promql_quantile_over_time_interpolates_ieee_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

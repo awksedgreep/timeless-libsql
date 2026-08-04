@@ -401,6 +401,7 @@ enum PromRangeOp {
     Sum,
     Count,
     Present,
+    Quantile,
     Last,
 }
 
@@ -413,6 +414,7 @@ impl PromRangeOp {
             Self::Sum => "sum_over_time",
             Self::Count => "count_over_time",
             Self::Present => "present_over_time",
+            Self::Quantile => "quantile_over_time",
             Self::Last => "last_over_time",
         }
     }
@@ -425,7 +427,7 @@ impl PromRangeOp {
             Self::Sum => Some("sum"),
             Self::Count => Some("count"),
             Self::Present => Some("count"),
-            Self::Last => None,
+            Self::Quantile | Self::Last => None,
         }
     }
 
@@ -436,7 +438,7 @@ impl PromRangeOp {
             Self::Max => Some(PromAggregateOp::Max),
             Self::Sum => Some(PromAggregateOp::Sum),
             Self::Count => Some(PromAggregateOp::Count),
-            Self::Present | Self::Last => None,
+            Self::Present | Self::Quantile | Self::Last => None,
         }
     }
 
@@ -455,6 +457,7 @@ enum PromRangeInput {
 pub(crate) struct PromRangePlan {
     op: PromRangeOp,
     input: PromRangeInput,
+    parameter: Option<Box<PromPlan>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -846,6 +849,16 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
     let parsed = promql::parse(input).map_err(|error| {
         if error == "no expression found in input" {
             "unknown position: parse error: no expression found in input".to_string()
+        } else if error
+            == "expected 2 argument(s) in call to 'quantile_over_time', got 1"
+        {
+            "1:1: parse error: expected 2 argument(s) in call to \"quantile_over_time\", got 1"
+                .to_string()
+        } else if error
+            == "expected type scalar in call to function 'quantile_over_time', got vector"
+        {
+            "1:20: parse error: expected type scalar in call to function \"quantile_over_time\", got instant vector"
+                .to_string()
         } else {
             format!("parse error: {error}")
         }
@@ -905,6 +918,34 @@ fn lower_promql_expr(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
         ),
+        promql::Expr::Call(call) if call.func.name == "quantile_over_time" => {
+            let [parameter, argument] = call.args.args.as_slice() else {
+                return Err("quantile_over_time requires a scalar and a range vector".into());
+            };
+            let parameter = lower_promql_expr((**parameter).clone(), lookback, depth + 1)?;
+            if parameter.value_type() != PromValueType::Scalar {
+                return Err("quantile_over_time requires a scalar parameter".into());
+            }
+            let input = match argument.as_ref() {
+                promql::Expr::MatrixSelector(selector) => {
+                    let window = duration_millis_i64(selector.range, "range")?;
+                    if window == 0 {
+                        return Err("PromQL range duration must be at least 1ms".into());
+                    }
+                    let selector = lower_promql_selector(selector.vs.clone())?;
+                    PromRangeInput::Selector { selector, window }
+                }
+                promql::Expr::Subquery(subquery) => PromRangeInput::Subquery(
+                    lower_promql_subquery(subquery.clone(), lookback, depth + 1)?,
+                ),
+                _ => return Err("quantile_over_time requires a range vector".into()),
+            };
+            Ok(PromPlan::RangeReduction(PromRangePlan {
+                op: PromRangeOp::Quantile,
+                input,
+                parameter: Some(Box::new(parameter)),
+            }))
+        }
         promql::Expr::Call(call)
             if matches!(
                 call.func.name,
@@ -944,7 +985,11 @@ fn lower_promql_expr(
                 ),
                 _ => return Err(format!("{} requires a range vector", op.name())),
             };
-            Ok(PromPlan::RangeReduction(PromRangePlan { op, input }))
+            Ok(PromPlan::RangeReduction(PromRangePlan {
+                op,
+                input,
+                parameter: None,
+            }))
         }
         other => Err(format!(
             "unsupported PromQL expression (parsed as {})",
@@ -2558,65 +2603,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
-        PromPlan::RangeReduction(range) => match &range.input {
-            PromRangeInput::Selector { selector, window }
-                if features.window_batches
-                    && features.window_batch_work_limit
-                    && range.op.native_name().is_some()
-                    && matches!(selector.metric, MetricSelection::Exact(_))
-                    && selector.timing.is_default()
-                    && [start, stop, step, *window]
-                        .into_iter()
-                        .all(|value| value % 1_000 == 0) =>
-            {
-                let MetricSelection::Exact(metric) = &selector.metric else {
-                    unreachable!("exact metric required by window guard")
-                };
-                execute_prometheus_window(
-                    conn,
-                    features.table,
-                    metric,
-                    &selector.filter,
-                    start / 1_000,
-                    stop / 1_000,
-                    step / 1_000,
-                    *window / 1_000,
-                    range.op,
-                    instant,
-                    limits,
-                    cancelled,
-                )
-            }
-            PromRangeInput::Selector { selector, window } => execute_prometheus_range_raw(
-                conn,
-                features,
-                selector,
-                start,
-                stop,
-                step,
-                *window,
-                range.op,
-                instant,
-                query_start,
-                query_end,
-                limits,
-                cancelled,
-            ),
-            PromRangeInput::Subquery(subquery) => execute_prometheus_range_subquery(
-                conn,
-                features,
-                subquery,
-                start,
-                stop,
-                step,
-                range.op,
-                instant,
-                query_start,
-                query_end,
-                limits,
-                cancelled,
-            ),
-        },
+        PromPlan::RangeReduction(range) => execute_prometheus_range_reduction_plan(
+            conn,
+            features,
+            range,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::RangeSelector { selector, window } => execute_prometheus_range_selector(
             conn,
             features,
@@ -2641,6 +2640,122 @@ fn execute_prometheus(
             cancelled,
         ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_range_reduction_plan(
+    conn: &Connection,
+    features: QueryFeatures,
+    range: &PromRangePlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let (parameters, parameter_frame_bytes, parameter_intermediate_points) =
+        if let Some(parameter) = &range.parameter {
+            let output = execute_prometheus(
+                conn,
+                features,
+                parameter,
+                start,
+                stop,
+                step,
+                instant,
+                query_start,
+                query_end,
+                limits,
+                cancelled,
+            )?;
+            let frame_bytes = output.frame_bytes;
+            let intermediate_points = output.intermediate_points.saturating_add(output.points);
+            let IntermediateValue::Scalar(points) = decode_prometheus_intermediate(
+                &output.body,
+                PromValueType::Scalar,
+                instant,
+                limits,
+                cancelled,
+            )?
+            else {
+                unreachable!("range parameter type was checked while lowering")
+            };
+            (Some(points), frame_bytes, intermediate_points)
+        } else {
+            (None, 0, 0)
+        };
+    enforce_intermediate_work(parameter_intermediate_points, limits)?;
+
+    let mut output = match &range.input {
+        PromRangeInput::Selector { selector, window }
+            if features.window_batches
+                && features.window_batch_work_limit
+                && range.op.native_name().is_some()
+                && matches!(selector.metric, MetricSelection::Exact(_))
+                && selector.timing.is_default()
+                && [start, stop, step, *window]
+                    .into_iter()
+                    .all(|value| value % 1_000 == 0) =>
+        {
+            let MetricSelection::Exact(metric) = &selector.metric else {
+                unreachable!("exact metric required by window guard")
+            };
+            execute_prometheus_window(
+                conn,
+                features.table,
+                metric,
+                &selector.filter,
+                start / 1_000,
+                stop / 1_000,
+                step / 1_000,
+                *window / 1_000,
+                range.op,
+                instant,
+                limits,
+                cancelled,
+            )?
+        }
+        PromRangeInput::Selector { selector, window } => execute_prometheus_range_raw(
+            conn,
+            features,
+            selector,
+            start,
+            stop,
+            step,
+            *window,
+            range.op,
+            parameters.as_deref(),
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        )?,
+        PromRangeInput::Subquery(subquery) => execute_prometheus_range_subquery(
+            conn,
+            features,
+            subquery,
+            start,
+            stop,
+            step,
+            range.op,
+            parameters.as_deref(),
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        )?,
+    };
+    output.frame_bytes = output.frame_bytes.saturating_add(parameter_frame_bytes);
+    output.intermediate_points = output
+        .intermediate_points
+        .saturating_add(parameter_intermediate_points);
+    enforce_intermediate_work(output.intermediate_points, limits)?;
+    Ok(output)
 }
 
 #[derive(Debug)]
@@ -2943,7 +3058,9 @@ fn prometheus_quantile(quantile: f64, values: &mut [f64]) -> f64 {
         (true, true) => std::cmp::Ordering::Equal,
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
-        (false, false) => left.total_cmp(right),
+        (false, false) => left
+            .partial_cmp(right)
+            .expect("non-NaN floats have a total numeric order"),
     });
     let rank = quantile * (values.len() as f64 - 1.0);
     let lower = rank.floor().max(0.0) as usize;
@@ -4003,6 +4120,7 @@ fn execute_prometheus_range_subquery(
     stop: i64,
     step: i64,
     op: PromRangeOp,
+    parameters: Option<&[(i64, f64)]>,
     instant: bool,
     query_start: i64,
     query_end: i64,
@@ -4048,6 +4166,7 @@ fn execute_prometheus_range_subquery(
         ));
     }
     let intermediate = decode_prometheus_matrix(&inner.body, limits, cancelled)?;
+    let parameters: BTreeMap<i64, f64> = parameters.unwrap_or_default().iter().copied().collect();
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
     enforce_prometheus_output(&body, 0, limits)?;
@@ -4083,7 +4202,12 @@ fn execute_prometheus_range_subquery(
                 if !instant {
                     comma(&mut body, item_points as usize);
                 }
-                let value = prometheus_range_reduction(&series.points[lo..hi], op, cancelled)?;
+                let value = prometheus_range_reduction(
+                    &series.points[lo..hi],
+                    op,
+                    parameters.get(&outer).copied(),
+                    cancelled,
+                )?;
                 write_prometheus_sample(&mut body, outer, value)?;
                 item_points += 1;
                 enforce_prometheus_output(
@@ -4243,6 +4367,7 @@ fn checked_timestamp_sub(timestamp: i64, duration: i64, name: &str) -> Result<i6
 fn prometheus_range_reduction(
     points: &[(i64, f64)],
     op: PromRangeOp,
+    parameter: Option<f64>,
     cancelled: &AtomicBool,
 ) -> Result<f64, String> {
     if matches!(op, PromRangeOp::Present) {
@@ -4250,6 +4375,18 @@ fn prometheus_range_reduction(
     }
     if matches!(op, PromRangeOp::Last) {
         return Ok(points[points.len() - 1].1);
+    }
+    if matches!(op, PromRangeOp::Quantile) {
+        let quantile = parameter
+            .ok_or_else(|| "quantile_over_time is missing its scalar parameter".to_string())?;
+        let mut values = Vec::with_capacity(points.len());
+        for &(_, value) in points {
+            check_cancelled(cancelled)?;
+            values.push(value);
+        }
+        let value = prometheus_quantile(quantile, &mut values);
+        check_cancelled(cancelled)?;
+        return Ok(value);
     }
     let aggregate = op
         .aggregate_op()
@@ -4712,6 +4849,7 @@ fn execute_prometheus_range_raw(
     step: i64,
     window: i64,
     op: PromRangeOp,
+    parameters: Option<&[(i64, f64)]>,
     instant: bool,
     query_start: i64,
     query_end: i64,
@@ -4734,6 +4872,7 @@ fn execute_prometheus_range_raw(
     let mut points = 0_u64;
     let mut frame_bytes = 0_usize;
     let mut remaining_work = limits.max_work_points;
+    let parameters: BTreeMap<i64, f64> = parameters.unwrap_or_default().iter().copied().collect();
     for (metric, catalog) in catalogs {
         check_cancelled(cancelled)?;
         if remaining_work == 0 {
@@ -4796,6 +4935,18 @@ fn execute_prometheus_range_raw(
                 if hi > lo {
                     let value = if matches!(op, PromRangeOp::Present) {
                         1.0
+                    } else if matches!(op, PromRangeOp::Quantile) {
+                        let quantile = parameters.get(&t).copied().ok_or_else(|| {
+                            "quantile_over_time is missing its scalar parameter".to_string()
+                        })?;
+                        let mut values = Vec::with_capacity(hi - lo);
+                        for index in lo..hi {
+                            check_cancelled(cancelled)?;
+                            values.push(series.value(raw.frame.as_deref(), index)?);
+                        }
+                        let value = prometheus_quantile(quantile, &mut values);
+                        check_cancelled(cancelled)?;
+                        value
                     } else if matches!(op, PromRangeOp::Last) {
                         series.value(raw.frame.as_deref(), hi - 1)?
                     } else {
@@ -5661,6 +5812,7 @@ mod tests {
         let PromPlan::RangeReduction(PromRangePlan {
             op: PromRangeOp::Avg,
             input: PromRangeInput::Subquery(average),
+            parameter: None,
         }) = lower_promql("avg_over_time(cpu[30s:])", 300_000).unwrap()
         else {
             panic!("subquery range function lowered to the wrong plan")
@@ -5671,6 +5823,7 @@ mod tests {
         let PromPlan::RangeReduction(PromRangePlan {
             op: PromRangeOp::Avg,
             input: PromRangeInput::Subquery(nested),
+            parameter: None,
         }) = lower_promql(
             "avg_over_time(avg_over_time(cpu[20s:10s])[20s:10s])",
             300_000,
@@ -5683,7 +5836,8 @@ mod tests {
             *nested.inner,
             PromPlan::RangeReduction(PromRangePlan {
                 op: PromRangeOp::Avg,
-                input: PromRangeInput::Subquery(_)
+                input: PromRangeInput::Subquery(_),
+                parameter: None
             })
         ));
         assert!(aligned_subquery_grid(0, 0, 10, 0).is_err());
@@ -5725,6 +5879,23 @@ mod tests {
         let last = aggregate_raw(&series, None, 0, 60, Aggregate::Last).unwrap();
         assert!(matches!(first[0].1, BucketValue::Real(1.0)));
         assert!(matches!(last[0].1, BucketValue::Real(3.0)));
+    }
+
+    #[test]
+    fn prometheus_quantile_keeps_input_order_for_signed_zero_ties() {
+        let mut positive_then_negative = [0.0, -0.0];
+        let low = prometheus_quantile(0.0, &mut positive_then_negative);
+        let high = prometheus_quantile(1.0, &mut positive_then_negative);
+        assert_eq!(low.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(high.to_bits(), (-0.0_f64).to_bits());
+
+        let mut negative_then_positive = [-0.0, 0.0];
+        let low = prometheus_quantile(0.0, &mut negative_then_positive);
+        let high = prometheus_quantile(1.0, &mut negative_then_positive);
+        // The interpolation expression adds a zero-weight +0 upper endpoint,
+        // which normalizes this exact q=0 result just as Prometheus does.
+        assert_eq!(low.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(high.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]

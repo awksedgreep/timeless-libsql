@@ -3698,6 +3698,44 @@ empty_presence = db.execute(
     "'metrics','avg_precision',NULL,1000,1000,1,30,'count')"
 ).fetchall()
 assert empty_presence == []
+window_quantile = db.execute(
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,raw.value"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    " WHERE raw.value IS NOT NULL"
+    "),ranked AS ("
+    " SELECT *,ROW_NUMBER() OVER (PARTITION BY series_id,ts ORDER BY value)-1 value_index,"
+    " COUNT(*) OVER (PARTITION BY series_id,ts) value_count FROM selected"
+    "),positions AS ("
+    " SELECT DISTINCT series_id,labels,ts,value_count,"
+    " CAST(:q AS REAL)*(value_count-1) rank FROM ranked"
+    "),bounds AS ("
+    " SELECT *,CAST(rank AS INTEGER) lower_index,"
+    " MIN(CAST(rank AS INTEGER)+1,value_count-1) upper_index FROM positions"
+    ") SELECT bounds.labels,bounds.ts,"
+    " lower.value*(1.0-(bounds.rank-bounds.lower_index))"
+    " +upper.value*(bounds.rank-bounds.lower_index)"
+    " FROM bounds JOIN ranked lower ON lower.series_id=bounds.series_id"
+    " AND lower.ts=bounds.ts AND lower.value_index=bounds.lower_index"
+    " JOIN ranked upper ON upper.series_id=bounds.series_id"
+    " AND upper.ts=bounds.ts AND upper.value_index=bounds.upper_index"
+    " ORDER BY bounds.labels,bounds.ts",
+    {
+        'metric': 'min_window',
+        'filter_json': None,
+        'start': 30,
+        'end': 30,
+        'step': 1,
+        'window': 20,
+        'q': 0.5,
+    },
+).fetchall()
+assert window_quantile == [('{}', 30, 3.5)]
 
 minimum = db.execute(
     "SELECT value FROM timeless_window("

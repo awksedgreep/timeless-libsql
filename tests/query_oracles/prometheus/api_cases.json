@@ -896,6 +896,84 @@
       "expected_empty": true
     },
     {
+      "id": "PQL-R09-quantile-over-time-boundary-expression",
+      "query": "quantile_over_time(1 / 2, oracle_temporal[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [6.5],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R09-quantile-over-subquery-boundary",
+      "query": "quantile_over_time(0.5, oracle_temporal[20s:10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [6.5],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-nan-ranked-low",
+      "query": "quantile_over_time(0, oracle_range_extrema{case=\"mixed\"}[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "mixed", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-nan-high",
+      "query": "quantile_over_time(1, oracle_range_extrema{case=\"mixed\"}[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "mixed", "job": "oracle"},
+      "expected_values": [2]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-infinite-interpolation",
+      "query": "quantile_over_time(0.5, oracle_range_extrema{case=\"infinite\"}[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "infinite", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-positive-zero-order",
+      "query": "quantile_over_time(0, oracle_range_extrema{case=\"zero\"}[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "zero", "job": "oracle"},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-negative-zero-order",
+      "query": "quantile_over_time(1, oracle_range_extrema{case=\"zero\"}[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "zero", "job": "oracle"},
+      "expected_values": ["-0"]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-nan-parameter",
+      "query": "quantile_over_time(NaN, oracle_temporal[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-low-parameter",
+      "query": "quantile_over_time(-1, oracle_temporal[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": ["-Inf"]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-high-parameter",
+      "query": "quantile_over_time(2, oracle_temporal[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": ["+Inf"]
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-empty",
+      "query": "quantile_over_time(0.5, oracle_temporal[20s])",
+      "evaluation_offset_ms": 600000,
+      "expected_empty": true
+    },
+    {
       "id": "PQL-O14-topk-tie-input-order",
       "query": "topk(1, oracle_rank_tie)",
       "evaluation_offset_ms": 30000,
@@ -988,6 +1066,28 @@
         "status": "error",
         "errorType": "bad_data",
         "error": "invalid parameter \"query\": 1:1: parse error: function \"first_over_time\" is not enabled"
+      }
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-arity-error",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "quantile_over_time(up[20s])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: expected 2 argument(s) in call to \"quantile_over_time\", got 1"
+      }
+    },
+    {
+      "id": "PQL-R09-quantile-over-time-parameter-type-error",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "quantile_over_time(up, up[20s])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:20: parse error: expected type scalar in call to function \"quantile_over_time\", got instant vector"
       }
     },
     {

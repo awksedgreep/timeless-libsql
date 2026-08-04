@@ -3332,12 +3332,12 @@ async fn session_five_promql_topk_bottomk_rank_per_step_and_reopen() {
         base * 1_000,
         base * 1_000,
         base * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
         base * 1_000,
         base * 1_000,
-        (base + 10) * 1_000,
-        (base + 10) * 1_000,
-        (base + 10) * 1_000,
-        (base + 10) * 1_000,
         base * 1_000,
         base * 1_000,
         base * 1_000,
@@ -3496,7 +3496,9 @@ async fn session_five_promql_quantile_interpolates_per_step_and_reopens() {
             "aggregate_quantile_limit{{host=\"b\"}} 2 {}\n",
             "aggregate_quantile_limit{{host=\"c\"}} 3 {}\n",
             "aggregate_quantile_limit{{host=\"d\"}} 4 {}\n",
-            "aggregate_quantile_limit{{host=\"e\"}} 5 {}\n"
+            "aggregate_quantile_limit{{host=\"e\"}} 5 {}\n",
+            "aggregate_quantile_zero{{host=\"a\"}} 0 {}\n",
+            "aggregate_quantile_zero{{host=\"b\"}} -0 {}\n"
         ),
         base * 1_000,
         base * 1_000,
@@ -3510,6 +3512,8 @@ async fn session_five_promql_quantile_interpolates_per_step_and_reopens() {
         (base + 10) * 1_000,
         (base + 10) * 1_000,
         (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
         base * 1_000,
         base * 1_000,
         base * 1_000,
@@ -3549,6 +3553,16 @@ async fn session_five_promql_quantile_interpolates_per_step_and_reopens() {
         )
         .await;
         assert_eq!(response.0, StatusCode::OK, "{}: {}", parameter, response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+    for (parameter, expected) in [("0", "0"), ("1", "-0")] {
+        let response = prom_query(
+            &app,
+            &format!("quantile({parameter}, aggregate_quantile_zero)"),
+            base,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
     }
     let range = prom_query_range(
@@ -5500,6 +5514,181 @@ async fn session_six_promql_present_over_time_tracks_presence_limits_and_reopen(
         prom_query(
             &reopened_app,
             "present_over_time(range_present[20s])",
+            base + 30,
+        )
+        .await
+        .1,
+        direct.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_six_promql_quantile_over_time_interpolates_ieee_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_six_quantile_over_time.db");
+    let base = 1_700_670_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_quantile 5 {}\n",
+            "range_quantile 3 {}\n",
+            "range_quantile 4 {}\n",
+            "range_quantile_ieee{{case=\"mixed\"}} NaN {}\n",
+            "range_quantile_ieee{{case=\"mixed\"}} 2 {}\n",
+            "range_quantile_ieee{{case=\"infinite\"}} -Inf {}\n",
+            "range_quantile_ieee{{case=\"infinite\"}} +Inf {}\n",
+            "range_quantile_ieee{{case=\"zero\"}} 0 {}\n",
+            "range_quantile_ieee{{case=\"zero\"}} -0 {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let direct = prom_query(
+        &app,
+        "quantile_over_time(1 / 2, range_quantile[20s])",
+        base + 30,
+    )
+    .await;
+    assert_eq!(direct.0, StatusCode::OK, "{}", direct.1);
+    assert_eq!(
+        direct.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base + 30, "3.5"]}])
+    );
+    let subquery = prom_query(
+        &app,
+        "quantile_over_time(0.5, range_quantile[20s:10s])",
+        base + 30,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(subquery.1, direct.1);
+    let range = prom_query_range(
+        &app,
+        "quantile_over_time(0.5, range_quantile[20s])",
+        base + 20,
+        base + 40,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base + 20, "4"], [base + 30, "3.5"], [base + 40, "4"]]
+        }])
+    );
+
+    for (parameter, case, expected) in [
+        ("0", "mixed", "NaN"),
+        ("1", "mixed", "2"),
+        ("0.5", "infinite", "NaN"),
+        ("0", "zero", "0"),
+        ("1", "zero", "-0"),
+    ] {
+        let query =
+            format!("quantile_over_time({parameter}, range_quantile_ieee{{case=\"{case}\"}}[20s])");
+        let result = prom_query(&app, &query, base + 30).await;
+        assert_eq!(result.0, StatusCode::OK, "{query}: {}", result.1);
+        assert_eq!(
+            result.1["data"]["result"][0]["value"][1], expected,
+            "{query}"
+        );
+    }
+    for (parameter, expected) in [("NaN", "NaN"), ("-1", "-Inf"), ("2", "+Inf")] {
+        let query = format!("quantile_over_time({parameter}, range_quantile[20s])");
+        let result = prom_query(&app, &query, base + 30).await;
+        assert_eq!(result.0, StatusCode::OK, "{query}: {}", result.1);
+        assert_eq!(
+            result.1["data"]["result"][0]["value"][1], expected,
+            "{query}"
+        );
+    }
+    let empty = prom_query(
+        &app,
+        "quantile_over_time(0.5, range_quantile[20s])",
+        base + 1_000,
+    )
+    .await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+
+    for (query, expected) in [
+        (
+            "quantile_over_time(range_quantile[20s])",
+            "invalid parameter \"query\": 1:1: parse error: expected 2 argument(s) in call to \"quantile_over_time\", got 1",
+        ),
+        (
+            "quantile_over_time(range_quantile, range_quantile[20s])",
+            "invalid parameter \"query\": 1:20: parse error: expected type scalar in call to function \"quantile_over_time\", got instant vector",
+        ),
+    ] {
+        let invalid = prom_query(&app, query, base + 30).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data", "{query}");
+        assert_eq!(invalid.1["error"], expected, "{query}");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "quantile_over_time(0.5, range_quantile[20s])",
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 1 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "quantile_over_time(1 / 2, range_quantile[20s])",
             base + 30,
         )
         .await
