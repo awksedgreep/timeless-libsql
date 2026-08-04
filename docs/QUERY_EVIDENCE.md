@@ -1011,3 +1011,31 @@ range executor, shutdown, and cold reopen. The executable SQL recipe checks
 the reverse-zero case. No extension signature, storage/frame format, batching,
 compression, index, rollup, retention, transaction, or migration behavior
 changed.
+
+## Session 6 `PQL-R04` compensated range sum
+
+The checked-in
+[`2026-08-04_session6_pql_r04.json`](evidence/2026-08-04_session6_pql_r04.json)
+was captured from exact extension and server build
+`07ec0f6a97eb6928b6840313e287e5b5bee7634d`. Both measured shapes use the
+public packed window kernel and its compensated sum.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, native `sum_over_time(...[5m])` | 1 | 133 | 0.243 | 0.555 | 0.670 | 0 | 1 | 32 | 131 |
+| 512 series × four steps, native `sum_over_time(...[5m])` | 2,048 | 70,638 | 3.104 | 3.391 | 3.552 | 0 | 512 | 16,384 | 53,831 |
+
+The wide path returns 2,048 sparse points from 512 candidate chunks and the
+expected 16,384 decoded inputs. It materializes no intermediate matrix;
+subsecond/modifier and subquery paths use the same compensated reduction in
+bounded Rust composition.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,164 KiB. Pinned oracle and real-extension regressions cover
+open-left boundaries, empty windows, cancellation-prone finite input, finite
+overflow, mixed infinities, NaN, both zero orders, subqueries, work limits,
+cancellation of the shared range executor, shutdown, and cold reopen. The
+public SQL recipe executes precision and overflow cases. No extension
+signature, storage/frame format, batching, compression, index, rollup,
+retention, transaction, or migration behavior changed.
