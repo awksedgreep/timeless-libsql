@@ -954,3 +954,32 @@ recipe and exact `window_batch_query_*` stats. The correction changes only a
 general reduction result and additive observability: batching, compression,
 indexes, rollups, retention, transactions, migrations, and packed-frame
 formats remain intact.
+
+## Session 6 `PQL-R02` range minimum
+
+The checked-in
+[`2026-08-04_session6_pql_r02.json`](evidence/2026-08-04_session6_pql_r02.json)
+was captured from exact extension and server build
+`218a9aabcf4f260470f7f4952a02239be5d15c62`. Both shapes use the public
+packed window kernel and report its complete input/decode/result work.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, native `min_over_time(...[5m])` | 1 | 131 | 0.316 | 0.477 | 0.604 | 0 | 1 | 32 | 131 |
+| 512 series × four steps, native `min_over_time(...[5m])` | 2,048 | 67,468 | 3.055 | 6.384 | 7.059 | 0 | 512 | 16,384 | 53,831 |
+
+The wide request produces 2,048 sparse grid points after considering exactly
+512 candidate chunks and decoding the expected 32 samples from each series.
+The API allocates no intermediate matrix on this whole-second native path.
+Subsecond/modifier fallbacks and subqueries are correctness-tested through the
+same ordered minimum state, but are not attributed to the extension fast path.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,124 KiB. Pinned Prometheus and real-extension cases cover exact
+`(T-window,T]` boundaries, empty windows, later/leading/all-NaN behavior,
+infinities, first-sample signed-zero stability, subqueries, work limits,
+cancellation of the shared range-reduction executor, shutdown, and cold
+reopen. The direct SQL recipe also checks the stable-zero result. The kernel
+correction changes no extension signature, storage or frame format, batching,
+compression, index, rollup, retention, transaction, or migration behavior.
