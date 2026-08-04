@@ -1457,3 +1457,35 @@ subqueries; singleton omission; invalid arity/types; limits; shutdown; and
 cold reopen. No extension signature, storage/frame format, batching,
 compression, index, rollup, retention, transaction, or migration behavior
 changed, and this row produced no new storage finding.
+
+## Session 7 `PQL-R19` float transition count
+
+The checked-in
+[`2026-08-04_session7_pql_r19.json`](evidence/2026-08-04_session7_pql_r19.json)
+was captured from exact extension and server build
+`6b9399c587fad0bf00e289a7d897960494230e90`. Both measured shapes use one
+bounded public packed raw read and scan the borrowed decoded values once in
+Rust with Prometheus's repeated-NaN equality rule.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `changes(...[5m])` | 1 | 132 | 0.469 | 0.860 | 0.901 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `changes(...[5m])` | 2,048 | 65,854 | 3.512 | 3.862 | 4.201 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes 16,384 bounded raw samples, emits 2,048
+transition counts, and creates neither an intermediate matrix nor a temporary
+value vector. At 3.862 ms p95, the public packed raw frame plus the exact
+ordinary-SQL `LAG` recipe remains the appropriate direct-user boundary; a
+transition-specific extension primitive would not avoid material work.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,312 KiB. No benchmark request required cancellation; focused and
+shared range-executor regressions cover cancellation and reader reuse. Pinned
+oracle and real-extension tests cover every transition, repeated values,
+constant and singleton series, repeated NaNs, NaN-to-number, infinities,
+signed-zero equality, exact open-left boundaries, offset output timestamps,
+subqueries, invalid types, limits, shutdown, and cold reopen. No extension
+signature, storage/frame format, batching, compression, index, rollup,
+retention, transaction, or migration behavior changed, and this row produced
+no new storage finding.
