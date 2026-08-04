@@ -94,3 +94,23 @@ KiB RSS HWM. The dropped-request cancellation/reuse contract remained green.
 No extension format, batching, compression, rollup, retention, transaction, or
 migration behavior changed; only additive per-process read counters were
 added to `timeless_stats`.
+
+## Session 2 `PQL-S11` scalar result
+
+The checked-in
+[`2026-08-04_session2_pql_s11.json`](evidence/2026-08-04_session2_pql_s11.json)
+was captured from exact build `f1f41f2ed9128655213d92ac0645c6b4ff1a3617`.
+The instant shape evaluates one `NaN` scalar; the range shape deliberately
+hits the 11,000-point grid ceiling and writes one constant matrix series.
+
+| shape | result | response bytes | p50 ms | p95 ms | p99 ms | storage reads |
+|---|---:|---:|---:|---:|---:|---:|
+| instant scalar | 1 point | 79 | 0.208 | 0.384 | 0.571 | 0 |
+| 11,000-step scalar range | 11,000 points | 209,087 | 0.585 | 0.770 | 0.789 | 0 |
+
+The large scalar grid is response-serialization work only and remains below
+one millisecond p99 on this host. The run completed all 16,384 fixture points
+durably with zero failed/queued work and reached 19,308 KiB RSS HWM; physical
+SQLite/WAL/SHM bytes remained 525,016. Because PromQL IEEE strings and
+evaluation timestamps are not portable SQLite REAL semantics, this row is
+correctly API-owned with no claimed SQL recipe.
