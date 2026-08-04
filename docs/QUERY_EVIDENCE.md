@@ -1555,3 +1555,39 @@ built-in `abs(-0.0)` retains the negative-zero bits; executable
 extension surfaces. No extension signature, storage/frame format, batching,
 compression, index, rollup, retention, transaction, or migration behavior
 changed.
+
+## Session 8 `PQL-F02` rounding transforms
+
+The checked-in
+[`2026-08-04_session8_pql_f02.json`](evidence/2026-08-04_session8_pql_f02.json)
+was captured from exact extension and server build
+`155324440a9d0200470073486cc80adbf4b47421`. The measured `round` shapes use
+one bounded public packed-raw read, evaluate the scalar nearest-multiple on the
+outer grid, and transform the selected vector in place. They are the most
+expensive member of the row; `ceil` and `floor` omit the scalar child.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `round(metric, 0.5)` | 1 | 132 | 0.332 | 0.471 | 0.583 | 2 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `round(metric, 0.5)` | 2,048 | 67,620 | 4.473 | 4.742 | 4.794 | 2,052 | 16,384 | 512 | 16,384 | 53,831 |
+
+The parameterized wide request adds exactly four scalar grid points to the
+same 2,048-point bounded vector bridge used by `abs`; it does not add a
+storage read. Candidate chunks, decoded samples, returned raw samples, packed
+payload bytes, and final response bytes are unchanged. At 4.742 ms p95, the
+public packed frame plus ordinary in-place Rust arithmetic remains the correct
+boundary; moving scalar rounding into the extension would not avoid decode or
+cross-boundary work for direct SQL users, who already have executable
+`SQL-PROM-039`.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 35,804 KiB. No benchmark request required cancellation; shared
+composed-evaluator cancellation plus focused work-limit coverage pins reader
+reuse. Pinned oracle and real-extension tests cover `ceil`, `floor`, default
+and parameterized `round`, positive and negative values, upward ties,
+negative zero, NaN and infinities, zero/signed-zero/NaN/infinite/negative
+steps, scalar expressions, range grids, nested transforms, invalid types,
+limits, shutdown, and cold reopen. No new storage finding arose, and no
+extension signature, storage/frame format, batching, compression, index,
+rollup, retention, transaction, or migration behavior changed.
