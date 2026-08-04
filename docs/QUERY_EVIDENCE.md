@@ -114,3 +114,34 @@ durably with zero failed/queued work and reached 19,308 KiB RSS HWM; physical
 SQLite/WAL/SHM bytes remained 525,016. Because PromQL IEEE strings and
 evaluation timestamps are not portable SQLite REAL semantics, this row is
 correctly API-owned with no claimed SQL recipe.
+
+## Session 2 `PQL-S12` duration result
+
+The checked-in
+[`2026-08-04_session2_pql_s12.json`](evidence/2026-08-04_session2_pql_s12.json)
+was captured from exact build `9c8481387241925071eb9b88cb7d9d948a7521e6`.
+Each instant query used a five-minute-and-250-millisecond root range. With the
+fixture's whole-second samples this includes 31 samples per series and forces
+the API's public packed-raw fallback rather than truncating time for the
+second-native packed-window TVF.
+
+| shape | series | API points/query | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host | 1 | 31 | 698 | 0.460 | 0.686 | 0.744 | 1 | 32 | 131 |
+| all 512 series | 512 | 15,872 | 344,293 | 4.326 | 4.716 | 7.578 | 512 | 16,384 | 53,831 |
+
+The subsecond-correct path does not increase extension work relative to the
+neighboring whole-second raw range measurement: the narrow query still prunes
+to one chunk and the wide query decodes the fixture once. Its wide p95 is
+2.4% lower than the `PQL-S06` run; p99 is 1.57 ms higher, so no speedup is
+claimed from separate machine-local samples. The corrected shortest-number
+formatter makes response sizes smaller even though this query returns one
+additional point per series.
+
+The run completed all 16,384 fixture points durably with zero failed or queued
+work, retained the 525,016-byte live SQLite/WAL/SHM footprint, and reached
+19,672 KiB RSS HWM. Pinned Prometheus API cases prove exact compound-duration
+scalar values, timestamp rounding, and 500 ms grids. The rule oracle and real
+extension regression prove subsecond open-left range boundaries. Cancellation
+and clean shutdown remained green. No extension format, batching, compression,
+rollup, retention, transaction, or migration behavior changed.
