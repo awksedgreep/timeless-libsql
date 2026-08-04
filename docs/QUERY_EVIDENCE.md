@@ -26,7 +26,9 @@ recorded single-client iterations. The JSON records:
 - response bytes and Linux process RSS HWM; and
 - the cancellation regression that accompanies the query surface.
 
-Run from a release build whose build identity matches `HEAD`:
+Run from release binaries and an extension whose build identities match
+`HEAD`. The harness reads `timeless_capabilities()` and fails before fixture
+setup if the extension or either signal binary is stale:
 
 ```bash
 TIMELESS_BUILD_COMMIT="$(git rev-parse HEAD)" \
@@ -162,7 +164,8 @@ both are one-point instant string results and perform no extension read.
 
 The larger value is intentionally a parser/HTTP/serializer pressure shape,
 not a normal query recommendation. It remains bounded by the server's request
-and response limits; the complete intermediate-limit audit remains `PQL-S20`.
+and response limits; the complete bounded-work evidence is recorded under
+`PQL-S20` below.
 The process reached 20,092 KiB RSS HWM, completed all 16,384 fixture points
 durably with zero failed or queued work, and retained the 525,016-byte live
 SQLite/WAL/SHM footprint. Pinned Prometheus cases prove double-quoted escape,
@@ -254,3 +257,53 @@ Intentional differences for unknown parameters, non-finite evaluation time,
 the 11,000-point ceiling, parser-detail text, and unprefixed native-route
 dispatch are explicit in the server guide and findings log. Future grammar
 rows must extend the same envelope contract before they can ship.
+
+## Session 2 `PQL-S20` bounded-query result
+
+The checked-in
+[`2026-08-04_session2_pql_s20.json`](evidence/2026-08-04_session2_pql_s20.json)
+was captured from exact extension and server build
+`23147d747acb156a3d144bec9881e11b59d77243`. It retains the 512-series,
+16,384-point comparison fixture and adds 25 durable series with 4,001 points
+each (100,025 points) solely to cross the default 100,000 storage-work bound.
+The near-result shape expands ordinary stored samples over a 195-point grid;
+the next grid point crosses the final-result bound.
+
+| shape | result | response bytes | p50 ms | p95 ms | p99 ms | storage work/query |
+|---|---:|---:|---:|---:|---:|---:|
+| exact host | 1 point | 164 | 0.551 | 0.719 | 0.725 | 1 chunk / 32 decoded |
+| 512-series instant | 512 points | 53,497 | 3.081 | 3.341 | 3.851 | 512 chunks / 16,384 decoded |
+| 99,840-point near limit | 99,840 points | 1,926,899 | 10.844 | 12.233 | 12.261 | 512 chunks / 16,384 decoded |
+| 100,352-point attempt | 1 execution error | 108 | 10.383 | 11.005 | 12.365 | 512 chunks / 16,384 decoded |
+| 100,025-point work attempt | 1 execution error | 139 | 0.429 | 0.594 | 0.685 | 25 chunks / 100,025 candidates / **0 payload bytes** |
+
+The result-limit rejection intentionally performs the allowed storage read and
+stops response construction at 100,000 points; it returns no partial matrix.
+The storage-work rejection is the important extension boundary result: across
+20 measured requests it reported 2,000,500 conservative candidate points and
+500 candidate chunks while reading zero payload bytes and returning zero
+points. Thus the limit is paid from chunk metadata before decompression or
+TRF1 allocation. Direct SQL regressions prove the same inclusive behavior for
+buffered and persisted raw points, packed window input and possible output,
+transactions, rollback, old-arity calls, invalid values, and reopen.
+
+The normal fixture completed all 16,384 points durably. The limit fixture then
+completed all 100,025 additional points for a final 116,409, with zero failed
+or queued work. The final SQLite/WAL/SHM footprint was 607,056 bytes and the
+whole process reached 32,380 KiB RSS HWM while repeatedly constructing the
+1.93 MiB near-limit response and ingesting the 2.08 MiB limit fixture. This is
+a measured, bounded increase from the earlier ~20 MiB Session 2 runs, not a
+claim that near-limit queries are free.
+
+The owner defaults are 11,000 points per series, 100,000 result points,
+100,000 storage work points, 16 MiB response bytes, and 30 seconds. The real
+extension HTTP contract pins each bound, a `504`/`timeout` deadline envelope,
+reader reuse, clean shutdown, and cold reopen. The existing dropped-request
+cancellation regression remains green and now checks cancellation inside raw
+window folds as well. Prometheus 3.13.2's intentional 11,001-point difference
+remains documented under `QSF-022`; Timeless keeps its stricter resource tier.
+
+No storage, compression, batching, rollup, retention, migration, or packed
+format changed. The two optional hidden limits are additive, old SQL arities
+remain valid, and `timeless_capabilities()` explicitly advertises support so a
+mismatched server/extension pair fails closed.
