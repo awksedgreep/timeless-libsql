@@ -1489,3 +1489,35 @@ subqueries, invalid types, limits, shutdown, and cold reopen. No extension
 signature, storage/frame format, batching, compression, index, rollup,
 retention, transaction, or migration behavior changed, and this row produced
 no new storage finding.
+
+## Session 7 `PQL-R20` float-counter reset count
+
+The checked-in
+[`2026-08-04_session7_pql_r20.json`](evidence/2026-08-04_session7_pql_r20.json)
+was captured from exact extension and server build
+`51b216f804796508997ef25cee52c1bf18a8f2e7`. Both measured shapes use one
+bounded public packed raw read and scan the borrowed decoded values once in
+Rust, counting only strict IEEE float decreases.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `resets(...[5m])` | 1 | 131 | 0.394 | 0.535 | 0.635 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `resets(...[5m])` | 2,048 | 63,806 | 3.435 | 4.129 | 4.995 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes 16,384 bounded raw samples, emits 2,048
+reset counts, and creates neither an intermediate matrix nor a temporary value
+vector. At 4.129 ms p95, the public packed raw frame plus the exact ordinary
+SQL `LAG` recipe remains preferable to a reset-count extension primitive. The
+extension's mechanical reset-adjusted increase/rate folds remain distinct.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,076 KiB. No benchmark request required cancellation; focused and
+shared range-executor regressions cover cancellation and reader reuse. Pinned
+oracle and real-extension tests cover monotonic and decreasing counters,
+repeated values, singleton zero, NaN and signed-zero non-resets, both infinity
+directions, exact open-left boundaries, offset output timestamps, subqueries,
+invalid types, limits, shutdown, and cold reopen. No extension signature,
+storage/frame format, batching, compression, index, rollup, retention,
+transaction, or migration behavior changed, and this row produced no new
+storage finding.
