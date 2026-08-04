@@ -4007,6 +4007,50 @@ assert [json.loads(row[0])['host'] for row in sort_range_labels] == [
     'web-1', 'web-1', 'web-2', 'web-2'
 ]
 
+scalar_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "), selected AS (SELECT labels,ts,value FROM timeless_grid("
+    " 'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    ") SELECT evaluation.ts,CASE WHEN COUNT(selected.ts)=1"
+    " THEN MAX(selected.value) ELSE NULL END value"
+    " FROM evaluation LEFT JOIN selected USING(ts)"
+    " GROUP BY evaluation.ts ORDER BY evaluation.ts"
+)
+scalar_single = db.execute(
+    scalar_sql,
+    {
+        'metric': 'cpu',
+        'filter_json': '{"host":"web-1"}',
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert scalar_single == [(100, 10.0), (110, 30.0)]
+scalar_multiple = db.execute(
+    scalar_sql,
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert scalar_multiple == [(100, None), (110, None)]
+vector_scalar = db.execute(
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    ") SELECT '{}' labels,ts,:value value FROM evaluation ORDER BY ts",
+    {'start': 100, 'end': 110, 'step': 10, 'value': 5.0},
+).fetchall()
+assert vector_scalar == [('{}', 100, 5.0), ('{}', 110, 5.0)]
+
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
     "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "

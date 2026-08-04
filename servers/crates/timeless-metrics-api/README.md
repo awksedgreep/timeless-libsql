@@ -77,6 +77,10 @@ placing NaN last, preserving labels, names, timestamps, and float bits, and
 using labels only to make equal-value groups deterministic. Range-query
 matrices remain label ordered, matching Prometheus rather than applying one
 step's value order to complete series.
+`scalar(vector)` emits the sole sample value at each step and NaN for zero or
+multiple samples; `vector(scalar)` emits one nameless series. Both preserve
+their exact Prometheus instant/range result types and compose without a second
+storage read.
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves

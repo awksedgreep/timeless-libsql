@@ -390,6 +390,7 @@ pub(crate) enum PromPlan {
     LabelJoin(PromLabelJoinPlan),
     Absent(PromAbsentPlan),
     Sort(PromSortPlan),
+    Conversion(PromConversionPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -543,6 +544,18 @@ pub(crate) struct PromAbsentPlan {
 pub(crate) struct PromSortPlan {
     inner: Box<PromPlan>,
     descending: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromConversionKind {
+    Scalar,
+    Vector,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromConversionPlan {
+    inner: Box<PromPlan>,
+    kind: PromConversionKind,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -830,6 +843,10 @@ impl PromPlan {
             Self::LabelJoin(_) => PromValueType::Vector,
             Self::Absent(_) => PromValueType::Vector,
             Self::Sort(_) => PromValueType::Vector,
+            Self::Conversion(conversion) => match conversion.kind {
+                PromConversionKind::Scalar => PromValueType::Scalar,
+                PromConversionKind::Vector => PromValueType::Vector,
+            },
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1389,6 +1406,27 @@ fn lower_promql_expr(
                 descending: call.func.name == "sort_desc",
             }))
         }
+        promql::Expr::Call(call) if matches!(call.func.name, "scalar" | "vector") => {
+            let [argument] = call.args.args.as_slice() else {
+                return Err(format!("{} requires exactly one argument", call.func.name));
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            let kind = if call.func.name == "scalar" {
+                if inner.value_type() != PromValueType::Vector {
+                    return Err("scalar requires an instant vector".into());
+                }
+                PromConversionKind::Scalar
+            } else {
+                if inner.value_type() != PromValueType::Scalar {
+                    return Err("vector requires a scalar".into());
+                }
+                PromConversionKind::Vector
+            };
+            Ok(PromPlan::Conversion(PromConversionPlan {
+                inner: Box::new(inner),
+                kind,
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1774,6 +1812,7 @@ fn lower_promql_subquery(
             | PromPlan::LabelJoin(_)
             | PromPlan::Absent(_)
             | PromPlan::Sort(_)
+            | PromPlan::Conversion(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -3189,6 +3228,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::Conversion(conversion) => execute_prometheus_conversion(
+            conn,
+            features,
+            conversion,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -4515,6 +4567,91 @@ fn prometheus_sort_order(descending: bool, left: f64, right: f64) -> std::cmp::O
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_conversion(
+    conn: &Connection,
+    features: QueryFeatures,
+    conversion: &PromConversionPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let child_type = conversion.inner.value_type();
+    let child = execute_prometheus(
+        conn,
+        features,
+        &conversion.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let frame_bytes = child.frame_bytes;
+    let mut intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let child =
+        decode_prometheus_intermediate(&child.body, child_type, instant, limits, cancelled)?;
+    let value = match (conversion.kind, child) {
+        (PromConversionKind::Vector, IntermediateValue::Scalar(points)) => {
+            IntermediateValue::Vector(vec![IntermediateSeries {
+                labels: BTreeMap::new(),
+                points,
+            }])
+        }
+        (PromConversionKind::Scalar, IntermediateValue::Vector(series)) => {
+            let mut samples: BTreeMap<i64, (usize, f64)> = BTreeMap::new();
+            for item in series {
+                check_cancelled(cancelled)?;
+                for (timestamp, value) in item.points {
+                    check_cancelled(cancelled)?;
+                    let entry = samples.entry(timestamp).or_insert((0, value));
+                    entry.0 = entry.0.saturating_add(1);
+                    entry.1 = value;
+                }
+            }
+            let mut points = Vec::new();
+            let mut timestamp = start;
+            loop {
+                check_cancelled(cancelled)?;
+                intermediate_points = intermediate_points.saturating_add(1);
+                enforce_intermediate_work(intermediate_points, limits)?;
+                let value = match samples.get(&timestamp) {
+                    Some((1, value)) => *value,
+                    _ => f64::NAN,
+                };
+                points.push((timestamp, value));
+                if timestamp >= stop {
+                    break;
+                }
+                let Some(next) = timestamp.checked_add(step).filter(|next| *next <= stop) else {
+                    break;
+                };
+                timestamp = next;
+            }
+            IntermediateValue::Scalar(points)
+        }
+        _ => unreachable!("conversion input type was checked while lowering"),
+    };
+    encode_prometheus_intermediate(
+        value,
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

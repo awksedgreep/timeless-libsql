@@ -1839,6 +1839,72 @@ extension primitive.
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_sort_orders_ieee_instants_not_range_matrices_and_reopens`.
 
+### SQL-PROM-050: `scalar` and `vector`
+
+Convert a bounded instant vector to one scalar value per evaluation step. An
+exactly one-sample step retains its value; zero or multiple samples become SQL
+NULL, the row-projected equivalent of PromQL NaN:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+), selected AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT evaluation.ts,
+       CASE WHEN COUNT(selected.ts) = 1
+            THEN MAX(selected.value)
+            ELSE NULL
+       END AS value
+FROM evaluation
+LEFT JOIN selected USING (ts)
+GROUP BY evaluation.ts
+ORDER BY evaluation.ts;
+```
+
+`:start`, `:end`, `:step`, and `:lookback` use the metric table's configured
+timestamp unit (integer seconds for the default table); the grid is inclusive
+and lookback is open-left. `COUNT(selected.ts)` counts every actual grid row,
+including a stored NaN whose row-visible value is NULL. `MAX(value)` returns
+NULL for that one stored NaN, correctly retaining the SQL projection of the
+PromQL result. The Rust API reads packed float bits and therefore emits the
+distinguishable Prometheus `NaN` string for empty, multiple, or stored-NaN
+cases.
+
+Convert a scalar expression to a nameless instant vector by attaching the
+empty label set to every evaluation timestamp:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+)
+SELECT '{}' AS labels, ts, :scalar_value AS value
+FROM evaluation
+ORDER BY ts;
+```
+
+Direct callers can replace `:scalar_value` with an ordinary scalar SQL
+expression or a joined scalar CTE. The Rust API owns PromQL expression typing,
+nested AST composition, exact scalar/vector instant and range envelopes,
+float-string formatting, per-step cardinality, cumulative work/response
+limits, and cancellation. These conversions operate on already-bounded
+results and need no extension primitive.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_scalar_vector_convert_types_cardinality_and_reopen`.
+
 ### SQL-PROM-006: range selector
 
 At instant evaluation timestamp `:at`, return every stored float sample in

@@ -9902,6 +9902,158 @@ async fn session_eight_promql_sort_orders_ieee_instants_not_range_matrices_and_r
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_scalar_vector_convert_types_cardinality_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_scalar_vector.db");
+    let base = 1_700_930_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "scalar_metric{{case=\"single\"}} 7 {}\n",
+            "scalar_metric{{case=\"single\"}} 8 {}\n",
+            "scalar_metric{{case=\"single\"}} 9 {}\n",
+            "scalar_metric{{case=\"multi\",host=\"a\"}} 1 {}\n",
+            "scalar_metric{{case=\"multi\",host=\"b\"}} 2 {}\n",
+            "scalar_metric{{case=\"nan\"}} NaN {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 20) * 1_000,
+        (base + 20) * 1_000,
+        (base + 20) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let single = prom_query(&app, "scalar(scalar_metric{case=\"single\"})", base + 20).await;
+    assert_eq!(single.0, StatusCode::OK, "{}", single.1);
+    assert_eq!(
+        single.1,
+        serde_json::json!({
+            "status": "success",
+            "data": {"resultType": "scalar", "result": [base + 20, "9"]}
+        })
+    );
+    for (query, value) in [
+        ("scalar(scalar_metric{case=\"missing\"})", "NaN"),
+        ("scalar(scalar_metric{case=\"multi\"})", "NaN"),
+        ("scalar(scalar_metric{case=\"nan\"})", "NaN"),
+    ] {
+        let response = prom_query(&app, query, base + 20).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], "scalar");
+        assert_eq!(
+            response.1["data"]["result"],
+            serde_json::json!([base + 20, value])
+        );
+    }
+
+    let scalar_range = prom_query_range(
+        &app,
+        "scalar(scalar_metric{case=\"single\"})",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(scalar_range.0, StatusCode::OK, "{}", scalar_range.1);
+    assert_eq!(
+        scalar_range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base, "7"], [base + 10, "8"], [base + 20, "9"]]
+        }])
+    );
+
+    let vector = prom_query(&app, "vector(2 + 3)", base + 20).await;
+    assert_eq!(vector.0, StatusCode::OK, "{}", vector.1);
+    assert_eq!(
+        vector.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base + 20, "5"]}])
+    );
+    let vector_range = prom_query_range(&app, "vector(2)", base, base + 20, 10).await;
+    assert_eq!(vector_range.0, StatusCode::OK, "{}", vector_range.1);
+    assert_eq!(
+        vector_range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base, "2"], [base + 10, "2"], [base + 20, "2"]]
+        }])
+    );
+    let nested = prom_query(&app, "scalar(abs(vector(-2)))", base + 20).await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"],
+        serde_json::json!([base + 20, "2"])
+    );
+
+    for query in ["scalar(1)", "vector(scalar_metric)"] {
+        let invalid = prom_query(&app, query, base + 20).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "scalar(scalar_metric{case=\"missing\"})",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("intermediate-work limit"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "scalar(scalar_metric{case=\"single\"})",
+            base + 20,
+        )
+        .await
+        .1,
+        single.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

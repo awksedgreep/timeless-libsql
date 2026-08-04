@@ -2709,6 +2709,59 @@
         {"metric": {"__name__": "oracle_sort_range", "host": "a", "job": "oracle"}, "values": [1, 10]},
         {"metric": {"__name__": "oracle_sort_range", "host": "b", "job": "oracle"}, "values": [2, 0]}
       ]
+    },
+    {
+      "id": "PQL-F15-scalar-single-series",
+      "query": "scalar(oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": 7
+    },
+    {
+      "id": "PQL-F15-scalar-empty-vector-is-nan",
+      "query": "scalar(oracle_temporal{job=\"missing\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": "NaN"
+    },
+    {
+      "id": "PQL-F15-scalar-multiple-series-is-nan",
+      "query": "scalar(oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": "NaN"
+    },
+    {
+      "id": "PQL-F15-scalar-preserves-nan",
+      "query": "scalar(oracle_math{case=\"nan\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": "NaN"
+    },
+    {
+      "id": "PQL-F15-scalar-range-converts-every-step",
+      "query": "scalar(oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {},
+      "expected_values": [4, 5, 6, 7]
+    },
+    {
+      "id": "PQL-F15-vector-scalar-is-nameless",
+      "query": "vector(2 + 3)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [5]
+    },
+    {
+      "id": "PQL-F15-vector-range-converts-every-step",
+      "query": "vector(2)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {},
+      "expected_values": [2, 2, 2, 2]
+    },
+    {
+      "id": "PQL-F15-conversions-compose",
+      "query": "scalar(abs(vector(-2)))",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": 2
     }
   ],
   "operator_error_cases": [
@@ -2831,6 +2884,22 @@
       "status": 400,
       "error_type": "bad_data",
       "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-F15-scalar-argument-type-errors",
+      "query": "scalar(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-F15-vector-argument-type-errors",
+      "query": "vector(oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type scalar"
     }
   ],
   "cases": [

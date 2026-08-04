@@ -848,6 +848,14 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 endpoint = "/api/v1/query"
                 result_type = "vector"
                 result = []
+            elif "expected_scalar" in case:
+                params = {
+                    "query": case["query"],
+                    "time": str(evaluation_ms / 1_000),
+                }
+                endpoint = "/api/v1/query"
+                result_type = "scalar"
+                result = [evaluation_ms / 1_000, str(case["expected_scalar"])]
             elif "expected_results" in case:
                 params = {
                     "query": case["query"],
@@ -875,6 +883,7 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 }]
             if (
                 result
+                and result_type != "scalar"
                 and "expected_results" not in case
                 and "expected_metric" not in case
                 and not case.get("drop_metric_name")
@@ -883,15 +892,21 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
             url = base + endpoint + "?" + urllib.parse.urlencode(params)
             with urllib.request.urlopen(url, timeout=10) as response:
                 body = json.loads(response.read())
+            actual_result = body.get("data", {}).get("result")
+            result_matches = (
+                actual_result == result
+                if result_type == "scalar"
+                else query_results_equal(
+                    result,
+                    actual_result,
+                    ordered=case.get("result_order", "unordered") == "ordered",
+                )
+            )
             valid = (
                 response.status == 200
                 and body.get("status") == "success"
                 and body.get("data", {}).get("resultType") == result_type
-                and query_results_equal(
-                    result,
-                    body.get("data", {}).get("result"),
-                    ordered=case.get("result_order", "unordered") == "ordered",
-                )
+                and result_matches
             )
             if not valid:
                 print(f"{case['id']}: expected {result!r}; got {body!r}", file=sys.stderr)

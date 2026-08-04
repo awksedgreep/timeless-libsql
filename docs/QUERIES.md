@@ -968,6 +968,21 @@ SQLite/libSQL callers can use the parameterized instant statement and range
 matrix statement in
 [`SQL-PROM-049`](QUERY_SQL_EQUIVALENTS.md#sql-prom-049-sort-and-sort_desc).
 
+PromQL's explicit evaluation-type conversions are also API composition:
+
+```promql
+scalar(process_resident_memory_bytes{instance="api-1"})
+vector(2 + 3)
+```
+
+`scalar(vector)` returns the sole sample value at each evaluation step and
+returns NaN when that step has zero or multiple samples. A sole stored NaN is
+still NaN. `vector(scalar)` produces one nameless series with the scalar value
+at every step. Both compose with other shipped expressions and retain their
+distinct scalar/vector instant and range envelopes. Direct SQLite/libSQL users
+can use the executable per-step cardinality and nameless-vector statements in
+[`SQL-PROM-050`](QUERY_SQL_EQUIVALENTS.md#sql-prom-050-scalar-and-vector).
+
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.
