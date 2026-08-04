@@ -70,6 +70,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-026`](#sql-prom-026-present_over_time) | `PQL-R08` | current | exact non-empty float-window presence |
 | [`SQL-PROM-027`](#sql-prom-027-quantile_over_time) | `PQL-R09` | current foundation | exact finite-value linear interpolation per float window; API owns raw IEEE edge semantics |
 | [`SQL-PROM-028`](#sql-prom-028-stddev_over_time-and-stdvar_over_time) | `PQL-R10`, `PQL-R11` | current foundation | finite-value population Welford deviation or variance per float window; API owns raw IEEE edge semantics |
+| [`SQL-PROM-029`](#sql-prom-029-rate) | `PQL-R12` | current foundation | finite float-counter reset correction and Prometheus edge extrapolation; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -505,6 +506,126 @@ samples are not stored. Direct regression: `tests/cli.sh` section 45;
 HTTP/oracle/reopen regression:
 `session_six_promql_stddev_over_time_is_population_ieee_and_reopenable` and
 `session_six_promql_stdvar_over_time_is_population_ieee_and_reopenable`.
+
+### SQL-PROM-029: `rate`
+
+Prometheus `rate` is not merely reset-adjusted increase divided by the range.
+For every `(T-window,T]` float-counter slice, compute reset correction, estimate
+the sample interval, extrapolate sufficiently close range edges, clamp the left
+edge to the counter's estimated zero point, and finally normalize per second:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.ts AS sample_ts,
+    raw.value,
+    LAG(raw.value) OVER (
+      PARTITION BY raw.series_id, evaluation.ts ORDER BY raw.ts
+    ) AS previous_value,
+    ROW_NUMBER() OVER (
+      PARTITION BY raw.series_id, evaluation.ts ORDER BY raw.ts
+    ) AS sample_number,
+    COUNT(*) OVER (
+      PARTITION BY raw.series_id, evaluation.ts
+    ) AS sample_count
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+), folded AS (
+  SELECT
+    series_id,
+    labels,
+    ts,
+    MAX(sample_count) AS sample_count,
+    MIN(sample_ts) AS first_ts,
+    MAX(sample_ts) AS last_ts,
+    MAX(CASE WHEN sample_number = 1 THEN value END) AS first_value,
+    MAX(
+      CASE WHEN sample_number = sample_count THEN value END
+    ) AS last_value,
+    SUM(
+      CASE
+        WHEN sample_number > 1 AND value < previous_value
+          THEN previous_value
+        ELSE 0.0
+      END
+    ) AS reset_correction
+  FROM selected
+  GROUP BY series_id, labels, ts
+  HAVING MAX(sample_count) >= 2 AND MAX(sample_ts) > MIN(sample_ts)
+), intervals AS (
+  SELECT
+    *,
+    last_value - first_value + reset_correction AS counter_delta,
+    (last_ts - first_ts) * 1.0 AS sampled_interval,
+    (last_ts - first_ts) * 1.0 / (sample_count - 1) AS average_interval
+  FROM folded
+), edges AS (
+  SELECT
+    *,
+    CASE
+      WHEN first_ts - (ts - :window) >= average_interval * 1.1
+        THEN average_interval / 2.0
+      ELSE first_ts - (ts - :window)
+    END AS start_duration,
+    CASE
+      WHEN ts - last_ts >= average_interval * 1.1
+        THEN average_interval / 2.0
+      ELSE ts - last_ts
+    END AS end_duration
+  FROM intervals
+)
+SELECT
+  labels,
+  ts,
+  counter_delta
+    * (
+        sampled_interval
+        + CASE
+            WHEN counter_delta > 0 AND first_value >= 0
+              THEN MIN(
+                start_duration,
+                sampled_interval * first_value / counter_delta
+              )
+            ELSE start_duration
+          END
+        + end_duration
+      )
+    / sampled_interval
+    / :window AS value
+FROM edges
+ORDER BY labels, ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
+seconds, so the result is per second. `:filter_json` is the public matcher JSON
+accepted by `timeless_raw`, or NULL. Output grid bounds are inclusive; sample
+windows are exactly `(T-window,T]`. Fewer than two samples and zero-duration
+sample pairs emit no row. Canonical label/timestamp ordering is deterministic.
+Prometheus normally admits only one float sample per series/timestamp; callers
+that insert duplicates directly must define an additional stable ordering.
+
+This executable recipe is exact for finite float counters. It intentionally
+does not use `timeless_window(..., 'rate')`: that public kernel is a general
+mechanical reset fold divided by the full window and does not implement
+Prometheus edge extrapolation or the zero-point clamp. The Rust API uses one
+bounded public packed raw read and owns PromQL parsing, metric-name removal,
+modifier and subquery evaluation, NaN/infinity strings, limits, cancellation,
+and HTTP envelopes. Native histograms and counter start timestamps are not
+stored. Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen
+regression: `session_seven_promql_rate_extrapolates_resets_bounds_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

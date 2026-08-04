@@ -3536,6 +3536,12 @@ db.executemany(
         ('max_window', '{}', 30, 4.0),
         ('max_zero', '{}', 20, -0.0),
         ('max_zero', '{}', 30, 0.0),
+        ('rate_counter', '{"case":"steady"}', 10, 100.0),
+        ('rate_counter', '{"case":"steady"}', 30, 300.0),
+        ('rate_counter', '{"case":"steady"}', 50, 500.0),
+        ('rate_counter', '{"case":"reset"}', 10, 100.0),
+        ('rate_counter', '{"case":"reset"}', 30, 150.0),
+        ('rate_counter', '{"case":"reset"}', 50, 20.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3780,6 +3786,62 @@ window_stdvar = db.execute(
     {**dispersion_params, 'variance_only': True},
 ).fetchall()
 assert window_stdvar == [('{}', 30, 0.25)]
+
+rate_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,raw.ts sample_ts,raw.value,"
+    " LAG(raw.value) OVER (PARTITION BY raw.series_id,evaluation.ts"
+    " ORDER BY raw.ts) previous_value,"
+    " ROW_NUMBER() OVER (PARTITION BY raw.series_id,evaluation.ts"
+    " ORDER BY raw.ts) sample_number,"
+    " COUNT(*) OVER (PARTITION BY raw.series_id,evaluation.ts) sample_count"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    "),folded AS ("
+    " SELECT series_id,labels,ts,MAX(sample_count) sample_count,"
+    " MIN(sample_ts) first_ts,MAX(sample_ts) last_ts,"
+    " MAX(CASE WHEN sample_number=1 THEN value END) first_value,"
+    " MAX(CASE WHEN sample_number=sample_count THEN value END) last_value,"
+    " SUM(CASE WHEN sample_number>1 AND value<previous_value"
+    " THEN previous_value ELSE 0.0 END) reset_correction"
+    " FROM selected GROUP BY series_id,labels,ts"
+    " HAVING MAX(sample_count)>=2 AND MAX(sample_ts)>MIN(sample_ts)"
+    "),intervals AS ("
+    " SELECT *,last_value-first_value+reset_correction counter_delta,"
+    " (last_ts-first_ts)*1.0 sampled_interval,"
+    " (last_ts-first_ts)*1.0/(sample_count-1) average_interval"
+    " FROM folded"
+    "),edges AS ("
+    " SELECT *,CASE WHEN first_ts-(ts-:window)>=average_interval*1.1"
+    " THEN average_interval/2.0 ELSE first_ts-(ts-:window) END start_duration,"
+    " CASE WHEN ts-last_ts>=average_interval*1.1"
+    " THEN average_interval/2.0 ELSE ts-last_ts END end_duration"
+    " FROM intervals"
+    ") SELECT labels,ts,counter_delta*((sampled_interval+"
+    " CASE WHEN counter_delta>0 AND first_value>=0"
+    " THEN MIN(start_duration,sampled_interval*first_value/counter_delta)"
+    " ELSE start_duration END+end_duration)/sampled_interval)/:window value"
+    " FROM edges ORDER BY labels,ts"
+)
+rate_values = db.execute(
+    rate_sql,
+    {
+        'metric': 'rate_counter',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+    },
+).fetchall()
+assert rate_values == [
+    ('{"case":"reset"}', 60, 1.75),
+    ('{"case":"steady"}', 60, 10.0),
+]
 
 minimum = db.execute(
     "SELECT value FROM timeless_window("

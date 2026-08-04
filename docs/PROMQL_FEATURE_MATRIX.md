@@ -120,7 +120,7 @@ correctness fallback.
 | `PQL-R09` | `quantile_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-027-quantile_over_time)); scalar expressions, interpolation, raw-NaN rank, infinities, stable signed-zero order, exact boundaries, subqueries, errors, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R10` | `stddev_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-028-stddev_over_time-and-stdvar_over_time)); population Welford state, wide magnitudes, IEEE values, exact boundaries, subqueries, errors, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R11` | `stdvar_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-028-stddev_over_time-and-stdvar_over_time)); population Welford state, wide magnitudes, exact Prometheus float strings, IEEE values, boundaries, subqueries, errors, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
-| `PQL-R12` | `rate` | missing | yes | `RAW`, `WINDOW` | `API` | P0 |
+| `PQL-R12` | `rate` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-029-rate)); float-counter resets, edge extrapolation, zero-point clamp, sparse/two-sample omission, boundaries, modifiers, subqueries, special values, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R13` | `irate` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R14` | `increase` | missing | yes | `RAW`, `WINDOW` | `API` | P0 |
 | `PQL-R15` | `delta` | missing | yes | `RAW`, `WINDOW` | `API` | P0 |

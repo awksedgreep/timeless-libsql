@@ -857,7 +857,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
 
     for path in [
         "/prometheus/api/v1/query_range?start=0&end=10&step=1",
-        "/prometheus/api/v1/query_range?query=rate%28prom_cpu%5B1m%5D%29&start=0&end=10&step=1",
+        "/prometheus/api/v1/query_range?query=rate%28prom_cpu%29&start=0&end=10&step=1",
     ] {
         let error = get_json(&app, path).await;
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
@@ -4291,8 +4291,8 @@ async fn session_two_promql_errors_match_the_documented_contract() {
             "invalid parameter \"query\": invalid expression type \"string\" for range query, must be Scalar or instant Vector",
         ),
         (
-            "/prometheus/api/v1/query?query=rate%28up%5B5m%5D%29",
-            "invalid parameter \"query\": unsupported PromQL expression (parsed as function call)",
+            "/prometheus/api/v1/query?query=rate%28up%29",
+            "invalid parameter \"query\": parse error: expected type matrix in call to function 'rate', got vector",
         ),
         (
             "/prometheus/api/v1/query?query=up&extra=x",
@@ -5967,6 +5967,184 @@ async fn session_six_promql_stdvar_over_time_is_population_ieee_and_reopenable()
         .await
         .1,
         direct.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_seven_promql_rate_extrapolates_resets_bounds_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_seven_rate.db");
+    let base = 1_700_700_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_rate{{case=\"steady\"}} 100 {}\n",
+            "range_rate{{case=\"steady\"}} 300 {}\n",
+            "range_rate{{case=\"steady\"}} 500 {}\n",
+            "range_rate{{case=\"reset\"}} 100 {}\n",
+            "range_rate{{case=\"reset\"}} 150 {}\n",
+            "range_rate{{case=\"reset\"}} 20 {}\n",
+            "range_rate{{case=\"sparse\"}} 100 {}\n",
+            "range_rate{{case=\"sparse\"}} 200 {}\n",
+            "range_rate{{case=\"zero\"}} 1 {}\n",
+            "range_rate{{case=\"zero\"}} 101 {}\n",
+            "range_rate{{case=\"singleton\"}} 5 {}\n",
+            "range_rate{{case=\"nan\"}} NaN {}\n",
+            "range_rate{{case=\"nan\"}} 2 {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 30) * 1_000,
+        (base + 40) * 1_000,
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let steady = prom_query(&app, "rate(range_rate{case=\"steady\"}[60s])", base + 60).await;
+    assert_eq!(steady.0, StatusCode::OK, "{}", steady.1);
+    assert_eq!(
+        steady.1["data"]["result"],
+        serde_json::json!([{"metric": {"case": "steady"}, "value": [base + 60, "10"]}])
+    );
+
+    for (case, window, at, expected) in [
+        ("reset", 60, 60, "1.75"),
+        ("sparse", 60, 60, "3.3333333333333335"),
+        ("zero", 40, 40, "3.775"),
+    ] {
+        let response = prom_query(
+            &app,
+            &format!("rate(range_rate{{case=\"{case}\"}}[{window}s])"),
+            base + at,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"],
+            serde_json::json!([{
+                "metric": {"case": case},
+                "value": [base + at, expected]
+            }])
+        );
+    }
+    let boundary = prom_query(&app, "rate(range_rate{case=\"steady\"}[40s])", base + 50).await;
+    assert_eq!(boundary.0, StatusCode::OK, "{}", boundary.1);
+    assert_eq!(
+        boundary.1["data"]["result"],
+        serde_json::json!([{"metric": {"case": "steady"}, "value": [base + 50, "10"]}])
+    );
+    let offset = prom_query(
+        &app,
+        "rate(range_rate{case=\"steady\"}[40s] offset 10s)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(offset.0, StatusCode::OK, "{}", offset.1);
+    assert_eq!(offset.1, steady.1);
+    let subquery = prom_query(
+        &app,
+        "rate(range_rate{case=\"steady\"}[40s:10s])",
+        base + 60,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(
+        subquery.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "steady"},
+            "value": [base + 60, "6.666666666666667"]
+        }])
+    );
+    let nan = prom_query(&app, "rate(range_rate{case=\"nan\"}[60s])", base + 60).await;
+    assert_eq!(nan.0, StatusCode::OK, "{}", nan.1);
+    assert_eq!(nan.1["data"]["result"][0]["value"][1], "NaN");
+    let singleton = prom_query(&app, "rate(range_rate{case=\"singleton\"}[60s])", base + 60).await;
+    assert_eq!(singleton.0, StatusCode::OK, "{}", singleton.1);
+    assert_eq!(singleton.1["data"]["result"], serde_json::json!([]));
+    let range = prom_query_range(
+        &app,
+        "rate(range_rate{case=\"steady\"}[40s])",
+        base + 50,
+        base + 60,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "steady"},
+            "values": [[base + 50, "10"], [base + 60, "10"]]
+        }])
+    );
+    let invalid = prom_query(&app, "rate(range_rate)", base + 60).await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
+    assert_eq!(invalid.1["errorType"], "bad_data");
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "rate(range_rate{case=\"steady\"}[60s])",
+        base + 60,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 1 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "rate(range_rate{case=\"steady\"}[60s])",
+            base + 60,
+        )
+        .await
+        .1,
+        steady.1
     );
     drop(reopened_app);
     reopened.shutdown().await.unwrap();

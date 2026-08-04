@@ -1072,6 +1072,76 @@
       "expected_empty": true
     },
     {
+      "id": "PQL-R12-rate-steady-extrapolated",
+      "query": "rate(oracle_counter{case=\"steady\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-reset-extrapolated",
+      "query": "rate(oracle_counter{case=\"reset\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [1.75],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-sparse-half-interval",
+      "query": "rate(oracle_counter{case=\"sparse\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "sparse", "job": "oracle"},
+      "expected_values": [3.3333333333333335],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-zero-point",
+      "query": "rate(oracle_counter{case=\"zero\"}[40s])",
+      "evaluation_offset_ms": 40000,
+      "expected_metric": {"case": "zero", "job": "oracle"},
+      "expected_values": [3.775],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-open-left-boundary",
+      "query": "rate(oracle_counter{case=\"steady\"}[40s])",
+      "evaluation_offset_ms": 50000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-offset-keeps-output-time",
+      "query": "rate(oracle_counter{case=\"steady\"}[40s] offset 10s)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-over-subquery",
+      "query": "rate(oracle_counter{case=\"steady\"}[40s:10s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [6.666666666666667],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-nan",
+      "query": "rate(oracle_counter{case=\"nan\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "nan", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R12-rate-singleton-omitted",
+      "query": "rate(oracle_counter{case=\"singleton\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_empty": true
+    },
+    {
       "id": "PQL-O14-topk-tie-input-order",
       "query": "topk(1, oracle_rank_tie)",
       "evaluation_offset_ms": 30000,

@@ -813,7 +813,7 @@ SELECT gs.value AS ts, g.value
     ON g.ts = gs.value;
 ```
 
-## Reset-corrected counter rate in pure SQL
+## Mechanical reset-corrected counter rate in pure SQL
 
 When you need counter math over the **raw vtab** (e.g. a range that
 mixes filters the kernels don't express), the standard reset-adjustment
@@ -834,10 +834,14 @@ SELECT SUM(CASE WHEN prev IS NULL      THEN 0            -- first sample: no ste
 ```
 
 This computes exactly what `timeless_window(..., 'increase')` computes
-over the window `(:t0, :t1]` — §33 asserts the two agree. **Prefer the
-kernel** when the shape fits: it decompresses once in the engine and
-ships grid points, not raw samples, and it's the form that stays fast
-over sqld/HTTP.
+over the window `(:t0, :t1]` — §33 asserts the two agree. This is a useful
+storage statistic, but neither it nor the native `rate` fold implements
+Prometheus edge extrapolation and zero-point clamping. For exact float-series
+PromQL `rate`, use executable recipe
+[`SQL-PROM-029`](QUERY_SQL_EQUIVALENTS.md#sql-prom-029-rate) or the Rust metrics
+API. Prefer the native kernel only when its explicitly mechanical semantics are
+the desired contract; it decompresses once in the engine and ships grid points
+rather than raw samples over sqld/HTTP.
 
 ## Top-k per bucket
 
