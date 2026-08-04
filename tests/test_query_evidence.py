@@ -57,6 +57,13 @@ class QueryEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "does not match evidence source"):
                 query_evidence.require_build_identity(binary, "new")
 
+    def test_evidence_rejects_a_stale_release_extension_identity(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "does not match evidence source"):
+            query_evidence.validate_extension_build_identity(
+                {"commit": "old", "target": "test", "profile": "release"},
+                "new",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

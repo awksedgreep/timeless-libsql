@@ -9,6 +9,7 @@ import os
 import platform
 import signal
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -71,6 +72,29 @@ def require_build_identity(binary: Path, expected_commit: str) -> dict:
             f"evidence source {expected_commit!r}"
         )
     return identity
+
+
+def validate_extension_build_identity(identity: dict, expected_commit: str) -> dict:
+    commit = identity.get("commit")
+    if commit != expected_commit:
+        raise RuntimeError(
+            f"extension build commit {commit!r} does not match evidence source "
+            f"{expected_commit!r}"
+        )
+    return identity
+
+
+def require_extension_build_identity(extension: Path, expected_commit: str) -> dict:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.enable_load_extension(True)
+        connection.load_extension(str(extension))
+        connection.enable_load_extension(False)
+        encoded = connection.execute("SELECT timeless_capabilities()").fetchone()[0]
+    finally:
+        connection.close()
+    capabilities = json.loads(encoded)
+    return validate_extension_build_identity(capabilities.get("build", {}), expected_commit)
 
 
 def stats(base: str, path: str) -> dict:
@@ -812,6 +836,10 @@ def main() -> int:
     for path in (extension, metrics_binary, logs_binary):
         if not path.is_file():
             parser.error(f"missing release artifact: {path}")
+    expected_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    extension_build = require_extension_build_identity(extension, expected_commit)
 
     with tempfile.TemporaryDirectory(prefix="timeless-query-evidence-") as temporary:
         directory = Path(temporary)
@@ -819,6 +847,7 @@ def main() -> int:
             "schema_version": 1,
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+            "extension_build": extension_build,
             "host": {
                 "system": platform.system(),
                 "release": platform.release(),

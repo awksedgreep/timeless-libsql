@@ -2,6 +2,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=TIMELESS_BUILD_COMMIT");
+    emit_git_rerun_paths();
     let commit = std::env::var("TIMELESS_BUILD_COMMIT")
         .ok()
         .filter(|value| !value.is_empty())
@@ -18,13 +19,26 @@ fn main() {
     );
 }
 
-fn git_commit() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
     output
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn emit_git_rerun_paths() {
+    let Some(git_dir) = git_output(&["rev-parse", "--absolute-git-dir"]) else {
+        return;
+    };
+    println!("cargo:rerun-if-changed={git_dir}/HEAD");
+    println!("cargo:rerun-if-changed={git_dir}/packed-refs");
+    if let Some(reference) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
+        println!("cargo:rerun-if-changed={git_dir}/{reference}");
+    }
+}
+
+fn git_commit() -> Option<String> {
+    git_output(&["rev-parse", "HEAD"])
 }
