@@ -842,10 +842,12 @@ PromQL `rate`, use executable recipe
 API. Exact last-two-sample PromQL `irate` is documented separately as
 [`SQL-PROM-030`](QUERY_SQL_EQUIVALENTS.md#sql-prom-030-irate), and exact
 extrapolated PromQL `increase` as
-[`SQL-PROM-031`](QUERY_SQL_EQUIVALENTS.md#sql-prom-031-increase). Prefer the
-native kernel only when its explicitly mechanical semantics are the desired
-contract; it decompresses once in the engine and ships grid points rather than
-raw samples over sqld/HTTP.
+[`SQL-PROM-031`](QUERY_SQL_EQUIVALENTS.md#sql-prom-031-increase). Exact
+extrapolated gauge `delta` is
+[`SQL-PROM-032`](QUERY_SQL_EQUIVALENTS.md#sql-prom-032-delta). Prefer the native
+kernel only when its explicitly mechanical semantics are the desired contract;
+it decompresses once in the engine and ships grid points rather than raw
+samples over sqld/HTTP.
 
 ## Top-k per bucket
 

@@ -124,7 +124,7 @@ correctness fallback.
 | `PQL-R12` | `rate` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-029-rate)); float-counter resets, edge extrapolation, zero-point clamp, sparse/two-sample omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R13` | `irate` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-030-irate)); last-two-sample reset substitution, actual-interval normalization, zero-interval/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R14` | `increase` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-031-increase)); reset correction, edge extrapolation, zero-point clamp, sparse/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
-| `PQL-R15` | `delta` | missing | yes | `RAW`, `WINDOW` | `API` | P0 |
+| `PQL-R15` | `delta` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-032-delta)); gauge decreases, edge extrapolation without reset or zero correction, sparse/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R16` | `idelta` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R17` | `deriv` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R18` | `predict_linear` | missing | yes | `RAW` | `API` | P0 |

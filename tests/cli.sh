@@ -3900,6 +3900,56 @@ assert increase_values == [
     ('{"case":"steady"}', 60, 600.0),
 ]
 
+delta_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,raw.ts sample_ts,raw.value,"
+    " ROW_NUMBER() OVER (PARTITION BY raw.series_id,evaluation.ts"
+    " ORDER BY raw.ts) sample_number,"
+    " COUNT(*) OVER (PARTITION BY raw.series_id,evaluation.ts) sample_count"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    "),folded AS ("
+    " SELECT series_id,labels,ts,MAX(sample_count) sample_count,"
+    " MIN(sample_ts) first_ts,MAX(sample_ts) last_ts,"
+    " MAX(CASE WHEN sample_number=1 THEN value END) first_value,"
+    " MAX(CASE WHEN sample_number=sample_count THEN value END) last_value"
+    " FROM selected GROUP BY series_id,labels,ts"
+    " HAVING MAX(sample_count)>=2 AND MAX(sample_ts)>MIN(sample_ts)"
+    "),intervals AS ("
+    " SELECT *,last_value-first_value gauge_delta,"
+    " (last_ts-first_ts)*1.0 sampled_interval,"
+    " (last_ts-first_ts)*1.0/(sample_count-1) average_interval"
+    " FROM folded"
+    "),edges AS ("
+    " SELECT *,CASE WHEN first_ts-(ts-:window)>=average_interval*1.1"
+    " THEN average_interval/2.0 ELSE first_ts-(ts-:window) END start_duration,"
+    " CASE WHEN ts-last_ts>=average_interval*1.1"
+    " THEN average_interval/2.0 ELSE ts-last_ts END end_duration"
+    " FROM intervals"
+    ") SELECT labels,ts,gauge_delta*"
+    " (sampled_interval+start_duration+end_duration)/sampled_interval value"
+    " FROM edges ORDER BY labels,ts"
+)
+delta_values = db.execute(
+    delta_sql,
+    {
+        'metric': 'rate_counter',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+    },
+).fetchall()
+assert delta_values == [
+    ('{"case":"reset"}', 60, -120.0),
+    ('{"case":"steady"}', 60, 600.0),
+]
+
 minimum = db.execute(
     "SELECT value FROM timeless_window("
     "'metrics','min_window',NULL,30,30,1,20,'min')"
