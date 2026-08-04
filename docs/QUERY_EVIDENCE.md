@@ -1159,3 +1159,34 @@ corrected shared signed-zero comparator and `QSF-046` records why the native
 nearest-rank kernel is not used. No extension primitive or storage, frame,
 batching, compression, index, rollup, retention, transaction, or migration
 behavior changed.
+
+## Session 6 `PQL-R10` population standard deviation over time
+
+The checked-in
+[`2026-08-04_session6_pql_r10.json`](evidence/2026-08-04_session6_pql_r10.json)
+was captured from exact extension and server build
+`079fb3fc1c18bcbbed8e3981b2578a926b92f941`. Both measured shapes use one
+bounded public packed raw read followed by the same population Welford fold
+already oracle-proven for cross-series aggregation.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `stddev_over_time(...[5m])` | 1 | 146 | 0.581 | 0.825 | 0.840 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `stddev_over_time(...[5m])` | 2,048 | 95,038 | 3.825 | 5.576 | 7.998 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 raw inputs and emits 2,048
+population deviations without an intermediate matrix. Its p95/p99 tail is
+recorded honestly rather than replaced with the smoother neighboring run;
+cardinality and storage work are unchanged, and the bounded single-pass fold
+does not justify a variance-specific extension primitive.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,444 KiB. Pinned oracle and real-extension regressions cover exact
+open-left boundaries, population rather than sample deviation, singleton and
+empty windows, wide magnitudes, NaN, infinities, both zero signs, subqueries,
+invalid argument types, work limits, cancellation, shutdown, and cold reopen.
+The finite-value recursive Welford SQL recipe executes through public raw
+rows. No extension primitive or storage, frame, batching, compression, index,
+rollup, retention, transaction, or migration behavior changed, and this row
+produced no new storage finding.
