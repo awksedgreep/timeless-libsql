@@ -145,3 +145,27 @@ scalar values, timestamp rounding, and 500 ms grids. The rule oracle and real
 extension regression prove subsecond open-left range boundaries. Cancellation
 and clean shutdown remained green. No extension format, batching, compression,
 rollup, retention, transaction, or migration behavior changed.
+
+## Session 2 `PQL-S13` string result
+
+The checked-in
+[`2026-08-04_session2_pql_s13.json`](evidence/2026-08-04_session2_pql_s13.json)
+was captured from exact build `e3529c1ef557d3daf2f32648119c1c82e40a0de3`.
+The narrow shape evaluates a short escaped string over GET. The wide shape
+parses, evaluates, and returns a 64 KiB raw value submitted as a form POST;
+both are one-point instant string results and perform no extension read.
+
+| shape | result | response bytes | p50 ms | p95 ms | p99 ms | storage reads |
+|---|---:|---:|---:|---:|---:|---:|
+| escaped string | 1 point | 91 | 0.201 | 0.352 | 0.359 | 0 |
+| 64 KiB string | 1 point | 65,612 | 1.886 | 2.477 | 2.690 | 0 |
+
+The larger value is intentionally a parser/HTTP/serializer pressure shape,
+not a normal query recommendation. It remains bounded by the server's request
+and response limits; the complete intermediate-limit audit remains `PQL-S20`.
+The process reached 20,092 KiB RSS HWM, completed all 16,384 fixture points
+durably with zero failed or queued work, and retained the 525,016-byte live
+SQLite/WAL/SHM footprint. Pinned Prometheus cases prove double-quoted escape,
+backtick raw-string, millisecond timestamp, and range-query error behavior.
+The real-extension regression repeats the query after a clean shutdown and
+reopen. No extension state or format changed.
