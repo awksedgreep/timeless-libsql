@@ -713,3 +713,33 @@ empty/missing groups, explicit `__name__` grouping, sparse range grids, and
 IEEE results. `QSF-035` records the discovered removal of the obsolete
 BEAM-era non-finite exposition restriction; batching, compression, indexes,
 rollups, retention, transactions, and packed formats are unchanged.
+
+## Session 5 `PQL-O10` cross-series average
+
+The checked-in
+[`2026-08-04_session5_pql_o10.json`](evidence/2026-08-04_session5_pql_o10.json)
+was captured from exact build `21aa78f1915ec75f560980ce78db638948d03986`.
+It repeats the Session 5 narrow and wide grouping shapes with `avg`.
+
+| shape | input series/step | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host | 1 | 1 | 116 | 0.384 | 0.552 | 0.612 | 1 | 32 | 524 |
+| all series, two groups × four steps | 512 | 8 | 297 | 3.973 | 4.090 | 4.297 | 512 | 16,384 | 268,304 |
+
+Storage work is identical to `sum`: 31 returned raw points for the narrow
+selector and 16,384 for the wide grid, with one public packed-frame read per
+query. The wide evaluator charges 2,048 child points as intermediate work and
+performs compensated arithmetic only while collapsing them into eight final
+points. The 4.09 ms p95 is the honest cost of bounded Rust composition over
+the retained public storage waist; it does not justify a new extension
+primitive.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes. Whole-process RSS HWM
+was 37,304 KiB. This cumulative harness added two measured query shapes after
+the preceding run, so its HWM delta is not attributed to one average query.
+Oracle and real-extension regressions pin compensated cancellation recovery,
+finite overflow fallback, IEEE values, grouping labels, limits, and reopen.
+The SQL cookbook executes ordinary `AVG` and explicitly states where its
+accumulation differs from Prometheus's compensated evaluator. No storage or
+packed-format change was made.
