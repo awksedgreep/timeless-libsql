@@ -16,6 +16,20 @@ tests:
         values: '7 8 9'
       - series: 'query_contract_temporal{host="t"}'
         values: '1 2 3 4 5 6 7'
+      - series: 'query_contract_arithmetic_lhs{host="a",zone="east"}'
+        values: '8 9 10'
+      - series: 'query_contract_arithmetic_lhs{host="b",zone="west"}'
+        values: '10 11 12'
+      - series: 'query_contract_arithmetic_lhs{host="c",zone="north"}'
+        values: '12 13 14'
+      - series: 'query_contract_arithmetic_rhs{host="a",zone="east"}'
+        values: '2 3 4'
+      - series: 'query_contract_arithmetic_rhs{host="b",zone="west"}'
+        values: '5 6 7'
+      - series: 'query_contract_arithmetic_rhs{host="d",zone="south"}'
+        values: '4 5 6'
+      - series: 'query_contract_arithmetic_rhs_duplicate{host="a",zone="east"}'
+        values: '3 4 5'
     promql_expr_test:
       - expr: 'query_contract_cpu{host="a"}'
         eval_time: 20s
@@ -130,3 +144,20 @@ tests:
         exp_samples:
           - labels: '{host="t"}'
             value: 7
+      - expr: 'query_contract_arithmetic_lhs + query_contract_arithmetic_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",zone="east"}'
+            value: 14
+          - labels: '{host="b",zone="west"}'
+            value: 19
+      - expr: '20 - query_contract_arithmetic_lhs{host="a"}'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",zone="east"}'
+            value: 10
+      - expr: 'query_contract_arithmetic_lhs{host="a"} ^ 2'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",zone="east"}'
+            value: 100

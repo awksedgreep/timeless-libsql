@@ -163,9 +163,119 @@
       "evaluation_offset_ms": 30000,
       "drop_metric_name": true,
       "expected_values": [7]
+    },
+    {
+      "id": "PQL-O02-vector-plus-scalar",
+      "query": "oracle_temporal + 2",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [9]
+    },
+    {
+      "id": "PQL-O02-scalar-minus-vector",
+      "query": "20 - oracle_temporal",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [13]
+    },
+    {
+      "id": "PQL-O02-vector-multiply-scalar-range",
+      "query": "oracle_temporal * 2",
+      "evaluation_offset_ms": 0,
+      "drop_metric_name": true,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [8, 10, 12, 14]
+    },
+    {
+      "id": "PQL-O02-vector-divide-by-zero",
+      "query": "oracle_temporal / 0",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": ["+Inf"]
+    },
+    {
+      "id": "PQL-O02-vector-modulo",
+      "query": "oracle_temporal % 4",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [3]
+    },
+    {
+      "id": "PQL-O02-vector-power",
+      "query": "oracle_temporal ^ 2",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [49]
+    },
+    {
+      "id": "PQL-O05-default-one-to-one-excludes-name",
+      "query": "oracle_temporal + oracle_temporal",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [14]
+    }
+  ],
+  "operator_error_cases": [
+    {
+      "id": "PQL-O05-duplicate-default-signature-errors",
+      "query": "oracle_arithmetic_lhs + {__name__=~\"oracle_arithmetic_rhs(_duplicate)?\"}",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "many-to-many matching not allowed"
     }
   ],
   "cases": [
+    {
+      "id": "PQL-O02-scalar-arithmetic-precedence",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "1 + 2 * 3", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "7"]}
+      }
+    },
+    {
+      "id": "PQL-O02-scalar-divide-by-zero",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "1 / 0", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "+Inf"]}
+      }
+    },
+    {
+      "id": "PQL-O02-scalar-zero-divide-zero",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "0 / 0", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "NaN"]}
+      }
+    },
+    {
+      "id": "PQL-O02-scalar-modulo-zero",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "5 % 0", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "NaN"]}
+      }
+    },
+    {
+      "id": "PQL-O02-scalar-power-domain",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "(-1) ^ 0.5", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "NaN"]}
+      }
+    },
     {
       "id": "PQL-O01-unary-scalar",
       "endpoint": "/api/v1/query",

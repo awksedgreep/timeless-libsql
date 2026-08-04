@@ -1801,6 +1801,174 @@ async fn session_four_promql_unary_minus_preserves_types_labels_limits_and_reope
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_promql_arithmetic_and_one_to_one_match_oracle_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four_arithmetic.db");
+    let base = 1_700_410_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut victoria = String::new();
+    for (metric, host, zone, first, second) in [
+        ("arithmetic_lhs", "a", "east", 8.0, 10.0),
+        ("arithmetic_lhs", "b", "west", 10.0, 12.0),
+        ("arithmetic_lhs", "c", "north", 12.0, 14.0),
+        ("arithmetic_rhs", "a", "east", 2.0, 4.0),
+        ("arithmetic_rhs", "b", "west", 5.0, 7.0),
+        ("arithmetic_rhs", "d", "south", 4.0, 6.0),
+        ("arithmetic_rhs_duplicate", "a", "east", 3.0, 5.0),
+    ] {
+        use std::fmt::Write;
+        writeln!(
+            victoria,
+            "{{\"metric\":{{\"__name__\":\"{metric}\",\"host\":\"{host}\",\"zone\":\"{zone}\"}},\"values\":[{first},{second}],\"timestamps\":[{},{}]}}",
+            base * 1_000,
+            (base + 10) * 1_000,
+        )
+        .unwrap();
+    }
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (query, expected) in [
+        ("1 + 2 * 3", "7"),
+        ("5 - 8", "-3"),
+        ("3 * 4", "12"),
+        ("5 / 2", "2.5"),
+        ("5 % 2", "1"),
+        ("2 ^ 3", "8"),
+        ("1 / 0", "+Inf"),
+        ("0 / 0", "NaN"),
+        ("5 % 0", "NaN"),
+        ("(-1) ^ 0.5", "NaN"),
+    ] {
+        let scalar = prom_query(&app, query, base).await;
+        assert_eq!(scalar.0, StatusCode::OK, "{query}: {}", scalar.1);
+        assert_eq!(scalar.1["data"]["resultType"], "scalar", "{query}");
+        assert_eq!(scalar.1["data"]["result"][1], expected, "{query}");
+    }
+
+    for (operator, expected) in [
+        ("+", "14"),
+        ("-", "6"),
+        ("*", "40"),
+        ("/", "2.5"),
+        ("%", "2"),
+        ("^", "10000"),
+    ] {
+        let query = format!("arithmetic_lhs{{host=\"a\"}} {operator} arithmetic_rhs{{host=\"a\"}}");
+        let result = prom_query(&app, &query, base + 10).await;
+        assert_eq!(result.0, StatusCode::OK, "{query}: {}", result.1);
+        assert_eq!(
+            result.1["data"]["result"],
+            serde_json::json!([{
+                "metric": {"host": "a", "zone": "east"},
+                "value": [base + 10, expected]
+            }]),
+            "{query}"
+        );
+    }
+
+    let scalar_left = prom_query(&app, "20 - arithmetic_lhs{host=\"a\"}", base + 10).await;
+    assert_eq!(scalar_left.0, StatusCode::OK, "{}", scalar_left.1);
+    assert_eq!(scalar_left.1["data"]["result"][0]["value"][1], "10");
+    assert_eq!(
+        scalar_left.1["data"]["result"][0]["metric"],
+        serde_json::json!({"host": "a", "zone": "east"})
+    );
+
+    let divide_zero = prom_query(&app, "arithmetic_lhs{host=\"a\"} / 0", base + 10).await;
+    assert_eq!(divide_zero.0, StatusCode::OK, "{}", divide_zero.1);
+    assert_eq!(divide_zero.1["data"]["result"][0]["value"][1], "+Inf");
+
+    let matched = prom_query(&app, "arithmetic_lhs + arithmetic_rhs", base + 10).await;
+    assert_eq!(matched.0, StatusCode::OK, "{}", matched.1);
+    assert_eq!(
+        matched.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a", "zone": "east"}, "value": [base + 10, "14"]},
+            {"metric": {"host": "b", "zone": "west"}, "value": [base + 10, "19"]}
+        ])
+    );
+
+    let range =
+        prom_query_range(&app, "arithmetic_lhs + arithmetic_rhs", base, base + 10, 10).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a", "zone": "east"}, "values": [[base, "10"], [base + 10, "14"]]},
+            {"metric": {"host": "b", "zone": "west"}, "values": [[base, "15"], [base + 10, "19"]]}
+        ])
+    );
+
+    let duplicate = prom_query(
+        &app,
+        "arithmetic_lhs + {__name__=~\"arithmetic_rhs(_duplicate)?\"}",
+        base + 10,
+    )
+    .await;
+    assert_eq!(
+        duplicate.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        duplicate.1
+    );
+    assert_eq!(duplicate.1["errorType"], "execution");
+    assert!(duplicate.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("many-to-many matching not allowed"));
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 3,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "arithmetic_lhs{host=\"a\"} + arithmetic_rhs{host=\"a\"}",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 3 points"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = prom_query(&reopened_app, "arithmetic_lhs + arithmetic_rhs", base + 10).await;
+    assert_eq!(recovered.1, matched.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
@@ -2637,6 +2805,30 @@ async fn post_form(app: &axum::Router, path: &str, body: &str) -> (StatusCode, V
         .await
         .unwrap();
     (status, serde_json::from_slice(&body).unwrap())
+}
+
+async fn prom_query(app: &axum::Router, query: &str, time: i64) -> (StatusCode, Value) {
+    let params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", query)
+        .append_pair("time", &time.to_string())
+        .finish();
+    get_json(app, &format!("/prometheus/api/v1/query?{params}")).await
+}
+
+async fn prom_query_range(
+    app: &axum::Router,
+    query: &str,
+    start: i64,
+    end: i64,
+    step: i64,
+) -> (StatusCode, Value) {
+    let params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", query)
+        .append_pair("start", &start.to_string())
+        .append_pair("end", &end.to_string())
+        .append_pair("step", &step.to_string())
+        .finish();
+    get_json(app, &format!("/prometheus/api/v1/query_range?{params}")).await
 }
 
 fn assert_no_content(response: (StatusCode, Vec<u8>)) {

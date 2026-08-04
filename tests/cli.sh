@@ -2017,6 +2017,8 @@ INSERT INTO ck(name, labels, ts, value) VALUES
   ('cpu', '{"host":"c"}', 0, 3.0),  ('cpu', '{"host":"c"}', 60, 15.0),
   ('errors',   '{"host":"a"}', 60, 5.0),
   ('requests', '{"host":"a"}', 60, 50.0),
+  ('arith_lhs', '{"host":"a"}', 60, 8.0),
+  ('arith_rhs', '{"host":"a"}', 60, 2.0),
   ('lat', '{}', 0, 10.0), ('lat', '{}', 10, 11.0), ('lat', '{}', 20, 12.0),
   ('lat', '{}', 30, 13.0), ('lat', '{}', 40, 10.0), ('lat', '{}', 50, 11.0),
   ('lat', '{}', 60, 12.0), ('lat', '{}', 70, 13.0), ('lat', '{}', 80, 10.0),
@@ -2101,6 +2103,22 @@ SELECT 'bounded_window', COUNT(*)
 SELECT 'unary_minus', labels, ts, -value
   FROM timeless_grid('ck','cpu','{"host":"a"}',0,60,60,60)
  ORDER BY labels, ts;
+-- SQL-PROM-004: all arithmetic operations with default exact-label matching
+WITH lhs AS (
+  SELECT labels, ts, value
+    FROM timeless_grid('ck','arith_lhs',NULL,60,60,60,60)
+), rhs AS (
+  SELECT labels, ts, value
+    FROM timeless_grid('ck','arith_rhs',NULL,60,60,60,60)
+)
+SELECT 'arithmetic', lhs.labels, lhs.ts,
+       lhs.value + rhs.value,
+       lhs.value - rhs.value,
+       lhs.value * rhs.value,
+       lhs.value / rhs.value,
+       lhs.value % rhs.value,
+       pow(lhs.value, rhs.value)
+  FROM lhs JOIN rhs USING(labels, ts);
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2143,6 +2161,9 @@ $'bounded_raw|1\nbounded_window|1'
 check_eq "SQL-PROM-010 negates a bounded public selector grid" \
   "$(grep '^unary_minus|' <<<"$got")" \
 $'unary_minus|{"host":"a"}|0|-1.0\nunary_minus|{"host":"a"}|60|-10.0'
+check_eq "SQL-PROM-004 executes every arithmetic operator with exact-label matching" \
+  "$(grep '^arithmetic|' <<<"$got")" \
+'arithmetic|{"host":"a"}|60|10.0|6.0|16.0|4.0|0.0|64.0'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="

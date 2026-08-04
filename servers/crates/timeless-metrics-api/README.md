@@ -27,9 +27,12 @@ The current PromQL slice supports scalar literals (including `NaN` and
 infinities), string literals, exact-name and nameless instant vector
 selectors, anchored regex/negative/duplicate `__name__` matchers, root range
 selectors on instant queries, and
-`avg_over_time(selector[window])`. Unary minus composes over shipped scalar and
+`avg_over_time(selector[window])`. Unary minus and arithmetic `+ - * / % ^`
+compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
-Prometheus scalar/vector/range result types. Selectors and range selectors accept signed
+Prometheus scalar/vector/range result types. Vector/vector arithmetic uses
+default one-to-one matching across every non-name label, filters unmatched
+samples, and rejects duplicate match signatures. Selectors and range selectors accept signed
 `offset` plus numeric/`start()`/`end()` `@` modifiers. Selector and shipped
 range-function expressions may be evaluated as bounded subqueries with
 `[range:resolution]`, including omitted/default resolution, nesting, and

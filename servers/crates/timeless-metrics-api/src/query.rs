@@ -385,6 +385,7 @@ pub(crate) enum PromPlan {
     Scalar(f64),
     String(String),
     Unary(Box<PromPlan>),
+    Binary(PromBinaryPlan),
     Selector { selector: Selector, lookback: i64 },
     AvgOverTime { selector: Selector, window: i64 },
     AvgOverSubquery(SubqueryPlan),
@@ -400,6 +401,36 @@ enum PromValueType {
     Matrix,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Power,
+}
+
+impl PromBinaryOp {
+    fn apply(self, lhs: f64, rhs: f64) -> f64 {
+        match self {
+            Self::Add => lhs + rhs,
+            Self::Subtract => lhs - rhs,
+            Self::Multiply => lhs * rhs,
+            Self::Divide => lhs / rhs,
+            Self::Modulo => lhs % rhs,
+            Self::Power => lhs.powf(rhs),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromBinaryPlan {
+    op: PromBinaryOp,
+    lhs: Box<PromPlan>,
+    rhs: Box<PromPlan>,
+}
+
 impl PromPlan {
     fn value_type(&self) -> PromValueType {
         match self {
@@ -407,6 +438,15 @@ impl PromPlan {
             Self::String(_) => PromValueType::String,
             Self::RangeSelector { .. } | Self::Subquery(_) => PromValueType::Matrix,
             Self::Unary(inner) => inner.value_type(),
+            Self::Binary(binary) => {
+                if binary.lhs.value_type() == PromValueType::Scalar
+                    && binary.rhs.value_type() == PromValueType::Scalar
+                {
+                    PromValueType::Scalar
+                } else {
+                    PromValueType::Vector
+                }
+            }
             Self::Selector { .. } | Self::AvgOverTime { .. } | Self::AvgOverSubquery(_) => {
                 PromValueType::Vector
             }
@@ -668,6 +708,7 @@ fn lower_promql_expr(
             }
             Ok(PromPlan::Unary(Box::new(inner)))
         }
+        promql::Expr::Binary(binary) => lower_promql_binary(binary, lookback, depth + 1),
         promql::Expr::Subquery(subquery) => Ok(PromPlan::Subquery(lower_promql_subquery(
             subquery,
             lookback,
@@ -699,6 +740,52 @@ fn lower_promql_expr(
     }
 }
 
+fn lower_promql_binary(
+    binary: promql_parser::parser::BinaryExpr,
+    lookback: i64,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    use promql_parser::parser::token;
+    use promql_parser::parser::VectorMatchCardinality;
+
+    let op = match binary.op.id() {
+        token::T_ADD => PromBinaryOp::Add,
+        token::T_SUB => PromBinaryOp::Subtract,
+        token::T_MUL => PromBinaryOp::Multiply,
+        token::T_DIV => PromBinaryOp::Divide,
+        token::T_MOD => PromBinaryOp::Modulo,
+        token::T_POW => PromBinaryOp::Power,
+        _ => {
+            return Err(format!("unsupported PromQL binary operator {}", binary.op));
+        }
+    };
+    if let Some(modifier) = &binary.modifier {
+        if modifier.return_bool
+            || modifier.matching.is_some()
+            || !matches!(modifier.card, VectorMatchCardinality::OneToOne)
+            || modifier.fill_values.lhs.is_some()
+            || modifier.fill_values.rhs.is_some()
+        {
+            return Err("PromQL binary matching modifiers are not shipped yet".into());
+        }
+    }
+    let lhs = lower_promql_expr(*binary.lhs, lookback, depth)?;
+    let rhs = lower_promql_expr(*binary.rhs, lookback, depth)?;
+    for operand in [&lhs, &rhs] {
+        if !matches!(
+            operand.value_type(),
+            PromValueType::Scalar | PromValueType::Vector
+        ) {
+            return Err("PromQL arithmetic requires scalar or instant-vector operands".into());
+        }
+    }
+    Ok(PromPlan::Binary(PromBinaryPlan {
+        op,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }))
+}
+
 fn lower_promql_subquery(
     subquery: promql_parser::parser::SubqueryExpr,
     lookback: i64,
@@ -722,6 +809,7 @@ fn lower_promql_subquery(
             | PromPlan::AvgOverTime { .. }
             | PromPlan::AvgOverSubquery(_)
             | PromPlan::Unary(_)
+            | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
     }
@@ -2071,6 +2159,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::Binary(binary) => execute_prometheus_binary(
+            conn,
+            features,
+            binary,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Selector { selector, lookback } => execute_prometheus_selector(
             conn,
             features,
@@ -2176,6 +2277,9 @@ enum IntermediateValue {
     Vector(Vec<IntermediateSeries>),
 }
 
+type PromMatchingKey = Vec<(String, String)>;
+type PromStepGroups<'a> = BTreeMap<&'a PromMatchingKey, Vec<(usize, f64)>>;
+
 impl IntermediateValue {
     fn points(&self) -> u64 {
         match self {
@@ -2247,6 +2351,283 @@ fn execute_prometheus_unary(
         limits,
         cancelled,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_binary(
+    conn: &Connection,
+    features: QueryFeatures,
+    binary: &PromBinaryPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let lhs_type = binary.lhs.value_type();
+    let rhs_type = binary.rhs.value_type();
+    let lhs = execute_prometheus(
+        conn,
+        features,
+        &binary.lhs,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    check_cancelled(cancelled)?;
+    let rhs = execute_prometheus(
+        conn,
+        features,
+        &binary.rhs,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let intermediate_points = lhs
+        .intermediate_points
+        .saturating_add(lhs.points)
+        .saturating_add(rhs.intermediate_points)
+        .saturating_add(rhs.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let frame_bytes = lhs.frame_bytes.saturating_add(rhs.frame_bytes);
+    let lhs = decode_prometheus_intermediate(&lhs.body, lhs_type, instant, limits, cancelled)?;
+    let rhs = decode_prometheus_intermediate(&rhs.body, rhs_type, instant, limits, cancelled)?;
+    let value = apply_prometheus_arithmetic(binary.op, lhs, rhs, cancelled)?;
+    encode_prometheus_intermediate(
+        value,
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn apply_prometheus_arithmetic(
+    op: PromBinaryOp,
+    lhs: IntermediateValue,
+    rhs: IntermediateValue,
+    cancelled: &AtomicBool,
+) -> Result<IntermediateValue, String> {
+    match (lhs, rhs) {
+        (IntermediateValue::Scalar(mut lhs), IntermediateValue::Scalar(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Err("PromQL scalar operands produced different evaluation grids".into());
+            }
+            for (lhs, rhs) in lhs.iter_mut().zip(rhs) {
+                check_cancelled(cancelled)?;
+                if lhs.0 != rhs.0 {
+                    return Err("PromQL scalar operands produced different evaluation grids".into());
+                }
+                lhs.1 = op.apply(lhs.1, rhs.1);
+            }
+            Ok(IntermediateValue::Scalar(lhs))
+        }
+        (IntermediateValue::Vector(vector), IntermediateValue::Scalar(scalar)) => {
+            Ok(IntermediateValue::Vector(apply_scalar_to_vector(
+                op, vector, scalar, false, cancelled,
+            )?))
+        }
+        (IntermediateValue::Scalar(scalar), IntermediateValue::Vector(vector)) => Ok(
+            IntermediateValue::Vector(apply_scalar_to_vector(op, vector, scalar, true, cancelled)?),
+        ),
+        (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => Ok(
+            IntermediateValue::Vector(apply_one_to_one_vectors(op, lhs, rhs, cancelled)?),
+        ),
+    }
+}
+
+fn apply_scalar_to_vector(
+    op: PromBinaryOp,
+    mut vector: Vec<IntermediateSeries>,
+    scalar: Vec<(i64, f64)>,
+    scalar_is_lhs: bool,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let scalar: BTreeMap<_, _> = scalar.into_iter().collect();
+    for series in &mut vector {
+        check_cancelled(cancelled)?;
+        series.labels.remove("__name__");
+        let mut output = Vec::with_capacity(series.points.len());
+        for (timestamp, value) in series.points.drain(..) {
+            check_cancelled(cancelled)?;
+            let Some(scalar) = scalar.get(&timestamp) else {
+                continue;
+            };
+            let value = if scalar_is_lhs {
+                op.apply(*scalar, value)
+            } else {
+                op.apply(value, *scalar)
+            };
+            output.push((timestamp, value));
+        }
+        series.points = output;
+    }
+    normalize_prometheus_vector(vector, cancelled)
+}
+
+fn default_matching_key(labels: &BTreeMap<String, String>) -> PromMatchingKey {
+    labels
+        .iter()
+        .filter(|(name, _)| name.as_str() != "__name__")
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn samples_by_timestamp(
+    series: &[IntermediateSeries],
+    cancelled: &AtomicBool,
+) -> Result<BTreeMap<i64, Vec<(usize, f64)>>, String> {
+    let mut output: BTreeMap<i64, Vec<(usize, f64)>> = BTreeMap::new();
+    for (index, series) in series.iter().enumerate() {
+        for (timestamp, value) in &series.points {
+            check_cancelled(cancelled)?;
+            output.entry(*timestamp).or_default().push((index, *value));
+        }
+    }
+    Ok(output)
+}
+
+fn duplicate_matching_error(key: &[(String, String)]) -> String {
+    let labels: BTreeMap<_, _> = key.iter().cloned().collect();
+    let labels = serde_json::to_string(&labels).unwrap_or_else(|_| "{}".into());
+    format!(
+        "found duplicate series for the match group {labels}; many-to-many matching not allowed: matching labels must be unique on one side"
+    )
+}
+
+fn apply_one_to_one_vectors(
+    op: PromBinaryOp,
+    lhs: Vec<IntermediateSeries>,
+    rhs: Vec<IntermediateSeries>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let lhs_keys: Vec<_> = lhs
+        .iter()
+        .map(|series| default_matching_key(&series.labels))
+        .collect();
+    let rhs_keys: Vec<_> = rhs
+        .iter()
+        .map(|series| default_matching_key(&series.labels))
+        .collect();
+    let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
+    let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
+    let mut output_points = vec![Vec::new(); lhs.len()];
+
+    for (timestamp, lhs_samples) in lhs_by_timestamp {
+        check_cancelled(cancelled)?;
+        let Some(rhs_samples) = rhs_by_timestamp.get(&timestamp) else {
+            continue;
+        };
+        let mut lhs_groups: PromStepGroups<'_> = BTreeMap::new();
+        for (index, value) in lhs_samples {
+            check_cancelled(cancelled)?;
+            lhs_groups
+                .entry(&lhs_keys[index])
+                .or_default()
+                .push((index, value));
+        }
+        let mut rhs_groups: PromStepGroups<'_> = BTreeMap::new();
+        for (index, value) in rhs_samples {
+            check_cancelled(cancelled)?;
+            rhs_groups
+                .entry(&rhs_keys[*index])
+                .or_default()
+                .push((*index, *value));
+        }
+        for (key, lhs_group) in lhs_groups {
+            check_cancelled(cancelled)?;
+            let Some(rhs_group) = rhs_groups.get(key) else {
+                continue;
+            };
+            if lhs_group.len() != 1 || rhs_group.len() != 1 {
+                return Err(duplicate_matching_error(key));
+            }
+            let (lhs_index, lhs_value) = lhs_group[0];
+            let rhs_value = rhs_group[0].1;
+            output_points[lhs_index].push((timestamp, op.apply(lhs_value, rhs_value)));
+        }
+    }
+
+    let output = lhs
+        .into_iter()
+        .zip(output_points)
+        .filter_map(|(mut series, points)| {
+            if points.is_empty() {
+                None
+            } else {
+                series.labels.remove("__name__");
+                series.points = points;
+                Some(series)
+            }
+        })
+        .collect();
+    normalize_prometheus_vector(output, cancelled)
+}
+
+fn normalize_prometheus_vector(
+    series: Vec<IntermediateSeries>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let mut output: Vec<IntermediateSeries> = Vec::new();
+    let mut positions: BTreeMap<BTreeMap<String, String>, usize> = BTreeMap::new();
+    for mut series in series {
+        check_cancelled(cancelled)?;
+        if series.points.is_empty() {
+            continue;
+        }
+        series.points.sort_unstable_by_key(|sample| sample.0);
+        if let Some(index) = positions.get(&series.labels).copied() {
+            let existing = &mut output[index];
+            merge_prometheus_points(&mut existing.points, series.points, cancelled)?;
+        } else {
+            positions.insert(series.labels.clone(), output.len());
+            output.push(series);
+        }
+    }
+    Ok(output)
+}
+
+fn merge_prometheus_points(
+    existing: &mut Vec<(i64, f64)>,
+    incoming: Vec<(i64, f64)>,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let left = std::mem::take(existing);
+    let mut merged = Vec::with_capacity(left.len().saturating_add(incoming.len()));
+    let mut lhs = left.into_iter().peekable();
+    let mut rhs = incoming.into_iter().peekable();
+    while lhs.peek().is_some() || rhs.peek().is_some() {
+        check_cancelled(cancelled)?;
+        match (lhs.peek(), rhs.peek()) {
+            (Some(left), Some(right)) if left.0 == right.0 => {
+                return Err("vector cannot contain metrics with the same labelset".into());
+            }
+            (Some(left), Some(right)) if left.0 < right.0 => {
+                merged.push(lhs.next().expect("peeked left point"));
+            }
+            (Some(_), Some(_)) => merged.push(rhs.next().expect("peeked right point")),
+            (Some(_), None) => merged.push(lhs.next().expect("peeked left point")),
+            (None, Some(_)) => merged.push(rhs.next().expect("peeked right point")),
+            (None, None) => break,
+        }
+    }
+    *existing = merged;
+    Ok(())
 }
 
 fn enforce_intermediate_work(points: u64, limits: PromQueryLimits) -> Result<(), String> {

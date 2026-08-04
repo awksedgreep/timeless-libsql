@@ -35,6 +35,16 @@ fn parse_underscored_root_number(input: &str) -> Result<Option<f64>, String> {
         return Ok(None);
     }
 
+    // This compatibility shim recognizes one complete root literal. An
+    // underscore later in a metric name (for example `20 - metric_name`)
+    // belongs to the ordinary PromQL parser, not to this numeric token.
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_hexdigit()
+            || matches!(byte, b'x' | b'X' | b'e' | b'E' | b'_' | b'.' | b'+' | b'-')
+    }) {
+        return Ok(None);
+    }
+
     let bytes = value.as_bytes();
     let hexadecimal = unsigned.starts_with("0x") || unsigned.starts_with("0X");
     for (index, byte) in bytes.iter().enumerate() {
@@ -96,6 +106,13 @@ mod tests {
             parse(r#""hello\nworld""#).unwrap(),
             Expr::StringLiteral(_)
         ));
+    }
+
+    #[test]
+    fn root_underscored_number_shim_does_not_capture_binary_metric_names() {
+        let expression = parse("20 - arithmetic_lhs").unwrap();
+        assert!(matches!(expression, Expr::Binary(_)));
+        assert!(parse("1__0").is_err());
     }
 
     #[test]

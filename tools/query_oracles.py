@@ -164,9 +164,16 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
         encoded = bytes([(1 << 3) | 1]) + struct.pack("<d", value)
         return encoded + protobuf_varint(2 << 3) + protobuf_varint(at_ms)
 
-    def series(name: str, points: list[tuple[float, int]]) -> bytes:
-        encoded = protobuf_bytes(1, label("__name__", name))
-        encoded += protobuf_bytes(1, label("job", "oracle"))
+    def series(
+        name: str,
+        points: list[tuple[float, int]],
+        extra_labels: dict[str, str] | None = None,
+    ) -> bytes:
+        labels = {"__name__": name, "job": "oracle", **(extra_labels or {})}
+        encoded = b"".join(
+            protobuf_bytes(1, label(key, value))
+            for key, value in sorted(labels.items())
+        )
         for value, at_ms in points:
             encoded += protobuf_bytes(2, sample(value, at_ms))
         return protobuf_bytes(1, encoded)
@@ -178,6 +185,21 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             (float(index + 1), timestamp_ms + offset_ms)
             for index, offset_ms in enumerate(range(-30_000, 30_001, 10_000))
         ],
+    )
+    write_request += series(
+        "oracle_arithmetic_lhs",
+        [(8.0, timestamp_ms + 30_000)],
+        {"host": "a", "zone": "east"},
+    )
+    write_request += series(
+        "oracle_arithmetic_rhs",
+        [(2.0, timestamp_ms + 30_000)],
+        {"host": "a", "zone": "east"},
+    )
+    write_request += series(
+        "oracle_arithmetic_rhs_duplicate",
+        [(3.0, timestamp_ms + 30_000)],
+        {"host": "a", "zone": "east"},
     )
     return snappy_literal(write_request)
 
@@ -480,6 +502,31 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
             )
             if not valid:
                 print(f"{case['id']}: expected {result!r}; got {body!r}", file=sys.stderr)
+                failures += 1
+            else:
+                print(f"{case['id']}: ok")
+        for case in fixture.get("operator_error_cases", []):
+            evaluation_ms = sample_timestamp_ms + case["evaluation_offset_ms"]
+            params = {
+                "query": case["query"],
+                "time": str(evaluation_ms / 1_000),
+            }
+            url = base + "/api/v1/query?" + urllib.parse.urlencode(params)
+            try:
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    status = response.status
+                    body = json.loads(response.read())
+            except urllib.error.HTTPError as error:
+                status = error.code
+                body = json.loads(error.read())
+            valid = (
+                status == case["status"]
+                and body.get("status") == "error"
+                and body.get("errorType") == case["error_type"]
+                and case["error_contains"] in body.get("error", "")
+            )
+            if not valid:
+                print(f"{case['id']}: unexpected response {status} {body!r}", file=sys.stderr)
                 failures += 1
             else:
                 print(f"{case['id']}: ok")

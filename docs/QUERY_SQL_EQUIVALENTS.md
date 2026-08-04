@@ -45,7 +45,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-001`](#sql-prom-001-instant-selector) | `PQL-S01`, `PQL-S02` | current | exact storage selection; API shapes PromQL output |
 | [`SQL-PROM-002`](#sql-prom-002-avg_over_time) | `PQL-S06`, `PQL-R01` | current | exact float-window reduction |
 | [`SQL-PROM-003`](#sql-prom-003-cross-series-sum-by-label) | `PQL-O09` | reference | SQL equivalent available; Rust PromQL row remains missing |
-| [`SQL-PROM-004`](#sql-prom-004-vector-arithmetic-with-label-matching) | `PQL-O02`, `PQL-O05` | reference | SQL equivalent available for explicit match keys |
+| [`SQL-PROM-004`](#sql-prom-004-vector-arithmetic-with-label-matching) | `PQL-O02`, `PQL-O05` | current foundation | vector/scalar arithmetic and exact-label joins; API owns language, cardinality, labels, IEEE strings, and envelopes |
 | [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | reference | SQL equivalent available; API still owes PromQL ordering/labels |
 | [`SQL-PROM-006`](#sql-prom-006-range-selector) | `PQL-S06` | current | exact root range-vector storage selection; API shapes the matrix |
 | [`SQL-PROM-007`](#sql-prom-007-bounded-packed-storage-work) | `PQL-S20` | current foundation | exact pre-decode work bounds; API owns language/result/deadline limits |
@@ -378,35 +378,64 @@ envelope rules.
 
 ### SQL-PROM-004: vector arithmetic with label matching
 
-Equivalent mechanical reduction for `errors / on(host) requests`:
+For vector/scalar arithmetic, apply the ordinary SQLite operator to the public
+grid (substitute the required arithmetic operator; `pow(value, :scalar)` is
+the `^` form):
+
+```sql
+SELECT labels, ts, value * CAST(:scalar AS REAL) AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+For default one-to-one vector matching, canonical `labels` equality is exactly
+PromQL's all-labels-except-`__name__` signature because public metric rows
+carry the name separately. This parameterized statement shows every numeric
+operation over `errors` and `requests`:
 
 ```sql
 WITH
 errors AS (
-  SELECT ts, labels, json_extract(labels, '$.host') AS host, value
+  SELECT ts, labels, value
   FROM timeless_grid(
     'metrics', 'errors_total', :error_filter,
     :start, :end, :step, :lookback
   )
 ),
 requests AS (
-  SELECT ts, labels, json_extract(labels, '$.host') AS host, value
+  SELECT ts, labels, value
   FROM timeless_grid(
     'metrics', 'requests_total', :request_filter,
     :start, :end, :step, :lookback
   )
 )
-SELECT e.labels, e.ts, e.value / r.value AS value
+SELECT
+  e.labels,
+  e.ts,
+  e.value + r.value AS add_value,
+  e.value - r.value AS subtract_value,
+  e.value * r.value AS multiply_value,
+  e.value / r.value AS divide_value,
+  e.value % r.value AS modulo_value,
+  pow(e.value, r.value) AS power_value
 FROM errors AS e
 JOIN requests AS r
-  ON r.ts = e.ts AND r.host = e.host
+  ON r.ts = e.ts AND r.labels = e.labels
 ORDER BY e.labels, e.ts;
 ```
 
-Ordinary joins are the intended direct-user surface. The Rust API still owes
-cardinality checks, `ignoring`, `group_left/right`, label propagation,
-division special values, and PromQL metric-name rules. A related executable
-join is in `tests/cli.sh` section 33.
+All timestamps use the metric table's native unit; bounds are inclusive output
+grid bounds, lookup windows are open on the left, unmatched rows are omitted,
+and canonical label JSON plus timestamp ordering is deterministic. SQLite
+ordinary arithmetic is the intended direct-user surface. The Rust API adds
+parser precedence, scalar/vector result typing, per-timestamp one-to-one
+cardinality validation, metric-name policy, millisecond timestamps, portable
+IEEE strings, bounded cumulative work, cancellation, and Prometheus envelopes.
+`on`, `ignoring`, and group matching remain separate matrix rows. The exact
+six-operation public-grid join executes in `tests/cli.sh` section 33.
 
 ### SQL-PROM-005: top-k per evaluation step
 

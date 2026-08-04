@@ -239,6 +239,34 @@ with
 recipe is the stored-vector foundation, not a claim that SQLite result typing
 or IEEE rendering is a PromQL envelope.
 
+## PromQL arithmetic and default vector matching
+
+The Rust API evaluates all stable float arithmetic combinations:
+
+```promql
+2 ^ 8
+http_requests_total * 1000
+100 - queue_depth
+errors_total / requests_total
+```
+
+Scalar/scalar returns a scalar. Either vector/scalar direction returns the
+vector's labels and grid; vector/vector uses one-to-one matching on all labels
+except `__name__`, emits only timestamps present on both sides, and uses the
+left labels. Every vector arithmetic result removes the metric name. Duplicate
+match signatures at the same evaluation timestamp fail as an execution error
+instead of producing a Cartesian product. IEEE division, modulo, and power
+results use Prometheus `NaN`/`+Inf`/`-Inf` strings.
+
+Both operands execute once across the requested grid. Their cumulative child
+points count as bounded intermediate work, and cancellation is checked during
+each child read, matching step, arithmetic operation, and serialization. The
+public SQL foundations—including vector/scalar arithmetic and an exact-label
+join—are executable in
+[`SQL-PROM-004`](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching).
+The Rust layer remains responsible for AST precedence, cardinality errors,
+result types, labels, limits, cancellation, and Prometheus envelopes.
+
 ## Scalar aggregate without raw materialization
 
 ```sql
