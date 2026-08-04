@@ -1691,3 +1691,33 @@ tests cover finite values, NaN, infinities, both signed zeros, range grids,
 nested transforms, invalid types, limits, shutdown, and cold reopen. The SQL
 row surface's NaN-to-NULL representation remains the documented API boundary;
 no new storage finding arose and no extension or storage contract changed.
+
+## Session 8 `PQL-F06` inverse trigonometric and hyperbolic transforms
+
+The checked-in
+[`2026-08-04_session8_pql_f06.json`](evidence/2026-08-04_session8_pql_f06.json)
+was captured from exact extension and server build
+`afa0ac285484e814d8ffe2300cdb746b48261909`. The measured `atan` shapes use
+one bounded public packed-raw read and apply a domain-total member of the
+family in place; `acos`, `acosh`, `asin`, `asinh`, and `atanh` use the same
+plan and allocation shape.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `atan(metric)` | 1 | 148 | 0.433 | 0.586 | 0.616 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `atan(metric)` | 2,048 | 98,193 | 4.394 | 6.399 | 11.227 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The transform adds no scalar child, second read, or result copy. Wide storage
+work is identical to neighboring single-vector transforms. `QSF-052`
+preserves the run's noisier p95/p99 rather than rerunning it away: its 4.394 ms
+median is consistent with the family, and the counters show no storage or
+allocation amplification. Direct SQLite/libSQL users already have the
+standard valid-domain functions in `SQL-PROM-043`.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 36,680 KiB. No benchmark request required cancellation; shared composed-
+evaluator cancellation pins reader reuse. Pinned oracle and real-extension
+tests cover all six functions, valid and invalid domains, endpoint
+infinities, NaN, signed zero, range grids, nesting, invalid types, limits,
+shutdown, and cold reopen. No extension or storage contract changed.
