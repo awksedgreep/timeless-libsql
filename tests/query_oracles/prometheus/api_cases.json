@@ -2067,6 +2067,80 @@
       "expected_metric": {"case": "below", "job": "oracle"},
       "expected_values": [2],
       "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F04-sqrt-domain-and-ieee-values",
+      "query": "sqrt(oracle_math{case=~\"sqrt|negative_zero|negative|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "sqrt", "job": "oracle"}, "value": 3},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "negative", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F04-exp-ieee-values",
+      "query": "exp(oracle_math{case=~\"zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "zero", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": 0}
+      ]
+    },
+    {
+      "id": "PQL-F04-ln-domain-and-ieee-values",
+      "query": "ln(oracle_math{case=~\"one|zero|negative_zero|negative|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "one", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "zero", "job": "oracle"}, "value": "-Inf"},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-Inf"},
+        {"metric": {"case": "negative", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F04-log2-and-log10-domains",
+      "query": "log2(oracle_math{case=~\"eight|zero|negative|nan|positive_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "eight", "job": "oracle"}, "value": 3},
+        {"metric": {"case": "zero", "job": "oracle"}, "value": "-Inf"},
+        {"metric": {"case": "negative", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F04-log10-exact-power",
+      "query": "log10(oracle_math{case=\"hundred\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "hundred", "job": "oracle"},
+      "expected_values": [2],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F04-sqrt-range-grid-and-name-policy",
+      "query": "sqrt(oracle_math{case=\"sqrt\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "sqrt", "job": "oracle"},
+      "expected_values": [2, 3]
+    },
+    {
+      "id": "PQL-F04-nested-math-transforms",
+      "query": "ln(exp(oracle_math{case=\"zero\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "zero", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
     }
   ],
   "operator_error_cases": [

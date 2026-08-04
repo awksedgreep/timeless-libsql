@@ -870,6 +870,10 @@ Bounded `clamp`, `clamp_min`, and `clamp_max` use
 [`SQL-PROM-040`](QUERY_SQL_EQUIVALENTS.md#sql-prom-040-clamp-clamp_min-and-clamp_max);
 the Rust API adds bit-exact NaN/signed-zero behavior and per-step scalar-bound
 expressions to the ordinary finite SQL foundation.
+Bounded `sqrt`, `exp`, `ln`, `log2`, and `log10` use
+[`SQL-PROM-041`](QUERY_SQL_EQUIVALENTS.md#sql-prom-041-sqrt-exp-ln-log2-and-log10);
+the Rust API preserves Prometheus `NaN`/infinity domain results that ordinary
+SQLite reports as SQL NULL.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

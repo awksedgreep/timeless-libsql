@@ -82,6 +82,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-038`](#sql-prom-038-abs) | `PQL-F01` | current foundation | exact bounded absolute value for finite floats, infinities, and signed zero; API owns packed-NaN fidelity, language, names, limits, and envelopes |
 | [`SQL-PROM-039`](#sql-prom-039-ceil-floor-and-round) | `PQL-F02` | current foundation | exact bounded IEEE ceiling/floor and Prometheus nearest-multiple arithmetic for row-visible values; API owns packed-NaN fidelity, scalar ASTs, names, limits, and envelopes |
 | [`SQL-PROM-040`](#sql-prom-040-clamp-clamp_min-and-clamp_max) | `PQL-F03` | current foundation | bounded finite-value clamping and inverted-bound omission; API owns packed IEEE fidelity, scalar ASTs, names, limits, and envelopes |
+| [`SQL-PROM-041`](#sql-prom-041-sqrt-exp-ln-log2-and-log10) | `PQL-F04` | current foundation | bounded SQLite math transforms for valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1434,6 +1435,38 @@ storage pruning or avoid the already-required vector decode.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_clamp_functions_bound_ieee_vectors_and_reopen`.
+
+### SQL-PROM-041: `sqrt`, `exp`, `ln`, `log2`, and `log10`
+
+SQLite's public math functions directly transform every bounded row:
+
+```sql
+SELECT labels, ts, sqrt(value) AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+Substitute `exp(value)`, `ln(value)`, `log2(value)`, or `log10(value)` for
+`sqrt(value)`. Bounds, step, and lookback use the metric table's configured
+timestamp unit (integer seconds for the default table); grid bounds are
+inclusive and lookback is open on the left. Missing grid samples remain
+absent, labels are canonical JSON, and ordering is deterministic.
+
+This recipe is exact over each SQLite function's valid row-visible domain.
+SQLite returns SQL NULL for invalid square-root/logarithm domains and for
+zero logarithms; a stored NaN is also row-projected as NULL. Those values do
+not encode Prometheus's required distinction among `NaN`, `-Inf`, and an
+absent sample. The Rust API reads the public bit-exact packed frame, applies
+the IEEE operations directly, removes `__name__`, and owns PromQL typing,
+limits, cancellation, nested composition, and HTTP envelopes. There is no
+storage-read or decode saving from adding a specialized extension primitive:
+direct SQLite/libSQL users already have these standard functions.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_math_transforms_match_domains_ieee_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

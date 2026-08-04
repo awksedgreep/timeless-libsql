@@ -401,8 +401,13 @@ enum PromFunctionOp {
     Clamp,
     ClampMax,
     ClampMin,
+    Exp,
     Floor,
+    Ln,
+    Log2,
+    Log10,
     Round,
+    Sqrt,
 }
 
 impl PromFunctionOp {
@@ -418,11 +423,16 @@ impl PromFunctionOp {
             }
             Self::ClampMax => Some(prometheus_math_min(parameters[0], value)),
             Self::ClampMin => Some(prometheus_math_max(parameters[0], value)),
+            Self::Exp => Some(value.exp()),
             Self::Floor => Some(value.floor()),
+            Self::Ln => Some(value.ln()),
+            Self::Log2 => Some(value.log2()),
+            Self::Log10 => Some(value.log10()),
             Self::Round => {
                 let inverse = 1.0 / parameters.first().copied().unwrap_or(1.0);
                 Some((value * inverse + 0.5).floor() / inverse)
             }
+            Self::Sqrt => Some(value.sqrt()),
         }
     }
 }
@@ -1050,12 +1060,20 @@ fn lower_promql_expr(
             }))
         }
         promql::Expr::Call(call)
-            if matches!(call.func.name, "ceil" | "floor" | "round") =>
+            if matches!(
+                call.func.name,
+                "ceil" | "exp" | "floor" | "ln" | "log2" | "log10" | "round" | "sqrt"
+            ) =>
         {
             let op = match call.func.name {
                 "ceil" => PromFunctionOp::Ceil,
+                "exp" => PromFunctionOp::Exp,
                 "floor" => PromFunctionOp::Floor,
+                "ln" => PromFunctionOp::Ln,
+                "log2" => PromFunctionOp::Log2,
+                "log10" => PromFunctionOp::Log10,
                 "round" => PromFunctionOp::Round,
+                "sqrt" => PromFunctionOp::Sqrt,
                 _ => unreachable!("guarded numeric transform"),
             };
             let (argument, parameter) = match call.args.args.as_slice() {

@@ -3501,6 +3501,7 @@ $'catalog|api,worker|GET /items\nbounded|10,9|5|2\nstream|3|3|0'
 echo "== section 45: documented query-language SQL equivalents =="
 SQL_EQ_DB="$TMP/query_sql_equivalents.db"
 got=$(python3 - "$EXT" "$SQL_EQ_DB" <<'PY'
+import json
 import math
 import sqlite3
 import sys
@@ -3560,6 +3561,12 @@ db.executemany(
         ('clamp_metric', '{"case":"below"}', 100, -3.0),
         ('clamp_metric', '{"case":"inside"}', 100, 2.0),
         ('clamp_metric', '{"case":"above"}', 100, 8.0),
+        ('math_metric', '{"case":"sqrt"}', 100, 4.0),
+        ('math_metric', '{"case":"zero"}', 100, 0.0),
+        ('math_metric', '{"case":"one"}', 100, 1.0),
+        ('math_metric', '{"case":"eight"}', 100, 8.0),
+        ('math_metric', '{"case":"hundred"}', 100, 100.0),
+        ('math_metric', '{"case":"negative"}', 100, -4.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3671,6 +3678,30 @@ inverted_clamp = db.execute(
     " WHERE minimum<=maximum"
 ).fetchall()
 assert inverted_clamp == []
+
+math_transforms = db.execute(
+    "SELECT labels,ts,sqrt(value),exp(value),ln(value),log2(value),log10(value)"
+    " FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    " ORDER BY labels,ts",
+    {
+        'metric': 'math_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+    },
+).fetchall()
+by_case = {json.loads(labels)['case']: row for labels, *row in math_transforms}
+assert by_case['sqrt'][1] == 2.0
+assert by_case['zero'][2] == 1.0
+assert by_case['one'][3] == 0.0
+assert by_case['eight'][4] == 3.0
+assert by_case['hundred'][5] == 2.0
+assert by_case['negative'][1] is None
+assert by_case['negative'][3:] == [None, None, None]
+assert by_case['zero'][3:] == [None, None, None]
 
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
