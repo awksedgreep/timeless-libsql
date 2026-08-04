@@ -67,6 +67,15 @@ fn document() -> &'static str {
                 "timeless_window_batches": {
                     "format": "TWB1",
                     "max_work_points": true
+                },
+                "timeless_logs": {
+                    "max_work_entries": true
+                },
+                "timeless_log_count": {
+                    "max_work_entries": true
+                },
+                "timeless_log_values": {
+                    "max_work_entries": true
                 }
             }
         })
@@ -91,6 +100,18 @@ mod tests {
         );
         assert_eq!(
             value["query_surfaces"]["timeless_window_batches"]["max_work_points"],
+            true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_logs"]["max_work_entries"],
+            true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_log_count"]["max_work_entries"],
+            true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_log_values"]["max_work_entries"],
             true
         );
     }

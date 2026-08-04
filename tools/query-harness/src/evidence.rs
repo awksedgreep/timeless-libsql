@@ -1197,14 +1197,29 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             bail!("logs durable watermark mismatch: {after_flush}");
         }
         let mut queries = Map::new();
-        for (key, name, expression, expected) in [
+        let exact_matches = (0..entries).filter(|index| index % 8 == 4).count();
+        for (key, name, expression, expected, expected_total) in [
             (
                 "narrow",
                 "logs-narrow",
-                "level:error service:api | limit 10000",
-                entries / severities.len(),
+                "level:error service:api status:=500 | sort by (_time) desc | offset 1 | limit 100",
+                exact_matches.saturating_sub(1).min(100),
+                None,
             ),
-            ("wide", "logs-wide", "* | limit 10000", entries),
+            (
+                "wide",
+                "logs-wide-phrase",
+                "\"query contract\" | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "count",
+                "logs-native-count",
+                "service:api | stats count() as total",
+                1,
+                Some(entries.div_ceil(4) as u64),
+            ),
         ] {
             let mut request = || {
                 let body = url::form_urlencoded::Serializer::new(String::new())
@@ -1221,6 +1236,19 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                         "LogsQL returned {status}: {}",
                         String::from_utf8_lossy(&response)
                     );
+                }
+                if let Some(expected_total) = expected_total {
+                    let row: Value = serde_json::from_slice(
+                        response
+                            .split(|byte| *byte == b'\n')
+                            .find(|line| !line.is_empty())
+                            .context("LogsQL count response is empty")?,
+                    )?;
+                    if row != json!({"total": expected_total}) {
+                        bail!(
+                            "LogsQL numeric count mismatch: expected {expected_total}, got {row}"
+                        );
+                    }
                 }
                 Ok(response)
             };
@@ -1247,7 +1275,8 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "queries": queries,
             "storage": selected_stats(&final_stats, &["total_bytes", "disk_size", "index_size", "database_file_bytes", "database_wal_bytes", "database_shm_bytes", "physical_database_bytes", "raw_blocks", "compressed_blocks", "buffered_entries"]),
             "rss_hwm_kib": hwm,
-            "cancellation": {"contract_test": "HTTP disconnect coverage is added per LogsQL evaluator row"},
+            "limits": {"result_rows": 100_000, "work_entries": 100_000, "response_bytes": 16 * 1024 * 1024, "deadline_ms": 30_000, "contract_test": "session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader"},
+            "cancellation": {"cancelled_requests": final_stats["api_query_cancelled"], "in_flight_at_capture": final_stats["api_query_in_flight"], "contract_test": "session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader"},
         }))
     })();
     let shutdown = server.shutdown(true);

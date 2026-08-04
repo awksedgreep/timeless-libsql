@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -225,13 +225,13 @@ fn setup(connection: &mut Connection) -> Result<()> {
             1000,
             "error",
             "request timeout",
-            r#"{"service":"api","host":"web-1","deployment":{"region":"us-east"},"duration_ms":12}"#,
+            r#"{"service":"api","host":"web-1","deployment":{"region":"us-east"},"duration_ms":12,"nested":{"ok":true,"count":2,"none":null,"empty":""}}"#,
         ])?;
         insert.execute(params![
             2000,
             "info",
             "request ok",
-            r#"{"service":"api","host":"web-2","deployment":{"region":"us-west"},"duration_ms":4}"#,
+            r#"{"service":"api","host":"web-2","deployment":{"region":"us-west"},"duration_ms":4,"nested":{"ok":"true","count":"2","empty":null}}"#,
         ])?;
     }
     transaction.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
@@ -287,6 +287,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "lookback" | "window" => Value::Integer(if counter_window { 60 } else { 20 }),
         "offset" => Value::Integer(10),
         "max_work_points" => Value::Integer(100_000),
+        "max_work_entries" => Value::Integer(100_000),
         "threshold" => Value::Real(0.0),
         "scalar" | "scalar_value" | "value" => Value::Real(2.0),
         "q" | "quantile" => Value::Real(0.5),
@@ -564,7 +565,8 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
 
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
-         WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'",
+         WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
+           AND max_work_entries=100000",
         [],
         |row| row.get(0),
     )?;
@@ -575,18 +577,47 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     )?;
     let count: i64 = connection.query_row(
         "SELECT n FROM timeless_log_count(
-           'logs','{\"level\":\"error\",\"service\":\"api\"}',NULL,1000,2000)",
+           'logs','{\"level\":\"error\",\"service\":\"api\"}',NULL,1000,2000,100000)",
         [],
         |row| row.get(0),
     )?;
     let values: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM timeless_log_values('logs','host',NULL,NULL,1000,2000,100)",
+        "SELECT COUNT(*) FROM timeless_log_values(
+           'logs','host',NULL,NULL,1000,2000,100,100000)",
+        [],
+        |row| row.get(0),
+    )?;
+    let compatible_count: i64 =
+        connection.query_row("SELECT n FROM timeless_log_count('logs')", [], |row| {
+            row.get(0)
+        })?;
+    let compatible_values: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM timeless_log_values(
+           'logs','host',NULL,NULL,1000,2000,100)",
         [],
         |row| row.get(0),
     )?;
     let nested: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
-         WHERE json_extract(metadata,'$.deployment.region')='us-east'",
+         WHERE json_type(metadata,'$.deployment.region')='text'
+           AND json_extract(metadata,'$.deployment.region')='us-east'",
+        [],
+        |row| row.get(0),
+    )?;
+    let typed: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM logs
+         WHERE json_type(metadata,'$.nested.ok')='true'
+           AND json_extract(metadata,'$.nested.ok')=1
+           AND json_type(metadata,'$.nested.count')='integer'
+           AND json_extract(metadata,'$.nested.count')=2
+           AND json_type(metadata,'$.nested.none')='null'
+           AND json_type(metadata,'$.nested.empty')='text'
+           AND json_extract(metadata,'$.nested.empty')=''",
+        [],
+        |row| row.get(0),
+    )?;
+    let missing: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM logs WHERE json_type(metadata,'$.nested.none') IS NULL",
         [],
         |row| row.get(0),
     )?;
@@ -595,10 +626,158 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         [],
         |row| row.get(0),
     )?;
-    if [bounded, substring, count, values, nested, buckets] != [1, 1, 1, 2, 1, 2] {
+    if [
+        bounded,
+        substring,
+        count,
+        values,
+        compatible_count,
+        compatible_values,
+        nested,
+        typed,
+        missing,
+        buckets,
+    ] != [1, 1, 1, 2, 2, 2, 1, 1, 1, 2]
+    {
         bail!(
             "SQL-LOG recipe results changed: {:?}",
-            [bounded, substring, count, values, nested, buckets]
+            [
+                bounded,
+                substring,
+                count,
+                values,
+                compatible_count,
+                compatible_values,
+                nested,
+                typed,
+                missing,
+                buckets
+            ]
+        );
+    }
+    let work_error = connection
+        .query_row(
+            "SELECT message FROM logs
+             WHERE message_contains='request' AND max_work_entries=1
+             ORDER BY ts LIMIT 2",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_err();
+    if !work_error.to_string().contains("max_work_entries=1") {
+        bail!("SQL log row work limit changed: {work_error}");
+    }
+    for sql in [
+        "SELECT message FROM logs WHERE max_work_entries=0",
+        "SELECT message FROM logs WHERE max_work_entries='not-an-integer'",
+        "SELECT message FROM logs WHERE max_work_entries=NULL",
+    ] {
+        if connection
+            .query_row(sql, [], |row| row.get::<_, String>(0))
+            .is_ok()
+        {
+            bail!("SQL log row surface accepted invalid work guard: {sql}");
+        }
+    }
+    let unbounded_hidden_rows: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM logs WHERE max_work_entries IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if unbounded_hidden_rows != 2 {
+        bail!("SQL hidden-column unbounded NULL projection changed: {unbounded_hidden_rows}");
+    }
+    for (surface, sql) in [
+        (
+            "timeless_log_count",
+            "SELECT n FROM timeless_log_count('logs',NULL,NULL,NULL,NULL,0)",
+        ),
+        (
+            "timeless_log_values",
+            "SELECT value FROM timeless_log_values('logs','host',NULL,NULL,NULL,NULL,10,0)",
+        ),
+        (
+            "timeless_log_count NULL guard",
+            "SELECT n FROM timeless_log_count('logs',NULL,NULL,NULL,NULL,NULL)",
+        ),
+        (
+            "timeless_log_values NULL guard",
+            "SELECT value FROM timeless_log_values('logs','host',NULL,NULL,NULL,NULL,10,NULL)",
+        ),
+    ] {
+        let error = connection
+            .query_row(sql, [], |row| row.get::<_, String>(0))
+            .unwrap_err();
+        let message = error.to_string();
+        if !message.contains("max_work_entries must") || !message.contains("positive") {
+            bail!("{surface} accepted an invalid work limit: {error}");
+        }
+    }
+
+    let log_stats: BTreeMap<String, Value> = {
+        let mut statement = connection.prepare(
+            "SELECT key, value FROM timeless_stats('logs')
+             WHERE key IN (
+               'timestamp_unit','blocks','raw_blocks','compressed_blocks',
+               'buffered_entries','disk_entries','total_entries',
+               'bytes_on_disk','raw_bytes','compressed_bytes','terms',
+               'index_bytes','ts_min','ts_max',
+               'optimize_source_entries','optimize_source_bytes'
+             )",
+        )?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        rows
+    };
+    for key in [
+        "timestamp_unit",
+        "blocks",
+        "raw_blocks",
+        "compressed_blocks",
+        "buffered_entries",
+        "disk_entries",
+        "total_entries",
+        "bytes_on_disk",
+        "raw_bytes",
+        "compressed_bytes",
+        "terms",
+        "index_bytes",
+        "ts_min",
+        "ts_max",
+        "optimize_source_entries",
+        "optimize_source_bytes",
+    ] {
+        if !log_stats.contains_key(key) {
+            bail!("public log statistic {key:?} is missing");
+        }
+    }
+    let integer = |key: &str| match log_stats.get(key) {
+        Some(Value::Integer(value)) => Ok(*value),
+        other => bail!("public log statistic {key:?} is not an INTEGER: {other:?}"),
+    };
+    if log_stats.get("timestamp_unit") != Some(&Value::Text("ms".to_owned()))
+        || integer("buffered_entries")? != 0
+        || integer("disk_entries")? != 2
+        || integer("total_entries")? != 2
+        || integer("compressed_blocks")? != 0
+        || integer("compressed_bytes")? != 0
+        || integer("ts_min")? != 1000
+        || integer("ts_max")? != 2000
+        || integer("optimize_source_entries")? != 2
+        || integer("optimize_source_bytes")? <= 0
+        || integer("bytes_on_disk")? != integer("raw_bytes")?
+        || integer("blocks")? != integer("raw_blocks")?
+        || integer("terms")? <= 0
+    {
+        bail!("public log storage statistics changed: {log_stats:?}");
+    }
+    if !matches!(log_stats.get("index_bytes"), Some(Value::Integer(value)) if *value >= 0)
+        && !matches!(log_stats.get("index_bytes"), Some(Value::Null))
+    {
+        bail!(
+            "public log index_bytes must be a non-negative INTEGER or NULL: {:?}",
+            log_stats.get("index_bytes")
         );
     }
     Ok(())

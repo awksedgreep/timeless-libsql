@@ -234,6 +234,30 @@ pub struct ExtensionCapabilities {
     pub minimum_server_version: String,
     pub build: BuildIdentity,
     pub signals: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub query_surfaces: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Require one additive query-surface flag after the base extension handshake.
+/// A server calls this before opening its virtual table when correct bounded
+/// execution depends on a particular public storage guard.
+pub fn require_query_surface(
+    capabilities: &ExtensionCapabilities,
+    surface: &str,
+    capability: &str,
+) -> Result<(), String> {
+    if capabilities
+        .query_surfaces
+        .get(surface)
+        .and_then(|surface| surface.get(capability))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "incompatible timeless extension: query surface {surface:?} requires capability {capability:?}"
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -538,6 +562,7 @@ mod tests {
                 profile: "test".into(),
             },
             signals: serde_json::Map::new(),
+            query_surfaces: serde_json::Map::new(),
         };
         let spec = DataPlaneSpec {
             signal: "metrics",
@@ -554,6 +579,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn additive_query_surface_capabilities_fail_closed() {
+        let mut capabilities = ExtensionCapabilities {
+            extension_version: "0.3.0".into(),
+            data_abi: 1,
+            minimum_server_version: "0.3.0".into(),
+            build: BuildIdentity {
+                commit: "test".into(),
+                target: "test".into(),
+                profile: "test".into(),
+            },
+            signals: serde_json::Map::new(),
+            query_surfaces: serde_json::Map::new(),
+        };
+        let error =
+            require_query_surface(&capabilities, "timeless_logs", "max_work_entries").unwrap_err();
+        assert!(error.contains("timeless_logs"), "{error}");
+        assert!(error.contains("max_work_entries"), "{error}");
+
+        capabilities.query_surfaces.insert(
+            "timeless_logs".into(),
+            serde_json::json!({"max_work_entries": true}),
+        );
+        require_query_surface(&capabilities, "timeless_logs", "max_work_entries").unwrap();
     }
 
     #[test]

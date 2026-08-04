@@ -13,15 +13,17 @@ Recipes for the query surface: the raw vtabs, the kernel TVFs
 (`timeless_aggregate`, `timeless_aggregate_frame`, `timeless_latest`,
 `timeless_latest_frame`, `timeless_grid`, `timeless_window`,
 `timeless_window_batches`, `timeless_raw_frame`, `timeless_rollup`,
-`timeless_rollup_batches`), the bucket TVFs, and the catalog TVFs. Every recipe is
-executed by `tests/cli.sh` against a fixed dataset with hand-verified output
-(cookbook recipes in §33, aggregate contract in §35, latest contract in §36),
-so drift fails the suite.
+`timeless_rollup_batches`), bounded log row/count/value surfaces, bucket TVFs,
+and catalog TVFs. The parameterized language mappings live in
+[`QUERY_SQL_EQUIVALENTS.md`](QUERY_SQL_EQUIVALENTS.md) and are executed by the
+Rust query harness against the real extension so documentation drift fails
+local validation.
 
 Conventions used throughout:
 
 - `ts` is in the table's native unit (`timeless_metrics` = epoch
-  **seconds**, logs = ms, traces = ns). The kernels are unit-agnostic:
+  **seconds**, generic logs = ms, traces = ns). The release logs server creates
+  a microsecond table. The kernels are unit-agnostic:
   `step`, `lookback`, and `window` are in the same unit as `ts`.
 - All kernel windows are half-open **`(t − width, t]`**: a sample
   exactly at `t` counts, a sample exactly at `t − width` does not.
@@ -99,6 +101,19 @@ SELECT * FROM timeless_stats('metrics');
 -- logs/traces frequency + latency dashboards
 SELECT bucket_ts, group_key, n
   FROM timeless_log_buckets('logs', 'level', NULL, :t0, :t1, 60000);
+
+-- bounded ordered log rows: an output LIMIT does not replace the work guard
+SELECT ts, level, message, metadata FROM logs
+ WHERE service='api' AND ts BETWEEN :t0 AND :t1
+   AND max_work_entries=:max_work_entries
+ ORDER BY ts DESC LIMIT 100 OFFSET 0;
+
+-- exact count and bounded field discovery without rowset materialization
+SELECT n FROM timeless_log_count(
+  'logs', '{"level":"error"}', NULL, :t0, :t1, :max_work_entries);
+SELECT value FROM timeless_log_values(
+  'logs', 'host', '{"level":"error"}', NULL,
+  :t0, :t1, 1000, :max_work_entries);
 SELECT bucket_ts, service, n, dur_p50, dur_p95, dur_p99
   FROM timeless_trace_buckets('traces', NULL, :t0, :t1, 60000000000);
 
@@ -124,6 +139,70 @@ Trace service/operation discovery reads posting-list metadata rather than span
 payloads. New blocks carry a collision-free service/operation pair term; if a
 selected legacy block lacks the generation marker, operation discovery falls
 back to exact block-at-a-time decode. Upgrades therefore remain complete.
+
+## Bounded log queries
+
+`max_work_entries` is an optional positive, inclusive guard over buffered
+entries considered plus candidate persisted entries charged before payload
+decode. It is independent of result cardinality: `LIMIT 1` cannot conceal a
+database-wide scan. Exceeding the cap returns an error and no partial rows,
+count, or value set. A bound-pruned block is not charged; a fully covered block
+that contributes to `timeless_log_count` from metadata does not consume row-
+decode work.
+
+The guard is available on all three direct SQLite/libSQL surfaces:
+
+- hidden equality input `timeless_logs.max_work_entries`;
+- optional sixth argument to `timeless_log_count`; and
+- optional eighth argument to `timeless_log_values`.
+
+Earlier arities remain backward-compatible and unbounded. Embedded hosts that
+need a hard policy should verify the corresponding `query_surfaces` flag from
+`timeless_capabilities()` and always bind the cap. SQLite progress handlers and
+`sqlite3_interrupt()` are observed between block reads/decodes, and a cancelled
+connection remains reusable. LogsQL syntax, typed post-filters, result limits,
+deadlines, and HTTP errors remain Rust signal-API responsibilities; see
+[`SQL-LOG-001` through `SQL-LOG-005`](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination).
+Zero, negative, NULL, and non-integer equality guards fail, including a
+supplied NULL positional TVF guard. With no equality guard the hidden column
+projects NULL, so `logs.max_work_entries IS NULL` selects the compatible
+unbounded form.
+
+## Public log storage statistics
+
+Embedded hosts can inspect log storage and schedule maintenance through the
+public statistics TVF without depending on private block, term, or metadata
+tables:
+
+```sql
+SELECT key, value
+  FROM timeless_stats('logs')
+ WHERE key IN (
+   'timestamp_unit',
+   'blocks', 'raw_blocks', 'compressed_blocks',
+   'buffered_entries', 'disk_entries', 'total_entries',
+   'bytes_on_disk', 'raw_bytes', 'compressed_bytes',
+   'terms', 'index_bytes',
+   'ts_min', 'ts_max',
+   'optimize_source_entries', 'optimize_source_bytes'
+ )
+ ORDER BY key;
+```
+
+Timestamps use the table's declared `timestamp_unit`. `total_entries` includes
+the live buffer, while `disk_entries` does not. The three payload-byte rows
+measure stored block blobs rather than the complete SQLite database, WAL, or
+freelist. `terms` is a posting-row count. `index_bytes` is the SQLite page
+allocation for the log term/timestamp/metadata structures and is `NULL` when
+the SQLite build does not expose `dbstat`. The `optimize_source_*` rows describe
+the raw or undersized persisted blocks currently eligible as optimizer source;
+they are an observation for choosing a bounded `optimize:<entries>` command,
+not a separate storage contract. Statistics keys are additive, so callers
+should select the keys they understand and tolerate new rows.
+
+The extension alone owns and interprets its shadow tables. A signal server or
+embedded application that needs a missing statistic should extend this public
+surface instead of reading private tables or duplicating block policy.
 
 ## PromQL nameless and multi-name selectors
 

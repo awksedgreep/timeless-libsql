@@ -90,7 +90,8 @@
 //! substring. Missing bounds default to the complete i64 range:
 //!
 //!   SELECT n FROM timeless_log_count(
-//!     'logs', '{"level":"error","service":"api"}', 'timeout', :start, :stop);
+//!     'logs', '{"level":"error","service":"api"}', 'timeout', :start, :stop,
+//!     :max_work_entries);
 //!
 //! Fully covered unfiltered or level-pure blocks contribute persisted entry
 //! counts without payload reads. All other blocks decode one at a time, so
@@ -101,7 +102,8 @@
 //! and retaining at most `limit + 1` strings:
 //!
 //!   SELECT value FROM timeless_log_values(
-//!     'logs', 'host', '{"level":"error"}', NULL, :start, :stop, 1000);
+//!     'logs', 'host', '{"level":"error"}', NULL, :start, :stop, 1000,
+//!     :max_work_entries);
 //!
 //! F9 — both kernel TVFs take an optional trailing fill argument:
 //! 'none' (default, sparse) or 'null' (dense: every grid point emitted
@@ -169,7 +171,7 @@ use rusqlite::{Connection, Error, Result};
 use timeless_core::{AggFn, Engine, Labels, LogQuery};
 
 use crate::flatjson::{labels_to_json, parse_labels_json, parse_matchers_json, MatcherSpec};
-use crate::logs_vtab::LogsTab;
+use crate::logs_vtab::{LogsTab, MERGE_TARGET_ENTRIES as LOG_MERGE_TARGET_ENTRIES};
 use crate::metrics_vtab::MetricsTab;
 use crate::query_frame::{encode_aggregate_frame, encode_latest_frame};
 use crate::shared::{self, DbGuard, SharedEngine};
@@ -2999,11 +3001,19 @@ unsafe impl VTabCursor for TraceDiscoveryCursor<'_> {
     }
 }
 
-/// timeless_log_count('logs', filter_json, message_contains, start, stop)
+/// timeless_log_count('logs', filter_json, message_contains, start, stop,
+///                    max_work_entries)
 /// → one INTEGER row. Only `tbl` is required; optional bounds default to the
 /// full i64 range. Filter JSON uses `level` plus metadata equalities, matching
 /// timeless_log_buckets.
-const LOG_COUNT_ARGS: &[&str] = &["tbl", "filter", "message_contains", "start", "stop"];
+const LOG_COUNT_ARGS: &[&str] = &[
+    "tbl",
+    "filter",
+    "message_contains",
+    "start",
+    "stop",
+    "max_work_entries",
+];
 const LOG_COUNT_REQUIRED: c_int = 0b00001;
 const LOG_COUNT_FIRST_ARG: c_int = 1;
 
@@ -3030,7 +3040,8 @@ unsafe impl<'vtab> VTab<'vtab> for LogCountTab {
         Ok((
             Cow::Borrowed(
                 c"CREATE TABLE x(n INTEGER, tbl HIDDEN, filter HIDDEN, \
-                                 message_contains HIDDEN, start HIDDEN, stop HIDDEN)",
+                                 message_contains HIDDEN, start HIDDEN, stop HIDDEN, \
+                                 max_work_entries HIDDEN)",
             ),
             LogCountTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -3087,6 +3098,7 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
             Some(slot) => args.get::<Option<i64>>(slot)?.unwrap_or(i64::MAX),
             None => i64::MAX,
         };
+        let max_work_entries = optional_positive_usize(M, "max_work_entries", slots[5], args)?;
 
         let mut level = None;
         let mut severity = None;
@@ -3111,7 +3123,7 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
         let read = read_permit(&shared, self.db, &table)?;
         let count = shared
             .engine
-            .count_after_snapshot(
+            .count_with_work_limit_after_snapshot(
                 &LogQuery {
                     ts_min,
                     ts_max,
@@ -3121,6 +3133,7 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
                     message_contains,
                     message_like_prune: None,
                 },
+                max_work_entries,
                 move || drop(read),
             )
             .map_err(module_err)?;
@@ -3152,7 +3165,7 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
 }
 
 /// timeless_log_values('logs', key, filter_json, message_contains,
-///                     start, stop, limit)
+///                     start, stop, limit, max_work_entries)
 /// → bounded distinct TEXT rows in lexical order. `tbl` and `key` are
 /// required. The remaining arguments share timeless_log_count semantics;
 /// limit defaults to 1,000 and is capped at 100,000.
@@ -3164,9 +3177,35 @@ const LOG_VALUES_ARGS: &[&str] = &[
     "start",
     "stop",
     "max_values",
+    "max_work_entries",
 ];
 const LOG_VALUES_REQUIRED: c_int = 0b0000011;
 const LOG_VALUES_FIRST_ARG: c_int = 1;
+
+fn optional_positive_usize(
+    module: &str,
+    name: &str,
+    slot: Option<usize>,
+    args: &Filters<'_>,
+) -> Result<Option<usize>> {
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+    let value: Option<i64> = args.get(slot)?;
+    let value = value.ok_or_else(|| {
+        module_err(format!(
+            "{module}: {name} must not be NULL and must be positive"
+        ))
+    })?;
+    if value <= 0 {
+        return Err(module_err(format!("{module}: {name} must be positive")));
+    }
+    usize::try_from(value).map(Some).map_err(|_| {
+        module_err(format!(
+            "{module}: {name} {value} exceeds this platform's usize"
+        ))
+    })
+}
 
 #[repr(C)]
 pub(crate) struct LogValuesTab {
@@ -3192,7 +3231,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogValuesTab {
             Cow::Borrowed(
                 c"CREATE TABLE x(value TEXT, tbl HIDDEN, key HIDDEN, filter HIDDEN, \
                                   message_contains HIDDEN, start HIDDEN, stop HIDDEN, \
-                                  max_values HIDDEN)",
+                                  max_values HIDDEN, max_work_entries HIDDEN)",
             ),
             LogValuesTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -3263,6 +3302,7 @@ unsafe impl VTabCursor for LogValuesCursor<'_> {
                 "{M}: limit must be between 0 and 100000"
             )));
         }
+        let max_work_entries = optional_positive_usize(M, "max_work_entries", slots[7], args)?;
 
         let mut level = None;
         let mut severity = None;
@@ -3287,7 +3327,7 @@ unsafe impl VTabCursor for LogValuesCursor<'_> {
         let read = read_permit(&shared, self.db, &table)?;
         self.values = shared
             .engine
-            .field_values_after_snapshot(
+            .field_values_with_work_limit_after_snapshot(
                 &LogQuery {
                     ts_min,
                     ts_max,
@@ -3299,6 +3339,7 @@ unsafe impl VTabCursor for LogValuesCursor<'_> {
                 },
                 &key,
                 limit as usize,
+                max_work_entries,
                 move || drop(read),
             )
             .map_err(module_err)?;
@@ -4146,6 +4187,61 @@ fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
     conn.query_row(&sql, [], |r| r.get(0))
 }
 
+struct LogStorageSummary {
+    disk_entries: i64,
+    bytes_on_disk: i64,
+    raw_bytes: i64,
+    optimize_source_entries: i64,
+    optimize_source_bytes: i64,
+}
+
+fn log_storage_summary(database: &str, table: &str) -> Result<LogStorageSummary> {
+    let conn = shared::current_conn().map_err(module_err)?;
+    let blocks = crate::sql_ident::qualified_shadow(database, table, "blocks");
+    let sql = format!(
+        "SELECT COALESCE(SUM(entry_count), 0),
+                COALESCE(SUM(length(data)), 0),
+                COALESCE(SUM(CASE WHEN codec IN (1, 6) THEN length(data) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN codec IN (1, 6) OR entry_count < {LOG_MERGE_TARGET_ENTRIES}
+                                  THEN entry_count ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN codec IN (1, 6) OR entry_count < {LOG_MERGE_TARGET_ENTRIES}
+                                  THEN length(data) ELSE 0 END), 0)
+           FROM {blocks}"
+    );
+    conn.query_row(&sql, [], |row| {
+        Ok(LogStorageSummary {
+            disk_entries: row.get(0)?,
+            bytes_on_disk: row.get(1)?,
+            raw_bytes: row.get(2)?,
+            optimize_source_entries: row.get(3)?,
+            optimize_source_bytes: row.get(4)?,
+        })
+    })
+}
+
+fn log_index_bytes(database: &str, table: &str) -> Option<i64> {
+    let conn = shared::current_conn().ok()?;
+    let dbstat = crate::sql_ident::qualified(database, "dbstat");
+    let sql = format!(
+        "SELECT COALESCE(SUM(pgsize), 0) FROM {dbstat}
+          WHERE name IN (?1, ?2, ?3, ?4)"
+    );
+    conn.query_row(
+        &sql,
+        [
+            crate::sql_ident::shadow_object(table, "terms"),
+            crate::sql_ident::shadow_object(table, "blocks_ts"),
+            crate::sql_ident::shadow_object(table, "meta"),
+            format!(
+                "sqlite_autoindex_{}_1",
+                crate::sql_ident::shadow_object(table, "meta")
+            ),
+        ],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 unsafe impl VTabCursor for StatsCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         use rusqlite::types::Value;
@@ -4289,20 +4385,53 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let profile = shared.engine.profile();
                 let optimize_backlog = shared.engine.optimize_backlog();
                 let gate = shared.write_gate.profile();
+                let storage = log_storage_summary(&database, &table)?;
+                let timestamp_unit = {
+                    let conn = shared::current_conn().map_err(module_err)?;
+                    crate::shadow_meta::load_meta_text(&conn, &database, &table, "timestamp_unit")
+                        .map_err(module_err)?
+                };
                 rows.extend([
+                    (
+                        "timestamp_unit",
+                        timestamp_unit.map_or(Value::Null, Value::Text),
+                    ),
                     ("blocks", Value::Integer(blocks as i64)),
                     ("raw_blocks", Value::Integer(raw_blocks as i64)),
-                    ("buffered_entries", Value::Integer(buffered as i64)),
                     (
-                        "bytes_on_disk",
-                        Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
+                        "compressed_blocks",
+                        Value::Integer(blocks.saturating_sub(raw_blocks) as i64),
+                    ),
+                    ("buffered_entries", Value::Integer(buffered as i64)),
+                    ("disk_entries", Value::Integer(storage.disk_entries)),
+                    (
+                        "total_entries",
+                        Value::Integer(storage.disk_entries.saturating_add(buffered as i64)),
+                    ),
+                    ("bytes_on_disk", Value::Integer(storage.bytes_on_disk)),
+                    ("raw_bytes", Value::Integer(storage.raw_bytes)),
+                    (
+                        "compressed_bytes",
+                        Value::Integer(storage.bytes_on_disk.saturating_sub(storage.raw_bytes)),
                     ),
                     (
                         "terms",
                         Value::Integer(count_rows(&database, &table, "terms")?),
                     ),
+                    (
+                        "index_bytes",
+                        log_index_bytes(&database, &table).map_or(Value::Null, Value::Integer),
+                    ),
                     ("ts_min", opt_ts(ts_min)),
                     ("ts_max", opt_ts(ts_max)),
+                    (
+                        "optimize_source_entries",
+                        Value::Integer(storage.optimize_source_entries),
+                    ),
+                    (
+                        "optimize_source_bytes",
+                        Value::Integer(storage.optimize_source_bytes),
+                    ),
                     (
                         "ingest_batch_count",
                         Value::Integer(profile.ingest_batch_count as i64),

@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::rejection::QueryRejection;
-use axum::extract::{DefaultBodyLimit, Form, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Form, Query, State};
 use axum::http::{header, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -13,12 +14,20 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
 
+use crate::logsql::{self, LogsqlError, LogsqlErrorKind, LogsqlOutput, LogsqlPlan};
 use crate::storage::{LogEntry, QueryRow, QuerySpec, TimestampUnit};
-use crate::Storage;
+use crate::{LogsQueryLimits, Storage};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn router(storage: Storage) -> Router {
+    router_with_limits(storage, LogsQueryLimits::default())
+}
+
+pub fn router_with_limits(storage: Storage, limits: LogsQueryLimits) -> Router {
+    limits
+        .validate()
+        .expect("LogsQL router limits must be valid");
     Router::new()
         .route("/live", get(liveness))
         .route("/ready", get(health))
@@ -31,6 +40,7 @@ pub fn router(storage: Storage) -> Router {
         .route("/api/v1/backup", post(backup))
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(Extension(limits))
         .with_state(storage)
 }
 
@@ -116,14 +126,19 @@ struct GetQuery {
 
 async fn query_get(
     State(storage): State<Storage>,
+    Extension(limits): Extension<LogsQueryLimits>,
     query: Result<Query<GetQuery>, QueryRejection>,
 ) -> Response<Body> {
     let Query(query) = match query {
         Ok(query) => query,
         Err(_) => return client_error("unsupported_query_parameters"),
     };
-    let spec = get_query_spec(query, storage.timestamp_unit());
-    query_response(&storage, spec).await
+    let limit_explicit = query.limit.is_some();
+    let mut spec = get_query_spec(query, storage.timestamp_unit());
+    if let Err((reason, limit)) = apply_query_limits(&mut spec, limit_explicit, limits) {
+        return query_limit_error(reason, limit);
+    }
+    query_response(&storage, spec, limits).await
 }
 
 #[derive(Deserialize, Default)]
@@ -143,6 +158,7 @@ struct FieldValuesQuery {
 
 async fn field_values(
     State(storage): State<Storage>,
+    Extension(limits): Extension<LogsQueryLimits>,
     query: Result<Query<FieldValuesQuery>, QueryRejection>,
 ) -> Response<Body> {
     let Query(query) = match query {
@@ -152,12 +168,21 @@ async fn field_values(
     if !matches!(query.field.as_str(), "service" | "host" | "path" | "status") {
         return client_error("unsupported_log_field").into_response();
     }
-    let limit = query.limit.unwrap_or(1_000);
+    let limit = query.limit.unwrap_or(1_000).min(if query.limit.is_some() {
+        usize::MAX
+    } else {
+        limits.max_result_rows
+    });
+    if limit > limits.max_result_rows {
+        return query_limit_error("max_result_rows", limits.max_result_rows);
+    }
     let spec = QuerySpec {
         level: query.level,
         service: query.service,
         metadata_eq: metadata_filters(query.host, query.path, query.status),
+        metadata_exact: Vec::new(),
         message: query.message,
+        message_phrase: None,
         ts_min: query
             .start
             .as_deref()
@@ -167,18 +192,35 @@ async fn field_values(
             .as_deref()
             .and_then(|value| parse_query_time(value, storage.timestamp_unit())),
         limit,
+        max_work_rows: limits.max_work_rows,
         ..QuerySpec::default()
     };
-    match storage.field_values(spec, query.field, limit).await {
-        Ok(values) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(RESULT_ROWS_HEADER, values.len())
-            .body(Body::from(
-                serde_json::to_vec(&json!({"values": values})).unwrap_or_default(),
-            ))
-            .unwrap(),
-        Err(error) => server_error(error),
+    match tokio::time::timeout(
+        limits.deadline,
+        storage.field_values(spec, query.field, limit),
+    )
+    .await
+    {
+        Err(_) => timeout_error(limits),
+        Ok(Err(error)) => query_execution_error(error),
+        Ok(Ok(values)) => {
+            let row_count = values.len();
+            match bounded_json(&json!({"values": values}), limits.max_response_bytes) {
+                Ok(body) => {
+                    storage.record_query_response_bytes(body.len());
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(RESULT_ROWS_HEADER, row_count)
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+                Err(BoundedJsonError::Limit) => {
+                    query_limit_error("max_response_bytes", limits.max_response_bytes)
+                }
+                Err(BoundedJsonError::Encode(error)) => server_error(error),
+            }
+        }
     }
 }
 
@@ -189,42 +231,73 @@ struct QueryForm {
 
 async fn query_post(
     State(storage): State<Storage>,
+    Extension(limits): Extension<LogsQueryLimits>,
     Form(form): Form<QueryForm>,
 ) -> impl IntoResponse {
-    let (spec, count) = match parse_logsql(
-        form.query.as_deref().unwrap_or("*"),
-        storage.timestamp_unit(),
-    ) {
-        Ok(parsed) => parsed,
-        Err(_) => return client_error("unsupported_logsql"),
+    let Some(query) = form.query.as_deref() else {
+        return logsql_error(LogsqlError {
+            kind: LogsqlErrorKind::Malformed,
+            message: "LogsQL query parameter is required".into(),
+        });
     };
-    if count {
-        match storage.count(spec).await {
-            Ok(total) => ndjson_response(format!("{}\n", json!({"total": total})), 1),
-            Err(error) => server_error(error),
+    let mut plan = match logsql::parse(query, storage.timestamp_unit()) {
+        Ok(parsed) => parsed,
+        Err(error) => return logsql_error(error),
+    };
+    if let Err((reason, limit)) = apply_plan_limits(&mut plan, limits) {
+        return query_limit_error(reason, limit);
+    }
+    if plan.output == LogsqlOutput::Count {
+        match tokio::time::timeout(limits.deadline, storage.count(plan.spec)).await {
+            Err(_) => timeout_error(limits),
+            Ok(Err(error)) => query_execution_error(error),
+            Ok(Ok(total)) => {
+                match bounded_json_line(&json!({"total": total}), limits.max_response_bytes) {
+                    Ok(body) => {
+                        storage.record_query_response_bytes(body.len());
+                        ndjson_response(body, 1)
+                    }
+                    Err(BoundedJsonError::Limit) => {
+                        query_limit_error("max_response_bytes", limits.max_response_bytes)
+                    }
+                    Err(BoundedJsonError::Encode(error)) => server_error(error),
+                }
+            }
         }
     } else {
-        query_response(&storage, spec).await
+        query_response(&storage, plan.spec, limits).await
     }
 }
 
-async fn query_response(storage: &Storage, spec: QuerySpec) -> Response<Body> {
-    match storage.query(spec).await {
-        Ok(rows) => {
+async fn query_response(
+    storage: &Storage,
+    spec: QuerySpec,
+    limits: LogsQueryLimits,
+) -> Response<Body> {
+    match tokio::time::timeout(limits.deadline, storage.query(spec)).await {
+        Err(_) => timeout_error(limits),
+        Ok(Err(error)) => query_execution_error(error),
+        Ok(Ok(rows)) => {
             let row_count = rows.len();
-            let mut body = String::new();
+            let mut body = BoundedBuffer::new(limits.max_response_bytes);
             for row in rows {
-                match response_row(row, storage.timestamp_unit()) {
-                    Ok(line) => {
-                        body.push_str(&line);
-                        body.push('\n');
+                match response_row(row, storage.timestamp_unit()).and_then(|value| {
+                    serde_json::to_writer(&mut body, &value)
+                        .map_err(|error| format!("encode result row: {error}"))?;
+                    body.write_all(b"\n")
+                        .map_err(|error| format!("encode result row: {error}"))
+                }) {
+                    Ok(()) => {}
+                    Err(_) if body.exceeded => {
+                        return query_limit_error("max_response_bytes", limits.max_response_bytes)
                     }
                     Err(error) => return server_error(error),
                 }
             }
+            let body = body.into_inner();
+            storage.record_query_response_bytes(body.len());
             ndjson_response(body, row_count)
         }
-        Err(error) => server_error(error),
     }
 }
 
@@ -252,7 +325,7 @@ async fn backup(
     }
 }
 
-fn ndjson_response(body: String, rows: usize) -> Response<Body> {
+fn ndjson_response(body: Vec<u8>, rows: usize) -> Response<Body> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/x-ndjson")
@@ -277,6 +350,179 @@ fn client_error(code: &str) -> Response<Body> {
         .into_response()
 }
 
+fn logsql_error(error: LogsqlError) -> Response<Body> {
+    match error.kind {
+        LogsqlErrorKind::Malformed => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_query",
+                "reason": "malformed_logsql",
+                "message": error.message
+            })),
+        )
+            .into_response(),
+        LogsqlErrorKind::Unsupported => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "unsupported_capability",
+                "reason": "unsupported_logsql",
+                "message": error.message
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn query_limit_error(reason: &str, limit: usize) -> Response<Body> {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({
+            "error": "query_limit",
+            "reason": reason,
+            "limit": limit
+        })),
+    )
+        .into_response()
+}
+
+fn timeout_error(limits: LogsQueryLimits) -> Response<Body> {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({
+            "error": "timeout",
+            "reason": "query_deadline",
+            "deadline_ms": limits.deadline.as_millis()
+        })),
+    )
+        .into_response()
+}
+
+fn query_execution_error(error: String) -> Response<Body> {
+    if let Some(limit) = error
+        .split("max_work_entries=")
+        .nth(1)
+        .and_then(|value| {
+            value
+                .split(|character: char| !character.is_ascii_digit())
+                .next()
+        })
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return query_limit_error("max_work_rows", limit);
+    }
+    if error.contains("max_work_rows=") {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "query_limit",
+                "reason": "max_work_rows",
+                "message": error
+            })),
+        )
+            .into_response();
+    }
+    server_error(error)
+}
+
+type QueryLimit = (&'static str, usize);
+
+fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(), QueryLimit> {
+    if plan.output == LogsqlOutput::Rows {
+        apply_query_limits(&mut plan.spec, plan.limit_explicit, limits)?;
+    } else {
+        plan.spec.max_work_rows = limits.max_work_rows;
+    }
+    Ok(())
+}
+
+fn apply_query_limits(
+    spec: &mut QuerySpec,
+    limit_explicit: bool,
+    limits: LogsQueryLimits,
+) -> Result<(), QueryLimit> {
+    if spec.limit > limits.max_result_rows {
+        if limit_explicit {
+            return Err(("max_result_rows", limits.max_result_rows));
+        }
+        spec.limit = limits.max_result_rows;
+    }
+    let Some(window) = spec.offset.checked_add(spec.limit) else {
+        return Err(("max_work_rows", limits.max_work_rows));
+    };
+    if window > limits.max_work_rows {
+        return Err(("max_work_rows", limits.max_work_rows));
+    }
+    spec.max_work_rows = limits.max_work_rows;
+    Ok(())
+}
+
+struct BoundedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl BoundedBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit.min(8 * 1024)),
+            limit,
+            exceeded: false,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedBuffer {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::other("LogsQL response byte limit exceeded"));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+enum BoundedJsonError {
+    Limit,
+    Encode(String),
+}
+
+fn bounded_json(value: &Value, limit: usize) -> Result<Vec<u8>, BoundedJsonError> {
+    let mut body = BoundedBuffer::new(limit);
+    if let Err(error) = serde_json::to_writer(&mut body, value) {
+        return Err(if body.exceeded {
+            BoundedJsonError::Limit
+        } else {
+            BoundedJsonError::Encode(format!("encode query response: {error}"))
+        });
+    }
+    Ok(body.into_inner())
+}
+
+fn bounded_json_line(value: &Value, limit: usize) -> Result<Vec<u8>, BoundedJsonError> {
+    let mut body = BoundedBuffer::new(limit);
+    if let Err(error) = serde_json::to_writer(&mut body, value) {
+        return Err(if body.exceeded {
+            BoundedJsonError::Limit
+        } else {
+            BoundedJsonError::Encode(format!("encode query response: {error}"))
+        });
+    }
+    if body.write_all(b"\n").is_err() {
+        return Err(BoundedJsonError::Limit);
+    }
+    Ok(body.into_inner())
+}
+
 async fn unsupported() -> Response<Body> {
     client_error("unsupported_route")
 }
@@ -286,7 +532,9 @@ fn get_query_spec(query: GetQuery, timestamp_unit: TimestampUnit) -> QuerySpec {
         level: query.level,
         service: query.service,
         metadata_eq: metadata_filters(query.host, query.path, query.status),
+        metadata_exact: Vec::new(),
         message: query.message,
+        message_phrase: None,
         ts_min: query
             .start
             .as_deref()
@@ -298,6 +546,7 @@ fn get_query_spec(query: GetQuery, timestamp_unit: TimestampUnit) -> QuerySpec {
         limit: query.limit.unwrap_or(100),
         offset: query.offset.unwrap_or(0),
         descending: query.order.as_deref() != Some("asc"),
+        max_work_rows: QuerySpec::default().max_work_rows,
     }
 }
 
@@ -442,126 +691,7 @@ fn parse_query_time(value: &str, timestamp_unit: TimestampUnit) -> Option<i64> {
         })
 }
 
-fn parse_logsql(query: &str, timestamp_unit: TimestampUnit) -> Result<(QuerySpec, bool), String> {
-    let mut spec = QuerySpec {
-        limit: 100,
-        descending: true,
-        ..QuerySpec::default()
-    };
-    let mut count = false;
-    let mut segments = query.split('|');
-    let base = segments.next().unwrap_or_default().trim();
-    if base.is_empty() {
-        return Err("LogsQL query is empty".into());
-    }
-    for term in logsql_terms(base)? {
-        match term {
-            LogsqlTerm::Token(token) if token == "*" => {}
-            LogsqlTerm::Token(token) if token.starts_with("level:") => {
-                let level = required_logsql_value(&token, "level:")?;
-                if !matches!(
-                    level.as_str(),
-                    "debug"
-                        | "info"
-                        | "notice"
-                        | "warning"
-                        | "error"
-                        | "critical"
-                        | "alert"
-                        | "emergency"
-                ) {
-                    return Err(format!("unsupported LogsQL level {level:?}"));
-                }
-                spec.level = Some(level);
-            }
-            LogsqlTerm::Token(token) if token.starts_with("service:") => {
-                spec.service = Some(required_logsql_value(&token, "service:")?);
-            }
-            LogsqlTerm::Token(token) if token.starts_with("_time:") => {
-                let window = required_logsql_value(&token, "_time:")?;
-                let duration_ms = parse_duration_ms(&window)
-                    .ok_or_else(|| format!("unsupported LogsQL time window {window:?}"))?;
-                spec.ts_min = Some(
-                    now(timestamp_unit)
-                        .saturating_sub(duration_from_millis(duration_ms, timestamp_unit)),
-                );
-            }
-            LogsqlTerm::Message(message) if spec.message.is_none() => {
-                spec.message = Some(message);
-            }
-            LogsqlTerm::Message(_) => return Err("multiple LogsQL message terms".into()),
-            LogsqlTerm::Token(token) => {
-                return Err(format!("unsupported LogsQL term {token:?}"));
-            }
-        }
-    }
-    for segment in segments {
-        let words: Vec<&str> = segment.split_whitespace().collect();
-        match words.as_slice() {
-            ["limit", value] => {
-                spec.limit = value
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid LogsQL limit {value:?}"))?;
-            }
-            ["stats", "count(*)" | "count()"] if !count => count = true,
-            [] => return Err("empty LogsQL pipeline".into()),
-            _ => return Err(format!("unsupported LogsQL pipeline {segment:?}")),
-        }
-    }
-    Ok((spec, count))
-}
-
-enum LogsqlTerm {
-    Token(String),
-    Message(String),
-}
-
-fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, String> {
-    let mut terms = Vec::new();
-    let mut rest = input;
-    while !rest.is_empty() {
-        rest = rest.trim_start();
-        if rest.is_empty() {
-            break;
-        }
-        if let Some(quoted) = rest.strip_prefix('"') {
-            let end = quoted
-                .find('"')
-                .ok_or_else(|| "unterminated LogsQL message term".to_string())?;
-            terms.push(LogsqlTerm::Message(quoted[..end].to_string()));
-            rest = &quoted[end + 1..];
-        } else {
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            terms.push(LogsqlTerm::Token(rest[..end].to_string()));
-            rest = &rest[end..];
-        }
-    }
-    Ok(terms)
-}
-
-fn required_logsql_value(token: &str, prefix: &str) -> Result<String, String> {
-    token
-        .strip_prefix(prefix)
-        .map(|value| value.trim_matches(['"', '\'']).to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("LogsQL {prefix} term requires a value"))
-}
-
-fn parse_duration_ms(value: &str) -> Option<i64> {
-    let split = value.find(|c: char| !c.is_ascii_digit())?;
-    let count: i64 = value[..split].parse().ok()?;
-    let unit = &value[split..];
-    let multiplier = match unit {
-        "s" => 1_000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        "d" => 86_400_000,
-        _ => return None,
-    };
-    count.checked_mul(multiplier)
-}
-
-fn response_row(row: QueryRow, timestamp_unit: TimestampUnit) -> Result<String, String> {
+fn response_row(row: QueryRow, timestamp_unit: TimestampUnit) -> Result<Value, String> {
     let metadata: Map<String, Value> = serde_json::from_str(&row.metadata_json)
         .map_err(|e| format!("decode stored metadata: {e}"))?;
     let mut object = metadata;
@@ -571,7 +701,7 @@ fn response_row(row: QueryRow, timestamp_unit: TimestampUnit) -> Result<String, 
     );
     object.insert("_msg".into(), Value::String(row.message));
     object.insert("level".into(), Value::String(row.level));
-    serde_json::to_string(&Value::Object(object)).map_err(|e| format!("encode result row: {e}"))
+    Ok(Value::Object(object))
 }
 
 fn format_timestamp(ts: i64, timestamp_unit: TimestampUnit) -> Result<String, String> {
@@ -601,13 +731,6 @@ fn micros_to_native(micros: i64, timestamp_unit: TimestampUnit) -> i64 {
     }
 }
 
-fn duration_from_millis(duration: i64, timestamp_unit: TimestampUnit) -> i64 {
-    match timestamp_unit {
-        TimestampUnit::Milliseconds => duration,
-        TimestampUnit::Microseconds => duration.saturating_mul(1_000),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,46 +749,5 @@ mod tests {
             entries[0].metadata_json,
             "{\"context\":{\"retry\":true},\"status\":500}"
         );
-    }
-
-    #[test]
-    fn workload_logsql_shapes_parse() {
-        let (spec, count) = parse_logsql(
-            "_time:5m level:error | limit 100",
-            TimestampUnit::Microseconds,
-        )
-        .unwrap();
-        assert_eq!(spec.level.as_deref(), Some("error"));
-        assert_eq!(spec.limit, 100);
-        assert!(spec.ts_min.is_some());
-        assert!(!count);
-
-        let (spec, count) = parse_logsql(
-            "_time:1h level:error | stats count(*)",
-            TimestampUnit::Microseconds,
-        )
-        .unwrap();
-        assert_eq!(spec.level.as_deref(), Some("error"));
-        assert!(count);
-
-        let (spec, _) = parse_logsql(
-            "_time:15m \"timeout\" | limit 50",
-            TimestampUnit::Microseconds,
-        )
-        .unwrap();
-        assert_eq!(spec.message.as_deref(), Some("timeout"));
-
-        for unsupported in [
-            "severity:error",
-            "level:error | sort by (_time)",
-            "level:error or level:critical",
-            "_time:5q",
-            "level:made-up",
-        ] {
-            assert!(
-                parse_logsql(unsupported, TimestampUnit::Microseconds).is_err(),
-                "{unsupported:?} silently broadened"
-            );
-        }
     }
 }

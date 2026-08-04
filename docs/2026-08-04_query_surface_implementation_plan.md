@@ -70,7 +70,7 @@ The common exit criteria for every feature session are:
 4. exact semantics pass the pinned oracle, with intentional differences named
    in the row;
 5. every SQL target or foundation has a parameterized public-surface recipe
-   executed by `tests/cli.sh`;
+   executed through the real extension by the Rust `timeless-query-harness`;
 6. user documentation, matrix state, test references, and any finding change
    in the same commit as implementation;
 7. narrow and wide evidence records p50/p95/p99, cardinality, rows/blocks

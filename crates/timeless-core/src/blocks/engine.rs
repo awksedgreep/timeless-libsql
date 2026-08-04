@@ -309,6 +309,7 @@ struct LogQueryBlockSnapshot {
 struct LogQuerySnapshot {
     blocks: Vec<LogQueryBlockSnapshot>,
     buffered: Vec<LogEntry>,
+    buffered_entries_considered: usize,
     candidate_blocks: u64,
     payload_bytes: u64,
     stable_locations: bool,
@@ -1709,9 +1710,36 @@ impl BlockEngine {
     where
         F: FnOnce(),
     {
+        self.query_ordered_with_work_limit_after_snapshot(
+            q,
+            order,
+            max_entries,
+            None,
+            after_snapshot,
+        )
+    }
+
+    /// Ordered query with both an output-window bound and a hard cap on the
+    /// number of log entries examined. The work cap is independent of result
+    /// cardinality: an unselective predicate cannot hide an unbounded decode
+    /// behind `LIMIT 1`.
+    pub fn query_ordered_with_work_limit_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        order: LogQueryOrder,
+        max_entries: Option<usize>,
+        max_work_entries: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<Vec<LogEntry>, String>
+    where
+        F: FnOnce(),
+    {
+        if max_work_entries == Some(0) {
+            return Err("max_work_entries must be positive".into());
+        }
         let started = Instant::now();
         let snapshot_started = Instant::now();
-        let snapshot = self.snapshot_query(q, false)?;
+        let snapshot = self.snapshot_query(q, false, max_work_entries)?;
         let snapshot_ns = elapsed_ns(snapshot_started);
         after_snapshot();
 
@@ -1724,6 +1752,8 @@ impl BlockEngine {
         let mut decoded_entries = 0u64;
         let mut matched_entries = 0u64;
         let mut blocks_skipped_by_bound = 0u64;
+        let mut work_entries = snapshot.buffered_entries_considered;
+        Self::enforce_query_work_limit(work_entries, max_work_entries)?;
         let mut out: Vec<LogEntry>;
 
         if let Some(capacity) = max_entries {
@@ -1777,6 +1807,10 @@ impl BlockEngine {
                     break;
                 }
 
+                self.store.check_cancelled()?;
+                work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
+
                 let bytes = match (block.payload, block.location) {
                     (Some(bytes), None) => bytes,
                     (None, Some(loc)) => {
@@ -1787,6 +1821,7 @@ impl BlockEngine {
                     _ => return Err("invalid log query block snapshot".into()),
                 };
                 let entries = decode_block(&bytes)?;
+                self.store.check_cancelled()?;
                 decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
                 for (row, entry) in entries.into_iter().enumerate() {
                     if entry_matches(&entry, q) {
@@ -1828,6 +1863,9 @@ impl BlockEngine {
             blocks.sort_by_key(|block| block.sequence);
             out = Vec::new();
             for block in blocks {
+                self.store.check_cancelled()?;
+                work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
                 let bytes = match (block.payload, block.location) {
                     (Some(bytes), None) => bytes,
                     (None, Some(loc)) => {
@@ -1838,6 +1876,7 @@ impl BlockEngine {
                     _ => return Err("invalid log query block snapshot".into()),
                 };
                 let entries = decode_block(&bytes)?;
+                self.store.check_cancelled()?;
                 decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
                 for entry in entries {
                     if entry_matches(&entry, q) {
@@ -1859,6 +1898,7 @@ impl BlockEngine {
                 }
             }
         }
+        self.store.check_cancelled()?;
         let materialize_ns = elapsed_ns(materialize_started);
 
         self.profile.query_count.fetch_add(1, Ordering::Relaxed);
@@ -1918,6 +1958,19 @@ impl BlockEngine {
         Ok(out)
     }
 
+    fn enforce_query_work_limit(
+        work_entries: usize,
+        max_work_entries: Option<usize>,
+    ) -> Result<(), String> {
+        if max_work_entries.is_some_and(|limit| work_entries > limit) {
+            return Err(format!(
+                "log query exceeded max_work_entries={}",
+                max_work_entries.expect("checked above")
+            ));
+        }
+        Ok(())
+    }
+
     fn retain_bounded(heap: &mut BinaryHeap<BoundedEntry>, entry: BoundedEntry, capacity: usize) {
         if capacity == 0 {
             return;
@@ -1956,12 +2009,31 @@ impl BlockEngine {
     where
         F: FnOnce(),
     {
+        self.field_values_with_work_limit_after_snapshot(q, key, max_values, None, after_snapshot)
+    }
+
+    pub fn field_values_with_work_limit_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        key: &str,
+        max_values: usize,
+        max_work_entries: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<Vec<String>, String>
+    where
+        F: FnOnce(),
+    {
         if key.is_empty() {
             return Err("log field-values key must not be empty".into());
         }
+        if max_work_entries == Some(0) {
+            return Err("max_work_entries must be positive".into());
+        }
 
-        let snapshot = self.snapshot_query(q, false)?;
+        let snapshot = self.snapshot_query(q, false, max_work_entries)?;
         after_snapshot();
+        let mut work_entries = snapshot.buffered_entries_considered;
+        Self::enforce_query_work_limit(work_entries, max_work_entries)?;
         let mut values = BTreeSet::new();
 
         for entry in &snapshot.buffered {
@@ -1971,12 +2043,17 @@ impl BlockEngine {
         }
 
         for block in snapshot.blocks {
+            self.store.check_cancelled()?;
+            work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+            Self::enforce_query_work_limit(work_entries, max_work_entries)?;
             let bytes = match (block.payload, block.location) {
                 (Some(bytes), None) => bytes,
                 (None, Some(location)) => self.store.read_block(&location)?,
                 _ => return Err("invalid log field-values block snapshot".into()),
             };
-            for entry in decode_block(&bytes)? {
+            let entries = decode_block(&bytes)?;
+            self.store.check_cancelled()?;
+            for entry in entries {
                 if entry_matches(&entry, q) {
                     if let Some(value) = entry.meta_value(key) {
                         Self::retain_field_value(&mut values, value, max_values);
@@ -1985,6 +2062,7 @@ impl BlockEngine {
             }
         }
 
+        self.store.check_cancelled()?;
         Ok(values.into_iter().collect())
     }
 
@@ -2014,16 +2092,31 @@ impl BlockEngine {
     where
         F: FnOnce(),
     {
+        self.count_with_work_limit_after_snapshot(q, None, after_snapshot)
+    }
+
+    pub fn count_with_work_limit_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        max_work_entries: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<u64, String>
+    where
+        F: FnOnce(),
+    {
         if q.message_like_prune.is_some() {
             return Err(
                 "native count requires an exact message_contains predicate, not LIKE pruning"
                     .into(),
             );
         }
+        if max_work_entries == Some(0) {
+            return Err("max_work_entries must be positive".into());
+        }
 
         let started = Instant::now();
         let snapshot_started = Instant::now();
-        let snapshot = self.snapshot_query(q, q.level.is_some())?;
+        let snapshot = self.snapshot_query(q, q.level.is_some(), max_work_entries)?;
         let snapshot_ns = elapsed_ns(snapshot_started);
         after_snapshot();
 
@@ -2033,8 +2126,11 @@ impl BlockEngine {
         let mut metadata_entries = 0u64;
         let mut decoded_blocks = 0u64;
         let mut decoded_entries = 0u64;
+        let mut work_entries = snapshot.buffered_entries_considered;
+        Self::enforce_query_work_limit(work_entries, max_work_entries)?;
 
         for block in snapshot.blocks {
+            self.store.check_cancelled()?;
             let fully_covered = block.meta.ts_min >= q.ts_min && block.meta.ts_max <= q.ts_max;
             let message_free = q
                 .message_contains
@@ -2063,6 +2159,9 @@ impl BlockEngine {
                 continue;
             }
 
+            work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+            Self::enforce_query_work_limit(work_entries, max_work_entries)?;
+
             let bytes = match (block.payload, block.location) {
                 (Some(bytes), None) => bytes,
                 (None, Some(loc)) => {
@@ -2073,6 +2172,7 @@ impl BlockEngine {
                 _ => return Err("invalid log count block snapshot".into()),
             };
             let entries = decode_block(&bytes)?;
+            self.store.check_cancelled()?;
             decoded_blocks = decoded_blocks.saturating_add(1);
             decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
             total = total.saturating_add(
@@ -2082,6 +2182,8 @@ impl BlockEngine {
                     .count() as u64,
             );
         }
+
+        self.store.check_cancelled()?;
 
         self.profile
             .native_count_count
@@ -2114,8 +2216,10 @@ impl BlockEngine {
         &self,
         q: &LogQuery,
         include_partitions: bool,
+        max_work_entries: Option<usize>,
     ) -> Result<LogQuerySnapshot, String> {
         let _transition = self.transition_read();
+        self.store.check_cancelled()?;
         let mut terms: Vec<String> = Vec::new();
         if let Some(lvl) = q.level {
             if lvl > 3 {
@@ -2175,6 +2279,20 @@ impl BlockEngine {
                 .map(|entry| (entry.loc.id, entry.partition))
                 .collect()
         });
+        // Buffer membership is part of the protected generation. Reject its
+        // complete examined-entry cost before evaluating predicates or
+        // cloning matching entries; otherwise a very small hard budget could
+        // still pay the whole live-buffer CPU/allocation cost before failing.
+        let buffer = self.buffer_lock();
+        let buffered_entries_considered = buffer.len();
+        Self::enforce_query_work_limit(buffered_entries_considered, max_work_entries)?;
+        let buffered = buffer
+            .iter()
+            .filter(|entry| entry_matches(entry, q))
+            .cloned()
+            .collect();
+        drop(buffer);
+
         let stable_locations = self.store.query_snapshot_keeps_locations_readable();
         let mut blocks = Vec::with_capacity(locs.len());
         let mut payload_bytes = 0u64;
@@ -2205,18 +2323,11 @@ impl BlockEngine {
                 });
             }
         }
-        // Buffer membership is part of the protected generation. Filter while
-        // borrowing it so the snapshot owns only matching entries, never an
-        // avoidable clone of the complete ingest buffer.
-        let buffered = self
-            .buffer_lock()
-            .iter()
-            .filter(|entry| entry_matches(entry, q))
-            .cloned()
-            .collect();
+        self.store.check_cancelled()?;
         Ok(LogQuerySnapshot {
             blocks,
             buffered,
+            buffered_entries_considered,
             candidate_blocks,
             payload_bytes,
             stable_locations,

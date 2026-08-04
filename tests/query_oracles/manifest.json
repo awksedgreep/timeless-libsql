@@ -39,7 +39,9 @@
       "version_entrypoint": "/victoria-logs-prod",
       "version_args": ["-version"],
       "version_contains": "v1.52.0",
-      "fixtures": []
+      "fixtures": [
+        "tests/query_oracles/victorialogs/api_cases.json"
+      ]
     }
   }
 }

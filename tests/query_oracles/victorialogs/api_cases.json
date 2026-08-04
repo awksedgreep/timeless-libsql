@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "rows": [
+    {"case": "phrase-exact", "_msg": "ssh: login fail"},
+    {"case": "phrase-inside", "_msg": "prefix ssh: login fail suffix"},
+    {"case": "phrase-case", "_msg": "SSH: login fail"},
+    {"case": "phrase-space", "_msg": "ssh:  login fail"},
+    {"case": "phrase-suffix", "_msg": "ssh: login failed"},
+    {"case": "phrase-prefix", "_msg": "xssh: login fail"},
+    {"case": "phrase-underscore", "_msg": "x_ssh: login fail"},
+    {"case": "phrase-unicode-prefix", "_msg": "éssh: login fail"},
+    {"case": "phrase-punctuation", "_msg": "(ssh: login fail)!"},
+    {"case": "phrase-unicode-punctuation", "_msg": "ssh: login fail—next"},
+    {"case": "quote-double", "_msg": "line one\nline two\t\"quoted\"\\slash"},
+    {"case": "quote-single", "_msg": "single'quote \\ slash"},
+    {"case": "quote-backtick", "_msg": "raw\\n\"double\"'single\\slash"},
+    {"case": "quote-pipe", "_msg": "left|right"},
+    {"case": "quote-hex-unicode", "_msg": "AλB"},
+    {"case": "identifier-colon", "_msg": "quoted field", "log:level": "error"},
+    {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
+    {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
+    {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
+    {"case": "page-3", "_msg": "page three", "page_group": "page", "time_offset_us": 4000000}
+  ],
+  "query_cases": [
+    {
+      "id": "LQL-F08-phrase-bytes-case-and-word-boundaries",
+      "query": "\"ssh: login fail\"",
+      "status": 200,
+      "expected_cases": [
+        "phrase-exact",
+        "phrase-inside",
+        "phrase-punctuation",
+        "phrase-unicode-punctuation"
+      ]
+    },
+    {
+      "id": "LQL-F08-empty-phrase-matches-nothing",
+      "query": "\"\"",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F39-double-quoted-go-escapes",
+      "query": "\"line one\\nline two\\t\\\"quoted\\\"\\\\slash\"",
+      "status": 200,
+      "expected_cases": ["quote-double"]
+    },
+    {
+      "id": "LQL-F39-single-quoted-escapes",
+      "query": "'single\\'quote \\\\ slash'",
+      "status": 200,
+      "expected_cases": ["quote-single"]
+    },
+    {
+      "id": "LQL-F39-backtick-is-raw",
+      "query": "`raw\\n\"double\"'single\\slash`",
+      "status": 200,
+      "expected_cases": ["quote-backtick"]
+    },
+    {
+      "id": "LQL-F39-quoted-pipe-is-not-a-pipeline",
+      "query": "\"left|right\"",
+      "status": 200,
+      "expected_cases": ["quote-pipe"]
+    },
+    {
+      "id": "LQL-F39-double-quoted-hex-and-unicode-escapes",
+      "query": "\"\\x41\\u03bb\\x42\"",
+      "status": 200,
+      "expected_cases": ["quote-hex-unicode"]
+    },
+    {
+      "id": "LQL-F39-quoted-field-identifier",
+      "query": "\"log:level\":=\"error\"",
+      "status": 200,
+      "expected_cases": ["identifier-colon"]
+    },
+    {
+      "id": "LQL-P02-P03-Q01-time-sort-offset-limit",
+      "query": "page_group:=\"page\" | sort by (_time) asc | offset 1 | limit 2",
+      "status": 200,
+      "result_order": "ordered",
+      "expected_cases": ["page-1", "page-2"]
+    },
+    {
+      "id": "LQL-P02-P03-Q01-aliases-and-descending",
+      "query": "page_group:=\"page\" | order by (_time) desc | skip 1 | head 2",
+      "status": 200,
+      "result_order": "ordered",
+      "expected_cases": ["page-2", "page-1"]
+    },
+    {
+      "id": "LQL-F02-relative-window",
+      "query": "_time:30s",
+      "status": 200,
+      "expected_cases": [
+        "phrase-exact", "phrase-inside", "phrase-case", "phrase-space",
+        "phrase-suffix", "phrase-prefix", "phrase-underscore",
+        "phrase-unicode-prefix", "phrase-punctuation",
+        "phrase-unicode-punctuation", "quote-double", "quote-single",
+        "quote-backtick", "quote-pipe", "quote-hex-unicode",
+        "identifier-colon", "page-0", "page-1", "page-2", "page-3"
+      ]
+    },
+    {
+      "id": "LQL-F02-zero-duration-is-empty",
+      "query": "_time:0s",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F03-rfc3339-closed-open-range",
+      "query": "page_group:=\"page\" _time:[{start},{end})",
+      "query_times": {
+        "start": {"offset_us": 1000000, "format": "rfc3339"},
+        "end": {"offset_us": 3000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-F03-rfc3339-open-closed-range",
+      "query": "page_group:=\"page\" _time:({start},{end}]",
+      "query_times": {
+        "start": {"offset_us": 1000000, "format": "rfc3339"},
+        "end": {"offset_us": 3000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-1", "page-2"]
+    },
+    {
+      "id": "LQL-F04-rfc3339-comparison-intersection",
+      "query": "page_group:=\"page\" _time:>{start} _time:<={end}",
+      "query_times": {
+        "start": {"offset_us": 1000000, "format": "rfc3339"},
+        "end": {"offset_us": 3000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-1", "page-2"]
+    },
+    {
+      "id": "LQL-F03-unix-seconds-range",
+      "query": "page_group:=\"page\" _time:[{start},{end})",
+      "query_times": {
+        "start": {"offset_us": 1000000, "format": "unix_s"},
+        "end": {"offset_us": 3000000, "format": "unix_s"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-F03-unix-milliseconds-range",
+      "query": "page_group:=\"page\" _time:[{start},{end})",
+      "query_times": {
+        "start": {"offset_us": 1000000, "format": "unix_ms"},
+        "end": {"offset_us": 3000000, "format": "unix_ms"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-F03-unix-microseconds-range",
+      "query": "page_group:=\"page\" _time:[{start},{end})",
+      "query_times": {
+        "start": {"offset_us": 1000000, "format": "unix_us"},
+        "end": {"offset_us": 3000000, "format": "unix_us"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-F03-unix-nanoseconds-range",
+      "query": "page_group:=\"page\" _time:[{start},{end})",
+      "query_times": {
+        "start": {"offset_us": 1000000, "format": "unix_ns"},
+        "end": {"offset_us": 3000000, "format": "unix_ns"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    }
+  ],
+  "stats_cases": [
+    {
+      "id": "LQL-P09-S01-count-total-field-type",
+      "query": "page_group:=\"page\" | stats count() as total",
+      "expected_rows": [{"total": "4"}]
+    }
+  ],
+  "error_cases": [
+    {
+      "id": "LQL-Q08-empty-query",
+      "query": "",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "`query` arg cannot be empty"
+    },
+    {
+      "id": "LQL-Q08-unterminated-quote",
+      "query": "\"unterminated",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q08-unsupported-pipe",
+      "query": "* | definitely_not_a_pipe",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F39-invalid-escape",
+      "query": "\"bad\\q\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F39-invalid-unicode-escape",
+      "query": "\"bad\\uD800\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    }
+  ]
+}

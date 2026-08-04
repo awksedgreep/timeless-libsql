@@ -11,6 +11,7 @@
 //!   CREATE TABLE x(ts INTEGER, level TEXT, message TEXT, metadata TEXT,
 //!                  "service" TEXT HIDDEN, "path" TEXT HIDDEN,
 //!                  "status" TEXT HIDDEN, message_contains TEXT HIDDEN,
+//!                  max_work_entries INTEGER HIDDEN,
 //!                  "<table>" HIDDEN)
 //!
 //! THE DESIGN IMPROVEMENT over the Elixir donor's query API: each
@@ -71,7 +72,7 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
 /// Engine parameters (see BlockEngineConfig for what each knob means).
 const FLUSH_THRESHOLD: usize = 8192; // buffered entries before auto-flush
 const ZSTD_LEVEL: i32 = 7;
-const MERGE_TARGET_ENTRIES: usize = 8192;
+pub(crate) const MERGE_TARGET_ENTRIES: usize = 8192;
 /// HARD CAP on merged-block ts span: 1 hour in the table's declared unit.
 /// PLAN.md "Pruning & retention": merge
 /// compaction must never produce blocks straddling retention
@@ -130,6 +131,8 @@ const PLAN_BOUNDED_TS_ASC: &str = "bounded-ts-asc";
 const PLAN_BOUNDED_TS_ASC_OFFSET: &str = "bounded-ts-asc-offset";
 const PLAN_BOUNDED_TS_DESC: &str = "bounded-ts-desc";
 const PLAN_BOUNDED_TS_DESC_OFFSET: &str = "bounded-ts-desc-offset";
+const PLAN_WORK_LIMIT: &str = "work-limit";
+const PLAN_WORK_LIMIT_SUFFIX: &str = "+work-limit";
 
 /// Number of fixed (non-hidden) columns before the index-key columns:
 /// 0=ts 1=level 2=message 3=metadata.
@@ -409,14 +412,16 @@ impl LogsTab {
         shared_engine.engine.set_retention(retention);
 
         // Declared schema, built at runtime: fixed columns + one HIDDEN
-        // TEXT column per index key + exact message search input + the hidden
-        // command column named after the table (FTS5 idiom).
+        // TEXT column per index key + exact message search input + an optional
+        // hard decode-work bound + the hidden command column named after the
+        // table (FTS5 idiom).
         let mut schema =
             String::from("CREATE TABLE x(ts INTEGER, level TEXT, message TEXT, metadata TEXT");
         for key in &index_keys {
             schema.push_str(&format!(", \"{}\" TEXT HIDDEN", escape_double_quote(key)));
         }
         schema.push_str(", message_contains TEXT HIDDEN");
+        schema.push_str(", max_work_entries INTEGER HIDDEN");
         schema.push_str(&format!(", \"{}\" HIDDEN)", escape_double_quote(&table)));
         let schema = CString::new(schema)
             .map_err(|_| module_err(format!("table/key name contains NUL: {table:?}")))?;
@@ -611,7 +616,16 @@ fn parse_index_keys_value(table: &str, value: &str) -> std::result::Result<Vec<S
             // Each key becomes a declared column name: reject collisions
             // with the fixed columns and the hidden command column now,
             // with a message better than SQLite's "duplicate column".
-            if ["ts", "level", "message", "metadata", "message_contains"].contains(&k) || k == table
+            if [
+                "ts",
+                "level",
+                "message",
+                "metadata",
+                "message_contains",
+                "max_work_entries",
+            ]
+            .contains(&k)
+                || k == table
             {
                 return Err(format!(
                     "index key {k:?} collides with a built-in column name"
@@ -676,6 +690,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         let mut hi_c: Option<usize> = None;
         let mut like_c: Option<usize> = None;
         let mut contains_c: Option<usize> = None;
+        let mut work_limit_c: Option<usize> = None;
         let mut limit_c: Option<usize> = None;
         let mut offset_c: Option<usize> = None;
         let mut key_c: Vec<Option<usize>> = vec![None; self.index_keys.len()];
@@ -706,6 +721,12 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
                         && contains_c.is_none() =>
                 {
                     contains_c = Some(i);
+                }
+                (col, SQLITE_INDEX_CONSTRAINT_EQ)
+                    if col as usize == FIXED_COLS + self.index_keys.len() + 1
+                        && work_limit_c.is_none() =>
+                {
+                    work_limit_c = Some(i);
                 }
                 (0, SQLITE_INDEX_CONSTRAINT_GE) if lo_c.is_none() => lo_c = Some(i),
                 (0, SQLITE_INDEX_CONSTRAINT_LE) if hi_c.is_none() => hi_c = Some(i),
@@ -769,18 +790,26 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             claim(info, limit_c, 0);
             claim(info, offset_c, 0);
         }
+        claim(info, work_limit_c, 0);
 
         info.set_idx_num(mask);
-        if let Some(order) = bounded_order {
-            let plan = match (order, offset_c.is_some()) {
-                (LogQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
-                (LogQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
-                (LogQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
-                (LogQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
+        let bounded_plan = bounded_order.map(|order| match (order, offset_c.is_some()) {
+            (LogQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
+            (LogQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
+            (LogQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
+            (LogQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
+        });
+        if let Some(plan) = bounded_plan {
+            let plan = if work_limit_c.is_some() {
+                format!("{plan}{PLAN_WORK_LIMIT_SUFFIX}")
+            } else {
+                plan.to_owned()
             };
-            info.set_idx_str(plan);
+            info.set_idx_str(&plan);
             info.set_order_by_consumed(true);
             info.set_estimated_rows(100);
+        } else if work_limit_c.is_some() {
+            info.set_idx_str(PLAN_WORK_LIMIT);
         }
         // Any pushed constraint prunes blocks via terms or ts range; a
         // bare scan decompresses everything. Steer the planner.
@@ -798,6 +827,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             rows: Vec::new(),
             pos: 0,
             message_contains: None,
+            max_work_entries: None,
             phantom: PhantomData,
         })
     }
@@ -839,7 +869,7 @@ impl UpdateVTab<'_> for LogsTab {
     /// INSERT. argv: [0] NULL, [1] requested rowid, then declared
     /// columns from index 2: 2=ts, 3=level, 4=message, 5=metadata,
     /// 6..6+K = index keys, 6+K = message_contains query input,
-    /// 7+K = hidden command column.
+    /// 7+K = max_work_entries query input, 8+K = hidden command column.
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
         // Connection routing + writer gate, as in metrics_vtab.rs
         // (gate is normally taken by begin(); this is the defensive
@@ -848,7 +878,7 @@ impl UpdateVTab<'_> for LogsTab {
         let _bind = DbGuard::bind(self.db);
         self.acquire_write_gate()?;
 
-        let cmd_idx = 2 + FIXED_COLS + self.index_keys.len() + 1;
+        let cmd_idx = 2 + FIXED_COLS + self.index_keys.len() + 2;
         // Command idiom, dispatched by TYPE like metrics: TEXT command,
         // BLOB reserved for a future Tier 2 batch format, NULL = data.
         match args.iter().nth(cmd_idx) {
@@ -1060,6 +1090,7 @@ pub struct LogsCursor<'vtab> {
     /// Bound value of the public exact-search hidden column. Returning it from
     /// column() lets SQLite safely recheck `message_contains = ?`.
     message_contains: Option<String>,
+    max_work_entries: Option<usize>,
     phantom: PhantomData<&'vtab LogsTab>,
 }
 
@@ -1153,7 +1184,15 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         };
         self.message_contains = message_contains.clone();
 
-        let bounded_order = match idx_str {
+        let (bounded_idx_str, has_work_limit) = match idx_str {
+            Some(PLAN_WORK_LIMIT) => (None, true),
+            Some(plan) if plan.ends_with(PLAN_WORK_LIMIT_SUFFIX) => (
+                Some(&plan[..plan.len() - PLAN_WORK_LIMIT_SUFFIX.len()]),
+                true,
+            ),
+            plan => (plan, false),
+        };
+        let bounded_order = match bounded_idx_str {
             Some(PLAN_BOUNDED_TS_ASC) => Some((LogQueryOrder::Asc, false)),
             Some(PLAN_BOUNDED_TS_ASC_OFFSET) => Some((LogQueryOrder::Asc, true)),
             Some(PLAN_BOUNDED_TS_DESC) => Some((LogQueryOrder::Desc, false)),
@@ -1183,6 +1222,23 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         } else {
             None
         };
+        let max_work_entries = if has_work_limit {
+            let value: Option<i64> = args.get(next())?;
+            let value = value.ok_or_else(|| {
+                module_err("max_work_entries must not be NULL and must be positive".into())
+            })?;
+            if value <= 0 {
+                return Err(module_err("max_work_entries must be positive".into()));
+            }
+            Some(usize::try_from(value).map_err(|_| {
+                module_err(format!(
+                    "max_work_entries {value} exceeds this platform's usize"
+                ))
+            })?)
+        } else {
+            None
+        };
+        self.max_work_entries = max_work_entries;
 
         let entries = if impossible {
             Vec::new()
@@ -1201,18 +1257,17 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 message_contains,
                 message_like_prune,
             };
-            match bounded {
-                Some((order, capacity)) => self
-                    .shared
-                    .engine
-                    .query_ordered_after_snapshot(&query, order, capacity, move || drop(read))
-                    .map_err(module_err)?,
-                None => self
-                    .shared
-                    .engine
-                    .query_after_snapshot(&query, move || drop(read))
-                    .map_err(module_err)?,
-            }
+            let (order, capacity) = bounded.unwrap_or((LogQueryOrder::Asc, None));
+            self.shared
+                .engine
+                .query_ordered_with_work_limit_after_snapshot(
+                    &query,
+                    order,
+                    capacity,
+                    max_work_entries,
+                    move || drop(read),
+                )
+                .map_err(module_err)?
         };
 
         self.rows = entries
@@ -1260,6 +1315,10 @@ unsafe impl VTabCursor for LogsCursor<'_> {
             }
             _ if i == FIXED_COLS + self.index_keys.len() => match &self.message_contains {
                 Some(value) => ctx.set_result(value),
+                None => ctx.set_result(&Null),
+            },
+            _ if i == FIXED_COLS + self.index_keys.len() + 1 => match self.max_work_entries {
+                Some(value) => ctx.set_result(&(value as i64)),
                 None => ctx.set_result(&Null),
             },
             // The hidden command column reads as NULL.

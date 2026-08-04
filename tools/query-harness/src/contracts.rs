@@ -182,6 +182,24 @@ fn markdown_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn validate_logs_storage_boundary(root: &Path) -> Result<Vec<String>> {
+    let relative = "servers/crates/timeless-logs-api/src/storage.rs";
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(path)?;
+    Ok(["logs_blocks", "logs_terms", "logs_meta"]
+        .into_iter()
+        .filter(|name| source.contains(name))
+        .map(|name| {
+            format!(
+                "{relative}: server references private extension shadow table {name}; use a public virtual table or scalar"
+            )
+        })
+        .collect())
+}
+
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -489,6 +507,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
         errors.push("missing docs/QUERY_SQL_EQUIVALENTS.md".to_owned());
     }
     errors.extend(validate_local_links(root)?);
+    errors.extend(validate_logs_storage_boundary(root)?);
     Ok(errors)
 }
 
@@ -653,5 +672,21 @@ mod tests {
         )
         .unwrap();
         assert_invalid(fixture.path(), "shipped marker mismatch");
+    }
+
+    #[test]
+    fn logs_server_private_shadow_table_access_fails() {
+        let fixture = fixture();
+        let source = fixture.path().join("servers/crates/timeless-logs-api/src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("storage.rs"),
+            "const BAD: &str = \"SELECT * FROM logs_blocks\";\n",
+        )
+        .unwrap();
+        assert_invalid(
+            fixture.path(),
+            "server references private extension shadow table logs_blocks",
+        );
     }
 }

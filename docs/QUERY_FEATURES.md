@@ -78,8 +78,9 @@ honestly in isolation.
    For every `SQL` target or foundation, add the equivalent parameterized
    statement to the [SQL equivalents cookbook](QUERY_SQL_EQUIVALENTS.md),
    state what language semantics still belong to the API, and execute the
-   statement in `tests/cli.sh`. If no honest public SQL equivalent exists,
-   change the ownership classification.
+   statement through the real extension with the Rust `timeless-query-harness`.
+   If no honest public SQL equivalent exists, change the ownership
+   classification.
 6. Test the Rust parser, planner, evaluator, HTTP envelope, and reopen behavior
    for every `API` feature.
 7. Compare PromQL with Prometheus/VictoriaMetrics or LogsQL with VictoriaLogs

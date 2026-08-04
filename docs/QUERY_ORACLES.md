@@ -82,6 +82,7 @@ containers and execute the baseline Prometheus fixture:
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle probe
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle prometheus-smoke
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle prometheus-api
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle victoria-logs-api
 ```
 
 The manifest is
@@ -97,3 +98,33 @@ fixtures before implementation. Multi-element vector fixtures compare by
 complete label/sample identity with `result_order: "unordered"` by default.
 They use `result_order: "ordered"` only for an operator such as an instant
 `topk` whose output order is part of the language contract.
+
+The VictoriaLogs API fixture ingests deterministic messages into uniquely
+named streams around one second-aligned server-owned evaluation instant, waits
+until every row is query-visible, and pins normalized case identities plus
+exact status and content-type classifications. It covers relative time,
+RFC3339 open/closed and comparison bounds, integer Unix seconds, milliseconds,
+microseconds, and nanoseconds, deterministic explicit sorting/pagination,
+case-sensitive phrase bytes, Unicode word boundaries, literal decoding,
+quoted field identifiers, and malformed query envelopes without treating
+VictoriaLogs' unspecified default row order as a contract. Time placeholders
+are resolved by the Rust harness after the container starts, so the checked
+fixture remains deterministic without relying on expired absolute timestamps.
+
+Two P0 Timeless compatibility choices intentionally differ from the pinned
+VictoriaLogs wire envelope and are asserted on both sides rather than hidden:
+
+- VictoriaLogs returns parser and unsupported-pipe failures as HTTP 400
+  `text/plain`. Timeless returns stable JSON, using HTTP 400
+  `invalid_query/malformed_logsql` for malformed input and HTTP 422
+  `unsupported_capability/unsupported_logsql` for syntax it recognizes but
+  does not implement. This preserves the product requirement that unsupported
+  behavior never silently broadens or falls back.
+- VictoriaLogs serializes `stats count() as total` as a JSON string. The
+  established Timeless/DDNet contract returns the exact count as a JSON number;
+  direct SQLite/libSQL users receive the same INTEGER from
+  `timeless_log_count`.
+
+`QSF-063` records these selected compatibility behaviors. All phrase, escape,
+identifier, filtering, ordering, and cardinality semantics remain exact to the
+pinned oracle where the retained Timeless storage model applies.

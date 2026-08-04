@@ -14,10 +14,13 @@ The previous Timeless compatibility oracle is
 and its tests. That parser was intentionally DDNet-oriented rather than complete
 LogsQL, but its supported syntax must not disappear in the Rust path.
 
-The current Rust parser supports `*`, relative `_time`, exact `level` and
-`service`, one quoted message substring, `limit`, and zero-argument
-`stats count()`. The native GET query API has additional filters, but they do
-not count as LogsQL support until the LogsQL parser and executor accept them.
+The current Rust parser supports the complete P0 Timeless/DDNet subset:
+wildcard selection; relative, bracketed, and comparison time bounds; all eight
+severities; service and arbitrary typed/nested field equality; quoted message
+phrases and literals; deterministic time sort, limit, and offset; and
+zero-argument `stats count()` with an optional alias. The native GET query API
+has additional filters, but they do not count as LogsQL support until the
+LogsQL parser and executor accept them.
 
 ## Legend and foundations
 
@@ -48,13 +51,13 @@ Rows with an `SQL` foundation must link an executable statement from the
 | ID | upstream construct | Rust now | Elixir | foundation | target | priority | notes |
 |---|---|---|---|---|---|---|---|
 | `LQL-F01` | wildcard/no-op `*` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | Must remain bounded by request limits even without a time filter. |
-| `LQL-F02` | relative `_time:5m` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | partial | yes | `ROWS` | `API` | P0 | Parsing exists, but `QSF-008` requires an injected query clock and exact real-extension boundary coverage. |
-| `LQL-F03` | absolute/bracket `_time:[start,end)` | missing | yes | `ROWS` | `API` | P0 | Preserve microsecond boundaries and inclusive/exclusive syntax. |
-| `LQL-F04` | `_time:>=...` and `_time:<...` | missing | yes | `ROWS` | `API` | P0 | Restore prior Timeless syntax with strict errors. |
-| `LQL-F05` | arbitrary exact `field:value` filters ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-005-arbitrary-metadata-equality)) | missing | yes | `ROWS` | `API` | P0 | Indexed keys prune; other fields decode exactly. |
+| `LQL-F02` | relative `_time:5m` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | One injected request clock defines upstream's `[now-duration,now)` window in the table's native unit; both microsecond edges, valid empty `0s`, the pinned live oracle, and reopen pass. |
+| `LQL-F03` | absolute/bracket `_time:[start,end)` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | RFC3339 and integer Unix-second/millisecond/microsecond/nanosecond bounds preserve `[`, `(`, `]`, and `)` exactly in the table's native unit; empty intersections fail. |
+| `LQL-F04` | `_time:>=...` and `_time:<...` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | `>`, `>=`, `<`, and `<=` intersect in the table's native unit; exclusive edges adjust by one unit and overflow/empty intersections fail. |
+| `LQL-F05` | arbitrary exact `field:value` filters ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-005-arbitrary-metadata-equality)) | shipped | yes | `ROWS` | `API` | P0 | Legacy `:` is exact string equality; `:=` accepts typed JSON primitives and dotted paths. Indexed string keys prune before bounded decode; missing/null/empty remain distinct. |
 | `LQL-F06` | exact `level:<severity>` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | All eight stored severities are valid. |
 | `LQL-F07` | exact `service:<value>` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | Honor semantic service aliases used by storage. |
-| `LQL-F08` | quoted message phrase ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-002-message-substring)) | partial | yes | `ROWS` | `API` | P0 | Current Rust performs substring matching; distinguish upstream phrase/word boundaries explicitly. |
+| `LQL-F08` | quoted message phrase | shipped | yes | `ROWS` | `API` | P0 | Exact case-sensitive phrase bytes plus Unicode letter/digit/underscore word boundaries match the pinned VictoriaLogs oracle. The existing case-insensitive Timeless substring primitive remains separate. |
 | `LQL-F09` | word filter | missing | no | `ROWS` | `API` | P1 | Correctness can decode first; indexing requires measurements. |
 | `LQL-F10` | prefix filter | missing | no | `ROWS` | `API` | P1 | API over decoded fields unless an index proves worthwhile. |
 | `LQL-F11` | pattern-match filter | missing | no | `ROWS` | `API` | P2 | Preserve upstream wildcard/capture semantics. |
@@ -85,7 +88,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `LQL-F36` | `_stream_id` filter | deferred | no | none | `DEFER` | DEFER | Requires a stable stream-ID storage contract. |
 | `LQL-F37` | sequence filter | missing | no | `ROWS` | `API` | P3 | Needs ordered state with strict memory bounds. |
 | `LQL-F38` | subquery/`in(...)` filter | missing | no | `SQL` | `API` | P3 | Use bounded SQL/API composition; do not add a nested-query vtab. |
-| `LQL-F39` | quoted identifiers/literals and escapes | partial | partial | none | `API` | P0 | Current quote handling is not the complete upstream grammar. |
+| `LQL-F39` | quoted identifiers/literals and escapes | shipped | partial | none | `API` | P0 | Double/single literals decode pinned Go escapes, backticks remain raw, quoted pipes do not split pipelines, and quoted field names are literal keys. Escapes producing non-UTF-8 bytes fail explicitly because the retained rich-log/JSON model is UTF-8. |
 | `LQL-F40` | comments and multi-line queries | missing | no | none | `API` | P2 | Parser-only, with error-location regressions. |
 | `LQL-F41` | `equals_common_case` / `contains_common_case` | missing | no | `ROWS` | `API` | P3 | Add only with a precise upstream Unicode/case oracle. |
 
@@ -98,14 +101,14 @@ extension.
 | ID | pipe | Rust now | Elixir | foundation | target | priority |
 |---|---|---|---|---|---|---|
 | `LQL-P01` | `limit` / `head` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 |
-| `LQL-P02` | `offset` / `skip` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | missing | yes | `ROWS` | `API` | P0 |
-| `LQL-P03` | `sort` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | missing | yes | `ROWS`, `SQL` | `API` | P0 |
+| `LQL-P02` | `offset` / `skip` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 |
+| `LQL-P03` | `sort` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS`, `SQL` | `API` | P0 |
 | `LQL-P04` | `field_values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-004-distinct-field-values)) | missing | no | `VALUES` | `API` | P1 |
 | `LQL-P05` | `field_names` | missing | no | `ROWS`, `VALUES` | `API` | P1 |
 | `LQL-P06` | `fields` / `keep` | missing | no | `SQL` | `API` | P1 |
 | `LQL-P07` | `delete` / `drop` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P08` | `filter` / `where` | missing | no | `SQL` | `API` | P1 |
-| `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | partial | partial | `COUNT`, `SQL` | `API` | P0 |
+| `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | shipped | partial | `COUNT`, `SQL` | `API` | P0 |
 | `LQL-P10` | `block_stats` | missing | no | `STATS` | `EXT` | P2 |
 | `LQL-P11` | `blocks_count` | missing | no | `STATS` | `EXT` | P2 |
 | `LQL-P12` | `query_stats` | missing | no | `STATS` | `API` | P2 |
@@ -176,14 +179,14 @@ only measured repeated scans should create new extension vectors.
 
 | ID | option/behavior | Rust now | target | priority | notes |
 |---|---|---|---|---|---|
-| `LQL-Q01` | deterministic `asc`/`desc`, limit, and offset ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | partial | `API` | P0 | GET supports it; LogsQL must reach the same planner. |
+| `LQL-Q01` | deterministic `asc`/`desc`, limit, and offset ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | `API` | P0 | Time sort uses `(ts, stable engine order)` in either direction; equal timestamps, aliases, zero limits, optimize, and reopen are pinned. |
 | `LQL-Q02` | field projection in response | missing | `API` | P1 | Preserve `_time`, `_msg`, and typed metadata rules. |
 | `LQL-Q03` | concurrency/parallel-reader options | partial | `API` | P2 | Claims/configuration may lower hard server limits. |
 | `LQL-Q04` | `time_offset` | missing | `API` | P2 | Planner-only timestamp shift. |
 | `LQL-Q05` | `global_filter` | missing | `API` | P3 | Apply before every subquery without textual substitution. |
 | `LQL-Q06` | partial-response option | missing | `API` | P3 | Default remains fail-closed; never silently return incomplete rows. |
-| `LQL-Q07` | cancellation, deadline, row/response/sample limits | partial | `API` | P0 | Apply inside every filter and pipe loop. |
-| `LQL-Q08` | stable VictoriaLogs-compatible errors | partial | `API` | P0 | Unsupported and malformed queries remain distinguishable. |
+| `LQL-Q07` | cancellation, deadline, row/response/sample limits | shipped | `API` | P0 | Hard defaults cap result rows, decoded/examined entries, response bytes, and wall time. Capability-advertised `max_work_entries` guards row/count/value reads before decode; dropped requests cancel SQLite/Rust work and readers remain reusable. |
+| `LQL-Q08` | stable VictoriaLogs-compatible errors | shipped | `API` | P0 | Timeless intentionally improves the upstream 400 text envelope: malformed syntax is stable JSON HTTP 400 and unsupported capability is stable JSON HTTP 422, with neither reaching storage. See `QSF-063`. |
 
 ## Higher-order library boundary
 

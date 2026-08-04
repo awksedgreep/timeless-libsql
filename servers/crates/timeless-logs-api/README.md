@@ -37,10 +37,19 @@ durability. `/api/v1/flush` is the explicit ordered durability barrier.
 
 The authoritative language contract is the
 [LogsQL feature matrix](../../../docs/LOGSQL_FEATURE_MATRIX.md). The shipped
-Rust API rows at this revision are listed below for CI; native GET parameters
-do not expand this LogsQL claim.
+Rust API rows at this revision are listed below for the executable contract
+audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F06 LQL-F07 LQL-P01 LQL-S01 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P09 LQL-Q01 LQL-Q07 LQL-Q08 LQL-S01 -->
+
+The POST grammar currently includes wildcard selection; upper-exclusive
+relative windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with
+open or closed native-unit edges; all eight exact severities; service and
+arbitrary typed metadata equality; quoted message phrases; time sort, limit,
+and offset aliases; and exact count with an optional output alias.
+Double- and single-quoted strings decode VictoriaLogs-compatible Go escapes,
+backtick strings are raw, and quoted field identifiers select one literal
+metadata key. Unsupported syntax is rejected rather than ignored.
 
 The release binary requires Phoenix-managed policy authentication by default.
 Backup and cluster administration remain in Phoenix; this process deliberately
@@ -68,6 +77,12 @@ The positive release controls are:
 - `TIMELESS_LOGS_COMMAND_QUEUE_BATCHES` (default `256`)
 - `TIMELESS_LOGS_FLUSH_INTERVAL_SECS` (default `1`)
 - `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` (default `30`)
+- `TIMELESS_LOGS_LOGSQL_MAX_RESULT_ROWS` (default `100000`, hard maximum
+  `100000`)
+- `TIMELESS_LOGS_LOGSQL_MAX_WORK_ROWS` (default `100000` decoded/examined
+  entries)
+- `TIMELESS_LOGS_LOGSQL_MAX_RESPONSE_BYTES` (default `16777216`)
+- `TIMELESS_LOGS_LOGSQL_DEADLINE_MS` (default `30000`)
 
 The measured reader default is two: one reader materially increased query tail
 latency, while four and eight added memory without a useful throughput or tail
@@ -79,9 +94,42 @@ extension publication conflicts wait inside the API rather than leaking as
 HTTP 500 responses. Health and stats expose admitted/completed work, queue
 depth and age, API phase timers, extension flush/query/optimize counters, and
 read-permit/writer-wait counters so admission cannot be confused with
-completed SQLite ingestion. `index_size` is the SQLite page bytes allocated to
-the logs posting/timestamp/meta structures; `term_postings` is their posting
-row count. These are deliberately separate units.
+completed SQLite ingestion. Query telemetry separately reports
+`api_query_in_flight`, `api_query_cancelled`, `api_query_errors`,
+`api_query_result_rows`, and `api_query_response_bytes`; in-flight work is not
+decremented until the SQLite reader has actually stopped. `index_size` is the
+SQLite page bytes allocated to the logs posting/timestamp/meta structures;
+`term_postings` is their posting row count. These are deliberately separate
+units. Storage totals, the declared timestamp unit, index allocation, and the
+optimizer source sample all come from public `timeless_stats('logs')` rows.
+The server never reads extension-owned shadow block, term, or metadata tables;
+ordinary SQLite page/freelist PRAGMAs provide only whole-database accounting.
+
+The server requires the extension capability
+`query_surfaces.{timeless_logs,timeless_log_count,timeless_log_values}.max_work_entries`
+and binds the positive hard guard on every row, count, and value-discovery
+request. Direct callers may use the backward-compatible unbounded arities or
+provide the same trailing/hidden input explicitly:
+
+```sql
+SELECT ts, level, message FROM logs
+ WHERE service='api' AND max_work_entries=100000
+ ORDER BY ts DESC LIMIT 100;
+
+SELECT n FROM timeless_log_count(
+  'logs', '{"level":"error"}', NULL, :start_us, :end_us, 100000);
+
+SELECT value FROM timeless_log_values(
+  'logs', 'host', NULL, NULL, :start_us, :end_us, 1000, 100000);
+```
+
+Malformed LogsQL returns JSON HTTP 400 with `invalid_query` and
+`malformed_logsql`; recognized but unsupported syntax returns JSON HTTP 422
+with `unsupported_capability` and `unsupported_logsql`. Limits return JSON
+HTTP 422 `query_limit`, and deadlines return JSON HTTP 504 `timeout`. Pinned
+VictoriaLogs instead uses HTTP 400 text for both parser classes and encodes a
+stats count as a JSON string; Timeless intentionally retains the stricter
+error distinction and numeric count documented in `QSF-063`.
 
 The ignored end-to-end contract test pins the storage boundary explicitly:
 

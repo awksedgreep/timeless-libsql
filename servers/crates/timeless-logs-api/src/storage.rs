@@ -11,9 +11,11 @@ use fs2::FileExt;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
-    preflight_database, preflight_extension, require_current_schema, BackupReport, DataPlaneSpec,
+    preflight_database, preflight_extension, require_current_schema, require_query_surface,
+    BackupReport, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -41,17 +43,48 @@ pub struct LogEntry {
     pub metadata_json: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct QuerySpec {
     pub level: Option<String>,
     pub service: Option<String>,
     pub metadata_eq: BTreeMap<String, String>,
+    pub metadata_exact: Vec<MetadataExact>,
     pub message: Option<String>,
+    pub message_phrase: Option<String>,
     pub ts_min: Option<i64>,
     pub ts_max: Option<i64>,
     pub limit: usize,
     pub offset: usize,
     pub descending: bool,
+    /// Hard upper bound on entries examined by the public extension query.
+    /// This is work, not output cardinality; `LIMIT 1` cannot conceal an
+    /// unbounded decode.
+    pub max_work_rows: usize,
+}
+
+impl Default for QuerySpec {
+    fn default() -> Self {
+        Self {
+            level: None,
+            service: None,
+            metadata_eq: BTreeMap::new(),
+            metadata_exact: Vec::new(),
+            message: None,
+            message_phrase: None,
+            ts_min: None,
+            ts_max: None,
+            limit: 0,
+            offset: 0,
+            descending: false,
+            max_work_rows: 100_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetadataExact {
+    pub path: Vec<String>,
+    pub expected: JsonValue,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -101,6 +134,11 @@ pub struct StorageStats {
     pub api_queue_wait_max_ns: i64,
     pub api_query_count: i64,
     pub api_query_ns: i64,
+    pub api_query_in_flight: i64,
+    pub api_query_cancelled: i64,
+    pub api_query_errors: i64,
+    pub api_query_result_rows: i64,
+    pub api_query_response_bytes: i64,
     pub ingest_batch_count: i64,
     pub ingest_batch_entries: i64,
     pub ingest_wire_decode_ns: i64,
@@ -194,6 +232,11 @@ struct QueueProfile {
     queue_wait_max_ns: u64,
     query_count: u64,
     query_ns: u64,
+    query_in_flight: u64,
+    query_cancelled: u64,
+    query_errors: u64,
+    query_result_rows: u64,
+    query_response_bytes: u64,
     checkpoint_count: u64,
     checkpoint_total_ns: u64,
     checkpoint_errors: u64,
@@ -216,14 +259,23 @@ enum WriteCommand {
 }
 
 enum ReadCommand {
-    Query(QuerySpec, oneshot::Sender<Result<Vec<QueryRow>, String>>),
-    Count(QuerySpec, oneshot::Sender<Result<i64, String>>),
-    FieldValues(
-        QuerySpec,
-        String,
-        usize,
-        oneshot::Sender<Result<Vec<String>, String>>,
-    ),
+    Query {
+        spec: QuerySpec,
+        cancelled: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<Vec<QueryRow>, String>>,
+    },
+    Count {
+        spec: QuerySpec,
+        cancelled: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<i64, String>>,
+    },
+    FieldValues {
+        spec: QuerySpec,
+        key: String,
+        limit: usize,
+        cancelled: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
     Stats(oneshot::Sender<Result<StorageStats, String>>),
     Shutdown,
 }
@@ -448,25 +500,65 @@ impl Storage {
     }
 
     pub async fn query(&self, spec: QuerySpec) -> Result<Vec<QueryRow>, String> {
+        validate_query_spec(&spec)?;
+        let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.reader()
-            .send(ReadCommand::Query(spec, reply_tx))
+        if self
+            .reader()
+            .send(ReadCommand::Query {
+                spec,
+                cancelled,
+                reply: reply_tx,
+            })
             .await
-            .map_err(|_| "SQLite reader is not running".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "SQLite reader stopped before query completed".to_string())?
+            .is_err()
+        {
+            cancellation.disarm();
+            record_read_return(&self.0.profile);
+            return Err("SQLite reader is not running".into());
+        }
+        cancellation.handoff_to_reader();
+        let result = match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                cancellation.disarm();
+                record_read_return(&self.0.profile);
+                return Err("SQLite reader stopped before query completed".into());
+            }
+        };
+        cancellation.disarm();
+        result
     }
 
     pub async fn count(&self, spec: QuerySpec) -> Result<i64, String> {
+        validate_work_limit(&spec)?;
+        let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.reader()
-            .send(ReadCommand::Count(spec, reply_tx))
+        if self
+            .reader()
+            .send(ReadCommand::Count {
+                spec,
+                cancelled,
+                reply: reply_tx,
+            })
             .await
-            .map_err(|_| "SQLite reader is not running".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "SQLite reader stopped before count completed".to_string())?
+            .is_err()
+        {
+            cancellation.disarm();
+            record_read_return(&self.0.profile);
+            return Err("SQLite reader is not running".into());
+        }
+        cancellation.handoff_to_reader();
+        let result = match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                cancellation.disarm();
+                record_read_return(&self.0.profile);
+                return Err("SQLite reader stopped before count completed".into());
+            }
+        };
+        cancellation.disarm();
+        result
     }
 
     pub async fn field_values(
@@ -475,14 +567,41 @@ impl Storage {
         key: String,
         limit: usize,
     ) -> Result<Vec<String>, String> {
+        validate_work_limit(&spec)?;
+        let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.reader()
-            .send(ReadCommand::FieldValues(spec, key, limit, reply_tx))
+        if self
+            .reader()
+            .send(ReadCommand::FieldValues {
+                spec,
+                key,
+                limit,
+                cancelled,
+                reply: reply_tx,
+            })
             .await
-            .map_err(|_| "SQLite reader is not running".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "SQLite reader stopped before field discovery completed".to_string())?
+            .is_err()
+        {
+            cancellation.disarm();
+            record_read_return(&self.0.profile);
+            return Err("SQLite reader is not running".into());
+        }
+        cancellation.handoff_to_reader();
+        let result = match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                cancellation.disarm();
+                record_read_return(&self.0.profile);
+                return Err("SQLite reader stopped before field discovery completed".into());
+            }
+        };
+        cancellation.disarm();
+        result
+    }
+
+    pub(crate) fn record_query_response_bytes(&self, bytes: usize) {
+        let mut profile = profile_lock(&self.0.profile);
+        profile.query_response_bytes = profile.query_response_bytes.saturating_add(bytes as u64);
     }
 
     pub async fn stats(&self) -> Result<StorageStats, String> {
@@ -513,6 +632,11 @@ impl Storage {
         stats.api_queue_wait_max_ns = profile.queue_wait_max_ns as i64;
         stats.api_query_count = profile.query_count as i64;
         stats.api_query_ns = profile.query_ns as i64;
+        stats.api_query_in_flight = profile.query_in_flight as i64;
+        stats.api_query_cancelled = profile.query_cancelled as i64;
+        stats.api_query_errors = profile.query_errors as i64;
+        stats.api_query_result_rows = profile.query_result_rows as i64;
+        stats.api_query_response_bytes = profile.query_response_bytes as i64;
         stats.checkpoint_count = profile.checkpoint_count as i64;
         stats.checkpoint_total_ns = profile.checkpoint_total_ns as i64;
         stats.checkpoint_errors = profile.checkpoint_errors as i64;
@@ -534,6 +658,23 @@ impl Storage {
     fn reader(&self) -> &mpsc::Sender<ReadCommand> {
         let number = self.0.next_reader.fetch_add(1, Ordering::Relaxed);
         &self.0.readers[number % self.0.readers.len()]
+    }
+
+    fn begin_read(&self) -> (Arc<AtomicBool>, ReadCancellation) {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        {
+            let mut profile = profile_lock(&self.0.profile);
+            profile.query_in_flight = profile.query_in_flight.saturating_add(1);
+        }
+        (
+            Arc::clone(&cancelled),
+            ReadCancellation {
+                cancelled,
+                profile: Arc::clone(&self.0.profile),
+                reader_owned: false,
+                armed: true,
+            },
+        )
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
@@ -570,6 +711,37 @@ impl Storage {
                 .map_err(|error| format!("release database owner lease: {error}"))?;
         }
         writer_result
+    }
+}
+
+struct ReadCancellation {
+    cancelled: Arc<AtomicBool>,
+    profile: Arc<StdMutex<QueueProfile>>,
+    reader_owned: bool,
+    armed: bool,
+}
+
+impl ReadCancellation {
+    fn handoff_to_reader(&mut self) {
+        self.reader_owned = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReadCancellation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.cancelled.store(true, Ordering::Release);
+        let mut profile = profile_lock(&self.profile);
+        profile.query_cancelled = profile.query_cancelled.saturating_add(1);
+        if !self.reader_owned {
+            profile.query_in_flight = profile.query_in_flight.saturating_sub(1);
+        }
     }
 }
 
@@ -695,19 +867,12 @@ fn optimize_backlog_with_actionable(
     conn: &Connection,
     actionable_entries: u64,
 ) -> Result<(), String> {
-    // The exact planner identifies actionable entries. Blob bytes are sampled
-    // over raw/small candidates because payload length is intentionally not
-    // part of the extension's in-memory metadata index.
-    let (sample_entries, sample_bytes): (i64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(entry_count), 0),
-                    COALESCE(SUM(length(data)), 0)
-             FROM logs_blocks
-             WHERE codec IN (1, 6) OR entry_count < 8192",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|error| format!("inspect optimize source bytes: {error}"))?;
+    // The extension owns block layout and publishes this source sample through
+    // its public stats TVF. The server turns it into a maintenance budget
+    // without inspecting private block tables or duplicating block policy.
+    let stats = stat_values(conn)?;
+    let sample_entries = stats.get("optimize_source_entries").copied().unwrap_or(0);
+    let sample_bytes = stats.get("optimize_source_bytes").copied().unwrap_or(0);
     let budget = optimize_entry_budget(
         actionable_entries,
         sample_entries.max(0) as u64,
@@ -779,22 +944,41 @@ fn reader_main(
     };
     while let Some(command) = commands.blocking_recv() {
         match command {
-            ReadCommand::Query(spec, reply) => {
+            ReadCommand::Query {
+                spec,
+                cancelled,
+                reply,
+            } => {
                 let started = Instant::now();
-                let result = retry_read(|| query_rows(&conn, &spec));
-                record_query(&profile, started.elapsed());
+                let result = cancellable_read(&conn, &cancelled, || query_rows(&conn, &spec));
+                let rows = result.as_ref().map_or(0, Vec::len);
+                record_query(&profile, started.elapsed(), result.is_err(), rows);
                 let _ = reply.send(result);
             }
-            ReadCommand::Count(spec, reply) => {
+            ReadCommand::Count {
+                spec,
+                cancelled,
+                reply,
+            } => {
                 let started = Instant::now();
-                let result = retry_read(|| query_count(&conn, &spec));
-                record_query(&profile, started.elapsed());
+                let result = cancellable_read(&conn, &cancelled, || query_count(&conn, &spec));
+                let rows = usize::from(result.is_ok());
+                record_query(&profile, started.elapsed(), result.is_err(), rows);
                 let _ = reply.send(result);
             }
-            ReadCommand::FieldValues(spec, key, limit, reply) => {
+            ReadCommand::FieldValues {
+                spec,
+                key,
+                limit,
+                cancelled,
+                reply,
+            } => {
                 let started = Instant::now();
-                let result = retry_read(|| query_field_values(&conn, &spec, &key, limit));
-                record_query(&profile, started.elapsed());
+                let result = cancellable_read(&conn, &cancelled, || {
+                    query_field_values(&conn, &spec, &key, limit)
+                });
+                let rows = result.as_ref().map_or(0, Vec::len);
+                record_query(&profile, started.elapsed(), result.is_err(), rows);
                 let _ = reply.send(result);
             }
             ReadCommand::Stats(reply) => {
@@ -825,6 +1009,9 @@ fn open_connection(
         required_batch: "rich-v1",
     };
     let capabilities = preflight_extension(&conn, spec)?;
+    for surface in ["timeless_logs", "timeless_log_count", "timeless_log_values"] {
+        require_query_surface(&capabilities, surface, "max_work_entries")?;
+    }
     preflight_database(&conn, spec.signal)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| format!("set busy timeout: {e}"))?;
@@ -839,14 +1026,7 @@ fn open_connection(
         ))
         .map_err(|e| format!("initialize logs database: {e}"))?;
         apply_schema_ledger(&conn, spec, &capabilities)?;
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT CAST(v AS TEXT) FROM logs_meta WHERE k = 'timestamp_unit'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| format!("read logs timestamp capability: {e}"))?;
+        let stored = stat_text(&conn, "timestamp_unit")?;
         if stored.as_deref() != Some(timestamp_unit.sql_name()) {
             return Err(format!(
                 "logs timestamp capability mismatch: binary requested {}, database stores {}",
@@ -866,8 +1046,18 @@ fn open_connection(
 /// not receive a spurious 500. This is API scheduling only; it does not alter
 /// the engine, its buffer, or its transactions.
 fn retry_read<T>(mut operation: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    retry_read_with_cancellation(&mut operation, None)
+}
+
+fn retry_read_with_cancellation<T>(
+    operation: &mut impl FnMut() -> Result<T, String>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<T, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
+        if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
+            return Err("logs query cancelled".into());
+        }
         match operation() {
             Ok(value) => return Ok(value),
             Err(error)
@@ -877,10 +1067,36 @@ fn retry_read<T>(mut operation: impl FnMut() -> Result<T, String>) -> Result<T, 
                         || error.contains("database is locked")
                         || error.contains("database is busy")) =>
             {
+                if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
+                    return Err("logs query cancelled".into());
+                }
                 thread::sleep(std::time::Duration::from_millis(1));
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+fn cancellable_read<T>(
+    conn: &Connection,
+    cancelled: &Arc<AtomicBool>,
+    mut operation: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    let progress_cancelled = Arc::clone(cancelled);
+    conn.progress_handler(
+        1_000,
+        Some(move || progress_cancelled.load(Ordering::Acquire)),
+    )
+    .map_err(|error| format!("install log query cancellation handler: {error}"))?;
+    let result = retry_read_with_cancellation(&mut operation, Some(cancelled));
+    let cleared = conn.progress_handler(0, None::<fn() -> bool>);
+    if cancelled.load(Ordering::Acquire) {
+        return Err("logs query cancelled".into());
+    }
+    match (result, cleared) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(format!("clear log query cancellation handler: {error}")),
     }
 }
 
@@ -915,10 +1131,23 @@ fn record_queue_completion(profile: &StdMutex<QueueProfile>, count: usize, succe
     }
 }
 
-fn record_query(profile: &StdMutex<QueueProfile>, duration: Duration) {
+fn record_query(
+    profile: &StdMutex<QueueProfile>,
+    duration: Duration,
+    error: bool,
+    result_rows: usize,
+) {
     let mut profile = profile_lock(profile);
     profile.query_count = profile.query_count.saturating_add(1);
     profile.query_ns = profile.query_ns.saturating_add(duration_ns(duration));
+    profile.query_in_flight = profile.query_in_flight.saturating_sub(1);
+    profile.query_errors = profile.query_errors.saturating_add(u64::from(error));
+    profile.query_result_rows = profile.query_result_rows.saturating_add(result_rows as u64);
+}
+
+fn record_read_return(profile: &StdMutex<QueueProfile>) {
+    let mut profile = profile_lock(profile);
+    profile.query_in_flight = profile.query_in_flight.saturating_sub(1);
 }
 
 fn insert_batch(
@@ -976,6 +1205,31 @@ fn push_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_work_limit(spec: &QuerySpec) -> Result<(), String> {
+    if spec.max_work_rows == 0 {
+        return Err("max_work_rows must be positive".into());
+    }
+    Ok(())
+}
+
+fn validate_query_spec(spec: &QuerySpec) -> Result<(), String> {
+    validate_work_limit(spec)?;
+    if spec.limit > 100_000 {
+        return Err("log query limit exceeds the extension maximum of 100000 rows".into());
+    }
+    let window = spec
+        .offset
+        .checked_add(spec.limit)
+        .ok_or_else(|| "log query offset plus limit overflows usize".to_string())?;
+    if window > spec.max_work_rows {
+        return Err(format!(
+            "log query offset plus limit exceeds max_work_rows={}",
+            spec.max_work_rows
+        ));
+    }
+    Ok(())
+}
+
 fn query_parts(spec: &QuerySpec) -> Result<(String, Vec<SqlValue>), String> {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -1012,6 +1266,11 @@ fn query_parts(spec: &QuerySpec) -> Result<(String, Vec<SqlValue>), String> {
         clauses.push("ts <= ?");
         values.push(SqlValue::Integer(ts_max));
     }
+    clauses.push("max_work_entries = ?");
+    values.push(SqlValue::Integer(
+        i64::try_from(spec.max_work_rows)
+            .map_err(|_| "max_work_rows exceeds SQLite INTEGER range".to_string())?,
+    ));
     let where_sql = if clauses.is_empty() {
         String::new()
     } else {
@@ -1021,6 +1280,12 @@ fn query_parts(spec: &QuerySpec) -> Result<(String, Vec<SqlValue>), String> {
 }
 
 fn query_rows(conn: &Connection, spec: &QuerySpec) -> Result<Vec<QueryRow>, String> {
+    if spec.limit == 0 {
+        return Ok(Vec::new());
+    }
+    if has_api_postfilter(spec) {
+        return query_rows_with_postfilters(conn, spec);
+    }
     let (where_sql, mut values) = query_parts(spec)?;
     let order = if spec.descending { "DESC" } else { "ASC" };
     let sql = format!(
@@ -1046,7 +1311,76 @@ fn query_rows(conn: &Connection, spec: &QuerySpec) -> Result<Vec<QueryRow>, Stri
         .map_err(|e| format!("read log row: {e}"))
 }
 
+fn query_rows_with_postfilters(
+    conn: &Connection,
+    spec: &QuerySpec,
+) -> Result<Vec<QueryRow>, String> {
+    if spec.limit == 0 {
+        return Ok(Vec::new());
+    }
+    let (where_sql, mut values) = query_parts(spec)?;
+    let order = if spec.descending { "DESC" } else { "ASC" };
+    let sql = format!(
+        "SELECT ts, level, message, metadata FROM logs{where_sql} \
+         ORDER BY ts {order} LIMIT ?"
+    );
+    values.push(SqlValue::Integer(
+        i64::try_from(spec.max_work_rows.saturating_add(1)).unwrap_or(i64::MAX),
+    ));
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("prepare LogsQL post-filter query: {error}"))?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(|error| format!("query LogsQL post-filter candidates: {error}"))?;
+    let limit = spec.limit.min(100_000);
+    let mut considered = 0usize;
+    let mut matched = 0usize;
+    let mut output = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("read LogsQL post-filter candidate: {error}"))?
+    {
+        considered = considered.saturating_add(1);
+        let message: String = row
+            .get(2)
+            .map_err(|error| format!("read post-filtered log message: {error}"))?;
+        let metadata_json: String = row
+            .get(3)
+            .map_err(|error| format!("read post-filtered log metadata JSON: {error}"))?;
+        if api_postfilters_match(&message, &metadata_json, spec)? {
+            if matched < spec.offset {
+                matched += 1;
+                continue;
+            }
+            output.push(QueryRow {
+                ts: row
+                    .get(0)
+                    .map_err(|error| format!("read typed log timestamp: {error}"))?,
+                level: row
+                    .get(1)
+                    .map_err(|error| format!("read typed log level: {error}"))?,
+                message,
+                metadata_json,
+            });
+            if output.len() == limit {
+                return Ok(output);
+            }
+        }
+    }
+    if considered > spec.max_work_rows {
+        return Err(format!(
+            "LogsQL post-filter exceeded max_work_rows={}",
+            spec.max_work_rows
+        ));
+    }
+    Ok(output)
+}
+
 fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
+    if has_api_postfilter(spec) {
+        return query_count_with_postfilters(conn, spec);
+    }
     let mut filter = BTreeMap::new();
     if let Some(level) = &spec.level {
         filter.insert("level", level);
@@ -1066,16 +1400,154 @@ fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
         )
     };
     conn.query_row(
-        "SELECT n FROM timeless_log_count('logs', ?1, ?2, ?3, ?4)",
+        "SELECT n FROM timeless_log_count('logs', ?1, ?2, ?3, ?4, ?5)",
         params![
             filter_json,
             spec.message.as_deref(),
             spec.ts_min.unwrap_or(i64::MIN),
-            spec.ts_max.unwrap_or(i64::MAX)
+            spec.ts_max.unwrap_or(i64::MAX),
+            i64::try_from(spec.max_work_rows)
+                .map_err(|_| "max_work_rows exceeds SQLite INTEGER range".to_string())?
         ],
         |row| row.get(0),
     )
     .map_err(|e| format!("count logs: {e}"))
+}
+
+fn query_count_with_postfilters(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
+    let (where_sql, mut values) = query_parts(spec)?;
+    let sql = format!("SELECT message, metadata FROM logs{where_sql} ORDER BY ts ASC LIMIT ?");
+    values.push(SqlValue::Integer(
+        i64::try_from(spec.max_work_rows.saturating_add(1)).unwrap_or(i64::MAX),
+    ));
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("prepare LogsQL post-filter count: {error}"))?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(|error| format!("query LogsQL post-filter count: {error}"))?;
+    let mut considered = 0usize;
+    let mut total = 0i64;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("read LogsQL post-filter count row: {error}"))?
+    {
+        considered = considered.saturating_add(1);
+        if considered > spec.max_work_rows {
+            return Err(format!(
+                "LogsQL post-filter count exceeded max_work_rows={}",
+                spec.max_work_rows
+            ));
+        }
+        let message: String = row
+            .get(0)
+            .map_err(|error| format!("read post-filter count message: {error}"))?;
+        let metadata_json: String = row
+            .get(1)
+            .map_err(|error| format!("read post-filter count metadata: {error}"))?;
+        if api_postfilters_match(&message, &metadata_json, spec)? {
+            total = total.saturating_add(1);
+        }
+    }
+    Ok(total)
+}
+
+fn has_api_postfilter(spec: &QuerySpec) -> bool {
+    spec.message_phrase.is_some() || !spec.metadata_exact.is_empty()
+}
+
+fn api_postfilters_match(
+    message: &str,
+    metadata_json: &str,
+    spec: &QuerySpec,
+) -> Result<bool, String> {
+    if spec
+        .message_phrase
+        .as_deref()
+        .is_some_and(|phrase| !logsql_phrase_matches(message, phrase))
+    {
+        return Ok(false);
+    }
+    metadata_exact_matches(metadata_json, &spec.metadata_exact)
+}
+
+/// VictoriaLogs phrases preserve every byte between the quotes, while word
+/// characters at either edge must begin/end a LogsQL word. Punctuation at an
+/// edge has no additional boundary requirement.
+fn logsql_phrase_matches(message: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    let require_start_boundary = phrase.chars().next().is_some_and(logsql_word_char);
+    let require_end_boundary = phrase.chars().next_back().is_some_and(logsql_word_char);
+
+    message.match_indices(phrase).any(|(start, matched)| {
+        let start_ok = !require_start_boundary
+            || start == 0
+            || message[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !logsql_word_char(character));
+        let end = start + matched.len();
+        let end_ok = !require_end_boundary
+            || end == message.len()
+            || message[end..]
+                .chars()
+                .next()
+                .is_none_or(|character| !logsql_word_char(character));
+        start_ok && end_ok
+    })
+}
+
+fn logsql_word_char(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
+}
+
+fn metadata_exact_matches(
+    metadata_json: &str,
+    predicates: &[MetadataExact],
+) -> Result<bool, String> {
+    if predicates.is_empty() {
+        return Ok(true);
+    }
+    let metadata: JsonValue = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("decode stored typed log metadata: {error}"))?;
+    for predicate in predicates {
+        let Some(actual) = metadata_path(&metadata, &predicate.path) else {
+            return Ok(false);
+        };
+        if !json_values_equal(actual, &predicate.expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn metadata_path<'a>(metadata: &'a JsonValue, path: &[String]) -> Option<&'a JsonValue> {
+    let mut value = metadata;
+    for segment in path {
+        value = match value {
+            JsonValue::Object(object) => object.get(segment)?,
+            JsonValue::Array(array) => array.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(value)
+}
+
+fn json_values_equal(left: &JsonValue, right: &JsonValue) -> bool {
+    match (left, right) {
+        (JsonValue::Number(left), JsonValue::Number(right)) => {
+            match (left.as_i64(), right.as_i64()) {
+                (Some(left), Some(right)) => left == right,
+                _ => match (left.as_u64(), right.as_u64()) {
+                    (Some(left), Some(right)) => left == right,
+                    _ => left.as_f64() == right.as_f64(),
+                },
+            }
+        }
+        _ => left == right,
+    }
 }
 
 fn query_field_values(
@@ -1106,7 +1578,7 @@ fn query_field_values(
         )
     };
     let mut statement = conn
-        .prepare("SELECT value FROM timeless_log_values('logs', ?1, ?2, ?3, ?4, ?5, ?6)")
+        .prepare("SELECT value FROM timeless_log_values('logs', ?1, ?2, ?3, ?4, ?5, ?6, ?7)")
         .map_err(|error| format!("prepare log field-values query: {error}"))?;
     let values = statement
         .query_map(
@@ -1116,7 +1588,9 @@ fn query_field_values(
                 spec.message.as_deref(),
                 spec.ts_min,
                 spec.ts_max,
-                i64::try_from(limit).unwrap_or(i64::MAX)
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(spec.max_work_rows)
+                    .map_err(|_| "max_work_rows exceeds SQLite INTEGER range".to_string())?
             ],
             |row| row.get(0),
         )
@@ -1130,35 +1604,13 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
     let engine = stat_values(conn)?;
     let stat = |key: &str| engine.get(key).copied().unwrap_or(0);
     let buffered = stat("buffered_entries");
-    let (blocks, disk_entries, bytes, raw_blocks, raw_bytes, oldest, newest): (
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        Option<i64>,
-        Option<i64>,
-    ) = conn
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(entry_count),0), COALESCE(SUM(length(data)),0),
-                    COALESCE(SUM(codec IN (1, 6)),0),
-                    COALESCE(SUM(CASE WHEN codec IN (1, 6) THEN length(data) ELSE 0 END),0),
-                    MIN(ts_min), MAX(ts_max)
-             FROM logs_blocks",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .map_err(|e| format!("read block stats: {e}"))?;
+    let blocks = stat("blocks");
+    let disk_entries = stat("disk_entries");
+    let bytes = stat("bytes_on_disk");
+    let raw_blocks = stat("raw_blocks");
+    let raw_bytes = stat("raw_bytes");
+    let oldest = engine.get("ts_min").copied();
+    let newest = engine.get("ts_max").copied();
     let (page_count, page_size, freelist_pages): (i64, i64, i64) = conn
         .query_row(
             "SELECT (SELECT page_count FROM pragma_page_count),
@@ -1169,23 +1621,8 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         )
         .map_err(|e| format!("read database size: {e}"))?;
     let page_bytes = page_count.saturating_mul(page_size);
-    let index_bytes: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(pgsize), 0)
-               FROM dbstat
-              WHERE name IN (
-                'logs_terms',
-                'logs_blocks_ts',
-                'logs_meta',
-                'sqlite_autoindex_logs_meta_1'
-              )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("read database index size: {e}"))?;
-    let term_postings: i64 = conn
-        .query_row("SELECT COUNT(*) FROM logs_terms", [], |row| row.get(0))
-        .map_err(|e| format!("read term count: {e}"))?;
+    let index_bytes = stat("index_bytes");
+    let term_postings = stat("terms");
     Ok(StorageStats {
         total_blocks: blocks,
         total_entries: disk_entries + buffered,
@@ -1207,8 +1644,8 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         newest_timestamp: newest,
         raw_blocks,
         raw_bytes,
-        compressed_blocks: blocks - raw_blocks,
-        compressed_bytes: bytes - raw_bytes,
+        compressed_blocks: blocks.saturating_sub(raw_blocks),
+        compressed_bytes: bytes.saturating_sub(raw_bytes),
         buffered_entries: buffered,
         queued_batches: 0,
         queued_entries: 0,
@@ -1224,6 +1661,11 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         api_queue_wait_max_ns: 0,
         api_query_count: 0,
         api_query_ns: 0,
+        api_query_in_flight: 0,
+        api_query_cancelled: 0,
+        api_query_errors: 0,
+        api_query_result_rows: 0,
+        api_query_response_bytes: 0,
         ingest_batch_count: stat("ingest_batch_count"),
         ingest_batch_entries: stat("ingest_batch_entries"),
         ingest_wire_decode_ns: stat("ingest_wire_decode_ns"),
@@ -1375,6 +1817,16 @@ fn stat_values(conn: &Connection) -> Result<HashMap<String, i64>, String> {
     Ok(values)
 }
 
+fn stat_text(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT CAST(value AS TEXT) FROM timeless_stats('logs') WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| format!("read public log stat {key:?}: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1389,6 +1841,44 @@ mod tests {
         assert!(error.contains("already owned"), "{error}");
         FileExt::unlock(&first).unwrap();
         acquire_database_lease(&database, "logs").unwrap();
+    }
+
+    #[test]
+    fn cancellation_accounting_transfers_only_after_reader_queue_admission() {
+        let profile = Arc::new(StdMutex::new(QueueProfile {
+            query_in_flight: 1,
+            ..QueueProfile::default()
+        }));
+        let before_queue = Arc::new(AtomicBool::new(false));
+        drop(ReadCancellation {
+            cancelled: Arc::clone(&before_queue),
+            profile: Arc::clone(&profile),
+            reader_owned: false,
+            armed: true,
+        });
+        assert!(before_queue.load(Ordering::Acquire));
+        assert_eq!(profile_lock(&profile).query_in_flight, 0);
+        assert_eq!(profile_lock(&profile).query_cancelled, 1);
+
+        {
+            let mut values = profile_lock(&profile);
+            values.query_in_flight = 1;
+        }
+        let after_queue = Arc::new(AtomicBool::new(false));
+        let mut cancellation = ReadCancellation {
+            cancelled: Arc::clone(&after_queue),
+            profile: Arc::clone(&profile),
+            reader_owned: false,
+            armed: true,
+        };
+        cancellation.handoff_to_reader();
+        drop(cancellation);
+        assert!(after_queue.load(Ordering::Acquire));
+        assert_eq!(profile_lock(&profile).query_in_flight, 1);
+        assert_eq!(profile_lock(&profile).query_cancelled, 2);
+
+        record_read_return(&profile);
+        assert_eq!(profile_lock(&profile).query_in_flight, 0);
     }
 
     #[test]
@@ -1478,5 +1968,32 @@ mod tests {
             )
             .unwrap();
         assert!(bytes > 0);
+    }
+
+    #[test]
+    fn logsql_phrase_preserves_bytes_and_unicode_word_boundaries() {
+        for matching in [
+            "ssh: login fail",
+            "prefix ssh: login fail suffix",
+            "(ssh: login fail)!",
+            "ssh: login fail—next",
+        ] {
+            assert!(logsql_phrase_matches(matching, "ssh: login fail"));
+        }
+        for non_matching in [
+            "SSH: login fail",
+            "ssh:  login fail",
+            "ssh: login failed",
+            "xssh: login fail",
+            "x_ssh: login fail",
+            "éssh: login fail",
+        ] {
+            assert!(!logsql_phrase_matches(non_matching, "ssh: login fail"));
+        }
+        assert!(logsql_phrase_matches("xssh: login failed", ": login"));
+        assert!(logsql_phrase_matches("тест45 done", "тест45"));
+        assert!(!logsql_phrase_matches("xтест45 done", "тест45"));
+        assert!(!logsql_phrase_matches("тест45x done", "тест45"));
+        assert!(!logsql_phrase_matches("anything", ""));
     }
 }

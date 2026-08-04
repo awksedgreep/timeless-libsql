@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, TimeZone, Timelike, Utc};
+use chrono::{Datelike, SecondsFormat, TimeZone, Timelike, Utc};
 use clap::Args;
 use regex::Regex;
 use reqwest::blocking::{Client, Response};
@@ -33,6 +33,7 @@ enum OracleCommand {
     Probe,
     PrometheusSmoke,
     PrometheusApi,
+    VictoriaLogsApi,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -259,6 +260,17 @@ fn response_json(response: Response) -> Result<(u16, Value)> {
     let body = serde_json::from_slice(&bytes)
         .with_context(|| format!("decode HTTP {status} body as JSON"))?;
     Ok((status, body))
+}
+
+fn response_text(response: Response) -> Result<(u16, String, String)> {
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    Ok((status, content_type, response.text()?))
 }
 
 fn post_remote_write(client: &Client, base: &str, sample_timestamp_ms: i64) -> Result<()> {
@@ -991,6 +1003,272 @@ fn prometheus_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Resu
     Ok(())
 }
 
+fn victorialogs_request(client: &Client, base: &str, query: &str) -> Result<(u16, String, String)> {
+    response_text(
+        client
+            .get(format!("{base}/select/logsql/query"))
+            .query(&[("query", query), ("limit", "1000")])
+            .send()?,
+    )
+}
+
+fn victorialogs_query(case: &Map<String, Value>, base_us: i64) -> Result<String> {
+    let mut query = string(case, "query")?;
+    let Some(times) = case.get("query_times") else {
+        return Ok(query);
+    };
+    for (name, value) in times.as_object().context("query_times must be an object")? {
+        let spec = value
+            .as_object()
+            .with_context(|| format!("query_times.{name} must be an object"))?;
+        let at_us = base_us
+            .checked_add(offset(spec, "offset_us")?)
+            .with_context(|| format!("query_times.{name} timestamp overflow"))?;
+        let format = string(spec, "format")?;
+        let replacement = match format.as_str() {
+            "rfc3339" => Utc
+                .timestamp_micros(at_us)
+                .single()
+                .with_context(|| format!("query_times.{name} is outside RFC3339 range"))?
+                .to_rfc3339_opts(SecondsFormat::Micros, true),
+            "unix_s" => {
+                if at_us % 1_000_000 != 0 {
+                    bail!("query_times.{name} is not an exact Unix second");
+                }
+                (at_us / 1_000_000).to_string()
+            }
+            "unix_ms" => {
+                if at_us % 1_000 != 0 {
+                    bail!("query_times.{name} is not an exact Unix millisecond");
+                }
+                (at_us / 1_000).to_string()
+            }
+            "unix_us" => at_us.to_string(),
+            "unix_ns" => at_us
+                .checked_mul(1_000)
+                .with_context(|| format!("query_times.{name} nanosecond overflow"))?
+                .to_string(),
+            _ => bail!("unknown query_times.{name} format {format:?}"),
+        };
+        let marker = format!("{{{name}}}");
+        if !query.contains(&marker) {
+            bail!("query does not contain query_times marker {marker}");
+        }
+        query = query.replace(&marker, &replacement);
+    }
+    Ok(query)
+}
+
+fn victorialogs_cases(client: &Client, base: &str, fixture: &Value, base_us: i64) -> Result<usize> {
+    let mut failures = 0;
+    for case in object_cases(fixture, "query_cases")? {
+        let query = victorialogs_query(case, base_us)?;
+        let (status, content_type, body) = victorialogs_request(client, base, &query)?;
+        let expected_status = case
+            .get("status")
+            .and_then(Value::as_u64)
+            .context("case status")? as u16;
+        let mut actual_cases = body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| -> Result<String> {
+                let row: Value = serde_json::from_str(line)
+                    .with_context(|| format!("decode VictoriaLogs row for {}", case_id(case)))?;
+                row.get("case")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .context("VictoriaLogs oracle row is missing case")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut expected_cases = case
+            .get("expected_cases")
+            .and_then(Value::as_array)
+            .context("case expected_cases")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .context("expected_cases entry must be a string")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if case.get("result_order").and_then(Value::as_str) != Some("ordered") {
+            actual_cases.sort();
+            expected_cases.sort();
+        }
+        let valid = status == expected_status
+            && content_type.starts_with("application/stream+json")
+            && actual_cases == expected_cases;
+        failures += print_verdict(case, valid, || {
+            format!(
+                "expected {expected_status} {expected_cases:?}; got {status} {content_type:?} {actual_cases:?}: {body:?}"
+            )
+        });
+    }
+    Ok(failures)
+}
+
+fn victorialogs_error_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
+    let mut failures = 0;
+    for case in object_cases(fixture, "error_cases")? {
+        let query = string(case, "query")?;
+        let (status, content_type, body) = victorialogs_request(client, base, &query)?;
+        let expected_status = case
+            .get("status")
+            .and_then(Value::as_u64)
+            .context("case status")? as u16;
+        let body_contains = string(case, "body_contains")?;
+        let expected_content_type = string(case, "content_type")?;
+        let valid = status == expected_status
+            && content_type == expected_content_type
+            && body.contains(&body_contains);
+        failures += print_verdict(case, valid, || {
+            format!(
+                "expected {expected_status} {expected_content_type:?} containing {body_contains:?}; got {status} {content_type:?} {body:?}"
+            )
+        });
+    }
+    Ok(failures)
+}
+
+fn victorialogs_stats_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
+    let mut failures = 0;
+    for case in object_cases(fixture, "stats_cases")? {
+        let query = string(case, "query")?;
+        let (status, content_type, body) = victorialogs_request(client, base, &query)?;
+        let actual = body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<Value>(line).context("decode VictoriaLogs stats row")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let expected = case
+            .get("expected_rows")
+            .and_then(Value::as_array)
+            .context("stats case expected_rows")?;
+        let valid = status == 200
+            && content_type.starts_with("application/stream+json")
+            && actual == *expected;
+        failures += print_verdict(case, valid, || {
+            format!("expected {expected:?}; got {status} {content_type:?} {actual:?}: {body:?}")
+        });
+    }
+    Ok(failures)
+}
+
+fn victorialogs_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Result<()> {
+    let relative = oracle
+        .fixtures
+        .iter()
+        .find(|path| path.ends_with("victorialogs/api_cases.json"))
+        .context("VictoriaLogs API fixture is not declared")?;
+    let fixture: Value = load_json(&root.join(relative))?;
+    let port = free_port()?;
+    let name = format!("timeless-logsql-oracle-{}", std::process::id());
+    let args = vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "-d".to_owned(),
+        "--name".to_owned(),
+        name.clone(),
+        "--platform".to_owned(),
+        "linux/amd64".to_owned(),
+        "-p".to_owned(),
+        format!("127.0.0.1:{port}:9428"),
+        oracle.image.clone(),
+        "-retentionPeriod=1d".to_owned(),
+    ];
+    let output = command_output(runtime, &args, Duration::from_secs(180))?;
+    if !output.status.success() {
+        bail!(
+            "failed to start VictoriaLogs oracle: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let _guard = ContainerGuard { runtime, name };
+    let base = format!("http://127.0.0.1:{port}");
+    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if client
+            .get(format!("{base}/health"))
+            .send()
+            .is_ok_and(|response| response.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("VictoriaLogs API oracle did not become ready");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let rows = fixture
+        .get("rows")
+        .and_then(Value::as_array)
+        .context("VictoriaLogs fixture is missing rows")?;
+    let mut ndjson = String::new();
+    let now_us = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as i64;
+    let base_us = (now_us / 1_000_000)
+        .saturating_mul(1_000_000)
+        .saturating_sub(10_000_000);
+    for (position, row) in rows.iter().enumerate() {
+        let mut row = row
+            .as_object()
+            .cloned()
+            .context("VictoriaLogs fixture row must be an object")?;
+        let offset_us = row
+            .remove("time_offset_us")
+            .map(|value| value.as_i64().context("time_offset_us must be an integer"))
+            .transpose()?
+            .unwrap_or(position as i64);
+        row.insert(
+            "oracle_time".to_owned(),
+            json!(base_us.saturating_add(offset_us)),
+        );
+        ndjson.push_str(&serde_json::to_string(&row)?);
+        ndjson.push('\n');
+    }
+    let response = client
+        .post(format!("{base}/insert/jsonline"))
+        .query(&[
+            ("_stream_fields", "case"),
+            ("_time_field", "oracle_time"),
+            ("_msg_field", "_msg"),
+        ])
+        .header("content-type", "application/stream+json")
+        .body(ndjson)
+        .send()?;
+    if !response.status().is_success() {
+        bail!("VictoriaLogs ingestion returned {}", response.status());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, _, body) = victorialogs_request(&client, &base, "*")?;
+        let count = body.lines().filter(|line| !line.trim().is_empty()).count();
+        if status == 200 && count == rows.len() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "VictoriaLogs ingested {count} of {} oracle rows before the deadline",
+                rows.len()
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let failures = victorialogs_cases(&client, &base, &fixture, base_us)?
+        + victorialogs_stats_cases(&client, &base, &fixture)?
+        + victorialogs_error_cases(&client, &base, &fixture)?;
+    if failures != 0 {
+        bail!("{failures} VictoriaLogs API oracle case(s) failed");
+    }
+    Ok(())
+}
+
 pub(crate) fn run(root: &Path, args: OracleArgs) -> Result<()> {
     let manifest_path = root.join(&args.manifest);
     let manifest: OracleManifest = load_json(&manifest_path)?;
@@ -1009,6 +1287,9 @@ pub(crate) fn run(root: &Path, args: OracleArgs) -> Result<()> {
         }
         OracleCommand::PrometheusApi => {
             prometheus_api(root, &args.runtime, &manifest.oracles["prometheus"])?
+        }
+        OracleCommand::VictoriaLogsApi => {
+            victorialogs_api(root, &args.runtime, &manifest.oracles["victorialogs"])?
         }
     }
     Ok(())
@@ -1098,6 +1379,35 @@ mod tests {
                     assert!(matches!(order, "ordered" | "unordered"));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn victorialogs_fixture_ids_and_stream_cases_are_unique() {
+        let root = repository_root();
+        let fixture: Value =
+            load_json(&root.join("tests/query_oracles/victorialogs/api_cases.json")).unwrap();
+        assert_eq!(fixture.get("schema_version"), Some(&json!(1)));
+
+        let mut identifiers = BTreeSet::new();
+        for name in ["query_cases", "stats_cases", "error_cases"] {
+            for case in object_cases(&fixture, name).unwrap() {
+                let identifier = case_id(case);
+                assert!(identifier.starts_with("LQL-"), "{identifier}");
+                assert!(
+                    identifiers.insert(identifier.to_owned()),
+                    "duplicate {identifier}"
+                );
+                if let Some(order) = case.get("result_order").and_then(Value::as_str) {
+                    assert!(matches!(order, "ordered" | "unordered"));
+                }
+            }
+        }
+
+        let mut stream_cases = BTreeSet::new();
+        for row in fixture.get("rows").and_then(Value::as_array).unwrap() {
+            let case = row.get("case").and_then(Value::as_str).unwrap();
+            assert!(stream_cases.insert(case.to_owned()), "duplicate {case}");
         }
     }
 

@@ -193,6 +193,12 @@ impl BlockStore for ShadowBlockStore {
         true
     }
 
+    fn check_cancelled(&self) -> Result<(), String> {
+        Self::conn()?
+            .query_row("SELECT 1", [], |_| Ok(()))
+            .map_err(|error| format!("log query cancellation checkpoint failed: {error}"))
+    }
+
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
         let conn = Self::conn()?;
         self.insert_block(&conn, block)

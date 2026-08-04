@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
-use timeless_logs_api::{run, Config};
+use timeless_logs_api::{run, Config, LogsQueryLimits};
 
 const USAGE: &str = "usage: timeless-logs-api <libtimeless_ext.so> <database> [listen-address]";
 
@@ -92,6 +92,36 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let logs_query_limits = LogsQueryLimits {
+        max_result_rows: match positive_usize_from_env(
+            "TIMELESS_LOGS_LOGSQL_MAX_RESULT_ROWS",
+            defaults.logs_query_limits.max_result_rows,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        max_work_rows: match positive_usize_from_env(
+            "TIMELESS_LOGS_LOGSQL_MAX_WORK_ROWS",
+            defaults.logs_query_limits.max_work_rows,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        max_response_bytes: match positive_usize_from_env(
+            "TIMELESS_LOGS_LOGSQL_MAX_RESPONSE_BYTES",
+            defaults.logs_query_limits.max_response_bytes,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        deadline: match duration_millis_from_env(
+            "TIMELESS_LOGS_LOGSQL_DEADLINE_MS",
+            defaults.logs_query_limits.deadline,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+    };
     let config = Config {
         extension_path: PathBuf::from(extension_path),
         database_path: PathBuf::from(database_path),
@@ -100,6 +130,7 @@ async fn main() -> ExitCode {
         command_queue_batches,
         flush_interval,
         optimize_interval,
+        logs_query_limits,
         auth,
         ..defaults
     };
@@ -110,6 +141,11 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn usage_error(error: String) -> ExitCode {
+    eprintln!("{error}");
+    ExitCode::from(2)
 }
 
 fn positive_usize_from_env(name: &str, default: usize) -> Result<usize, String> {
@@ -146,6 +182,21 @@ fn interval_from_env(name: &str, default_seconds: u64) -> Result<Duration, Strin
         return Err(format!("{name} must be positive"));
     }
     Ok(Duration::from_secs(seconds))
+}
+
+fn duration_millis_from_env(name: &str, default: Duration) -> Result<Duration, String> {
+    let millis = match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|error| format!("invalid {name}={value:?}: {error}"))?,
+        Err(std::env::VarError::NotPresent) => u64::try_from(default.as_millis())
+            .map_err(|_| format!("default {name} overflows u64"))?,
+        Err(error) => return Err(format!("read {name}: {error}")),
+    };
+    if millis == 0 {
+        return Err(format!("{name} must be positive"));
+    }
+    Ok(Duration::from_millis(millis))
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@
 //!   - buffered + flushed merge correctness
 //!     plus codec round-trips and validation edges.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -1744,4 +1744,157 @@ fn released_flush_frame_still_rolls_back_with_outer_transaction() {
     engine.txn_rollback();
 
     assert_eq!(engine.stats(), (0, 0, 1));
+}
+
+struct CancellingQueryStore {
+    inner: MemBlockStore,
+    cancel_on_read: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl BlockStore for CancellingQueryStore {
+    fn query_snapshot_keeps_locations_readable(&self) -> bool {
+        true
+    }
+
+    fn check_cancelled(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err("test log query cancelled".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
+        self.inner.put_block(block)
+    }
+
+    fn replace_blocks(
+        &self,
+        add: &[EncodedBlock],
+        remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        self.inner.replace_blocks(add, remove, on_committed)
+    }
+
+    fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
+        let bytes = self.inner.read_block(loc)?;
+        if self.cancel_on_read.load(Ordering::Acquire) {
+            self.cancelled.store(true, Ordering::Release);
+        }
+        Ok(bytes)
+    }
+
+    fn delete_blocks(&self, locs: &[BlockLoc]) -> Vec<String> {
+        self.inner.delete_blocks(locs)
+    }
+
+    fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
+        self.inner.scan()
+    }
+
+    fn query_terms(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.inner.query_terms(terms, ts_min, ts_max)
+    }
+
+    fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
+        self.inner.save_meta(key, value)
+    }
+
+    fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner.load_meta(key)
+    }
+}
+
+#[test]
+fn query_work_limits_bound_decode_and_cancellation_leaves_the_engine_reusable() {
+    let cancel_on_read = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let engine = BlockEngine::new(
+        Box::new(CancellingQueryStore {
+            inner: MemBlockStore::new(),
+            cancel_on_read: Arc::clone(&cancel_on_read),
+            cancelled: Arc::clone(&cancelled),
+        }),
+        config(&["service"]),
+    )
+    .unwrap();
+    for ts in 0..10 {
+        engine
+            .push(entry(ts, 1, "work", &[("service", "api")]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+
+    let query = LogQuery {
+        message_contains: Some("work".into()),
+        ..full_range_query()
+    };
+    let error = engine
+        .query_ordered_with_work_limit_after_snapshot(
+            &query,
+            LogQueryOrder::Asc,
+            Some(1),
+            Some(9),
+            || {},
+        )
+        .unwrap_err();
+    assert_eq!(error, "log query exceeded max_work_entries=9");
+
+    engine
+        .push(entry(10, 1, "buffered", &[("service", "api")]))
+        .unwrap();
+    engine
+        .push(entry(11, 1, "buffered", &[("service", "api")]))
+        .unwrap();
+    let mut snapshot_completed = false;
+    let error = engine
+        .query_ordered_with_work_limit_after_snapshot(
+            &query,
+            LogQueryOrder::Asc,
+            Some(1),
+            Some(1),
+            || snapshot_completed = true,
+        )
+        .unwrap_err();
+    assert_eq!(error, "log query exceeded max_work_entries=1");
+    assert!(
+        !snapshot_completed,
+        "live-buffer work must fail before filtering/cloning completes"
+    );
+    engine.flush().unwrap();
+
+    cancel_on_read.store(true, Ordering::Release);
+    let error = engine
+        .query_ordered_with_work_limit_after_snapshot(
+            &query,
+            LogQueryOrder::Asc,
+            Some(12),
+            Some(12),
+            || {},
+        )
+        .unwrap_err();
+    assert_eq!(error, "test log query cancelled");
+
+    cancel_on_read.store(false, Ordering::Release);
+    cancelled.store(false, Ordering::Release);
+    assert_eq!(
+        engine
+            .query_ordered_with_work_limit_after_snapshot(
+                &query,
+                LogQueryOrder::Asc,
+                Some(12),
+                Some(12),
+                || {},
+            )
+            .unwrap()
+            .len(),
+        10
+    );
 }

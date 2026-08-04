@@ -96,7 +96,7 @@ sqlite3 demo.db \
 | module | row shape | ts unit | indexed dimensions (pushdown) |
 |---|---|---|---|
 | `timeless_metrics` | `(name, ts, value, labels)` | **seconds** | `name` =, `ts` ranges |
-| `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column =, exact `message_contains` = |
+| `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column =, exact `message_contains` =; optional hidden `max_work_entries` bounds examined entries |
 | `timeless_traces` | core IDs/timing plus typed `attributes`, `status_description`, `events`, `resource`, `instrumentation_scope` | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
 
 All three share the same lifecycle: inserts land in an in-memory buffer
@@ -420,6 +420,16 @@ SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
 SELECT key, value FROM timeless_stats('metrics')
  WHERE key LIKE 'raw_batch_query_%' ORDER BY key;
 
+-- Logs expose block, entry, payload, index, timestamp-unit, and current
+-- optimizer-source totals without exposing extension shadow tables:
+SELECT key, value FROM timeless_stats('logs')
+ WHERE key IN ('timestamp_unit','blocks','raw_blocks','compressed_blocks',
+               'buffered_entries','disk_entries','total_entries',
+               'bytes_on_disk','raw_bytes','compressed_bytes','terms',
+               'index_bytes','ts_min','ts_max','optimize_source_entries',
+               'optimize_source_bytes')
+ ORDER BY key;
+
 -- Optional discovery filters use the same matcher JSON and are applied
 -- before unrelated catalog rows cross SQLite:
 SELECT labels FROM timeless_series('metrics', 'cpu_usage',
@@ -432,6 +442,9 @@ For worked recipes — reset-corrected counter math in pure SQL, top-k
 per bucket, cross-metric joins, IQR/σ outlier exclusion, gap-fill
 patterns — see **[docs/QUERIES.md](docs/QUERIES.md)**; every recipe in
 it is executed by the test suite, so the cookbook can't rot.
+Hosts must use these public rows rather than querying implementation-owned
+shadow tables; additive keys may appear as the extension gains observable
+capabilities.
 
 ### Logs
 
@@ -450,7 +463,13 @@ SELECT ts, level, message FROM logs
 -- 1753000000123|error|payment declined: card_expired
 ```
 
-- `level` is a strict vocabulary: `debug | info | warning | error`.
+- `level` is a strict eight-value vocabulary: `debug | info | notice |
+  warning | error | critical | alert | emergency`. Legacy flat batches retain
+  their four-level representation; rich-v1 batches preserve all eight names.
+- `metadata` is canonical typed JSON. Strings, numbers, booleans, nulls,
+  arrays, and nested objects survive flush, optimize, and reopen. Declared
+  `index_keys` project string values for posting-list pruning without replacing
+  the authoritative typed object.
 - Index-key equality intersects posting lists in the `_terms` shadow table;
   only matching blocks are decompressed.
 - `message LIKE '%…%'` scans by default — or declare
@@ -466,7 +485,7 @@ SELECT ts, level, message FROM logs
 
   ```sql
   SELECT ts, level, message FROM logs
-   WHERE message_contains='timeout'
+   WHERE message_contains='timeout' AND max_work_entries=100000
    ORDER BY ts DESC LIMIT 100;
   ```
 
@@ -475,11 +494,11 @@ SELECT ts, level, message FROM logs
   for a non-ASCII needle so it cannot introduce false negatives.
 - Index keys can also be used as INSERT shorthand: a non-NULL value in the
   hidden column merges into the metadata JSON.
-- **Batch ingest**: a columnar blob (v0 spec in the vtab docs) into the
-  hidden column ingests a whole batch in one statement, validated
-  all-or-nothing — one round trip per batch for remote writers, +16-46%
-  throughput in-process (logs/traces ingest is flush-bound, unlike
-  metrics where the blob path is 10x).
+- **Batch ingest**: the flat string-only v0 batch remains readable; rich-v1
+  preserves microsecond timestamps, all eight severities, and canonical typed
+  metadata. Inserting either public columnar blob into the hidden table column
+  ingests a whole batch in one statement, validated all-or-nothing. The
+  extension's 8,192-entry buffer remains authoritative.
 
 **Bucket kernel** — the dominant logs-dashboard shape (volume histogram
 by level or any index key) evaluated engine-side; level-pure blocks that
@@ -495,19 +514,36 @@ SELECT bucket_ts, group_key, n FROM timeless_log_buckets(
 GROUP BY over the raw vtab (5.7x, totals verified equal).
 
 **Scalar count** — exact count without materializing a log rowset. `filter` is
-a flat JSON object: `level` selects severity and every other member is a
-metadata equality. The remaining arguments are optional exact substring and
-inclusive timestamp bounds:
+a flat filter JSON object: `level` selects severity and every other string
+member is a metadata equality. The remaining arguments are optional exact
+substring, inclusive timestamp bounds, and a positive examined-entry cap:
 
 ```sql
 SELECT n FROM timeless_log_count(
-  'logs', '{"level":"error","service":"api"}', 'timeout', :t0, :t1
+  'logs', '{"level":"error","service":"api"}', 'timeout', :t0, :t1,
+  :max_work_entries
 );
 ```
 
 Only the table name is required. Fully covered unfiltered or level-pure blocks
 use persisted `entry_count` without reading payloads. Boundary, legacy-mixed,
-metadata-filtered, and message-filtered blocks decode one at a time.
+metadata-filtered, and message-filtered blocks decode one at a time. The
+optional final cap is charged before candidate blocks are decoded and fails
+without a partial result. The same guard is a hidden equality input on
+`timeless_logs` and the final argument to bounded field discovery:
+
+```sql
+SELECT value FROM timeless_log_values(
+  'logs', 'host', '{"level":"error"}', NULL,
+  :t0, :t1, 1000, :max_work_entries
+);
+```
+
+`timeless_capabilities()` advertises these guards under
+`query_surfaces.timeless_logs`, `.timeless_log_count`, and
+`.timeless_log_values`. Omitting them preserves the older unbounded direct-SQL
+contract; the Rust logs API requires the capability and always binds a hard
+limit.
 
 ### Traces
 

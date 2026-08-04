@@ -21,8 +21,8 @@ Each recipe must:
    still owes language/result shaping, or an intentionally different SQL
    operation;
 4. state ordering, bounds, missing-value, and type behavior;
-5. name its matrix row IDs and its executable regression in `tests/cli.sh` or
-   an extension-backed server contract; and
+5. name its matrix row IDs and its executable regression in the Rust
+   `timeless-query-harness` or an extension-backed server contract; and
 6. show `EXPLAIN QUERY PLAN` or measured counters when a claim depends on
    pushdown rather than ordinary row filtering.
 
@@ -97,10 +97,10 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-053`](#sql-prom-053-day_of_year-days_in_month-month-and-year) | `PQL-F18` | current foundation | UTC calendar extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
 | [`SQL-PROM-054`](#sql-prom-054-histogram_quantile-over-classic-buckets) | `PQL-H01` | current foundation | bounded classic-bucket grouping, monotonic correction, and linear interpolation; API owns strict bound parsing, tolerance, annotations, IEEE, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
-| [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
+| [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
 | [`SQL-LOG-004`](#sql-log-004-distinct-field-values) | `LQL-P04`, `LQL-S03`, `LQL-S04` | current foundation | bounded lexical values; aggregate syntax remains API work |
-| [`SQL-LOG-005`](#sql-log-005-arbitrary-metadata-equality) | `LQL-F05` | reference | correct decoded fallback for a non-indexed field |
+| [`SQL-LOG-005`](#sql-log-005-arbitrary-metadata-equality) | `LQL-F05` | current | exact typed decoded fallback for a non-indexed field; `json_type` distinguishes missing, null, and empty |
 | [`SQL-LOG-006`](#sql-log-006-counts-by-field-and-time-bucket) | `LQL-P09`, `LQL-S05`, `LQL-S08` | current foundation | storage bucket vector or ordinary SQL grouping |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
@@ -3132,6 +3132,7 @@ WHERE ts >= :start_ms
   AND ts <= :end_ms
   AND level = :level
   AND service = :service
+  AND max_work_entries = :max_work_entries
 ORDER BY ts DESC
 LIMIT :limit OFFSET :offset;
 ```
@@ -3147,12 +3148,28 @@ SELECT ts, level, message, metadata
 FROM logs
 WHERE ts >= :start_ms AND ts <= :end_ms
   AND level = :level AND service = :service
+  AND max_work_entries = :max_work_entries
 ORDER BY ts DESC
 LIMIT :limit OFFSET :offset;
 ```
 
+The `_ms` suffix in this legacy-default recipe names the unit selected when
+the table was created; the release logs server creates `timestamp_unit='us'`
+and binds epoch microseconds instead. Relative and closed bounds use `>=` and
+`<=`. For `_time:[start,end)` in a microsecond table, bind
+`:start_us = start` and `:end_us = end - 1`; `(start,end]` binds
+`start + 1` and `end`. The Rust planner rejects overflow and an empty
+intersection rather than widening it.
+
 `service` is fast only when declared in `index_keys`. Other declared keys use
-the same shape.
+the same shape. `:max_work_entries` is a positive hard cap on entries examined,
+independent of result cardinality. It is optional for backward-compatible
+direct SQL, but the Rust server always binds it; a small `LIMIT` therefore
+cannot conceal an unbounded live-buffer filter or block decode. Zero, negative,
+NULL, and non-integer equality inputs fail explicitly. Omit the predicate for
+the compatible unbounded form; because an unbound hidden input projects SQL
+NULL, `max_work_entries IS NULL` selects that form rather than supplying a
+guard.
 
 ### SQL-LOG-002: message substring
 
@@ -3164,13 +3181,19 @@ FROM logs
 WHERE ts >= :start_ms
   AND ts <= :end_ms
   AND message_contains = :needle
+  AND max_work_entries = :max_work_entries
 ORDER BY ts DESC
 LIMIT :limit OFFSET :offset;
 ```
 
 This is Timeless's case-insensitive literal substring operation. It is not by
-itself VictoriaLogs word, phrase, prefix, or regexp semantics. The matrix
-keeps those rows separate.
+itself VictoriaLogs word, phrase, prefix, or regexp semantics. A shipped
+VictoriaLogs phrase preserves exact case and bytes, then enforces a word
+boundary when its first or last character is a Unicode letter, digit, or
+underscore. Portable SQLite has no complete Unicode-category predicate for
+that boundary, so `LQL-F08` honestly remains bounded `ROWS`/Rust API
+composition and does not claim this SQL recipe. The matrix keeps the two
+operations separate.
 
 ### SQL-LOG-003: exact count
 
@@ -3183,7 +3206,8 @@ FROM timeless_log_count(
   :filter_json,
   :message_contains,
   :start_ms,
-  :end_ms
+  :end_ms,
+  :max_work_entries
 );
 ```
 
@@ -3193,9 +3217,14 @@ Example `:filter_json`:
 {"level":"error","service":"api","status":"500"}
 ```
 
-Only the table name is required; other arguments may be `NULL`. Fully covered
+Only the table name is required; other arguments may be omitted. A positive
+`:max_work_entries` bounds entries decoded for boundary or content predicates;
+metadata-only contributions do not consume row-decode work. Fully covered
 blocks can answer from metadata, while boundary and content predicates decode
-as needed. Direct regression: `tests/cli.sh` section 43.
+as needed. A supplied NULL, zero, negative, or non-integer guard fails
+explicitly; omitting the final
+argument retains the compatible unbounded arity. Direct regression: the Rust SQL-equivalent harness and
+`tests/cli.sh` section 43.
 
 ### SQL-LOG-004: distinct field values
 
@@ -3210,15 +3239,18 @@ FROM timeless_log_values(
   :message_contains,
   :start_ms,
   :end_ms,
-  :max_values
+  :max_values,
+  :max_work_entries
 )
 ORDER BY value;
 ```
 
-The default cap is 1,000 and the hard cap is 100,000. This is the direct SQL
-foundation for field discovery and distinct-value query work. Extension-backed
-coverage lives in the Rust logs server storage contract; add a CLI recipe
-regression before marking the corresponding LogsQL rows shipped.
+The value-result default is 1,000 and its hard cap is 100,000.
+`:max_work_entries` separately caps entries examined while discovering those
+values. A supplied NULL, zero, negative, or non-integer guard fails explicitly;
+omitting the final argument
+retains the compatible unbounded arity. This is the direct SQL foundation for
+field discovery and distinct-value query work.
 
 ### SQL-LOG-005: arbitrary metadata equality
 
@@ -3230,6 +3262,8 @@ SELECT ts, level, message, metadata
 FROM logs
 WHERE ts >= :start_ms
   AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND json_type(metadata, '$.deployment.region') = 'text'
   AND json_extract(metadata, '$.deployment.region') = :region
 ORDER BY ts DESC
 LIMIT :limit OFFSET :offset;
@@ -3238,6 +3272,24 @@ LIMIT :limit OFFSET :offset;
 This is correct but requires decoding candidate rows. If measurements show a
 stable, selective key is common, create a new table with that key declared in
 `index_keys`; do not read or mutate shadow tables.
+
+`json_extract` alone is insufficient for exact typed filters because SQLite
+returns SQL `NULL` for both a missing path and a stored JSON null. Pair it with
+`json_type`:
+
+| stored value | exact SQL predicate |
+|---|---|
+| missing | `json_type(metadata, '$.nested.value') IS NULL` |
+| JSON null | `json_type(metadata, '$.nested.value') = 'null'` |
+| empty string | `json_type(...) = 'text' AND json_extract(...) = ''` |
+| boolean true | `json_type(...) = 'true' AND json_extract(...) = 1` |
+| number 2 | `json_type(...) IN ('integer','real') AND json_extract(...) = 2` |
+| string `"2"` | `json_type(...) = 'text' AND json_extract(...) = '2'` |
+
+The Rust P0 compatibility grammar keeps legacy `field:value` as exact string
+equality. Its explicit `field:=value` form accepts JSON primitives, and dotted
+field names select nested object leaves. Arrays/objects as whole comparison
+values and VictoriaLogs word/phrase exactness remain separate matrix rows.
 
 ### SQL-LOG-006: counts by field and time bucket
 
@@ -3277,7 +3329,8 @@ When a matrix row uses `SQL` as its target or foundation:
 1. add its stable row ID to the recipe index;
 2. include an executable statement and setup;
 3. describe exact and non-equivalent language behavior;
-4. add the statement to `tests/cli.sh` with hand-verified output; and
+4. add the statement to the Rust `timeless-query-harness` with hand-verified
+   semantic output; and
 5. link the recipe from the matrix row before changing its status to
    `shipped`.
 

@@ -188,6 +188,16 @@ pub trait BlockStore: Send + Sync {
         false
     }
 
+    /// Cooperative query-cancellation checkpoint.
+    ///
+    /// In-memory stores have nothing to observe, so the default succeeds. A
+    /// SQLite-backed store overrides this with a tiny statement on the host
+    /// connection. That statement observes `sqlite3_interrupt()` and progress
+    /// handlers even while the virtual table is decoding blocks in Rust.
+    fn check_cancelled(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Persist one block and its terms. Same-operation term insert:
     /// a block is never visible without its posting-list rows.
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String>;

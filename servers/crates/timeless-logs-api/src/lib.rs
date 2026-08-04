@@ -5,6 +5,7 @@
 //! automatic raw flush, block layout, and compression behavior unchanged.
 
 mod api;
+mod logsql;
 mod storage;
 
 use std::net::SocketAddr;
@@ -16,9 +17,53 @@ use timeless_api_common::{
 };
 use tokio::net::TcpListener;
 
-pub use api::router;
-pub use storage::{LogEntry, QuerySpec, Storage, StorageStats, TimestampUnit};
+pub use api::{router, router_with_limits};
+pub use logsql::{
+    parse as parse_logsql, parse_at as parse_logsql_at, LogsqlError, LogsqlErrorKind, LogsqlOutput,
+    LogsqlPlan,
+};
+pub use storage::{LogEntry, MetadataExact, QuerySpec, Storage, StorageStats, TimestampUnit};
 pub use timeless_api_common::BackupReport;
+
+/// Hard LogsQL execution limits applied even when authentication is disabled.
+/// Claim-derived policy may lower these values but cannot raise the storage
+/// owner's bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LogsQueryLimits {
+    pub max_result_rows: usize,
+    pub max_work_rows: usize,
+    pub max_response_bytes: usize,
+    pub deadline: Duration,
+}
+
+impl Default for LogsQueryLimits {
+    fn default() -> Self {
+        Self {
+            max_result_rows: 100_000,
+            max_work_rows: 100_000,
+            max_response_bytes: 16 * 1024 * 1024,
+            deadline: Duration::from_secs(30),
+        }
+    }
+}
+
+impl LogsQueryLimits {
+    pub fn validate(self) -> Result<(), String> {
+        if !(1..=100_000).contains(&self.max_result_rows) {
+            return Err("max_result_rows must be in 1..=100000".into());
+        }
+        if self.max_work_rows == 0 {
+            return Err("max_work_rows must be positive".into());
+        }
+        if self.max_response_bytes == 0 {
+            return Err("max_response_bytes must be positive".into());
+        }
+        if self.deadline.as_millis() == 0 {
+            return Err("LogsQL deadline must be at least 1ms".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -30,6 +75,7 @@ pub struct Config {
     pub flush_interval: Duration,
     pub optimize_interval: Duration,
     pub timestamp_unit: TimestampUnit,
+    pub logs_query_limits: LogsQueryLimits,
     pub auth: AuthConfig,
 }
 
@@ -52,6 +98,7 @@ impl Default for Config {
             // microseconds. Direct SQL callers can still create the legacy
             // default millisecond table explicitly.
             timestamp_unit: TimestampUnit::Microseconds,
+            logs_query_limits: LogsQueryLimits::default(),
             auth: AuthConfig::disabled(),
         }
     }
@@ -75,6 +122,7 @@ impl Config {
         if self.flush_interval.is_zero() || self.optimize_interval.is_zero() {
             return Err("maintenance intervals must be positive".into());
         }
+        self.logs_query_limits.validate()?;
         self.auth.preflight()?;
         Ok(())
     }
@@ -90,7 +138,10 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.command_queue_batches,
         config.timestamp_unit,
     )?;
-    let app = protect_router(router(storage.clone()), config.auth.clone());
+    let app = protect_router(
+        router_with_limits(storage.clone(), config.logs_query_limits),
+        config.auth.clone(),
+    );
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|e| format!("bind {}: {e}", config.listen))?;
@@ -138,6 +189,12 @@ mod tests {
         assert_eq!(
             config.validate().unwrap_err(),
             "reader_connections must be positive"
+        );
+        config.reader_connections = 1;
+        config.logs_query_limits.max_response_bytes = 0;
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "max_response_bytes must be positive"
         );
     }
 }

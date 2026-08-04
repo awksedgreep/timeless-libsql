@@ -209,10 +209,12 @@ CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,path,status');
 | column | type | required | notes |
 |---|---|---|---|
 | `ts` | INTEGER | yes | unix timestamp in **milliseconds** |
-| `level` | TEXT | yes | exactly one of `debug`, `info`, `warning`, `error` |
+| `level` | TEXT | yes | exactly one of `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency` |
 | `message` | TEXT | yes | the log line |
-| `metadata` | TEXT | no | flat JSON object of strings |
+| `metadata` | TEXT | no | canonical typed JSON object; nested objects, arrays, strings, numbers, booleans, and null survive |
 | *(each index key)* | TEXT | hidden | usable in SELECT, WHERE, and INSERT |
+| `message_contains` | TEXT | hidden query input | exact case-insensitive literal substring, evaluated before rows cross SQLite |
+| `max_work_entries` | INTEGER | hidden query input | optional positive cap on buffered/candidate entries examined before decode |
 
 Every `index_keys` key becomes a real (hidden) column. You can filter on it,
 select it, and even insert through it:
@@ -262,8 +264,28 @@ predicate; it can also bound an ordered result before rows cross SQLite:
 ```sql
 SELECT * FROM logs
 WHERE message_contains='timeout' AND ts >= :start
+  AND max_work_entries=100000
 ORDER BY ts DESC LIMIT 100;
 ```
+
+For an exact scalar count without materializing rows, or bounded field-value
+discovery, use the public TVFs. Existing shorter arities remain compatible;
+the optional final argument is the same positive pre-decode work guard:
+
+```sql
+SELECT n FROM timeless_log_count(
+  'logs', '{"level":"error","service":"api"}', NULL,
+  :start, :stop, :max_work_entries);
+
+SELECT value FROM timeless_log_values(
+  'logs', 'host', '{"level":"error"}', NULL,
+  :start, :stop, 1000, :max_work_entries);
+```
+
+Generic tables default to epoch milliseconds. The release Rust logs server
+declares microseconds and binds every timestamp and work guard in that native
+unit. Inspect `timeless_capabilities()` before depending on an additive query
+input.
 
 For tokenized/ranked full-text search, a plain table with FTS5 remains the
 better tool; this table is optimized for dimensional filtering, literal
@@ -347,7 +369,7 @@ storage engine can use to *skip* decompression:
 | table | accelerated predicates |
 |---|---|
 | metrics | `series_id = ...`, `name = ...`, `ts` ranges (`>`, `>=`, `<`, `<=`, `BETWEEN`) |
-| logs | `level = ...`, any index-key `= ...`, `ts` ranges |
+| logs | `level = ...`, any index-key `= ...`, `ts` ranges, `message_contains = ...`; `max_work_entries = ...` bounds examined entries |
 | traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges |
 
 Everything else still *works* — it's ordinary SQL over the decompressed rows
@@ -431,6 +453,10 @@ INSERT INTO traces(traces)   VALUES ('optimize:65536'); -- bounded trace source 
   so a call always makes progress. Inspect `optimize_pending_*`,
   `optimize_merge_ready_*`, and the raw/merge phase counters in
   `timeless_stats(...)` to schedule it without guessing at block structure.
+  For logs, `optimize_source_entries` and `optimize_source_bytes` expose the
+  current raw-or-undersized source sample used to translate a byte budget into
+  an entry budget. These are public extension rows; hosts must not inspect
+  shadow block tables.
 - **`prune:<ts>`** — retention. Drops all data older than the timestamp,
   which is given in *that table's* unit:
 
@@ -461,9 +487,9 @@ of its shadow storage.
 |---|---|
 | `not authorized` on `.load` | macOS system sqlite3 — see [section 1](#1-install-and-load) |
 | `name is required (TEXT)` / `ts is required (INTEGER)` / `value is required (REAL)` | metrics insert with a NULL/missing required column |
-| `level is required (TEXT: debug\|info\|warning\|error)` | logs `level` is NULL or not one of the four exact words — vocabularies are strict, `'warn'` and `'ERROR'` are rejected, not coerced |
+| `level is required` / invalid severity | logs `level` is NULL or not one of the eight exact lowercase names — `'warn'` and `'ERROR'` are rejected, not coerced |
 | `trace_id is required (16-byte BLOB or 32-char hex TEXT)` | wrong id length/format; same pattern for `span_id` (8 bytes / 16 hex chars) |
-| flat-JSON errors on `labels` / `metadata` | value must be a flat JSON object with **string** values only |
+| flat-JSON errors on metric `labels` | labels must be a flat JSON object with **string** values only; rich log `metadata` instead accepts canonical typed/nested JSON |
 | JSON shape errors on trace rich fields | `attributes`, `resource`, and `instrumentation_scope` must be JSON objects; `events` must be an array; typed and nested values are supported |
 | errors on `UPDATE` / `DELETE` | by design; the store is append-only — use `prune:<ts>` for retention |
 | unknown command string | typo in a command insert, e.g. `'optimise'` — commands are exact: `flush`, `compact` (metrics), `optimize` (logs/traces), `prune:<ts>` |
@@ -576,7 +602,7 @@ INSERT INTO traces(trace_id, span_id, name, service, start_ts) VALUES (...);   -
 ... WHERE service = 'api' AND status = 'error' AND start_ts > :t
 
 -- Vocabularies (strict, lowercase)
-level:  debug | info | warning | error
+level:  debug | info | notice | warning | error | critical | alert | emergency
 kind:   internal | server | client | producer | consumer
 status: unset | ok | error
 ```
