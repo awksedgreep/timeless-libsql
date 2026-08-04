@@ -45,6 +45,26 @@ class QueryOracleManifestTests(unittest.TestCase):
         identifiers = [case["id"] for case in fixture["cases"]]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         self.assertTrue(all(identifier.startswith("PQL-") for identifier in identifiers))
+        for case in fixture.get("operator_cases", []):
+            self.assertIn(case.get("result_order", "unordered"), {"ordered", "unordered"})
+
+    def test_promql_vector_comparison_distinguishes_promised_order(self) -> None:
+        expected = [
+            {"metric": {"value": "first"}, "value": [1, "1"]},
+            {"metric": {"value": "second"}, "value": [1, "2"]},
+        ]
+        reordered = list(reversed(expected))
+        self.assertTrue(
+            query_oracles.query_results_equal(expected, reordered, ordered=False)
+        )
+        self.assertFalse(
+            query_oracles.query_results_equal(expected, reordered, ordered=True)
+        )
+        changed = copy.deepcopy(reordered)
+        changed[0]["value"][1] = "3"
+        self.assertFalse(
+            query_oracles.query_results_equal(expected, changed, ordered=False)
+        )
 
 
 if __name__ == "__main__":

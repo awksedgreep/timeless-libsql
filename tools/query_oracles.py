@@ -27,6 +27,19 @@ def load_manifest(root: Path, relative: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def query_results_equal(expected: list[dict], actual: object, *, ordered: bool) -> bool:
+    """Compare PromQL result vectors without inventing an ordering contract."""
+    if not isinstance(actual, list) or len(actual) != len(expected):
+        return False
+    if ordered:
+        return actual == expected
+
+    def stable_key(value: dict) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    return sorted(actual, key=stable_key) == sorted(expected, key=stable_key)
+
+
 def validate_manifest(root: Path, manifest: dict) -> list[str]:
     errors: list[str] = []
     if manifest.get("schema_version") != 1:
@@ -634,7 +647,11 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 response.status == 200
                 and body.get("status") == "success"
                 and body.get("data", {}).get("resultType") == result_type
-                and body.get("data", {}).get("result") == result
+                and query_results_equal(
+                    result,
+                    body.get("data", {}).get("result"),
+                    ordered=case.get("result_order", "unordered") == "ordered",
+                )
             )
             if not valid:
                 print(f"{case['id']}: expected {result!r}; got {body!r}", file=sys.stderr)

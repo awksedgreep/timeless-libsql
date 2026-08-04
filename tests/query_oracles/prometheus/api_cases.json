@@ -526,6 +526,7 @@
       "id": "PQL-O14-topk-global",
       "query": "topk(1 + 1, oracle_aggregation)",
       "evaluation_offset_ms": 30000,
+      "result_order": "ordered",
       "expected_results": [
         {"metric": {"__name__": "oracle_aggregation", "host": "c", "job": "oracle", "region": "west"}, "value": 6},
         {"metric": {"__name__": "oracle_aggregation", "host": "b", "job": "oracle", "region": "east"}, "value": 4}
@@ -612,6 +613,7 @@
       "id": "PQL-O16-count-values-format",
       "query": "count_values(\"value\", oracle_count_values)",
       "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
       "expected_results": [
         {"metric": {"value": "0.00000000000000000001"}, "value": 1},
         {"metric": {"value": "100000000000000000000"}, "value": 1},

@@ -92,4 +92,7 @@ Prometheus container. For lookback semantics, the harness encodes one
 dependency-free protobuf/raw-Snappy Remote Write sample, waits for its `204`
 durability response, then tests the exact boundary, millisecond inclusion, and
 zero/default behavior against that real series. Later sessions extend these
-fixtures before implementation.
+fixtures before implementation. Multi-element vector fixtures compare by
+complete label/sample identity with `result_order: "unordered"` by default.
+They use `result_order: "ordered"` only for an operator such as an instant
+`topk` whose output order is part of the language contract.
