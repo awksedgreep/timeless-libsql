@@ -564,3 +564,42 @@ adds all six operators, exact ordering, cumulative limits, shutdown, and cold
 reopen. Section 33 executes both public-grid SQL forms. No extension opcode,
 private table, storage format, batching, compression, rollup, retention,
 transaction, or migration behavior changed.
+
+## Session 4 `PQL-O04` set-operator result
+
+The checked-in
+[`2026-08-04_session4_pql_o04.json`](evidence/2026-08-04_session4_pql_o04.json)
+was captured from exact extension and server build
+`a04981e3c3fb25263ff59116f8a288669b248a90`. The narrow shape intersects one
+exact-host instant vector with itself. The wide shape forms the
+left-preferred union of two 512-series vectors over four timestamps.
+
+| shape | final points | intermediate points/query | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `metric and metric` | 1 | 2 | 164 | 0.502 | 0.789 | 0.859 | 64 |
+| 512 series × four points, `metric or metric` | 2,048 | 4,096 | 84,004 | 8.562 | 9.632 | 10.069 | 32,768 |
+
+Both operands are independently selectable AST children, so both shapes make
+two bounded packed reads and charge every child point as intermediate work.
+Across 50 wide requests the extension considered 51,200 candidate chunks,
+decoded 1,638,400 stored points, returned 1,638,400 storage points, and the API
+reported 204,800 intermediate points. Membership itself performs no further
+storage read. The wide response is larger than arithmetic/`bool` responses
+because set operators preserve the contributing metric name.
+
+The run durably completed all 118,457 main and boundary-fixture points with
+zero failed or queued work. Live SQLite/WAL/SHM storage was 672,688 bytes and
+whole-process RSS HWM was 36,460 KiB. The existing cumulative work/response
+limits bound both child materializations and the final result; cancellation
+is checked during child execution, per-step membership, normalization, and
+serialization.
+
+Prometheus 3.13.2 API and promtool fixtures pin `and`, `unless`, left-preferred
+`or`, source metric names and values, true many-to-many membership, and
+operator precedence. The real-extension regression adds scalar rejection,
+step-local range sparsity, exact ordering, cumulative-work rejection,
+shutdown, and cold reopen. Section 33 executes `EXISTS`, `NOT EXISTS`, and
+left-preferred `UNION ALL` using only public grids. No extension opcode,
+private table, storage format, batching, compression, rollup, retention,
+transaction, or migration behavior changed; ordinary SQL and bounded Rust
+composition remain the justified boundary.
