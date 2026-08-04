@@ -1391,3 +1391,36 @@ invalid types, work limits, shutdown, and cold reopen. No extension signature,
 storage/frame format, batching, compression, index, rollup, retention,
 transaction, or migration behavior changed, and this row produced no new
 storage finding.
+
+## Session 7 `PQL-R17` float-gauge linear derivative
+
+The checked-in
+[`2026-08-04_session7_pql_r17.json`](evidence/2026-08-04_session7_pql_r17.json)
+was captured from exact extension and server build
+`75ecce62df1b6aa4999f76003d3664a41dd67d7a`. Both measured shapes use one
+bounded public packed raw read followed by the Rust PromQL timestamp-centered,
+compensated least-squares fold.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `deriv(...[5m])` | 1 | 133 | 0.622 | 0.913 | 1.056 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `deriv(...[5m])` | 2,048 | 67,902 | 3.812 | 4.014 | 5.201 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 bounded raw gauge samples
+and emits 2,048 slopes without an intermediate matrix. Centering on each
+window's first millisecond timestamp avoids absolute-epoch precision loss;
+four compensated sums preserve the pinned Prometheus arithmetic. At 4.014 ms
+p95, the existing public packed raw surface plus executable finite-value SQL
+recipe remains preferable to a regression-specific extension primitive.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 35,780 KiB. No benchmark request required cancellation; the focused
+fold regression and shared range-executor regression cover cancellation and
+reader reuse. Pinned oracle and real-extension regressions cover linear and
+nonlinear slopes at large epoch timestamps, sparse and constant series, exact
+open-left boundaries, offset output timestamps, subqueries, NaN, mixed and
+constant infinities, singleton omission, invalid types, work limits,
+shutdown, and cold reopen. No extension signature, storage/frame format,
+batching, compression, index, rollup, retention, transaction, or migration
+behavior changed, and this row produced no new storage finding.
