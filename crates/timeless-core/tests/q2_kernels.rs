@@ -129,7 +129,9 @@ fn naive_window_agg(
                 AggFn::Count => win.len() as f64,
                 AggFn::Sum => win.iter().fold(0.0f64, |a, &v| a + v),
                 AggFn::Avg => reference_compensated_average(&win),
-                AggFn::Min => win[1..].iter().fold(win[0], |a, &v| f64::min(a, v)),
+                AggFn::Min => win[1..]
+                    .iter()
+                    .fold(win[0], |a, &v| if a > v || a.is_nan() { v } else { a }),
                 AggFn::Max => win[1..].iter().fold(win[0], |a, &v| f64::max(a, v)),
             };
             out.push((t, value));
@@ -372,6 +374,39 @@ fn window_average_compensates_cancellation_and_falls_back_before_overflow() {
             assert_eq!(average.to_bits(), expected.to_bits(), "{name}");
         }
     }
+    engine.shutdown().unwrap();
+}
+
+#[test]
+fn window_min_ignores_later_nan_replaces_leading_nan_and_preserves_first_zero() {
+    let dir = temp_dir("stable_min");
+    let engine = new_engine(&dir);
+    let labels = HashMap::new();
+
+    for (name, values, expected) in [
+        ("mixed", [f64::NAN, 2.0], 2.0_f64),
+        ("later_nan", [2.0, f64::NAN], 2.0),
+        ("positive_zero_first", [0.0, -0.0], 0.0),
+        ("negative_zero_first", [-0.0, 0.0], -0.0),
+    ] {
+        let series = engine.resolve_cached(name, &labels).unwrap();
+        engine.write_point(series, 20, values[0]);
+        engine.write_point(series, 30, values[1]);
+        let minimum = engine
+            .query_window_agg_by_id(series, 30, 30, 1, 20, AggFn::Min)
+            .unwrap()[0]
+            .1;
+        assert_eq!(minimum.to_bits(), expected.to_bits(), "{name}");
+    }
+
+    let all_nan = engine.resolve_cached("all_nan", &labels).unwrap();
+    engine.write_point(all_nan, 20, f64::NAN);
+    engine.write_point(all_nan, 30, f64::NAN);
+    assert!(engine
+        .query_window_agg_by_id(all_nan, 30, 30, 1, 20, AggFn::Min)
+        .unwrap()[0]
+        .1
+        .is_nan());
     engine.shutdown().unwrap();
 }
 

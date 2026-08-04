@@ -388,10 +388,50 @@ pub(crate) enum PromPlan {
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
-    AvgOverTime { selector: Selector, window: i64 },
-    AvgOverSubquery(SubqueryPlan),
+    RangeReduction(PromRangePlan),
     RangeSelector { selector: Selector, window: i64 },
     Subquery(SubqueryPlan),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromRangeOp {
+    Avg,
+    Min,
+}
+
+impl PromRangeOp {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Avg => "avg_over_time",
+            Self::Min => "min_over_time",
+        }
+    }
+
+    fn native_name(self) -> &'static str {
+        match self {
+            Self::Avg => "avg",
+            Self::Min => "min",
+        }
+    }
+
+    fn aggregate_op(self) -> PromAggregateOp {
+        match self {
+            Self::Avg => PromAggregateOp::Avg,
+            Self::Min => PromAggregateOp::Min,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum PromRangeInput {
+    Selector { selector: Selector, window: i64 },
+    Subquery(SubqueryPlan),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromRangePlan {
+    op: PromRangeOp,
+    input: PromRangeInput,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -570,9 +610,7 @@ impl PromPlan {
                     PromValueType::Vector
                 }
             }
-            Self::Selector { .. } | Self::AvgOverTime { .. } | Self::AvgOverSubquery(_) => {
-                PromValueType::Vector
-            }
+            Self::Selector { .. } | Self::RangeReduction(_) => PromValueType::Vector,
         }
     }
 }
@@ -840,24 +878,30 @@ fn lower_promql_expr(
             lookback,
             depth + 1,
         )?)),
-        promql::Expr::Call(call) if call.func.name == "avg_over_time" => {
-            let [argument] = call.args.args.as_slice() else {
-                return Err("avg_over_time requires exactly one range vector".into());
+        promql::Expr::Call(call) if matches!(call.func.name, "avg_over_time" | "min_over_time") => {
+            let op = match call.func.name {
+                "avg_over_time" => PromRangeOp::Avg,
+                "min_over_time" => PromRangeOp::Min,
+                _ => unreachable!("guarded range function"),
             };
-            match argument.as_ref() {
+            let [argument] = call.args.args.as_slice() else {
+                return Err(format!("{} requires exactly one range vector", op.name()));
+            };
+            let input = match argument.as_ref() {
                 promql::Expr::MatrixSelector(selector) => {
                     let window = duration_millis_i64(selector.range, "range")?;
                     if window == 0 {
                         return Err("PromQL range duration must be at least 1ms".into());
                     }
                     let selector = lower_promql_selector(selector.vs.clone())?;
-                    Ok(PromPlan::AvgOverTime { selector, window })
+                    PromRangeInput::Selector { selector, window }
                 }
-                promql::Expr::Subquery(subquery) => Ok(PromPlan::AvgOverSubquery(
+                promql::Expr::Subquery(subquery) => PromRangeInput::Subquery(
                     lower_promql_subquery(subquery.clone(), lookback, depth + 1)?,
-                )),
-                _ => Err("avg_over_time requires a range vector".into()),
-            }
+                ),
+                _ => return Err(format!("{} requires a range vector", op.name())),
+            };
+            Ok(PromPlan::RangeReduction(PromRangePlan { op, input }))
         }
         other => Err(format!(
             "unsupported PromQL expression (parsed as {})",
@@ -1079,8 +1123,7 @@ fn lower_promql_subquery(
     if !matches!(
         inner,
         PromPlan::Selector { .. }
-            | PromPlan::AvgOverTime { .. }
-            | PromPlan::AvgOverSubquery(_)
+            | PromPlan::RangeReduction(_)
             | PromPlan::Unary(_)
             | PromPlan::Binary(_)
     ) {
@@ -2472,46 +2515,64 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
-        PromPlan::AvgOverTime { selector, window }
-            if features.window_batches
-                && features.window_batch_work_limit
-                && matches!(selector.metric, MetricSelection::Exact(_))
-                && selector.timing.is_default()
-                && [start, stop, step, *window]
-                    .into_iter()
-                    .all(|value| value % 1_000 == 0) =>
-        {
-            let MetricSelection::Exact(metric) = &selector.metric else {
-                unreachable!("exact metric required by window guard")
-            };
-            execute_prometheus_window(
+        PromPlan::RangeReduction(range) => match &range.input {
+            PromRangeInput::Selector { selector, window }
+                if features.window_batches
+                    && features.window_batch_work_limit
+                    && matches!(selector.metric, MetricSelection::Exact(_))
+                    && selector.timing.is_default()
+                    && [start, stop, step, *window]
+                        .into_iter()
+                        .all(|value| value % 1_000 == 0) =>
+            {
+                let MetricSelection::Exact(metric) = &selector.metric else {
+                    unreachable!("exact metric required by window guard")
+                };
+                execute_prometheus_window(
+                    conn,
+                    features.table,
+                    metric,
+                    &selector.filter,
+                    start / 1_000,
+                    stop / 1_000,
+                    step / 1_000,
+                    *window / 1_000,
+                    range.op,
+                    instant,
+                    limits,
+                    cancelled,
+                )
+            }
+            PromRangeInput::Selector { selector, window } => execute_prometheus_range_raw(
                 conn,
-                features.table,
-                metric,
-                &selector.filter,
-                start / 1_000,
-                stop / 1_000,
-                step / 1_000,
-                *window / 1_000,
+                features,
+                selector,
+                start,
+                stop,
+                step,
+                *window,
+                range.op,
                 instant,
+                query_start,
+                query_end,
                 limits,
                 cancelled,
-            )
-        }
-        PromPlan::AvgOverTime { selector, window } => execute_prometheus_avg_raw(
-            conn,
-            features,
-            selector,
-            start,
-            stop,
-            step,
-            *window,
-            instant,
-            query_start,
-            query_end,
-            limits,
-            cancelled,
-        ),
+            ),
+            PromRangeInput::Subquery(subquery) => execute_prometheus_range_subquery(
+                conn,
+                features,
+                subquery,
+                start,
+                stop,
+                step,
+                range.op,
+                instant,
+                query_start,
+                query_end,
+                limits,
+                cancelled,
+            ),
+        },
         PromPlan::RangeSelector { selector, window } => execute_prometheus_range_selector(
             conn,
             features,
@@ -2529,19 +2590,6 @@ fn execute_prometheus(
             subquery,
             start,
             stop,
-            instant,
-            query_start,
-            query_end,
-            limits,
-            cancelled,
-        ),
-        PromPlan::AvgOverSubquery(subquery) => execute_prometheus_avg_subquery(
-            conn,
-            features,
-            subquery,
-            start,
-            stop,
-            step,
             instant,
             query_start,
             query_end,
@@ -3903,13 +3951,14 @@ fn execute_prometheus_subquery(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_prometheus_avg_subquery(
+fn execute_prometheus_range_subquery(
     conn: &Connection,
     features: QueryFeatures,
     subquery: &SubqueryPlan,
     start: i64,
     stop: i64,
     step: i64,
+    op: PromRangeOp,
     instant: bool,
     query_start: i64,
     query_end: i64,
@@ -3988,7 +4037,7 @@ fn execute_prometheus_avg_subquery(
                 if !instant {
                     comma(&mut body, item_points as usize);
                 }
-                let value = prometheus_range_average(&series.points[lo..hi], cancelled)?;
+                let value = prometheus_range_reduction(&series.points[lo..hi], op, cancelled)?;
                 write_prometheus_sample(&mut body, outer, value)?;
                 item_points += 1;
                 enforce_prometheus_output(
@@ -4145,13 +4194,18 @@ fn checked_timestamp_sub(timestamp: i64, duration: i64, name: &str) -> Result<i6
         .ok_or_else(|| format!("PromQL timestamp overflow while applying {name}"))
 }
 
-fn prometheus_range_average(points: &[(i64, f64)], cancelled: &AtomicBool) -> Result<f64, String> {
-    let mut average = PromAggregateState::new(PromAggregateOp::Avg, points[0].1);
+fn prometheus_range_reduction(
+    points: &[(i64, f64)],
+    op: PromRangeOp,
+    cancelled: &AtomicBool,
+) -> Result<f64, String> {
+    let aggregate = op.aggregate_op();
+    let mut reduction = PromAggregateState::new(aggregate, points[0].1);
     for &(_, value) in &points[1..] {
         check_cancelled(cancelled)?;
-        average.add(PromAggregateOp::Avg, value);
+        reduction.add(aggregate, value);
     }
-    Ok(average.finish(PromAggregateOp::Avg))
+    Ok(reduction.finish(aggregate))
 }
 
 fn empty_prometheus_matrix(limits: PromQueryLimits) -> Result<ReadOutput, String> {
@@ -4500,6 +4554,7 @@ fn execute_prometheus_window(
     stop: i64,
     step: i64,
     window: i64,
+    op: PromRangeOp,
     instant: bool,
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
@@ -4509,7 +4564,7 @@ fn execute_prometheus_window(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT labels, buckets
-               FROM timeless_window_batches('{}', ?1, ?2, ?3, ?4, ?5, ?6, 'avg', NULL, ?7)
+               FROM timeless_window_batches('{}', ?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)
               ORDER BY labels, series_id",
             table.name()
         ))
@@ -4523,6 +4578,7 @@ fn execute_prometheus_window(
                 stop,
                 step,
                 window,
+                op.native_name(),
                 max_work_points
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
@@ -4587,7 +4643,7 @@ fn execute_prometheus_window(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_prometheus_avg_raw(
+fn execute_prometheus_range_raw(
     conn: &Connection,
     features: QueryFeatures,
     selector: &Selector,
@@ -4595,6 +4651,7 @@ fn execute_prometheus_avg_raw(
     stop: i64,
     step: i64,
     window: i64,
+    op: PromRangeOp,
     instant: bool,
     query_start: i64,
     query_end: i64,
@@ -4671,18 +4728,14 @@ fn execute_prometheus_avg_raw(
                     lo += 1;
                 }
                 if hi > lo {
-                    let mut average = PromAggregateState::new(
-                        PromAggregateOp::Avg,
-                        series.value(raw.frame.as_deref(), lo)?,
-                    );
+                    let aggregate = op.aggregate_op();
+                    let mut reduction =
+                        PromAggregateState::new(aggregate, series.value(raw.frame.as_deref(), lo)?);
                     for index in lo + 1..hi {
                         check_cancelled(cancelled)?;
-                        average.add(
-                            PromAggregateOp::Avg,
-                            series.value(raw.frame.as_deref(), index)?,
-                        );
+                        reduction.add(aggregate, series.value(raw.frame.as_deref(), index)?);
                     }
-                    let value = average.finish(PromAggregateOp::Avg);
+                    let value = reduction.finish(aggregate);
                     admit_prometheus_point(points.saturating_add(item_points), limits)?;
                     if !instant {
                         comma(&mut body, item_points as usize);
@@ -5529,22 +5582,34 @@ mod tests {
             Some((-20, -10, 2))
         );
 
-        let PromPlan::AvgOverSubquery(average) =
-            lower_promql("avg_over_time(cpu[30s:])", 300_000).unwrap()
+        let PromPlan::RangeReduction(PromRangePlan {
+            op: PromRangeOp::Avg,
+            input: PromRangeInput::Subquery(average),
+        }) = lower_promql("avg_over_time(cpu[30s:])", 300_000).unwrap()
         else {
             panic!("subquery range function lowered to the wrong plan")
         };
         assert_eq!(average.resolution, None);
         assert!(matches!(*average.inner, PromPlan::Selector { .. }));
 
-        let PromPlan::AvgOverSubquery(nested) = lower_promql(
+        let PromPlan::RangeReduction(PromRangePlan {
+            op: PromRangeOp::Avg,
+            input: PromRangeInput::Subquery(nested),
+        }) = lower_promql(
             "avg_over_time(avg_over_time(cpu[20s:10s])[20s:10s])",
             300_000,
         )
-        .unwrap() else {
+        .unwrap()
+        else {
             panic!("nested subquery lowered to the wrong plan")
         };
-        assert!(matches!(*nested.inner, PromPlan::AvgOverSubquery(_)));
+        assert!(matches!(
+            *nested.inner,
+            PromPlan::RangeReduction(PromRangePlan {
+                op: PromRangeOp::Avg,
+                input: PromRangeInput::Subquery(_)
+            })
+        ));
         assert!(aligned_subquery_grid(0, 0, 10, 0).is_err());
     }
 

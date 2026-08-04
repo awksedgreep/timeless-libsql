@@ -27,7 +27,7 @@ The current PromQL slice supports scalar literals (including `NaN` and
 infinities), string literals, exact-name and nameless instant vector
 selectors, anchored regex/negative/duplicate `__name__` matchers, root range
 selectors on instant queries, and
-`avg_over_time(selector[window])`. Unary minus and arithmetic `+ - * / % ^`
+`avg_over_time(selector[window])` and `min_over_time(selector[window])`. Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
 Prometheus scalar/vector/range result types. Vector/vector arithmetic uses
@@ -131,7 +131,9 @@ extension kernel as millisecond-aware.
 
 Every `avg_over_time` path uses the same compensated average and
 overflow-safe incremental-mean fallback as the pinned Prometheus oracle.
-This includes packed whole-second windows, raw modifier/subsecond fallbacks,
+Every `min_over_time` path uses ordered-comparison minimum semantics, including
+first-sample signed-zero stability and Prometheus-compatible NaN handling.
+Both include packed whole-second windows, raw modifier/subsecond fallbacks,
 and materialized subqueries; valid `NaN` and infinities remain values rather
 than frame errors. All paths remove `__name__`, omit empty windows, enforce
 cumulative work/output/deadline limits, and remain cancellation-aware.
@@ -176,7 +178,8 @@ The query layer catalog-prunes nameless selectors through `timeless_series`,
 applies every regex/negative name matcher before payload access, then lowers
 each selected metric name to a bounded `timeless_raw_frame` call
 and performs a linear last-sample sweep over the exact
-five-minute `(T-lookback,T]` window. Whole-second `avg_over_time` lowers to
+five-minute `(T-lookback,T]` window. Whole-second `avg_over_time` and
+`min_over_time` lower to
 `timeless_window_batches`; its raw fallback preserves `(T-window,T]`, grid
 timestamps, and Prometheus metric-name removal. A root range selector reads public raw frames,
 applies the same open-left boundary, and returns a matrix only from an instant

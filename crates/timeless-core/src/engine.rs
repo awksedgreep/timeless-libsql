@@ -3120,7 +3120,10 @@ impl Engine {
     //   - samples are consumed in the engine's sorted order
     //     (query_range_by_id order; ties keep engine order, last wins),
     //   - Sum/Avg fold left-to-right in ascending ts order,
-    //   - Min/Max use f64::min/f64::max seeded by the first sample.
+    //   - Min uses an ordered comparison seeded by the first sample: an
+    //     incoming NaN is ignored, a leading NaN is replaced by the first
+    //     ordered value, and equal signed zeros retain the first sample.
+    //   - Max uses f64::max seeded by the first sample.
     // A naive evaluator over the same raw samples must agree on every
     // bit, which is what makes these kernels safe to push down.
 
@@ -3186,9 +3189,13 @@ impl Engine {
                 AggFn::Count => win.len() as f64,
                 AggFn::Sum => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v),
                 AggFn::Avg => Self::compensated_window_average(win),
-                AggFn::Min => win[1..]
-                    .iter()
-                    .fold(win[0].1, |acc, &(_, v)| f64::min(acc, v)),
+                AggFn::Min => win[1..].iter().fold(win[0].1, |acc, &(_, value)| {
+                    if acc > value || acc.is_nan() {
+                        value
+                    } else {
+                        acc
+                    }
+                }),
                 AggFn::Max => win[1..]
                     .iter()
                     .fold(win[0].1, |acc, &(_, v)| f64::max(acc, v)),

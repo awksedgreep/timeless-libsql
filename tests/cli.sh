@@ -3501,6 +3501,7 @@ $'catalog|api,worker|GET /items\nbounded|10,9|5|2\nstream|3|3|0'
 echo "== section 45: documented query-language SQL equivalents =="
 SQL_EQ_DB="$TMP/query_sql_equivalents.db"
 got=$(python3 - "$EXT" "$SQL_EQ_DB" <<'PY'
+import math
 import sqlite3
 import sys
 
@@ -3525,6 +3526,11 @@ db.executemany(
         ('avg_precision', '{}', 30, -1e16),
         ('avg_overflow', '{}', 20, sys.float_info.max),
         ('avg_overflow', '{}', 30, sys.float_info.max),
+        ('min_window', '{}', 10, 5.0),
+        ('min_window', '{}', 20, 3.0),
+        ('min_window', '{}', 30, 4.0),
+        ('min_zero', '{}', 20, 0.0),
+        ('min_zero', '{}', 30, -0.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3661,6 +3667,17 @@ overflow_avg = db.execute(
     "'metrics','avg_overflow',NULL,30,30,1,20,'avg')"
 ).fetchone()[0]
 assert overflow_avg == sys.float_info.max
+
+minimum = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','min_window',NULL,30,30,1,20,'min')"
+).fetchone()[0]
+assert minimum == 3.0
+first_zero = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','min_zero',NULL,30,30,1,20,'min')"
+).fetchone()[0]
+assert first_zero == 0.0 and math.copysign(1.0, first_zero) == 1.0
 
 cross_sum = db.execute(
     "WITH selected AS ("

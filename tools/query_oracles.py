@@ -345,6 +345,20 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             ],
             {"case": case},
         )
+    for case, values in [
+        ("all_nan", [float("nan"), float("nan")]),
+        ("mixed", [float("nan"), 2.0]),
+        ("infinite", [float("-inf"), float("inf")]),
+        ("zero", [0.0, -0.0]),
+    ]:
+        write_request += series(
+            "oracle_range_extrema",
+            [
+                (values[0], timestamp_ms + 20_000),
+                (values[1], timestamp_ms + 30_000),
+            ],
+            {"case": case},
+        )
     return snappy_literal(write_request)
 
 

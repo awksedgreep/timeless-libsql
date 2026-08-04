@@ -62,6 +62,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-018`](#sql-prom-018-cross-series-population-variance-and-standard-deviation) | `PQL-O13` | current foundation | bounded population second moment; API owns Welford/IEEE arithmetic, language, labels, limits, and envelopes |
 | [`SQL-PROM-019`](#sql-prom-019-cross-series-quantile) | `PQL-O15` | current foundation | bounded finite-value linear interpolation; API owns language, raw-NaN rank, parameters, labels, limits, and envelopes |
 | [`SQL-PROM-020`](#sql-prom-020-count-series-by-sample-value) | `PQL-O16` | current foundation | exact bounded grouping by raw SQL numeric value; API owns Prometheus label formatting, grouping syntax, raw NaN, limits, and envelopes |
+| [`SQL-PROM-021`](#sql-prom-021-min_over_time) | `PQL-R02` | current | exact float-window minimum |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -159,6 +160,35 @@ Prometheus `NaN`, positive/negative infinity, and signed-zero float behavior;
 the API still owns language parsing, metric-name removal, timestamp units,
 limits, and result envelopes. Native histogram samples are not stored. Direct
 regression: `tests/cli.sh` sections 22, 33, 35, and 45.
+
+### SQL-PROM-021: `min_over_time`
+
+Evaluate `min_over_time(metric{...}[:window])` on an exact range-query grid:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_window(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :window,
+  'min'
+)
+ORDER BY labels, ts;
+```
+
+Metric timestamps and all bound parameters are integer seconds. Set
+`:start = :end` for an instant evaluation. Each reduction uses the exact
+open-left, closed-right interval `(T-window,T]`; empty windows emit no row.
+Samples are visited in timestamp order. An incoming NaN does not replace a
+numeric minimum, a leading NaN is replaced by the first ordered value, an
+all-NaN window remains NaN in the extension's packed IEEE bits, and equal
+signed zeros retain the first sample. Some SQLite hosts or language bindings
+normalize a NaN REAL to SQL NULL when projecting or binding it; use
+`timeless_window_batches` when exact non-finite bits must cross that boundary.
+The Rust API owns PromQL parsing, metric-name removal, outer evaluation
+timestamps, subquery composition, limits, cancellation, IEEE response strings,
+and result envelopes. Native histogram samples are not stored. Direct
+regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_six_promql_min_over_time_boundaries_ieee_limits_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

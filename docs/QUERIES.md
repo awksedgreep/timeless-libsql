@@ -193,6 +193,7 @@ globally aligned inner grid:
 ```promql
 http_requests_total[30m:30s]
 avg_over_time(http_requests_total[30m:30s])
+min_over_time(http_requests_total[30m:30s])
 avg_over_time(http_requests_total[30m:])
 avg_over_time(http_requests_total[30m:30s] @ end() offset 5m)
 avg_over_time(avg_over_time(http_requests_total[5m:30s])[30m:1m])
@@ -721,7 +722,10 @@ limits fail explicitly.
 The `avg` window fold uses compensated summation for cancellation-prone
 finite values and an incremental-mean fallback before the running sum would
 overflow. `NaN`, infinities, and signed zero remain IEEE values in the packed
-frame. This is a general direct-SQL reduction; PromQL parsing, label/name
+frame. The `min` fold ignores an incoming NaN once it has a numeric minimum,
+replaces a leading NaN with the first numeric sample, retains NaN for an
+all-NaN window, and preserves the first of equal signed zeros. These are
+general direct-SQL reductions; PromQL parsing, label/name
 policy, timestamps, limits, and envelopes remain in the Rust metrics API.
 
 The `buckets` blob is versioned and little-endian:
