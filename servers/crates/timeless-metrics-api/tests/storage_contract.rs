@@ -4965,6 +4965,158 @@ async fn session_six_promql_max_over_time_boundaries_ieee_limits_and_reopen() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_six_promql_sum_over_time_is_compensated_ieee_bounded_and_reopenable() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_six_sum_over_time.db");
+    let base = 1_700_630_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_sum 5 {}\n",
+            "range_sum 3 {}\n",
+            "range_sum 4 {}\n",
+            "range_sum_precision 1e16 {}\n",
+            "range_sum_precision 1 {}\n",
+            "range_sum_precision -1e16 {}\n",
+            "range_sum_overflow 1.7976931348623157e308 {}\n",
+            "range_sum_overflow 1.7976931348623157e308 {}\n",
+            "range_sum_ieee{{case=\"nan\"}} NaN {}\n",
+            "range_sum_ieee{{case=\"nan\"}} 1 {}\n",
+            "range_sum_ieee{{case=\"positive\"}} +Inf {}\n",
+            "range_sum_ieee{{case=\"positive\"}} 1 {}\n",
+            "range_sum_ieee{{case=\"mixed\"}} +Inf {}\n",
+            "range_sum_ieee{{case=\"mixed\"}} -Inf {}\n",
+            "range_sum_zero{{case=\"forward\"}} 0 {}\n",
+            "range_sum_zero{{case=\"forward\"}} -0 {}\n",
+            "range_sum_zero{{case=\"reverse\"}} -0 {}\n",
+            "range_sum_zero{{case=\"reverse\"}} 0 {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let direct = prom_query(&app, "sum_over_time(range_sum[20s])", base + 30).await;
+    assert_eq!(direct.0, StatusCode::OK, "{}", direct.1);
+    assert_eq!(
+        direct.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base + 30, "7"]}])
+    );
+    let subquery = prom_query(&app, "sum_over_time(range_sum[20s:10s])", base + 30).await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(subquery.1, direct.1);
+    let range = prom_query_range(
+        &app,
+        "sum_over_time(range_sum[20s])",
+        base + 20,
+        base + 40,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base + 20, "8"], [base + 30, "7"], [base + 40, "4"]]
+        }])
+    );
+    let precision = prom_query(&app, "sum_over_time(range_sum_precision[30s])", base + 30).await;
+    assert_eq!(precision.0, StatusCode::OK, "{}", precision.1);
+    assert_eq!(precision.1["data"]["result"][0]["value"][1], "1");
+    let overflow = prom_query(&app, "sum_over_time(range_sum_overflow[20s])", base + 30).await;
+    assert_eq!(overflow.0, StatusCode::OK, "{}", overflow.1);
+    assert_eq!(overflow.1["data"]["result"][0]["value"][1], "+Inf");
+    let ieee = prom_query(&app, "sum_over_time(range_sum_ieee[20s])", base + 30).await;
+    assert_eq!(ieee.0, StatusCode::OK, "{}", ieee.1);
+    assert_eq!(
+        ieee.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "mixed"}, "value": [base + 30, "NaN"]},
+            {"metric": {"case": "nan"}, "value": [base + 30, "NaN"]},
+            {"metric": {"case": "positive"}, "value": [base + 30, "+Inf"]}
+        ])
+    );
+    let zero = prom_query(&app, "sum_over_time(range_sum_zero[20s])", base + 30).await;
+    assert_eq!(zero.0, StatusCode::OK, "{}", zero.1);
+    assert_eq!(
+        zero.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "forward"}, "value": [base + 30, "0"]},
+            {"metric": {"case": "reverse"}, "value": [base + 30, "0"]}
+        ])
+    );
+    let empty = prom_query(&app, "sum_over_time(range_sum[20s])", base + 1_000).await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "sum_over_time(range_sum[20s])", base + 30).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 1 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(&reopened_app, "sum_over_time(range_sum[20s])", base + 30)
+            .await
+            .1,
+        direct.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

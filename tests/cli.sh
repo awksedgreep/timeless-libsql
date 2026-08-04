@@ -3673,6 +3673,17 @@ overflow_avg = db.execute(
 ).fetchone()[0]
 assert overflow_avg == sys.float_info.max
 
+precision_sum = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','avg_precision',NULL,30,30,1,30,'sum')"
+).fetchone()[0]
+assert precision_sum == 1.0
+overflow_sum = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','avg_overflow',NULL,30,30,1,20,'sum')"
+).fetchone()[0]
+assert math.isinf(overflow_sum) and overflow_sum > 0
+
 minimum = db.execute(
     "SELECT value FROM timeless_window("
     "'metrics','min_window',NULL,30,30,1,20,'min')"

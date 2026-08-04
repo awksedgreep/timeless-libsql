@@ -107,6 +107,26 @@ fn reference_compensated_average(values: &[f64]) -> f64 {
     }
 }
 
+fn reference_compensated_sum(values: &[f64]) -> f64 {
+    let add = |increment: f64, sum: f64, compensation: f64| {
+        let total = sum + increment;
+        let compensation = if total.is_infinite() {
+            0.0
+        } else if sum.abs() >= increment.abs() {
+            compensation + ((sum - total) + increment)
+        } else {
+            compensation + ((increment - total) + sum)
+        };
+        (total, compensation)
+    };
+    let mut sum = values[0];
+    let mut compensation = 0.0;
+    for &value in &values[1..] {
+        (sum, compensation) = add(value, sum, compensation);
+    }
+    sum + compensation
+}
+
 /// Reference window agg: collect the complete window and apply each pinned fold.
 fn naive_window_agg(
     samples: &[(i64, f64)],
@@ -127,16 +147,14 @@ fn naive_window_agg(
         if !win.is_empty() {
             let value = match agg {
                 AggFn::Count => win.len() as f64,
-                AggFn::Sum => win.iter().fold(0.0f64, |a, &v| a + v),
+                AggFn::Sum => reference_compensated_sum(&win),
                 AggFn::Avg => reference_compensated_average(&win),
                 AggFn::Min => win[1..]
                     .iter()
                     .fold(win[0], |a, &v| if a > v || a.is_nan() { v } else { a }),
-                AggFn::Max => {
-                    win[1..]
-                        .iter()
-                        .fold(win[0], |a, &v| if a < v || a.is_nan() { v } else { a })
-                }
+                AggFn::Max => win[1..]
+                    .iter()
+                    .fold(win[0], |a, &v| if a < v || a.is_nan() { v } else { a }),
             };
             out.push((t, value));
         }
@@ -376,6 +394,44 @@ fn window_average_compensates_cancellation_and_falls_back_before_overflow() {
             assert!(average.is_nan(), "{name}");
         } else {
             assert_eq!(average.to_bits(), expected.to_bits(), "{name}");
+        }
+    }
+    engine.shutdown().unwrap();
+}
+
+#[test]
+fn window_sum_compensates_cancellation_and_preserves_ieee_results() {
+    let dir = temp_dir("compensated_sum");
+    let engine = new_engine(&dir);
+    let labels = HashMap::new();
+
+    let precision = engine.resolve_cached("precision_sum", &labels).unwrap();
+    for (timestamp, value) in [(10, 1e16), (20, 1.0), (30, -1e16)] {
+        engine.write_point(precision, timestamp, value);
+    }
+    let sum = engine
+        .query_window_agg_by_id(precision, 30, 30, 1, 30, AggFn::Sum)
+        .unwrap()[0]
+        .1;
+    assert_eq!(sum.to_bits(), 1.0_f64.to_bits());
+
+    for (name, values, expected) in [
+        ("overflow_sum", [f64::MAX, f64::MAX], f64::INFINITY),
+        ("nan_sum", [f64::NAN, 1.0], f64::NAN),
+        ("mixed_sum", [f64::INFINITY, f64::NEG_INFINITY], f64::NAN),
+        ("zero_sum", [-0.0, 0.0], 0.0),
+    ] {
+        let series = engine.resolve_cached(name, &labels).unwrap();
+        engine.write_point(series, 20, values[0]);
+        engine.write_point(series, 30, values[1]);
+        let sum = engine
+            .query_window_agg_by_id(series, 30, 30, 1, 20, AggFn::Sum)
+            .unwrap()[0]
+            .1;
+        if expected.is_nan() {
+            assert!(sum.is_nan(), "{name}");
+        } else {
+            assert_eq!(sum.to_bits(), expected.to_bits(), "{name}");
         }
     }
     engine.shutdown().unwrap();

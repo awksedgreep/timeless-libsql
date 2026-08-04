@@ -28,7 +28,8 @@ infinities), string literals, exact-name and nameless instant vector
 selectors, anchored regex/negative/duplicate `__name__` matchers, root range
 selectors on instant queries, and
 `avg_over_time(selector[window])`, `min_over_time(selector[window])`, and
-`max_over_time(selector[window])`. Unary minus and arithmetic `+ - * / % ^`
+`max_over_time(selector[window])`, plus `sum_over_time(selector[window])`.
+Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
 Prometheus scalar/vector/range result types. Vector/vector arithmetic uses
@@ -132,6 +133,8 @@ extension kernel as millisecond-aware.
 
 Every `avg_over_time` path uses the same compensated average and
 overflow-safe incremental-mean fallback as the pinned Prometheus oracle.
+Every `sum_over_time` path uses compensated addition while retaining IEEE
+overflow and NaN behavior.
 Every `min_over_time` and `max_over_time` path uses ordered-comparison extrema,
 including first-sample signed-zero stability and Prometheus-compatible NaN handling.
 Both include packed whole-second windows, raw modifier/subsecond fallbacks,
@@ -180,7 +183,7 @@ applies every regex/negative name matcher before payload access, then lowers
 each selected metric name to a bounded `timeless_raw_frame` call
 and performs a linear last-sample sweep over the exact
 five-minute `(T-lookback,T]` window. Whole-second `avg_over_time`,
-`min_over_time`, and `max_over_time` lower to
+`min_over_time`, `max_over_time`, and `sum_over_time` lower to
 `timeless_window_batches`; its raw fallback preserves `(T-window,T]`, grid
 timestamps, and Prometheus metric-name removal. A root range selector reads public raw frames,
 applies the same open-left boundary, and returns a matrix only from an instant

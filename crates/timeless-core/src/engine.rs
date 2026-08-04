@@ -3119,7 +3119,7 @@ impl Engine {
     // Bit-exactness contract (what the property tests pin down):
     //   - samples are consumed in the engine's sorted order
     //     (query_range_by_id order; ties keep engine order, last wins),
-    //   - Sum/Avg fold left-to-right in ascending ts order,
+    //   - Sum/Avg use compensated folds in ascending timestamp order,
     //   - Min uses an ordered comparison seeded by the first sample: an
     //     incoming NaN is ignored, a leading NaN is replaced by the first
     //     ordered value, and equal signed zeros retain the first sample.
@@ -3187,7 +3187,7 @@ impl Engine {
         match op {
             WindowOp::Agg(agg) => Some(match agg {
                 AggFn::Count => win.len() as f64,
-                AggFn::Sum => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v),
+                AggFn::Sum => Self::compensated_window_sum(win),
                 AggFn::Avg => Self::compensated_window_average(win),
                 AggFn::Min => win[1..].iter().fold(win[0].1, |acc, &(_, value)| {
                     if acc > value || acc.is_nan() {
@@ -3264,6 +3264,18 @@ impl Engine {
         } else {
             sum / count + compensation / count
         }
+    }
+
+    /// Cancellation-safe sum with Prometheus's compensated add semantics.
+    /// Infinite overflow stays infinite; mixed infinities and NaN propagate.
+    fn compensated_window_sum(win: &[(i64, f64)]) -> f64 {
+        debug_assert!(!win.is_empty());
+        let mut sum = win[0].1;
+        let mut compensation = 0.0;
+        for &(_, value) in &win[1..] {
+            (sum, compensation) = compensated_add(value, sum, compensation);
+        }
+        sum + compensation
     }
 
     /// The pinned increase rule: reset-adjusted sum of steps, first

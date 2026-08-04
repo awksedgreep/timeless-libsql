@@ -623,6 +623,26 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        range_sum_narrow = measure(
+            "metrics-range-sum-narrow",
+            lambda: promql('sum_over_time(query_contract_cpu{host="h0000"}[5m])'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        range_sum_wide = measure(
+            "metrics-range-sum-wide",
+            lambda: promql_range(
+                "sum_over_time(query_contract_cpu[5m])", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         unary_narrow = measure(
             "metrics-unary-minus-narrow",
             lambda: promql('-query_contract_cpu{host="h0000"}'),
@@ -1185,6 +1205,8 @@ def metrics_evidence(
                 "range_min_wide": range_min_wide,
                 "range_max_narrow": range_max_narrow,
                 "range_max_wide": range_max_wide,
+                "range_sum_narrow": range_sum_narrow,
+                "range_sum_wide": range_sum_wide,
                 "unary_minus_narrow": unary_narrow,
                 "unary_minus_wide": unary_wide,
                 "arithmetic_vector_scalar_narrow": arithmetic_narrow,
