@@ -7,7 +7,7 @@
 //! explicit error rather than an empty result or a fallback execution path.
 
 pub(crate) use promql_parser::label::MatchOp;
-pub(crate) use promql_parser::parser::{Expr, NumberLiteral, VectorSelector};
+pub(crate) use promql_parser::parser::{AtModifier, Expr, NumberLiteral, Offset, VectorSelector};
 
 pub(crate) fn parse(input: &str) -> Result<Expr, String> {
     if let Some(number) = parse_underscored_root_number(input)? {

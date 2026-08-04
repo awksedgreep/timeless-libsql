@@ -164,6 +164,27 @@ string does not by itself make a nameless selector legal, so
 Catalog rows are tested against every name matcher before any metric payload
 is requested.
 
+## PromQL temporal selectors
+
+Temporal modifiers change where a selector reads without changing the outer
+evaluation timestamps returned by an instant-vector or range query:
+
+```promql
+http_requests_total offset 5m
+http_requests_total offset -30s
+http_requests_total @ 1700300010
+http_requests_total @ start()
+http_requests_total @ end() offset 10s
+```
+
+The planner resolves `@` first and subtracts the signed offset second. Numeric
+`@` supports millisecond precision; `start()` and `end()` use the request's
+outer range endpoints. Lookback and range windows are relative to that resolved
+lookup time. Root range vectors keep stored sample timestamps, while selector
+and function results keep the outer evaluation grid. See executable direct-SQL
+forms in
+[`SQL-PROM-008`](QUERY_SQL_EQUIVALENTS.md#sql-prom-008-temporal-selector-modifiers).
+
 ## Scalar aggregate without raw materialization
 
 ```sql

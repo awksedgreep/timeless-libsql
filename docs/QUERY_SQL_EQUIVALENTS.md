@@ -49,6 +49,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | reference | SQL equivalent available; API still owes PromQL ordering/labels |
 | [`SQL-PROM-006`](#sql-prom-006-range-selector) | `PQL-S06` | current | exact root range-vector storage selection; API shapes the matrix |
 | [`SQL-PROM-007`](#sql-prom-007-bounded-packed-storage-work) | `PQL-S20` | current foundation | exact pre-decode work bounds; API owns language/result/deadline limits |
+| [`SQL-PROM-008`](#sql-prom-008-temporal-selector-modifiers) | `PQL-S07`, `PQL-S08` | current foundation | exact shifted/fixed lookup time; API owns parser and outer query context |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -206,6 +207,52 @@ deadline/error envelopes, and tighter auth-claim policy. Direct regressions:
 `tests/cli.sh` sections 22, 34, and 45; core buffered/persisted coverage:
 `write_flush_query_recover`; HTTP/reopen coverage:
 `session_two_promql_limits_bound_grid_work_results_response_and_deadline`.
+
+### SQL-PROM-008: temporal selector modifiers
+
+For a selector with signed `offset`, shift the lookup grid by `:offset` and
+restore the outer evaluation timestamp in the projection. Positive offsets
+look into the past; negative offsets look into the future:
+
+```sql
+SELECT labels, ts + :offset AS ts, value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start - :offset, :end - :offset, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+For `@` forms, first resolve `:anchor` to the numeric timestamp, query once at
+`:anchor - :offset`, and cross that value with the outer evaluation grid:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT labels, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :anchor - :offset, :anchor - :offset, 1, :lookback
+  )
+)
+SELECT selected.labels, evaluation.ts, selected.value
+FROM selected CROSS JOIN evaluation
+ORDER BY selected.labels, evaluation.ts;
+```
+
+All parameters use the metric table's native timestamp unit (seconds for the
+default table). `:offset` is signed; bind zero when absent. For numeric `@`,
+`:anchor` is that timestamp. For `@ start()` and `@ end()`, bind `:start` and
+`:end`, respectively. The order is always anchor first, offset second. Output
+timestamps are the outer grid, while lookback and the open-left boundary are
+relative to lookup time. Missing series remain sparse. The API owns parsing,
+millisecond conversion, overflow errors, range-vector raw timestamps,
+function label policy, limits, cancellation, and Prometheus envelopes. Direct
+regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_three_promql_temporal_modifiers_preserve_selection_and_output_time`.
 
 ### SQL-PROM-003: cross-series sum by label
 

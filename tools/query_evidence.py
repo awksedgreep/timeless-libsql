@@ -463,6 +463,48 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        offset_positive_narrow = measure(
+            "metrics-offset-positive-narrow",
+            lambda: promql('query_contract_cpu{host="h0000"} offset 20s'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        offset_negative_wide = measure(
+            "metrics-offset-negative-wide",
+            lambda: promql_range(
+                "query_contract_cpu offset -20s", at - 50, at - 20, 10
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
+        at_numeric_narrow = measure(
+            "metrics-at-numeric-narrow",
+            lambda: promql(
+                f'query_contract_cpu{{host="h0000"}} @ {at - 20}'
+            ),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        at_end_wide = measure(
+            "metrics-at-end-wide",
+            lambda: promql_range(
+                "query_contract_cpu @ end()", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -712,6 +754,10 @@ def metrics_evidence(
                 "nameless_wide": nameless_wide,
                 "metric_name_regex_narrow": metric_name_regex_narrow,
                 "metric_name_negative_wide": metric_name_negative_wide,
+                "offset_positive_narrow": offset_positive_narrow,
+                "offset_negative_wide": offset_negative_wide,
+                "at_numeric_narrow": at_numeric_narrow,
+                "at_end_wide": at_end_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

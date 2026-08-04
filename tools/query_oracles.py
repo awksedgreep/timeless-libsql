@@ -160,12 +160,26 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
     def label(name: str, value: str) -> bytes:
         return protobuf_bytes(1, name.encode()) + protobuf_bytes(2, value.encode())
 
-    sample = bytes([(1 << 3) | 1]) + struct.pack("<d", 7.0)
-    sample += protobuf_varint(2 << 3) + protobuf_varint(timestamp_ms)
-    series = protobuf_bytes(1, label("__name__", "oracle_lookback"))
-    series += protobuf_bytes(1, label("job", "oracle"))
-    series += protobuf_bytes(2, sample)
-    return snappy_literal(protobuf_bytes(1, series))
+    def sample(value: float, at_ms: int) -> bytes:
+        encoded = bytes([(1 << 3) | 1]) + struct.pack("<d", value)
+        return encoded + protobuf_varint(2 << 3) + protobuf_varint(at_ms)
+
+    def series(name: str, points: list[tuple[float, int]]) -> bytes:
+        encoded = protobuf_bytes(1, label("__name__", name))
+        encoded += protobuf_bytes(1, label("job", "oracle"))
+        for value, at_ms in points:
+            encoded += protobuf_bytes(2, sample(value, at_ms))
+        return protobuf_bytes(1, encoded)
+
+    write_request = series("oracle_lookback", [(7.0, timestamp_ms)])
+    write_request += series(
+        "oracle_temporal",
+        [
+            (float(index + 1), timestamp_ms + offset_ms)
+            for index, offset_ms in enumerate(range(-30_000, 30_001, 10_000))
+        ],
+    )
+    return snappy_literal(write_request)
 
 
 def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
@@ -273,6 +287,65 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 ]
             if not valid:
                 print(f"{case['id']}: unexpected response {body!r}", file=sys.stderr)
+                failures += 1
+            else:
+                print(f"{case['id']}: ok")
+        for case in fixture.get("temporal_cases", []):
+            query = case["query"]
+            if "at_offset_ms" in case:
+                at_ms = sample_timestamp_ms + case["at_offset_ms"]
+                query = query.format(at=str(at_ms / 1_000))
+            expected_values = [str(value) for value in case["expected_values"]]
+            if "range" in case:
+                range_case = case["range"]
+                start_ms = sample_timestamp_ms + range_case["start_offset_ms"]
+                end_ms = sample_timestamp_ms + range_case["end_offset_ms"]
+                params = {
+                    "query": query,
+                    "start": str(start_ms / 1_000),
+                    "end": str(end_ms / 1_000),
+                    "step": range_case["step"],
+                }
+                expected_timestamps = [
+                    start_ms + index * (end_ms - start_ms) // (len(expected_values) - 1)
+                    for index in range(len(expected_values))
+                ]
+                expected_result_type = "matrix"
+                expected_result = [
+                    {
+                        "metric": {"__name__": "oracle_temporal", "job": "oracle"},
+                        "values": [
+                            [timestamp / 1_000, value]
+                            for timestamp, value in zip(expected_timestamps, expected_values)
+                        ],
+                    }
+                ]
+                endpoint = "/api/v1/query_range"
+            else:
+                evaluation_ms = sample_timestamp_ms + case["evaluation_offset_ms"]
+                params = {"query": query, "time": str(evaluation_ms / 1_000)}
+                expected_result_type = "vector"
+                expected_result = [
+                    {
+                        "metric": {"__name__": "oracle_temporal", "job": "oracle"},
+                        "value": [evaluation_ms / 1_000, expected_values[0]],
+                    }
+                ]
+                endpoint = "/api/v1/query"
+            url = base + endpoint + "?" + urllib.parse.urlencode(params)
+            with urllib.request.urlopen(url, timeout=10) as response:
+                body = json.loads(response.read())
+            valid = (
+                response.status == 200
+                and body.get("status") == "success"
+                and body.get("data", {}).get("resultType") == expected_result_type
+                and body.get("data", {}).get("result") == expected_result
+            )
+            if not valid:
+                print(
+                    f"{case['id']}: expected {expected_result!r}; got {body!r}",
+                    file=sys.stderr,
+                )
                 failures += 1
             else:
                 print(f"{case['id']}: ok")

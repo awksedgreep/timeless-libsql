@@ -1173,6 +1173,187 @@ async fn session_three_promql_metric_name_matchers_prune_before_reads_and_reopen
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_three_promql_temporal_modifiers_preserve_selection_and_output_time() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_three_temporal.db");
+    let base = 1_700_300_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        2,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"temporal_metric\",\"host\":\"a\"}},",
+            "\"values\":[1,2,3,4,5,6,7],\"timestamps\":[{},{},{},{},{},{},{}]}}"
+        ),
+        (base - 30) * 1_000,
+        (base - 20) * 1_000,
+        (base - 10) * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let positive = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=temporal_metric%20offset%2020s&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(positive.0, StatusCode::OK);
+    assert_eq!(
+        positive.1["data"]["result"][0]["value"],
+        serde_json::json!([base + 30, "5"])
+    );
+
+    let negative = get_json(
+        &app,
+        &format!("/prometheus/api/v1/query?query=temporal_metric%20offset%20-20s&time={base}"),
+    )
+    .await;
+    assert_eq!(negative.0, StatusCode::OK);
+    assert_eq!(
+        negative.1["data"]["result"][0]["value"],
+        serde_json::json!([base, "6"])
+    );
+
+    let at_timestamp = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=temporal_metric%20%40%20{}&time={}",
+            base + 10,
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(at_timestamp.0, StatusCode::OK);
+    assert_eq!(
+        at_timestamp.1["data"]["result"][0]["value"],
+        serde_json::json!([base + 30, "5"])
+    );
+
+    let offset_then_at = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=temporal_metric%20offset%2010s%20%40%20{}&time={}",
+            base + 20,
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(offset_then_at.0, StatusCode::OK);
+    assert_eq!(
+        offset_then_at.1["data"]["result"][0]["value"],
+        serde_json::json!([base + 30, "5"])
+    );
+
+    let positive_range = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=temporal_metric%20offset%2010s&start={base}&end={}&step=10",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(positive_range.0, StatusCode::OK);
+    assert_eq!(
+        positive_range.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base, "3"],
+            [base + 10, "4"],
+            [base + 20, "5"],
+            [base + 30, "6"]
+        ])
+    );
+
+    for (modifier, value) in [("start%28%29", "4"), ("end%28%29", "7")] {
+        let fixed = get_json(
+            &app,
+            &format!(
+                "/prometheus/api/v1/query_range?query=temporal_metric%20%40%20{modifier}&start={base}&end={}&step=10",
+                base + 30
+            ),
+        )
+        .await;
+        assert_eq!(fixed.0, StatusCode::OK);
+        assert_eq!(
+            fixed.1["data"]["result"][0]["values"],
+            serde_json::json!([
+                [base, value],
+                [base + 10, value],
+                [base + 20, value],
+                [base + 30, value]
+            ])
+        );
+    }
+
+    let range_root = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=temporal_metric%5B20s%5D%20%40%20{}&time={}",
+            base + 10,
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(range_root.0, StatusCode::OK);
+    assert_eq!(
+        range_root.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "4"], [base + 10, "5"]])
+    );
+
+    let fixed_average = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=avg_over_time%28temporal_metric%5B20s%5D%20%40%20end%28%29%20offset%2010s%29&start={base}&end={}&step=10",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(fixed_average.0, StatusCode::OK);
+    assert_eq!(
+        fixed_average.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base, "5.5"],
+            [base + 10, "5.5"],
+            [base + 20, "5.5"],
+            [base + 30, "5.5"]
+        ])
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = get_json(
+        &reopened_app,
+        &format!(
+            "/prometheus/api/v1/query?query=temporal_metric%20offset%2020s&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(recovered.1, positive.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

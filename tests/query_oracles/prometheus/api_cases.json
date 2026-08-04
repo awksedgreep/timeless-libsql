@@ -21,6 +21,45 @@
       "expected_result_count": 1
     }
   ],
+  "temporal_cases": [
+    {
+      "id": "PQL-S07-positive-offset",
+      "query": "oracle_temporal offset 20s",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [5]
+    },
+    {
+      "id": "PQL-S07-negative-offset",
+      "query": "oracle_temporal offset -20s",
+      "evaluation_offset_ms": 0,
+      "expected_values": [6]
+    },
+    {
+      "id": "PQL-S08-numeric-at-before-offset",
+      "query": "oracle_temporal @ {at} offset 10s",
+      "at_offset_ms": 20000,
+      "evaluation_offset_ms": 30000,
+      "expected_values": [5]
+    },
+    {
+      "id": "PQL-S07-range-offset-retains-outer-timestamps",
+      "query": "oracle_temporal offset 10s",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [3, 4, 5, 6]
+    },
+    {
+      "id": "PQL-S08-range-at-start",
+      "query": "oracle_temporal @ start()",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [4, 4, 4, 4]
+    },
+    {
+      "id": "PQL-S08-range-at-end",
+      "query": "oracle_temporal @ end()",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [7, 7, 7, 7]
+    }
+  ],
   "cases": [
     {
       "id": "PQL-S06-root-range-vector-instant-type",

@@ -260,6 +260,7 @@ impl Aggregate {
 pub(crate) struct Selector {
     metric: MetricSelection,
     filter: FilterPlan,
+    timing: SelectorTiming,
 }
 
 #[derive(Clone, Debug)]
@@ -268,6 +269,72 @@ enum MetricSelection {
     Regex(Regex),
     Matchers(Vec<Matcher>),
     All,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SelectorTiming {
+    offset_ms: i64,
+    at: Option<SelectorAt>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectorAt {
+    Start,
+    End,
+    Timestamp(i64),
+}
+
+impl SelectorTiming {
+    fn lower(
+        offset: Option<promql::Offset>,
+        at: Option<promql::AtModifier>,
+    ) -> Result<Self, String> {
+        let offset_ms = match offset {
+            None => 0,
+            Some(promql::Offset::Pos(duration)) => duration_millis_i64(duration, "offset")?,
+            Some(promql::Offset::Neg(duration)) => duration_millis_i64(duration, "offset")?
+                .checked_neg()
+                .ok_or_else(|| "PromQL negative offset overflow".to_string())?,
+        };
+        let at = match at {
+            None => None,
+            Some(promql::AtModifier::Start) => Some(SelectorAt::Start),
+            Some(promql::AtModifier::End) => Some(SelectorAt::End),
+            Some(promql::AtModifier::At(timestamp)) => {
+                Some(SelectorAt::Timestamp(system_time_millis(timestamp)?))
+            }
+        };
+        Ok(Self { offset_ms, at })
+    }
+
+    fn is_default(self) -> bool {
+        self == Self::default()
+    }
+
+    fn selection_time(self, outer: i64, query_start: i64, query_end: i64) -> Result<i64, String> {
+        let anchor = match self.at {
+            None => outer,
+            Some(SelectorAt::Start) => query_start,
+            Some(SelectorAt::End) => query_end,
+            Some(SelectorAt::Timestamp(timestamp)) => timestamp,
+        };
+        anchor
+            .checked_sub(self.offset_ms)
+            .ok_or_else(|| "PromQL timestamp overflow while applying offset".to_string())
+    }
+}
+
+fn duration_millis_i64(duration: std::time::Duration, name: &str) -> Result<i64, String> {
+    i64::try_from(duration.as_millis()).map_err(|_| format!("PromQL {name} duration overflow"))
+}
+
+fn system_time_millis(timestamp: SystemTime) -> Result<i64, String> {
+    match timestamp.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration_millis_i64(duration, "@ timestamp"),
+        Err(error) => duration_millis_i64(error.duration(), "@ timestamp")?
+            .checked_neg()
+            .ok_or_else(|| "PromQL negative @ timestamp overflow".to_string()),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -527,9 +594,7 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
         }
     })?;
     let lower_selector = |selector: promql::VectorSelector| -> Result<_, String> {
-        if selector.offset.is_some() || selector.at.is_some() {
-            return Err("PromQL modifiers are not shipped yet".into());
-        }
+        let timing = SelectorTiming::lower(selector.offset, selector.at)?;
         if !selector.matchers.or_matchers.is_empty() {
             return Err("PromQL OR matcher groups are not shipped yet".into());
         }
@@ -563,6 +628,7 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
                 (Some(_), _) => return Err("metric name specified twice".into()),
             },
             filter: FilterPlan::new(matchers),
+            timing,
         })
     };
     match parsed {
@@ -736,6 +802,7 @@ impl<'a> SelectorParser<'a> {
         Ok(Selector {
             metric,
             filter: FilterPlan::new(matchers),
+            timing: SelectorTiming::default(),
         })
     }
 
@@ -1886,6 +1953,7 @@ fn execute_prometheus(
             if features.window_batches
                 && features.window_batch_work_limit
                 && matches!(selector.metric, MetricSelection::Exact(_))
+                && selector.timing.is_default()
                 && [start, stop, step, *window]
                     .into_iter()
                     .all(|value| value % 1_000 == 0) =>
@@ -2008,7 +2076,11 @@ fn execute_prometheus_range_selector(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let lower = evaluation_time.saturating_sub(window);
+    let selection_time =
+        selector
+            .timing
+            .selection_time(evaluation_time, evaluation_time, evaluation_time)?;
+    let lower = selection_time.saturating_sub(window);
     let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
     let mut body = br#"{"status":"success","data":{"resultType":"matrix","result":["#.to_vec();
     enforce_prometheus_output(&body, 0, limits)?;
@@ -2030,7 +2102,7 @@ fn execute_prometheus_range_selector(
             &metric,
             &selector.filter,
             storage_seconds_floor(lower),
-            storage_seconds_floor(evaluation_time),
+            storage_seconds_floor(selection_time),
             Some(remaining_work),
         )?;
         let work_points = raw.series.iter().map(RawSeries::len).sum();
@@ -2054,7 +2126,7 @@ fn execute_prometheus_range_selector(
             for index in 0..series.len() {
                 check_cancelled(cancelled)?;
                 let timestamp = seconds_to_millis(series.timestamp(raw.frame.as_deref(), index)?);
-                if timestamp <= lower || timestamp > evaluation_time {
+                if timestamp <= lower || timestamp > selection_time {
                     continue;
                 }
                 admit_prometheus_point(points.saturating_add(item_points), limits)?;
@@ -2100,6 +2172,10 @@ fn execute_prometheus_selector(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
+    let selection_start = selector.timing.selection_time(start, start, stop)?;
+    let selection_stop = selector.timing.selection_time(stop, start, stop)?;
+    let read_start = selection_start.min(selection_stop);
+    let read_stop = selection_start.max(selection_stop);
     let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
@@ -2121,8 +2197,8 @@ fn execute_prometheus_selector(
             features,
             &metric,
             &selector.filter,
-            storage_seconds_floor(start.saturating_sub(lookback)),
-            storage_seconds_floor(stop),
+            storage_seconds_floor(read_start.saturating_sub(lookback)),
+            storage_seconds_floor(read_stop),
             Some(remaining_work),
         )?;
         let work_points = raw.series.iter().map(RawSeries::len).sum();
@@ -2148,12 +2224,14 @@ fn execute_prometheus_selector(
             let mut t = start;
             loop {
                 check_cancelled(cancelled)?;
+                let selection_time = selector.timing.selection_time(t, start, stop)?;
                 while hi < series.len()
-                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
+                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?)
+                        <= selection_time
                 {
                     hi += 1;
                 }
-                let lower = t.saturating_sub(lookback);
+                let lower = selection_time.saturating_sub(lookback);
                 while lo < hi
                     && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
                 {
@@ -2308,6 +2386,10 @@ fn execute_prometheus_avg_raw(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
+    let selection_start = selector.timing.selection_time(start, start, stop)?;
+    let selection_stop = selector.timing.selection_time(stop, start, stop)?;
+    let read_start = selection_start.min(selection_stop);
+    let read_stop = selection_start.max(selection_stop);
     let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
@@ -2329,8 +2411,8 @@ fn execute_prometheus_avg_raw(
             features,
             &metric,
             &selector.filter,
-            storage_seconds_floor(start.saturating_sub(window)),
-            storage_seconds_floor(stop),
+            storage_seconds_floor(read_start.saturating_sub(window)),
+            storage_seconds_floor(read_stop),
             Some(remaining_work),
         )?;
         let work_points = raw.series.iter().map(RawSeries::len).sum();
@@ -2356,12 +2438,14 @@ fn execute_prometheus_avg_raw(
             let mut t = start;
             loop {
                 check_cancelled(cancelled)?;
+                let selection_time = selector.timing.selection_time(t, start, stop)?;
                 while hi < series.len()
-                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
+                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?)
+                        <= selection_time
                 {
                     hi += 1;
                 }
-                let lower = t.saturating_sub(window);
+                let lower = selection_time.saturating_sub(window);
                 while lo < hi
                     && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
                 {
@@ -3172,6 +3256,36 @@ mod tests {
 
         let error = lower_promql(r#"{__name__!="missing"}"#, 300_000).unwrap_err();
         assert!(error.contains("at least one non-empty matcher"), "{error}");
+    }
+
+    #[test]
+    fn promql_temporal_modifiers_resolve_anchor_before_signed_offset() {
+        let PromPlan::Selector { selector, .. } =
+            lower_promql("cpu @ 50 offset 10s", 300_000).unwrap()
+        else {
+            panic!("temporal selector lowered to the wrong plan")
+        };
+        assert_eq!(selector.timing.offset_ms, 10_000);
+        assert_eq!(selector.timing.at, Some(SelectorAt::Timestamp(50_000)));
+        assert_eq!(
+            selector.timing.selection_time(60_000, 0, 60_000).unwrap(),
+            40_000
+        );
+
+        let PromPlan::Selector { selector, .. } = lower_promql("cpu offset -20s", 300_000).unwrap()
+        else {
+            panic!("negative-offset selector lowered to the wrong plan")
+        };
+        assert_eq!(selector.timing.offset_ms, -20_000);
+        assert_eq!(
+            selector.timing.selection_time(10_000, 0, 60_000).unwrap(),
+            30_000
+        );
+
+        let PromPlan::Selector { selector, .. } = lower_promql("cpu @ -1", 300_000).unwrap() else {
+            panic!("pre-epoch selector lowered to the wrong plan")
+        };
+        assert_eq!(selector.timing.at, Some(SelectorAt::Timestamp(-1_000)));
     }
 
     #[test]

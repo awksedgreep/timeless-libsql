@@ -3388,6 +3388,53 @@ instant = db.execute(
 ).fetchall()
 assert len(instant) == 2
 
+offset = db.execute(
+    "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "
+    "ORDER BY labels,outer_ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+        'offset': 10,
+    },
+).fetchall()
+assert offset == [
+    ('{"host":"web-1","service":"api"}', 110, 10.0),
+    ('{"host":"web-2","service":"api"}', 110, 20.0),
+]
+
+fixed = db.execute(
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "), selected AS ("
+    " SELECT labels,value FROM timeless_grid("
+    "  'metrics',:metric,:filter_json,:anchor-:offset,:anchor-:offset,1,:lookback)"
+    ") SELECT selected.labels,evaluation.ts,selected.value"
+    " FROM selected CROSS JOIN evaluation"
+    " ORDER BY selected.labels,evaluation.ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+        'anchor': 110,
+        'offset': 10,
+    },
+).fetchall()
+assert fixed == [
+    ('{"host":"web-1","service":"api"}', 100, 10.0),
+    ('{"host":"web-1","service":"api"}', 110, 10.0),
+    ('{"host":"web-2","service":"api"}', 100, 20.0),
+    ('{"host":"web-2","service":"api"}', 110, 20.0),
+]
+
 window = db.execute(
     "SELECT labels,ts,value FROM timeless_window("
     "'metrics',:metric,:filter_json,:start,:end,:step,:window,'avg') "
@@ -3506,7 +3553,8 @@ buckets = db.execute(
 ).fetchall()
 assert sum(row[2] for row in buckets) == 2
 
-print(f"prom|{len(instant)}|{len(window)}|{len(top)}|{ratio:.1f}")
+print(f"prom|{len(instant)}|{len(window)}|{len(top)}|{ratio:.1f}|"
+      f"{len(offset)}|{len(fixed)}")
 print(f"logs|{len(bounded)}|{len(substring)}|{count}|{len(values)}|"
       f"{len(metadata)}|{sum(row[2] for row in buckets)}")
 db.close()
@@ -3515,7 +3563,7 @@ PY
 
 check_eq "documented SQL equivalents execute through the public extension" \
   "$got" \
-$'prom|2|4|2|0.2\nlogs|1|1|1|2|1|2'
+$'prom|2|4|2|0.2|2|4\nlogs|1|1|1|2|1|2'
 
 # ---------------------------------------------------------------------------
 echo

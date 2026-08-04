@@ -28,7 +28,8 @@ The current PromQL slice supports scalar literals (including `NaN` and
 infinities), string literals, exact-name and nameless instant vector
 selectors, anchored regex/negative/duplicate `__name__` matchers, root range
 selectors on instant queries, and
-`avg_over_time(selector[window])`. It
+`avg_over_time(selector[window])`. Selectors and range selectors accept signed
+`offset` plus numeric/`start()`/`end()` `@` modifiers. It
 deliberately rejects every other
 function, operator, aggregation, subquery, offset, or modifier with a
 Prometheus `bad_data` response. There is no hidden Elixir fallback. The
@@ -154,6 +155,13 @@ query; range-query use fails as `bad_data`. The Rust process writes the final ve
 BEAM/NIF or per-series transport. Duplicate matcher AND semantics and the
 11,000-point resolution limit
 match the existing service contract.
+
+Temporal modifiers resolve `@` before subtracting signed `offset`. They shift
+lookup/lookback/window time but never the outer selector/function output grid;
+root range vectors continue to expose the selected raw sample timestamps.
+Modified window functions deliberately use the bounded public raw path because
+the extension's window timestamps are lookup timestamps, not PromQL's outer
+evaluation timestamps.
 
 Every read carries a cancellation token. A dropped HTTP future stops host grid
 evaluation between points and installs a scoped SQLite progress handler; the
