@@ -347,6 +347,35 @@ functions over public grids; executable
 [`SQL-PROM-013`](QUERY_SQL_EQUIVALENTS.md#sql-prom-013-on-and-ignoring-label-matching)
 shows both forms.
 
+## PromQL many-to-one vector matching
+
+`group_left` and `group_right` explicitly allow multiple series on one side of
+an arithmetic or comparison match:
+
+```promql
+pod_errors + on(service) group_left(team) service_budget
+service_budget - on(service) group_right(team) pod_usage
+```
+
+`group_left` makes the right side unique and retains each left-side series;
+`group_right` makes the left side unique and retains each right-side series.
+The optional label list copies labels from that unique “one” side. A missing
+or empty included label removes the corresponding many-side label. The copy
+must still leave every result labelset unique at each evaluation timestamp.
+
+Operation direction never changes: `a - ... group_right ... b` still computes
+`a - b`. For a non-`bool` comparison, the surviving sample value is likewise
+the original left value; `group_right` uses the right metric identity solely
+to represent its right-side result cardinality. Arithmetic and `bool` follow
+their established metric-name removal rules.
+
+The evaluator validates the one side and result uniqueness independently at
+every step, supports an active one-side series changing across a range, and
+keeps all child/result work bounded and cancellable. Direct SQL users can
+compose the public grids and run an explicit uniqueness preflight; executable
+[`SQL-PROM-014`](QUERY_SQL_EQUIVALENTS.md#sql-prom-014-group_left-and-group_right)
+shows the complete foundation.
+
 ## Scalar aggregate without raw materialization
 
 ```sql

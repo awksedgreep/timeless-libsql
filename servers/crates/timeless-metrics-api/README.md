@@ -39,6 +39,9 @@ and names, while `bool` emits `0`/`1` and removes names. Set `and`, `or`, and
 sample's value, labels, and metric name. Vector/vector operators accept
 `on(...)` and `ignoring(...)`, including empty lists and missing-label
 matching, with Prometheus output-label and duplicate-cardinality rules.
+Many-to-one `group_left` and one-to-many `group_right` preserve operation
+direction, copy labels from the unique side, and reject both duplicate unique
+sides and non-unique result labelsets.
 Selectors and range selectors accept signed
 `offset` plus numeric/`start()`/`end()` `@` modifiers. Selector and shipped
 range-function expressions may be evaluated as bounded subqueries with

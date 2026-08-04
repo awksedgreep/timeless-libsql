@@ -34,6 +34,18 @@ tests:
         values: '6 7 8'
       - series: 'query_contract_matching_rhs{host="a",shared="x",zone="west"}'
         values: '1 2 3'
+      - series: 'query_contract_group_many_lhs{host="a",owner="old",pod="p1",zone="east"}'
+        values: '6 7 8'
+      - series: 'query_contract_group_many_lhs{host="a",owner="old",pod="p2",zone="west"}'
+        values: '7 8 9'
+      - series: 'query_contract_group_one_rhs{host="a",team="core"}'
+        values: '1 2 3'
+      - series: 'query_contract_group_one_lhs{host="a",team="core"}'
+        values: '6 7 8'
+      - series: 'query_contract_group_many_rhs{host="a",pod="p1",zone="east"}'
+        values: '1 2 3'
+      - series: 'query_contract_group_many_rhs{host="a",pod="p2",zone="west"}'
+        values: '2 3 4'
     promql_expr_test:
       - expr: 'query_contract_cpu{host="a"}'
         eval_time: 20s
@@ -251,3 +263,31 @@ tests:
         exp_samples:
           - labels: '{}'
             value: 11
+      - expr: 'query_contract_group_many_lhs + on(host) group_left(team) query_contract_group_one_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",owner="old",pod="p1",team="core",zone="east"}'
+            value: 11
+          - labels: '{host="a",owner="old",pod="p2",team="core",zone="west"}'
+            value: 12
+      - expr: 'query_contract_group_many_lhs + on(host) group_left(owner) query_contract_group_one_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",pod="p1",zone="east"}'
+            value: 11
+          - labels: '{host="a",pod="p2",zone="west"}'
+            value: 12
+      - expr: 'query_contract_group_one_lhs - on(host) group_right(team) query_contract_group_many_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",pod="p1",team="core",zone="east"}'
+            value: 5
+          - labels: '{host="a",pod="p2",team="core",zone="west"}'
+            value: 4
+      - expr: 'query_contract_group_one_lhs > on(host) group_right(team) query_contract_group_many_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_group_many_rhs{host="a",pod="p1",team="core",zone="east"}'
+            value: 8
+          - labels: 'query_contract_group_many_rhs{host="a",pod="p2",team="core",zone="west"}'
+            value: 8

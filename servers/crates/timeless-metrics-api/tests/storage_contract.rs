@@ -2447,6 +2447,231 @@ async fn session_four_promql_on_ignoring_match_labels_names_limits_and_reopen() 
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_promql_group_matching_direction_labels_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four_group_matching.db");
+    let base = 1_700_450_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut victoria = String::new();
+    for (metric, labels, first, second) in [
+        (
+            "group_many_lhs",
+            "\"host\":\"a\",\"owner\":\"old\",\"pod\":\"p1\",\"zone\":\"east\"",
+            8.0,
+            18.0,
+        ),
+        (
+            "group_many_lhs",
+            "\"host\":\"a\",\"owner\":\"old\",\"pod\":\"p2\",\"zone\":\"west\"",
+            9.0,
+            19.0,
+        ),
+        (
+            "group_collision_many",
+            "\"host\":\"a\",\"team\":\"red\"",
+            4.0,
+            14.0,
+        ),
+        (
+            "group_collision_many",
+            "\"host\":\"a\",\"team\":\"blue\"",
+            5.0,
+            15.0,
+        ),
+        (
+            "group_one_rhs",
+            "\"host\":\"a\",\"team\":\"core\"",
+            2.0,
+            12.0,
+        ),
+        (
+            "group_one_rhs_duplicate",
+            "\"host\":\"a\",\"team\":\"ops\"",
+            3.0,
+            13.0,
+        ),
+        (
+            "group_one_lhs",
+            "\"host\":\"a\",\"team\":\"core\"",
+            8.0,
+            18.0,
+        ),
+        (
+            "group_one_lhs_duplicate",
+            "\"host\":\"a\",\"team\":\"ops\"",
+            9.0,
+            19.0,
+        ),
+        (
+            "group_many_rhs",
+            "\"host\":\"a\",\"pod\":\"p1\",\"zone\":\"east\"",
+            2.0,
+            12.0,
+        ),
+        (
+            "group_many_rhs",
+            "\"host\":\"a\",\"pod\":\"p2\",\"zone\":\"west\"",
+            3.0,
+            13.0,
+        ),
+    ] {
+        use std::fmt::Write;
+        writeln!(
+            victoria,
+            "{{\"metric\":{{\"__name__\":\"{metric}\",{labels}}},\"values\":[{first},{second}],\"timestamps\":[{},{}]}}",
+            base * 1_000,
+            (base + 10) * 1_000,
+        )
+        .unwrap();
+    }
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let group_left = prom_query(
+        &app,
+        "group_many_lhs + on(host) group_left(team) group_one_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(group_left.0, StatusCode::OK, "{}", group_left.1);
+    assert_eq!(
+        group_left.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a", "owner": "old", "pod": "p1", "team": "core", "zone": "east"}, "value": [base + 10, "30"]},
+            {"metric": {"host": "a", "owner": "old", "pod": "p2", "team": "core", "zone": "west"}, "value": [base + 10, "31"]}
+        ])
+    );
+
+    let missing_include = prom_query(
+        &app,
+        "group_many_lhs + on(host) group_left(owner) group_one_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(missing_include.0, StatusCode::OK, "{}", missing_include.1);
+    for sample in missing_include.1["data"]["result"].as_array().unwrap() {
+        assert!(sample["metric"].get("owner").is_none(), "{sample}");
+    }
+
+    let group_right = prom_query(
+        &app,
+        "group_one_lhs - on(host) group_right(team) group_many_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(group_right.0, StatusCode::OK, "{}", group_right.1);
+    assert_eq!(
+        group_right.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a", "pod": "p1", "team": "core", "zone": "east"}, "value": [base + 10, "6"]},
+            {"metric": {"host": "a", "pod": "p2", "team": "core", "zone": "west"}, "value": [base + 10, "5"]}
+        ])
+    );
+
+    let comparison = prom_query(
+        &app,
+        "group_one_lhs > on(host) group_right(team) group_many_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(comparison.0, StatusCode::OK, "{}", comparison.1);
+    for sample in comparison.1["data"]["result"].as_array().unwrap() {
+        assert_eq!(sample["metric"]["__name__"], "group_many_rhs");
+        assert_eq!(sample["metric"]["team"], "core");
+        assert_eq!(sample["value"][1], "18");
+    }
+
+    for query in [
+        "group_many_lhs + on(host) group_left(team) {__name__=~\"group_one_rhs(_duplicate)?\"}",
+        "{__name__=~\"group_one_lhs(_duplicate)?\"} - on(host) group_right(team) group_many_rhs",
+    ] {
+        let duplicate = prom_query(&app, query, base + 10).await;
+        assert_eq!(duplicate.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(duplicate.1["errorType"], "execution");
+        assert!(duplicate.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("many-to-many matching not allowed"));
+    }
+
+    let collision = prom_query(
+        &app,
+        "group_collision_many + on(host) group_left(team) group_one_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(collision.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(collision.1["errorType"], "execution");
+    assert!(collision.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("grouping labels must ensure unique matches"));
+
+    let range = prom_query_range(
+        &app,
+        "group_many_lhs + on(host) group_left(team) group_one_rhs",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "10"], [base + 10, "30"]])
+    );
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 5,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "group_many_lhs + on(host) group_left(team) group_one_rhs",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 5 points"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = prom_query(
+        &reopened_app,
+        "group_one_lhs - on(host) group_right(team) group_many_rhs",
+        base + 10,
+    )
+    .await;
+    assert_eq!(recovered.1, group_right.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

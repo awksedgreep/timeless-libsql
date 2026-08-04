@@ -216,6 +216,44 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
         [(3.0, timestamp_ms + 30_000)],
         {"host": "a", "shared": "x", "zone": "north"},
     )
+    for pod, zone, value in [("p1", "east", 8.0), ("p2", "west", 9.0)]:
+        write_request += series(
+            "oracle_group_many_lhs",
+            [(value, timestamp_ms + 30_000)],
+            {"host": "a", "owner": "old", "pod": pod, "zone": zone},
+        )
+    for team, value in [("red", 4.0), ("blue", 5.0)]:
+        write_request += series(
+            "oracle_group_collision_many",
+            [(value, timestamp_ms + 30_000)],
+            {"host": "a", "team": team},
+        )
+    write_request += series(
+        "oracle_group_one_rhs",
+        [(2.0, timestamp_ms + 30_000)],
+        {"host": "a", "team": "core"},
+    )
+    write_request += series(
+        "oracle_group_one_rhs_duplicate",
+        [(3.0, timestamp_ms + 30_000)],
+        {"host": "a", "team": "ops"},
+    )
+    write_request += series(
+        "oracle_group_one_lhs",
+        [(8.0, timestamp_ms + 30_000)],
+        {"host": "a", "team": "core"},
+    )
+    write_request += series(
+        "oracle_group_one_lhs_duplicate",
+        [(9.0, timestamp_ms + 30_000)],
+        {"host": "a", "team": "ops"},
+    )
+    for pod, zone, value in [("p1", "east", 2.0), ("p2", "west", 3.0)]:
+        write_request += series(
+            "oracle_group_many_rhs",
+            [(value, timestamp_ms + 30_000)],
+            {"host": "a", "pod": pod, "zone": zone},
+        )
     return snappy_literal(write_request)
 
 
@@ -507,6 +545,20 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 endpoint = "/api/v1/query"
                 result_type = "vector"
                 result = []
+            elif "expected_results" in case:
+                params = {
+                    "query": case["query"],
+                    "time": str(evaluation_ms / 1_000),
+                }
+                endpoint = "/api/v1/query"
+                result_type = "vector"
+                result = [
+                    {
+                        "metric": dict(expected["metric"]),
+                        "value": [evaluation_ms / 1_000, str(expected["value"])],
+                    }
+                    for expected in case["expected_results"]
+                ]
             else:
                 params = {
                     "query": case["query"],
@@ -518,7 +570,12 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                     "metric": dict(case.get("expected_metric", {"job": "oracle"})),
                     "value": [evaluation_ms / 1_000, str(case["expected_values"][0])],
                 }]
-            if result and "expected_metric" not in case and not case.get("drop_metric_name"):
+            if (
+                result
+                and "expected_results" not in case
+                and "expected_metric" not in case
+                and not case.get("drop_metric_name")
+            ):
                 result[0]["metric"]["__name__"] = "oracle_temporal"
             url = base + endpoint + "?" + urllib.parse.urlencode(params)
             with urllib.request.urlopen(url, timeout=10) as response:

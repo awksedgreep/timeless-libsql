@@ -428,6 +428,15 @@ enum PromVectorMatching {
     Ignoring(BTreeSet<String>),
 }
 
+#[derive(Clone, Debug, Default)]
+enum PromVectorCardinality {
+    #[default]
+    OneToOne,
+    ManyToOne(BTreeSet<String>),
+    OneToMany(BTreeSet<String>),
+    ManyToMany,
+}
+
 impl PromVectorMatching {
     fn key(&self, labels: &BTreeMap<String, String>) -> PromMatchingKey {
         match self {
@@ -512,6 +521,7 @@ pub(crate) struct PromBinaryPlan {
     rhs: Box<PromPlan>,
     return_bool: bool,
     matching: PromVectorMatching,
+    cardinality: PromVectorCardinality,
 }
 
 impl PromPlan {
@@ -869,11 +879,21 @@ fn lower_promql_binary(
             PromVectorMatching::Ignoring(labels.labels.iter().cloned().collect())
         }
     };
+    let cardinality = match binary.modifier.as_ref().map(|modifier| &modifier.card) {
+        None | Some(VectorMatchCardinality::OneToOne) => PromVectorCardinality::OneToOne,
+        Some(VectorMatchCardinality::ManyToOne(labels)) => {
+            PromVectorCardinality::ManyToOne(labels.labels.iter().cloned().collect())
+        }
+        Some(VectorMatchCardinality::OneToMany(labels)) => {
+            PromVectorCardinality::OneToMany(labels.labels.iter().cloned().collect())
+        }
+        Some(VectorMatchCardinality::ManyToMany) => PromVectorCardinality::ManyToMany,
+    };
     if let Some(modifier) = &binary.modifier {
         let expected_cardinality = if op.is_set() {
-            matches!(modifier.card, VectorMatchCardinality::ManyToMany)
+            matches!(cardinality, PromVectorCardinality::ManyToMany)
         } else {
-            matches!(modifier.card, VectorMatchCardinality::OneToOne)
+            !matches!(cardinality, PromVectorCardinality::ManyToMany)
         };
         if !expected_cardinality
             || modifier.fill_values.lhs.is_some()
@@ -913,6 +933,7 @@ fn lower_promql_binary(
         rhs: Box::new(rhs),
         return_bool,
         matching,
+        cardinality,
     }))
 }
 
@@ -2540,6 +2561,7 @@ fn execute_prometheus_binary(
         binary.op,
         binary.return_bool,
         &binary.matching,
+        &binary.cardinality,
         lhs,
         rhs,
         cancelled,
@@ -2558,6 +2580,7 @@ fn apply_prometheus_binary(
     op: PromBinaryOp,
     return_bool: bool,
     matching: &PromVectorMatching,
+    cardinality: &PromVectorCardinality,
     lhs: IntermediateValue,
     rhs: IntermediateValue,
     cancelled: &AtomicBool,
@@ -2610,10 +2633,11 @@ fn apply_prometheus_binary(
             )?))
         }
         (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => {
-            Ok(IntermediateValue::Vector(apply_one_to_one_vectors(
+            Ok(IntermediateValue::Vector(apply_vector_vectors(
                 op,
                 return_bool,
                 matching,
+                cardinality,
                 lhs,
                 rhs,
                 cancelled,
@@ -2772,10 +2796,11 @@ fn duplicate_matching_error(key: &[(String, String)]) -> String {
     )
 }
 
-fn apply_one_to_one_vectors(
+fn apply_vector_vectors(
     op: PromBinaryOp,
     return_bool: bool,
     matching: &PromVectorMatching,
+    cardinality: &PromVectorCardinality,
     lhs: Vec<IntermediateSeries>,
     rhs: Vec<IntermediateSeries>,
     cancelled: &AtomicBool,
@@ -2790,7 +2815,7 @@ fn apply_one_to_one_vectors(
         .collect();
     let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
     let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
-    let mut output_points = vec![Vec::new(); lhs.len()];
+    let mut output: BTreeMap<BTreeMap<String, String>, Vec<(i64, f64)>> = BTreeMap::new();
 
     for (timestamp, lhs_samples) in lhs_by_timestamp {
         check_cancelled(cancelled)?;
@@ -2818,34 +2843,125 @@ fn apply_one_to_one_vectors(
             let Some(rhs_group) = rhs_groups.get(key) else {
                 continue;
             };
-            if lhs_group.len() != 1 || rhs_group.len() != 1 {
-                return Err(duplicate_matching_error(key));
-            }
-            let (lhs_index, lhs_value) = lhs_group[0];
-            let rhs_value = rhs_group[0].1;
-            if let Some(value) = op.evaluate(lhs_value, rhs_value, lhs_value, return_bool) {
-                output_points[lhs_index].push((timestamp, value));
+            let matches: Vec<(usize, usize, f64, f64)> = match cardinality {
+                PromVectorCardinality::OneToOne => {
+                    if lhs_group.len() != 1 || rhs_group.len() != 1 {
+                        return Err(duplicate_matching_error(key));
+                    }
+                    vec![(
+                        lhs_group[0].0,
+                        rhs_group[0].0,
+                        lhs_group[0].1,
+                        rhs_group[0].1,
+                    )]
+                }
+                PromVectorCardinality::ManyToOne(_) => {
+                    if rhs_group.len() != 1 {
+                        return Err(duplicate_matching_error(key));
+                    }
+                    lhs_group
+                        .iter()
+                        .map(|(lhs_index, lhs_value)| {
+                            (*lhs_index, rhs_group[0].0, *lhs_value, rhs_group[0].1)
+                        })
+                        .collect()
+                }
+                PromVectorCardinality::OneToMany(_) => {
+                    if lhs_group.len() != 1 {
+                        return Err(duplicate_matching_error(key));
+                    }
+                    rhs_group
+                        .iter()
+                        .map(|(rhs_index, rhs_value)| {
+                            (lhs_group[0].0, *rhs_index, lhs_group[0].1, *rhs_value)
+                        })
+                        .collect()
+                }
+                PromVectorCardinality::ManyToMany => {
+                    unreachable!("set operators use their dedicated evaluator")
+                }
+            };
+            let mut step_output_labels = BTreeSet::new();
+            for (lhs_index, rhs_index, lhs_value, rhs_value) in matches {
+                check_cancelled(cancelled)?;
+                let Some(value) = op.evaluate(
+                    lhs_value,
+                    rhs_value,
+                    lhs_value,
+                    return_bool,
+                ) else {
+                    continue;
+                };
+                let (base_labels, one_labels) = match cardinality {
+                    PromVectorCardinality::OneToMany(_) => {
+                        (&rhs[rhs_index].labels, &lhs[lhs_index].labels)
+                    }
+                    _ => (&lhs[lhs_index].labels, &rhs[rhs_index].labels),
+                };
+                let labels = vector_result_labels(
+                    base_labels,
+                    one_labels,
+                    op,
+                    return_bool,
+                    matching,
+                    cardinality,
+                );
+                if !step_output_labels.insert(labels.clone()) {
+                    return Err(
+                        "multiple matches for labels: grouping labels must ensure unique matches"
+                            .into(),
+                    );
+                }
+                output.entry(labels).or_default().push((timestamp, value));
             }
         }
     }
 
-    let output = lhs
+    let output = output
         .into_iter()
-        .zip(output_points)
-        .filter_map(|(mut series, points)| {
-            if points.is_empty() {
-                None
-            } else {
-                if op.is_arithmetic() || return_bool {
-                    series.labels.remove("__name__");
-                }
-                matching.project_one_to_one_result(&mut series.labels);
-                series.points = points;
-                Some(series)
-            }
+        .map(|(labels, points)| IntermediateSeries {
+            labels,
+            points,
         })
         .collect();
     normalize_prometheus_vector(output, cancelled)
+}
+
+fn vector_result_labels(
+    base_labels: &BTreeMap<String, String>,
+    one_labels: &BTreeMap<String, String>,
+    op: PromBinaryOp,
+    return_bool: bool,
+    matching: &PromVectorMatching,
+    cardinality: &PromVectorCardinality,
+) -> BTreeMap<String, String> {
+    let mut labels = base_labels.clone();
+    if op.is_arithmetic() {
+        labels.remove("__name__");
+    }
+    match cardinality {
+        PromVectorCardinality::OneToOne => matching.project_one_to_one_result(&mut labels),
+        PromVectorCardinality::ManyToOne(include)
+        | PromVectorCardinality::OneToMany(include) => {
+            for name in include {
+                match one_labels.get(name).filter(|value| !value.is_empty()) {
+                    Some(value) => {
+                        labels.insert(name.clone(), value.clone());
+                    }
+                    None => {
+                        labels.remove(name);
+                    }
+                }
+            }
+        }
+        PromVectorCardinality::ManyToMany => {
+            unreachable!("set operators retain contributing labels")
+        }
+    }
+    if return_bool {
+        labels.remove("__name__");
+    }
+    labels
 }
 
 fn normalize_prometheus_vector(

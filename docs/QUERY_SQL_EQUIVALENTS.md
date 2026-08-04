@@ -55,6 +55,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-011`](#sql-prom-011-comparison-filter-and-bool) | `PQL-O03` | current foundation | exact SQLite predicate/CASE over public grids; API owns AST types, name policy, matching, limits, and envelopes |
 | [`SQL-PROM-012`](#sql-prom-012-set-membership) | `PQL-O04` | current foundation | exact step-local many-to-many membership over public grids; API owns language, names, bounds, limits, and envelopes |
 | [`SQL-PROM-013`](#sql-prom-013-on-and-ignoring-label-matching) | `PQL-O06` | current foundation | explicit JSON-label projection/equality over public grids; API owns AST/cardinality/name/error semantics |
+| [`SQL-PROM-014`](#sql-prom-014-group_left-and-group_right) | `PQL-O07` | current foundation | explicit many/one grid join and label copy; API owns uniqueness failures, name/value direction, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -552,6 +553,82 @@ rules, one-to-one cardinality errors, AST validation, bounded work,
 cancellation, and Prometheus envelopes. Direct executable regression:
 `tests/cli.sh` section 33; HTTP/oracle/reopen regression:
 `session_four_promql_on_ignoring_match_labels_names_limits_and_reopen`.
+
+### SQL-PROM-014: `group_left` and `group_right`
+
+For `many + on(service) group_left(team) one`, join a many-side grid to a
+one-side grid by the explicit key and copy `team` from the unique right side:
+
+```sql
+WITH
+many AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :many_metric, :many_filter,
+    :start, :end, :step, :lookback
+  )
+),
+one AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :one_metric, :one_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  CASE
+    WHEN COALESCE(json_extract(one.labels, '$.team'), '') = ''
+      THEN json_remove(many.labels, '$.team')
+    ELSE json_set(
+      many.labels, '$.team', json_extract(one.labels, '$.team')
+    )
+  END AS labels,
+  many.ts,
+  many.value + one.value AS value
+FROM many
+JOIN one
+  ON one.ts = many.ts
+ AND COALESCE(json_extract(one.labels, '$.service'), '') =
+     COALESCE(json_extract(many.labels, '$.service'), '')
+ORDER BY labels, many.ts;
+```
+
+Before executing, the direct caller must prove that the one side is unique at
+each match key and timestamp:
+
+```sql
+WITH one AS (
+  SELECT labels, ts
+  FROM timeless_grid(
+    'metrics', :one_metric, :one_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  COALESCE(json_extract(labels, '$.service'), '') AS match_service,
+  ts,
+  COUNT(*) AS matches
+FROM one
+GROUP BY match_service, ts
+HAVING COUNT(*) > 1;
+```
+
+Any returned row is a cardinality error, not permission to execute a Cartesian
+join. `group_right` swaps which side supplies the base labelset and which side
+must be unique, but never swaps the language operation. For example,
+`one - on(service) group_right(team) many` projects from `many`, copies `team`
+from `one`, and still calculates `one.value - many.value`.
+
+Time units, inclusive grid bounds, open-left lookback, missing sample behavior,
+and canonical label ordering follow `SQL-PROM-013`. A missing or empty included
+label removes that label from the result. Included labels that collapse two
+many-side results to the same labelset at one timestamp are also an execution
+error. Arithmetic removes the metric name. A `group_right` comparison filter
+uses the right metric identity but retains the original left value; the Rust
+API owns that directionality, per-step uniqueness errors, result splitting,
+limits, cancellation, and envelopes. Direct executable regression:
+`tests/cli.sh` section 33; HTTP/oracle/reopen regression:
+`session_four_promql_group_matching_direction_labels_limits_and_reopen`.
 
 ### SQL-PROM-003: cross-series sum by label
 

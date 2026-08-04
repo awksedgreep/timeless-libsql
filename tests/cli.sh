@@ -2027,6 +2027,12 @@ INSERT INTO ck(name, labels, ts, value) VALUES
   ('set_rhs', '{"host":"d"}', 60, 400.0),
   ('matching_lhs', '{"host":"a","shared":"x","zone":"east"}', 60, 8.0),
   ('matching_rhs', '{"host":"a","shared":"x","zone":"west"}', 60, 2.0),
+  ('group_many_lhs', '{"host":"a","pod":"p1"}', 60, 8.0),
+  ('group_many_lhs', '{"host":"a","pod":"p2"}', 60, 9.0),
+  ('group_one_rhs', '{"host":"a","team":"core"}', 60, 2.0),
+  ('group_one_lhs', '{"host":"a","team":"core"}', 60, 8.0),
+  ('group_many_rhs', '{"host":"a","pod":"p1"}', 60, 2.0),
+  ('group_many_rhs', '{"host":"a","pod":"p2"}', 60, 3.0),
   ('lat', '{}', 0, 10.0), ('lat', '{}', 10, 11.0), ('lat', '{}', 20, 12.0),
   ('lat', '{}', 30, 13.0), ('lat', '{}', 40, 10.0), ('lat', '{}', 50, 11.0),
   ('lat', '{}', 60, 12.0), ('lat', '{}', 70, 13.0), ('lat', '{}', 80, 10.0),
@@ -2190,6 +2196,40 @@ SELECT 'matching_ignoring',json_remove(lhs.labels,'$.zone'),
     ON rhs.ts=lhs.ts
    AND json_remove(rhs.labels,'$.zone')=json_remove(lhs.labels,'$.zone')
  ORDER BY 2,3;
+-- SQL-PROM-014: explicit group_left/group_right many/one joins
+WITH many AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','group_many_lhs',NULL,60,60,60,60)
+), one AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','group_one_rhs',NULL,60,60,60,60)
+)
+SELECT 'group_left',
+       json_set(many.labels,'$.team',json_extract(one.labels,'$.team')),
+       many.ts,many.value+one.value
+  FROM many JOIN one
+    ON one.ts=many.ts
+   AND COALESCE(json_extract(one.labels,'$.host'),'') =
+       COALESCE(json_extract(many.labels,'$.host'),'')
+ ORDER BY 2,3;
+WITH one AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','group_one_lhs',NULL,60,60,60,60)
+), many AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','group_many_rhs',NULL,60,60,60,60)
+)
+SELECT 'group_right',
+       json_set(many.labels,'$.team',json_extract(one.labels,'$.team')),
+       many.ts,one.value-many.value
+  FROM one JOIN many
+    ON one.ts=many.ts
+   AND COALESCE(json_extract(one.labels,'$.host'),'') =
+       COALESCE(json_extract(many.labels,'$.host'),'')
+ ORDER BY 2,3;
+WITH one AS (
+  SELECT labels,ts FROM timeless_grid('ck','group_one_rhs',NULL,60,60,60,60)
+)
+SELECT 'group_duplicate_count',COUNT(*) FROM (
+  SELECT COALESCE(json_extract(labels,'$.host'),'') key,ts
+    FROM one GROUP BY key,ts HAVING COUNT(*)>1
+);
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2244,6 +2284,9 @@ $'set_and|{"host":"a"}|60|10.0\nset_and|{"host":"b"}|60|20.0\nset_unless|{"host"
 check_eq "SQL-PROM-013 executes on/ignoring keys and result projection" \
   "$(grep -E '^matching_(on|ignoring)\|' <<<"$got")" \
 $'matching_on|{"host":"a"}|60|10.0\nmatching_ignoring|{"host":"a","shared":"x"}|60|10.0'
+check_eq "SQL-PROM-014 executes both group directions after uniqueness preflight" \
+  "$(grep -E '^group_(left|right|duplicate_count)\|' <<<"$got")" \
+$'group_left|{"host":"a","pod":"p1","team":"core"}|60|10.0\ngroup_left|{"host":"a","pod":"p2","team":"core"}|60|11.0\ngroup_right|{"host":"a","pod":"p1","team":"core"}|60|6.0\ngroup_right|{"host":"a","pod":"p2","team":"core"}|60|5.0\ngroup_duplicate_count|0'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="

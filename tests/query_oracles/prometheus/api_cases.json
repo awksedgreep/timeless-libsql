@@ -326,6 +326,42 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {},
       "expected_values": [10]
+    },
+    {
+      "id": "PQL-O07-group-left-copies-one-side-label",
+      "query": "oracle_group_many_lhs + on(host) group_left(team) oracle_group_one_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle", "owner": "old", "pod": "p1", "team": "core", "zone": "east"}, "value": 10},
+        {"metric": {"host": "a", "job": "oracle", "owner": "old", "pod": "p2", "team": "core", "zone": "west"}, "value": 11}
+      ]
+    },
+    {
+      "id": "PQL-O07-group-left-removes-absent-included-label",
+      "query": "oracle_group_many_lhs + on(host) group_left(owner) oracle_group_one_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle", "pod": "p1", "zone": "east"}, "value": 10},
+        {"metric": {"host": "a", "job": "oracle", "pod": "p2", "zone": "west"}, "value": 11}
+      ]
+    },
+    {
+      "id": "PQL-O07-group-right-preserves-operation-direction",
+      "query": "oracle_group_one_lhs - on(host) group_right(team) oracle_group_many_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle", "pod": "p1", "team": "core", "zone": "east"}, "value": 6},
+        {"metric": {"host": "a", "job": "oracle", "pod": "p2", "team": "core", "zone": "west"}, "value": 5}
+      ]
+    },
+    {
+      "id": "PQL-O07-group-right-comparison-keeps-right-name-left-value",
+      "query": "oracle_group_one_lhs > on(host) group_right(team) oracle_group_many_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"__name__": "oracle_group_many_rhs", "host": "a", "job": "oracle", "pod": "p1", "team": "core", "zone": "east"}, "value": 8},
+        {"metric": {"__name__": "oracle_group_many_rhs", "host": "a", "job": "oracle", "pod": "p2", "team": "core", "zone": "west"}, "value": 8}
+      ]
     }
   ],
   "operator_error_cases": [
@@ -344,6 +380,30 @@
       "status": 422,
       "error_type": "execution",
       "error_contains": "many-to-many matching not allowed"
+    },
+    {
+      "id": "PQL-O07-group-left-requires-unique-right-side",
+      "query": "oracle_group_many_lhs + on(host) group_left(team) {__name__=~\"oracle_group_one_rhs(_duplicate)?\"}",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "many-to-many matching not allowed"
+    },
+    {
+      "id": "PQL-O07-group-right-requires-unique-left-side",
+      "query": "{__name__=~\"oracle_group_one_lhs(_duplicate)?\"} - on(host) group_right(team) oracle_group_many_rhs",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "many-to-many matching not allowed"
+    },
+    {
+      "id": "PQL-O07-included-labels-must-keep-results-unique",
+      "query": "oracle_group_collision_many + on(host) group_left(team) oracle_group_one_rhs",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "grouping labels must ensure unique matches"
     }
   ],
   "cases": [

@@ -309,6 +309,24 @@ def metrics_evidence(
                     separators=(",", ":"),
                 )
             )
+        for service, team, value in [
+            ("api", "frontend", 2.0),
+            ("worker", "backend", 3.0),
+        ]:
+            lines.append(
+                json.dumps(
+                    {
+                        "metric": {
+                            "__name__": "query_contract_service_factor",
+                            "service": service,
+                            "team": team,
+                        },
+                        "values": [value for _ in range(points)],
+                        "timestamps": timestamps,
+                    },
+                    separators=(",", ":"),
+                )
+            )
         selector_names = 64
         for index in range(selector_names):
             lines.append(
@@ -337,7 +355,7 @@ def metrics_evidence(
         if status != 200:
             raise RuntimeError(f"metrics flush returned {status}: {flush_body!r}")
         after_flush = stats(server.base, "/select/metrics/stats")
-        expected_points = (series + selector_names) * points
+        expected_points = (series + selector_names + 2) * points
         if after_flush["completed_points"] != expected_points or after_flush["queued_points"] != 0:
             raise RuntimeError(f"metrics durable watermark mismatch: {after_flush}")
 
@@ -652,6 +670,33 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        group_left_narrow = measure(
+            "metrics-group-left-narrow",
+            lambda: promql(
+                'query_contract_cpu{host="h0000"} + on(service) group_left(team) '
+                "query_contract_service_factor"
+            ),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        group_right_wide = measure(
+            "metrics-group-right-wide",
+            lambda: promql_range(
+                "query_contract_service_factor - on(service) group_right(team) "
+                "query_contract_cpu",
+                at - 30,
+                at,
+                10,
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -919,6 +964,8 @@ def metrics_evidence(
                 "set_or_wide": set_wide,
                 "matching_on_narrow": matching_narrow,
                 "matching_on_wide": matching_wide,
+                "group_left_narrow": group_left_narrow,
+                "group_right_wide": group_right_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,
