@@ -3760,6 +3760,28 @@ cross_quantile = db.execute(
 ).fetchall()
 assert cross_quantile == [('api', 100, 15.0), ('api', 110, 25.0)]
 
+cross_values = db.execute(
+    "WITH selected AS ("
+    " SELECT ts,COALESCE(json_extract(labels,'$.service'),'') service,value"
+    " FROM timeless_grid('metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    ") SELECT service,ts,value,COUNT(*) FROM selected"
+    " GROUP BY service,ts,value ORDER BY service,ts,value",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert cross_values == [
+    ('api', 100, 10.0, 1),
+    ('api', 100, 20.0, 1),
+    ('api', 110, 20.0, 1),
+    ('api', 110, 30.0, 1),
+]
+
 ratio = db.execute(
     "WITH errors AS ("
     " SELECT ts,labels,json_extract(labels,'$.host') host,value"

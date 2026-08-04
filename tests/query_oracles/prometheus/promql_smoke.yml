@@ -402,3 +402,12 @@ tests:
             value: 3.5
           - labels: '{region="west"}'
             value: 6
+      - expr: 'count_values by (region) ("value", query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east",value="3"}'
+            value: 1
+          - labels: '{region="east",value="4"}'
+            value: 1
+          - labels: '{region="west",value="6"}'
+            value: 1

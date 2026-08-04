@@ -597,9 +597,39 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {},
       "expected_values": ["+Inf"]
+    },
+    {
+      "id": "PQL-O16-count-values-by",
+      "query": "count_values by (region) (\"value\", oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east", "value": "3"}, "value": 1},
+        {"metric": {"region": "east", "value": "4"}, "value": 1},
+        {"metric": {"region": "west", "value": "6"}, "value": 1}
+      ]
+    },
+    {
+      "id": "PQL-O16-count-values-format",
+      "query": "count_values(\"value\", oracle_count_values)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"value": "0.00000000000000000001"}, "value": 1},
+        {"metric": {"value": "100000000000000000000"}, "value": 1},
+        {"metric": {"value": "-0"}, "value": 1},
+        {"metric": {"value": "+Inf"}, "value": 1},
+        {"metric": {"value": "NaN"}, "value": 1}
+      ]
     }
   ],
   "operator_error_cases": [
+    {
+      "id": "PQL-O16-count-values-empty-label-errors",
+      "query": "count_values(\"\", oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "invalid label name"
+    },
     {
       "id": "PQL-O14-topk-nan-parameter-errors",
       "query": "topk(NaN, oracle_aggregation)",

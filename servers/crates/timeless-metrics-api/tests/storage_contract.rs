@@ -3569,6 +3569,152 @@ async fn session_five_promql_quantile_interpolates_per_step_and_reopens() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_count_values_formats_groups_ranges_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_count_values.db");
+    let base = 1_700_570_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let values = format!(
+        concat!(
+            "aggregate_values{{host=\"a\",region=\"east\",value=\"old\"}} 1 {}\n",
+            "aggregate_values{{host=\"b\",region=\"east\",value=\"old\"}} 1 {}\n",
+            "aggregate_values{{host=\"c\",region=\"east\",value=\"old\"}} 2 {}\n",
+            "aggregate_values{{host=\"d\",region=\"west\",value=\"old\"}} -0 {}\n",
+            "aggregate_values{{host=\"e\",region=\"west\",value=\"old\"}} +Inf {}\n",
+            "aggregate_values{{host=\"f\",region=\"west\",value=\"old\"}} NaN {}\n",
+            "aggregate_values{{host=\"g\",region=\"west\",value=\"old\"}} 1e-20 {}\n",
+            "aggregate_values{{host=\"h\",region=\"west\",value=\"old\"}} 1e20 {}\n",
+            "aggregate_values{{host=\"a\",region=\"east\",value=\"old\"}} 2 {}\n",
+            "aggregate_values{{host=\"b\",region=\"east\",value=\"old\"}} 1 {}\n",
+            "aggregate_values{{host=\"c\",region=\"east\",value=\"old\"}} 2 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", values.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let grouped = prom_query(
+        &app,
+        "count_values by (region) (\"value\", aggregate_values)",
+        base,
+    )
+    .await;
+    assert_eq!(grouped.0, StatusCode::OK, "{}", grouped.1);
+    assert_eq!(
+        grouped.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east", "value": "1"}, "value": [base, "2"]},
+            {"metric": {"region": "east", "value": "2"}, "value": [base, "1"]},
+            {"metric": {"region": "west", "value": "+Inf"}, "value": [base, "1"]},
+            {"metric": {"region": "west", "value": "-0"}, "value": [base, "1"]},
+            {"metric": {"region": "west", "value": "0.00000000000000000001"}, "value": [base, "1"]},
+            {"metric": {"region": "west", "value": "100000000000000000000"}, "value": [base, "1"]},
+            {"metric": {"region": "west", "value": "NaN"}, "value": [base, "1"]}
+        ])
+    );
+    let result_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_result_points: 4,
+            ..PromQueryLimits::default()
+        },
+    );
+    let too_many = prom_query(
+        &result_limited,
+        "count_values by (region) (\"value\", aggregate_values)",
+        base,
+    )
+    .await;
+    assert_eq!(
+        too_many.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        too_many.1
+    );
+    assert!(too_many.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum result-point limit of 4"));
+    let without = prom_query(
+        &app,
+        "count_values without (__name__, host) (\"sample\", aggregate_values{region=\"east\"})",
+        base,
+    )
+    .await;
+    assert_eq!(without.0, StatusCode::OK, "{}", without.1);
+    assert_eq!(
+        without.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east", "sample": "1", "value": "old"}, "value": [base, "2"]},
+            {"metric": {"region": "east", "sample": "2", "value": "old"}, "value": [base, "1"]}
+        ])
+    );
+    let invalid = prom_query(&app, "count_values(\"\", aggregate_values)", base).await;
+    assert_eq!(invalid.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", invalid.1);
+    assert!(invalid.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid label name"));
+
+    let range = prom_query_range(
+        &app,
+        "count_values by (region) (\"value\", aggregate_values{region=\"east\"})",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east", "value": "1"}, "values": [[base, "2"], [base + 10, "1"]]},
+            {"metric": {"region": "east", "value": "2"}, "values": [[base, "1"], [base + 10, "2"]]}
+        ])
+    );
+
+    drop(result_limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "count_values by (region) (\"value\", aggregate_values)",
+            base,
+        )
+        .await
+        .1,
+        grouped.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

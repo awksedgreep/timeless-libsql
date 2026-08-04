@@ -95,7 +95,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O13` | `stddev` and `stdvar` aggregations ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-018-cross-series-population-variance-and-standard-deviation)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O14` | `topk` and `bottomk` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-005-top-k-per-evaluation-step)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O15` | `quantile` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-019-cross-series-quantile)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O16` | `count_values` | missing | yes | `SQL` | `API` | P0 |
+| `PQL-O16` | `count_values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-020-count-series-by-sample-value)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O17` | experimental `limitk` and `limit_ratio` | missing | no | `SQL` | `API` | EXP |
 | `PQL-O18` | experimental binary fill modifiers | missing | no | `SQL` | `API` | EXP |
 | `PQL-O19` | native-histogram trim operators `</` and `>/` | deferred | no | none | `DEFER` | DEFER |

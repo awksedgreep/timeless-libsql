@@ -419,6 +419,11 @@ partition has fewer than `k` numeric samples.
 `quantile(q, vector)` sorts each group at each evaluation step and linearly
 interpolates rank `q * (N - 1)`. Raw NaN participates at the low end of the
 rank; `q < 0`, `q > 1`, and NaN `q` produce `-Inf`, `+Inf`, and NaN.
+`count_values("label", vector)` emits one count per distinct sample value and
+group at each step. The selected label overwrites an input label of the same
+name before grouping. Values use Prometheus fixed shortest formatting,
+including `-0`, infinities, NaN, and fully expanded decimal exponents; this
+operation can approach input cardinality and remains subject to result limits.
 
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
@@ -443,6 +448,9 @@ Step-local ranking is executable as ordinary window-function SQL in
 Finite cross-series interpolation is executable in
 [`SQL-PROM-019`](QUERY_SQL_EQUIVALENTS.md#sql-prom-019-cross-series-quantile);
 the recipe states why packed raw bits are needed for PromQL's NaN rank.
+Raw numeric grouping for direct users is executable in
+[`SQL-PROM-020`](QUERY_SQL_EQUIVALENTS.md#sql-prom-020-count-series-by-sample-value),
+with Prometheus label formatting correctly retained in the API.
 
 ## Scalar aggregate without raw materialization
 

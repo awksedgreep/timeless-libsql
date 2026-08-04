@@ -61,6 +61,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-017`](#sql-prom-017-cross-series-count-and-group) | `PQL-O12` | current foundation | bounded cross-series row count/presence; API owns grouping syntax, labels, limits, and envelopes |
 | [`SQL-PROM-018`](#sql-prom-018-cross-series-population-variance-and-standard-deviation) | `PQL-O13` | current foundation | bounded population second moment; API owns Welford/IEEE arithmetic, language, labels, limits, and envelopes |
 | [`SQL-PROM-019`](#sql-prom-019-cross-series-quantile) | `PQL-O15` | current foundation | bounded finite-value linear interpolation; API owns language, raw-NaN rank, parameters, labels, limits, and envelopes |
+| [`SQL-PROM-020`](#sql-prom-020-count-series-by-sample-value) | `PQL-O16` | current foundation | exact bounded grouping by raw SQL numeric value; API owns Prometheus label formatting, grouping syntax, raw NaN, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -908,6 +909,49 @@ labels, limits, cancellation, and envelopes. This executable SQL is the
 public direct-user foundation for normal finite data, not a false IEEE-parity
 claim. It runs in `tests/cli.sh` section 45; the exact API contract is
 `session_five_promql_quantile_interpolates_per_step_and_reopens`.
+
+### SQL-PROM-020: count series by sample value
+
+Direct SQLite/libSQL users can group bounded grid rows by their numeric value
+without materializing another storage representation:
+
+```sql
+WITH selected AS (
+  SELECT
+    ts,
+    COALESCE(json_extract(labels, '$.service'), '') AS service,
+    value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  json_object('service', service) AS grouping_labels,
+  ts,
+  value AS sample_value,
+  COUNT(*) AS value_count
+FROM selected
+GROUP BY service, ts, value
+ORDER BY service, ts, value;
+```
+
+`:metric`, `:filter_json`, and all epoch-second temporal parameters follow
+`SQL-PROM-019`; output bounds are inclusive and lookback is open-left.
+Missing `service` is normalized to empty. Output is one row per distinct SQL
+numeric value per group and timestamp, with an integer count. Empty input
+emits no row.
+
+PromQL's `count_values("label", vector)` turns `sample_value` into a label
+name/value pair. The Rust API implements Go-compatible fixed shortest float
+text—including `-0`, `+Inf`, `-Inf`, NaN, and exponent expansion—using packed
+raw float bits; it overwrites an existing label of the same name before
+applying `by`/`without`. SQLite exposes raw NaN as NULL, so the SQL statement
+is an honest numeric grouping foundation rather than an IEEE-label-formatting
+claim. The API also owns UTF-8 label-name validation, per-step range assembly,
+cardinality limits, cancellation, and envelopes. This recipe executes in
+`tests/cli.sh` section 45; the exact API contract is
+`session_five_promql_count_values_formats_groups_ranges_and_reopens`.
 
 ### SQL-PROM-004: vector arithmetic with label matching
 

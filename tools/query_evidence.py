@@ -837,6 +837,31 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        count_values_narrow = measure(
+            "metrics-count-values-narrow",
+            lambda: promql(
+                'count_values("value", query_contract_cpu{host="h0000"})'
+            ),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        count_values_wide = measure(
+            "metrics-count-values-wide",
+            lambda: promql_range(
+                'count_values by(service) ("value", query_contract_cpu)',
+                at - 30,
+                at,
+                10,
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -1120,6 +1145,8 @@ def metrics_evidence(
                 "bottomk_wide": bottomk_wide,
                 "quantile_narrow": quantile_narrow,
                 "quantile_wide": quantile_wide,
+                "count_values_narrow": count_values_narrow,
+                "count_values_wide": count_values_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

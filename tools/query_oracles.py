@@ -286,6 +286,18 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             [(value, timestamp_ms + 30_000)],
             {"case": case, "host": host},
         )
+    for host, value in [
+        ("tiny", 1e-20),
+        ("huge", 1e20),
+        ("negative_zero", -0.0),
+        ("positive_inf", float("inf")),
+        ("nan", float("nan")),
+    ]:
+        write_request += series(
+            "oracle_count_values",
+            [(value, timestamp_ms + 30_000)],
+            {"host": host},
+        )
     return snappy_literal(write_request)
 
 

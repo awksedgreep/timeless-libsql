@@ -415,6 +415,7 @@ enum PromAggregateOp {
     TopK,
     BottomK,
     Quantile,
+    CountValues,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -430,6 +431,7 @@ pub(crate) struct PromAggregatePlan {
     op: PromAggregateOp,
     inner: Box<PromPlan>,
     param: Option<Box<PromPlan>>,
+    value_label: Option<String>,
     grouping: PromAggregateGrouping,
 }
 
@@ -884,38 +886,50 @@ fn lower_promql_aggregate(
         token::T_TOPK => PromAggregateOp::TopK,
         token::T_BOTTOMK => PromAggregateOp::BottomK,
         token::T_QUANTILE => PromAggregateOp::Quantile,
+        token::T_COUNT_VALUES => PromAggregateOp::CountValues,
         _ => {
             return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
         }
     };
-    let requires_param = matches!(
-        op,
-        PromAggregateOp::TopK | PromAggregateOp::BottomK | PromAggregateOp::Quantile
-    );
-    let param = match (requires_param, aggregate.param) {
-        (true, Some(param)) => {
-            let param = lower_promql_expr(*param, lookback, depth)?;
-            if param.value_type() != PromValueType::Scalar {
+    let (param, value_label) = if op == PromAggregateOp::CountValues {
+        let Some(param) = aggregate.param else {
+            return Err("PromQL aggregation count_values requires a string parameter".into());
+        };
+        let promql::Expr::StringLiteral(label) = *param else {
+            return Err("PromQL aggregation count_values requires a string parameter".into());
+        };
+        (None, Some(label.val))
+    } else {
+        let requires_param = matches!(
+            op,
+            PromAggregateOp::TopK | PromAggregateOp::BottomK | PromAggregateOp::Quantile
+        );
+        let param = match (requires_param, aggregate.param) {
+            (true, Some(param)) => {
+                let param = lower_promql_expr(*param, lookback, depth)?;
+                if param.value_type() != PromValueType::Scalar {
+                    return Err(format!(
+                        "PromQL aggregation {} requires a scalar parameter",
+                        aggregate.op
+                    ));
+                }
+                Some(Box::new(param))
+            }
+            (true, None) => {
                 return Err(format!(
                     "PromQL aggregation {} requires a scalar parameter",
                     aggregate.op
                 ));
             }
-            Some(Box::new(param))
-        }
-        (true, None) => {
-            return Err(format!(
-                "PromQL aggregation {} requires a scalar parameter",
-                aggregate.op
-            ));
-        }
-        (false, Some(_)) => {
-            return Err(format!(
-                "PromQL aggregation {} does not accept a parameter",
-                aggregate.op
-            ));
-        }
-        (false, None) => None,
+            (false, Some(_)) => {
+                return Err(format!(
+                    "PromQL aggregation {} does not accept a parameter",
+                    aggregate.op
+                ));
+            }
+            (false, None) => None,
+        };
+        (param, None)
     };
     let grouping = match aggregate.modifier {
         None => PromAggregateGrouping::All,
@@ -937,6 +951,7 @@ fn lower_promql_aggregate(
         op,
         inner: Box::new(inner),
         param,
+        value_label,
         grouping,
     }))
 }
@@ -2671,6 +2686,8 @@ fn execute_prometheus_aggregate(
             params.as_deref().unwrap_or_default(),
             cancelled,
         )?
+    } else if aggregate.op == PromAggregateOp::CountValues {
+        apply_prometheus_count_values(aggregate, series, cancelled)?
     } else {
         apply_prometheus_aggregate(aggregate, series, cancelled)?
     };
@@ -2843,6 +2860,101 @@ fn prometheus_quantile(quantile: f64, values: &mut [f64]) -> f64 {
     values[lower] * (1.0 - weight) + values[upper] * weight
 }
 
+fn apply_prometheus_count_values(
+    aggregate: &PromAggregatePlan,
+    series: Vec<IntermediateSeries>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let value_label = aggregate
+        .value_label
+        .as_deref()
+        .ok_or_else(|| "count_values is missing its value label".to_string())?;
+    if value_label.is_empty() {
+        return Err("invalid label name \"\"".into());
+    }
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, u64>> = BTreeMap::new();
+    for item in series {
+        check_cancelled(cancelled)?;
+        for (timestamp, value) in item.points {
+            check_cancelled(cancelled)?;
+            let formatted = format_prometheus_label_value(value);
+            let labels = match &aggregate.grouping {
+                PromAggregateGrouping::All => {
+                    BTreeMap::from([(value_label.to_string(), formatted)])
+                }
+                PromAggregateGrouping::By(names) => {
+                    let mut labels: BTreeMap<_, _> = item
+                        .labels
+                        .iter()
+                        .filter(|(name, value)| names.contains(*name) && !value.is_empty())
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect();
+                    labels.insert(value_label.to_string(), formatted);
+                    labels
+                }
+                PromAggregateGrouping::Without(names) => {
+                    let mut labels = item.labels.clone();
+                    labels.insert(value_label.to_string(), formatted);
+                    labels
+                        .into_iter()
+                        .filter(|(name, value)| {
+                            name != "__name__" && !names.contains(name) && !value.is_empty()
+                        })
+                        .collect()
+                }
+            };
+            *groups
+                .entry(labels)
+                .or_default()
+                .entry(timestamp)
+                .or_default() += 1;
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(labels, points)| IntermediateSeries {
+            labels,
+            points: points
+                .into_iter()
+                .map(|(timestamp, count)| (timestamp, count as f64))
+                .collect(),
+        })
+        .collect())
+}
+
+fn format_prometheus_label_value(value: f64) -> String {
+    if !value.is_finite() {
+        return format_prometheus_value(value);
+    }
+    let rendered = value.to_string();
+    let Some(exponent_at) = rendered.find(['e', 'E']) else {
+        return rendered;
+    };
+    let (mantissa, exponent) = rendered.split_at(exponent_at);
+    let exponent: i32 = exponent[1..]
+        .parse()
+        .expect("Rust float formatting emits a decimal exponent");
+    let (sign, mantissa) = mantissa
+        .strip_prefix('-')
+        .map_or(("", mantissa), |unsigned| ("-", unsigned));
+    let decimal_at = mantissa.find('.').unwrap_or(mantissa.len());
+    let digits = mantissa.replace('.', "");
+    let output_decimal_at = decimal_at as i32 + exponent;
+    let expanded = if output_decimal_at <= 0 {
+        format!("0.{}{}", "0".repeat((-output_decimal_at) as usize), digits)
+    } else if output_decimal_at as usize >= digits.len() {
+        format!(
+            "{}{}",
+            digits,
+            "0".repeat(output_decimal_at as usize - digits.len())
+        )
+    } else {
+        let split = output_decimal_at as usize;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    format!("{sign}{expanded}")
+}
+
 fn apply_prometheus_aggregate(
     aggregate: &PromAggregatePlan,
     series: Vec<IntermediateSeries>,
@@ -2951,7 +3063,10 @@ impl PromAggregateState {
                 self.mean += delta / self.count;
                 self.variance += delta * (value - self.mean);
             }
-            PromAggregateOp::TopK | PromAggregateOp::BottomK | PromAggregateOp::Quantile => {
+            PromAggregateOp::TopK
+            | PromAggregateOp::BottomK
+            | PromAggregateOp::Quantile
+            | PromAggregateOp::CountValues => {
                 unreachable!("ranking aggregations do not use reduction state")
             }
         }
@@ -2967,7 +3082,10 @@ impl PromAggregateState {
             PromAggregateOp::Group => 1.0,
             PromAggregateOp::StdDev => (self.variance / self.count).sqrt(),
             PromAggregateOp::StdVar => self.variance / self.count,
-            PromAggregateOp::TopK | PromAggregateOp::BottomK | PromAggregateOp::Quantile => {
+            PromAggregateOp::TopK
+            | PromAggregateOp::BottomK
+            | PromAggregateOp::Quantile
+            | PromAggregateOp::CountValues => {
                 unreachable!("ranking aggregations do not use reduction state")
             }
         }
