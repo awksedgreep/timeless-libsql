@@ -1909,6 +1909,108 @@
       "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
       "expected_metric": {"case": "negative", "job": "oracle"},
       "expected_values": [3, 4]
+    },
+    {
+      "id": "PQL-F02-ceil-finite-and-ieee-values",
+      "query": "ceil(oracle_round)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative", "job": "oracle"}, "value": -2},
+        {"metric": {"case": "negative_tie", "job": "oracle"}, "value": -1},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "positive", "job": "oracle"}, "value": 2},
+        {"metric": {"case": "positive_tie", "job": "oracle"}, "value": 2},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F02-floor-finite-and-ieee-values",
+      "query": "floor(oracle_round)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative", "job": "oracle"}, "value": -3},
+        {"metric": {"case": "negative_tie", "job": "oracle"}, "value": -2},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "positive", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "positive_tie", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F02-round-default-finite-and-ieee-values",
+      "query": "round(oracle_round)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative", "job": "oracle"}, "value": -3},
+        {"metric": {"case": "negative_tie", "job": "oracle"}, "value": -1},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "positive", "job": "oracle"}, "value": 2},
+        {"metric": {"case": "positive_tie", "job": "oracle"}, "value": 2},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F02-round-scalar-expression-step",
+      "query": "round(oracle_round{case=~\"negative|positive\"}, 1 / 2)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative", "job": "oracle"}, "value": -2.5},
+        {"metric": {"case": "positive", "job": "oracle"}, "value": 1.5}
+      ]
+    },
+    {
+      "id": "PQL-F02-round-zero-step",
+      "query": "round(oracle_round{case=\"positive\"}, 0)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "positive", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F02-round-negative-zero-step",
+      "query": "round(oracle_round{case=\"positive\"}, -0)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "positive", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F02-round-nan-step",
+      "query": "round(oracle_round{case=\"positive\"}, NaN)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "positive", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F02-round-infinite-step",
+      "query": "round(oracle_round{case=\"positive\"}, Inf)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "positive", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F02-round-negative-step",
+      "query": "round(oracle_round{case=\"positive\"}, -0.5)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "positive", "job": "oracle"},
+      "expected_values": [1.5],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F02-ceil-range-grid-and-name-policy",
+      "query": "ceil(oracle_round{case=\"negative\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "negative", "job": "oracle"},
+      "expected_values": [-1, -2]
     }
   ],
   "operator_error_cases": [

@@ -80,6 +80,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-036`](#sql-prom-036-changes) | `PQL-R19` | current | exact ordered float-transition count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
 | [`SQL-PROM-037`](#sql-prom-037-resets) | `PQL-R20` | current | exact ordered strict float-decrease count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
 | [`SQL-PROM-038`](#sql-prom-038-abs) | `PQL-F01` | current foundation | exact bounded absolute value for finite floats, infinities, and signed zero; API owns packed-NaN fidelity, language, names, limits, and envelopes |
+| [`SQL-PROM-039`](#sql-prom-039-ceil-floor-and-round) | `PQL-F02` | current foundation | exact bounded IEEE ceiling/floor and Prometheus nearest-multiple arithmetic for row-visible values; API owns packed-NaN fidelity, scalar ASTs, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1326,6 +1327,62 @@ ordinary row SQL alone provides the complete PromQL function. A specialized
 extension primitive would add no storage pruning or decode benefit. Direct
 regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_abs_transforms_float_vectors_and_reopens`.
+
+### SQL-PROM-039: `ceil`, `floor`, and `round`
+
+SQLite's public scalar math functions directly express bounded ceiling and
+floor transforms:
+
+```sql
+SELECT labels, ts, ceil(value) AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+Substitute `floor(value)` for `ceil(value)`. To match Prometheus `round` and
+its optional nearest-multiple argument, preserve the upstream operation order:
+
+```sql
+WITH
+parameter(nearest) AS (
+  SELECT COALESCE(CAST(:nearest AS REAL), 1.0)
+), selected AS (
+  SELECT labels, ts, value, 1.0 / nearest AS inverse
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  ), parameter
+)
+SELECT labels, ts,
+       floor(value * inverse + 0.5) / inverse AS value
+FROM selected
+ORDER BY labels, ts;
+```
+
+Bind `:nearest` to NULL for the default `1`, or to a scalar step such as
+`0.5`. The formula intentionally rounds ties upward, including `-1.5` to
+`-1`; a zero, signed-zero, NaN, or infinite step follows IEEE arithmetic and
+produces the same NaN cases as Prometheus. Negative steps are accepted and
+retain the exact upstream operation order rather than being silently made
+positive.
+
+All timestamp and grid parameters use the metric table's configured unit;
+the default table uses integer seconds. Grid bounds are inclusive, lookback is
+open on the left, missing samples remain absent, labels are canonical JSON,
+and ordering is deterministic. `ceil` and `floor` retain negative-zero bits;
+default `round` maps negative zero to positive zero.
+
+As in `SQL-PROM-038`, ordinary row projection represents a stored NaN as SQL
+NULL. The Rust API reads the public bit-exact packed frame to retain NaN,
+evaluates the optional scalar expression on each outer timestamp, removes the
+metric name, and owns PromQL types, cumulative limits, cancellation, and HTTP
+envelopes. These transforms do not justify an extension primitive: they add
+no pruning and require no additional decode beyond the selected vector.
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_rounding_functions_match_float_and_step_semantics`.
 
 ### SQL-PROM-006: range selector
 

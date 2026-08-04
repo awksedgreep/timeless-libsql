@@ -970,6 +970,26 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        round_narrow = measure(
+            "metrics-round-narrow",
+            lambda: promql('round(query_contract_cpu{host="h0000"}, 0.5)'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        round_wide = measure(
+            "metrics-round-wide",
+            lambda: promql_range(
+                "round(query_contract_cpu, 0.5)", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         arithmetic_narrow = measure(
             "metrics-arithmetic-vector-scalar-narrow",
             lambda: promql('query_contract_cpu{host="h0000"} * 2'),
@@ -1550,6 +1570,8 @@ def metrics_evidence(
                 "unary_minus_wide": unary_wide,
                 "abs_narrow": abs_narrow,
                 "abs_wide": abs_wide,
+                "round_narrow": round_narrow,
+                "round_wide": round_wide,
                 "arithmetic_vector_scalar_narrow": arithmetic_narrow,
                 "arithmetic_one_to_one_wide": arithmetic_wide,
                 "comparison_filter_narrow": comparison_narrow,

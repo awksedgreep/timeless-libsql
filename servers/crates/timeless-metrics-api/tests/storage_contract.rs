@@ -7842,6 +7842,177 @@ async fn session_eight_promql_abs_transforms_float_vectors_and_reopens() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_rounding_functions_match_float_and_step_semantics() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_rounding.db");
+    let base = 1_700_810_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "transform_round{{case=\"negative\"}} -1.6 {}\n",
+            "transform_round{{case=\"negative\"}} -2.6 {}\n",
+            "transform_round{{case=\"negative_tie\"}} -1.5 {}\n",
+            "transform_round{{case=\"negative_zero\"}} -0 {}\n",
+            "transform_round{{case=\"positive\"}} 1.6 {}\n",
+            "transform_round{{case=\"positive_tie\"}} 1.5 {}\n",
+            "transform_round{{case=\"nan\"}} NaN {}\n",
+            "transform_round{{case=\"positive_inf\"}} +Inf {}\n",
+            "transform_round{{case=\"negative_inf\"}} -Inf {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (function, case, expected) in [
+        ("ceil", "negative", "-1"),
+        ("floor", "negative", "-2"),
+        ("round", "negative", "-2"),
+        ("round", "negative_tie", "-1"),
+        ("ceil", "positive", "2"),
+        ("floor", "positive", "1"),
+        ("round", "positive", "2"),
+        ("round", "positive_tie", "2"),
+        ("ceil", "negative_zero", "-0"),
+        ("floor", "negative_zero", "-0"),
+        ("round", "negative_zero", "0"),
+        ("ceil", "nan", "NaN"),
+        ("floor", "positive_inf", "+Inf"),
+        ("round", "negative_inf", "-Inf"),
+    ] {
+        let response = prom_query(
+            &app,
+            &format!("{function}(transform_round{{case=\"{case}\"}})"),
+            base,
+        )
+        .await;
+        assert_eq!(
+            response.0,
+            StatusCode::OK,
+            "{function}/{case}: {}",
+            response.1
+        );
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({"case": case})
+        );
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+
+    for (case, expected) in [("negative", "-1.5"), ("positive", "1.5")] {
+        let response = prom_query(
+            &app,
+            &format!("round(transform_round{{case=\"{case}\"}}, 1 / 2)"),
+            base,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+    for (step, expected) in [
+        ("0", "NaN"),
+        ("-0", "NaN"),
+        ("NaN", "NaN"),
+        ("Inf", "NaN"),
+        ("-0.5", "1.5"),
+    ] {
+        let response = prom_query(
+            &app,
+            &format!("round(transform_round{{case=\"positive\"}}, {step})"),
+            base,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{step}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+
+    let range = prom_query_range(
+        &app,
+        "ceil(transform_round{case=\"negative\"})",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "negative"},
+            "values": [[base, "-1"], [base + 10, "-2"]]
+        }])
+    );
+    let nested = prom_query(
+        &app,
+        "round(abs(transform_round{case=\"negative\"}), 0.5)",
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "1.5");
+
+    for query in [
+        "ceil(1)",
+        "floor(transform_round[1m])",
+        "round(transform_round, transform_round)",
+    ] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "round(transform_round, 0.5)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_result = prom_query(
+        &reopened_app,
+        "round(transform_round{case=\"negative_tie\"})",
+        base,
+    )
+    .await;
+    assert_eq!(reopened_result.0, StatusCode::OK, "{}", reopened_result.1);
+    assert_eq!(reopened_result.1["data"]["result"][0]["value"][1], "-1");
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

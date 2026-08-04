@@ -397,12 +397,21 @@ pub(crate) enum PromPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromFunctionOp {
     Abs,
+    Ceil,
+    Floor,
+    Round,
 }
 
 impl PromFunctionOp {
-    fn apply(self, value: f64) -> f64 {
+    fn apply(self, value: f64, parameter: Option<f64>) -> f64 {
         match self {
             Self::Abs => value.abs(),
+            Self::Ceil => value.ceil(),
+            Self::Floor => value.floor(),
+            Self::Round => {
+                let inverse = 1.0 / parameter.unwrap_or(1.0);
+                (value * inverse + 0.5).floor() / inverse
+            }
         }
     }
 }
@@ -411,6 +420,7 @@ impl PromFunctionOp {
 pub(crate) struct PromFunctionPlan {
     op: PromFunctionOp,
     inner: Box<PromPlan>,
+    parameter: Option<Box<PromPlan>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -993,6 +1003,53 @@ fn lower_promql_expr(
             Ok(PromPlan::Function(PromFunctionPlan {
                 op: PromFunctionOp::Abs,
                 inner: Box::new(inner),
+                parameter: None,
+            }))
+        }
+        promql::Expr::Call(call)
+            if matches!(call.func.name, "ceil" | "floor" | "round") =>
+        {
+            let op = match call.func.name {
+                "ceil" => PromFunctionOp::Ceil,
+                "floor" => PromFunctionOp::Floor,
+                "round" => PromFunctionOp::Round,
+                _ => unreachable!("guarded numeric transform"),
+            };
+            let (argument, parameter) = match call.args.args.as_slice() {
+                [argument] => (argument, None),
+                [argument, parameter] if op == PromFunctionOp::Round => {
+                    (argument, Some(parameter))
+                }
+                _ => {
+                    return Err(format!(
+                        "{} requires an instant vector{}",
+                        call.func.name,
+                        if op == PromFunctionOp::Round {
+                            " and an optional scalar step"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err(format!("{} requires an instant vector", call.func.name));
+            }
+            let parameter = parameter
+                .map(|parameter| {
+                    let parameter =
+                        lower_promql_expr((**parameter).clone(), lookback, depth + 1)?;
+                    if parameter.value_type() != PromValueType::Scalar {
+                        return Err("round step must be a scalar".to_string());
+                    }
+                    Ok(Box::new(parameter))
+                })
+                .transpose()?;
+            Ok(PromPlan::Function(PromFunctionPlan {
+                op,
+                inner: Box::new(inner),
+                parameter,
             }))
         }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
@@ -3548,9 +3605,43 @@ fn execute_prometheus_function(
         limits,
         cancelled,
     )?;
-    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    let mut intermediate_points = child.intermediate_points.saturating_add(child.points);
     enforce_intermediate_work(intermediate_points, limits)?;
-    let frame_bytes = child.frame_bytes;
+    let mut frame_bytes = child.frame_bytes;
+    let parameters = if let Some(parameter) = &function.parameter {
+        check_cancelled(cancelled)?;
+        let output = execute_prometheus(
+            conn,
+            features,
+            parameter,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        )?;
+        intermediate_points = intermediate_points
+            .saturating_add(output.intermediate_points)
+            .saturating_add(output.points);
+        enforce_intermediate_work(intermediate_points, limits)?;
+        frame_bytes = frame_bytes.saturating_add(output.frame_bytes);
+        let IntermediateValue::Scalar(points) = decode_prometheus_intermediate(
+            &output.body,
+            PromValueType::Scalar,
+            instant,
+            limits,
+            cancelled,
+        )?
+        else {
+            unreachable!("function parameter type was checked while lowering")
+        };
+        Some(points.into_iter().collect::<BTreeMap<_, _>>())
+    } else {
+        None
+    };
     let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
         &child.body,
         PromValueType::Vector,
@@ -3564,9 +3655,17 @@ fn execute_prometheus_function(
     for item in &mut series {
         check_cancelled(cancelled)?;
         item.labels.remove("__name__");
-        for (_, value) in &mut item.points {
+        for (timestamp, value) in &mut item.points {
             check_cancelled(cancelled)?;
-            *value = function.op.apply(*value);
+            let parameter = parameters
+                .as_ref()
+                .map(|parameters| {
+                    parameters.get(timestamp).copied().ok_or_else(|| {
+                        "PromQL function parameter is missing an evaluation timestamp".to_string()
+                    })
+                })
+                .transpose()?;
+            *value = function.op.apply(*value, parameter);
         }
     }
     encode_prometheus_intermediate(

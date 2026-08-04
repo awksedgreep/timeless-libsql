@@ -863,6 +863,9 @@ Bounded instant-vector `abs` is
 [`SQL-PROM-038`](QUERY_SQL_EQUIVALENTS.md#sql-prom-038-abs); ordinary SQLite
 is exact for finite values, infinities, and signed zero, while the Rust API
 retains packed NaN fidelity and PromQL labels, types, limits, and envelopes.
+Bounded `ceil`, `floor`, and nearest-multiple `round` use
+[`SQL-PROM-039`](QUERY_SQL_EQUIVALENTS.md#sql-prom-039-ceil-floor-and-round),
+including Prometheus's exact tie and scalar-step arithmetic.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

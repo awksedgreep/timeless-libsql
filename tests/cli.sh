@@ -3554,6 +3554,9 @@ db.executemany(
         ('abs_metric', '{"case":"negative_inf"}', 100, -math.inf),
         ('abs_metric', '{"case":"negative_zero"}', 100, -0.0),
         ('abs_metric', '{"case":"positive"}', 100, 2.0),
+        ('round_metric', '{"case":"negative"}', 100, -1.6),
+        ('round_metric', '{"case":"negative_zero"}', 100, -0.0),
+        ('round_metric', '{"case":"positive"}', 100, 1.6),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3606,6 +3609,32 @@ assert absolute == [
     ('{"case":"positive"}', 100, 2.0),
 ]
 assert math.copysign(1.0, absolute[2][2]) == 1.0
+
+rounding = db.execute(
+    "WITH parameter(nearest) AS (SELECT CAST(:nearest AS REAL)),"
+    " selected AS (SELECT labels,ts,value,1.0/nearest AS inverse"
+    " FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback),parameter)"
+    " SELECT labels,ts,ceil(value),floor(value),"
+    " floor(value*inverse+0.5)/inverse FROM selected ORDER BY labels,ts",
+    {
+        'metric': 'round_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+        'nearest': 0.5,
+    },
+).fetchall()
+assert rounding == [
+    ('{"case":"negative"}', 100, -1.0, -2.0, -1.5),
+    ('{"case":"negative_zero"}', 100, -0.0, -0.0, 0.0),
+    ('{"case":"positive"}', 100, 2.0, 1.0, 1.5),
+]
+assert math.copysign(1.0, rounding[1][2]) == -1.0
+assert math.copysign(1.0, rounding[1][3]) == -1.0
+assert math.copysign(1.0, rounding[1][4]) == 1.0
 
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
