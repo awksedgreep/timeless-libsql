@@ -2118,3 +2118,40 @@ sentinels, labels/names, nested ranges, errors, shutdown, and cold reopen.
 The previously recorded `QSF-057` conversion boundary applies unchanged. No
 extension, frame, batching, compression, index, rollup, retention,
 transaction, migration, or storage contract changed.
+
+## Session 9 `PQL-H01` classic histogram quantiles
+
+The checked-in
+[`2026-08-04_session9_pql_h01.json`](evidence/2026-08-04_session9_pql_h01.json)
+was captured from exact extension and server build
+`97c90891592c17578c1cc9347e3b85c32b1b7a92`. The narrow shape evaluates four
+bucket series for one classic histogram. The wide shape evaluates four bucket
+series for each of 512 histograms.
+
+| shape | bucket points read | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, instant `histogram_quantile(0.5, buckets{host="h0000"})` | 4 | 1 | 131 | 0.607 | 0.816 | 0.834 | 5 | 4 | 4 | 208 |
+| all 512 histograms | 2,048 | 512 | 41,450 | 13.869 | 14.589 | 15.295 | 2,049 | 2,048 | 2,048 | 106,496 |
+
+The API reads each selected ordinary float bucket exactly once through the
+public packed raw surface, retains metric names only while separating bucket
+families, then applies strict bound parsing, equal-bound coalescing, the
+Prometheus `1e-12` relative tolerance, monotonic repair, interpolation, and
+output collision checks in bounded Rust composition. The wide response
+crosses 57,360 packed frame bytes and does no second storage read. At 14.589
+ms wide p95, the work scales with the required 2,048 input series and 512
+results; `QSF-058` records why a histogram-specific extension primitive is not
+justified. Direct SQLite/libSQL users have the finite-data foundation in
+`SQL-PROM-054`.
+
+All 20,544 primary fixture points completed durably with zero failed or queued
+work. The larger histogram fixture plus the existing work-limit fixture used
+1,279,784 physical SQLite/WAL/SHM bytes and reached 45,244 KiB whole-process
+RSS HWM. The focused real-extension regression and 485-case pinned Prometheus
+run cover invalid quantiles, missing/malformed/infinite bounds, insufficient
+buckets, zero and infinite totals, material decreases, tolerated deltas,
+equal parsed bounds, NaN counts, aggregation/rate composition, output-family
+collisions, range grids, types, arity, cumulative work limits, cancellation,
+shutdown, and cold reopen. Native histogram behavior remains deferred pending
+an explicit typed storage design. No extension, frame, batching, compression,
+index, rollup, retention, transaction, migration, or storage format changed.

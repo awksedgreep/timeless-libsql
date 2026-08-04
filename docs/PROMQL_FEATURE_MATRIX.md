@@ -171,7 +171,7 @@ an `le` label; they fit the existing storage model. Native histograms do not.
 
 | ID | function | Rust now | Elixir | foundation | target | priority | notes |
 |---|---|---|---|---|---|---|---|
-| `PQL-H01` | `histogram_quantile` over classic buckets | in progress | yes | `RAW`, `SQL` | `API` | P0 | Preserve monotonicity correction and label grouping. |
+| `PQL-H01` | `histogram_quantile` over classic buckets ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-054-histogram_quantile-over-classic-buckets)) | shipped | yes | `RAW`, `SQL` | `API` | P0 | Scalar quantiles, classic-family grouping, strict bounds, equal-bound coalescing, precision tolerance, monotonic repair, interpolation, special values, range grids, output collisions, limits, cancellation, and reopen are pinned. |
 | `PQL-H02` | `histogram_fraction` over classic buckets | missing | no | `RAW`, `SQL` | `API` | P2 | Implement only after an upstream differential fixture. |
 | `PQL-H03` | `histogram_quantiles` | missing | no | `RAW`, `SQL` | `API` | P2 | Confirm the exact upstream/stability contract first. |
 | `PQL-H04` | `histogram_avg/count/sum/stddev/stdvar` on native samples | deferred | no | none | `DEFER` | DEFER | Requires `QSF-003` storage work. |
