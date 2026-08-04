@@ -708,6 +708,26 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        range_stddev_narrow = measure(
+            "metrics-range-stddev-narrow",
+            lambda: promql('stddev_over_time(query_contract_cpu{host="h0000"}[5m])'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        range_stddev_wide = measure(
+            "metrics-range-stddev-wide",
+            lambda: promql_range(
+                "stddev_over_time(query_contract_cpu[5m])", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         range_last_narrow = measure(
             "metrics-range-last-narrow",
             lambda: promql('last_over_time(query_contract_cpu{host="h0000"}[5m])'),
@@ -1298,6 +1318,8 @@ def metrics_evidence(
                 "range_present_wide": range_present_wide,
                 "range_quantile_narrow": range_quantile_narrow,
                 "range_quantile_wide": range_quantile_wide,
+                "range_stddev_narrow": range_stddev_narrow,
+                "range_stddev_wide": range_stddev_wide,
                 "range_last_narrow": range_last_narrow,
                 "range_last_wide": range_last_wide,
                 "unary_minus_narrow": unary_narrow,

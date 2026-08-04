@@ -3736,6 +3736,41 @@ window_quantile = db.execute(
     },
 ).fetchall()
 assert window_quantile == [('{}', 30, 3.5)]
+window_stddev = db.execute(
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,"
+    " ROW_NUMBER() OVER (PARTITION BY raw.series_id,evaluation.ts"
+    " ORDER BY raw.ts) sample_number,"
+    " COUNT(*) OVER (PARTITION BY raw.series_id,evaluation.ts) sample_count,"
+    " raw.value FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    " WHERE raw.value IS NOT NULL"
+    "),moments(series_id,labels,ts,sample_number,sample_count,n,mean,m2) AS ("
+    " SELECT series_id,labels,ts,sample_number,sample_count,1.0,value,0.0"
+    " FROM selected WHERE sample_number=1"
+    " UNION ALL SELECT next.series_id,next.labels,next.ts,next.sample_number,"
+    " next.sample_count,moments.n+1.0,"
+    " moments.mean+(next.value-moments.mean)/(moments.n+1.0),"
+    " moments.m2+(next.value-moments.mean)*(next.value-(moments.mean"
+    " +(next.value-moments.mean)/(moments.n+1.0)))"
+    " FROM moments JOIN selected next ON next.series_id=moments.series_id"
+    " AND next.ts=moments.ts AND next.sample_number=moments.sample_number+1"
+    ") SELECT labels,ts,SQRT(m2/n) FROM moments"
+    " WHERE sample_number=sample_count ORDER BY labels,ts",
+    {
+        'metric': 'min_window',
+        'filter_json': None,
+        'start': 30,
+        'end': 30,
+        'step': 1,
+        'window': 20,
+    },
+).fetchall()
+assert window_stddev == [('{}', 30, 0.5)]
 
 minimum = db.execute(
     "SELECT value FROM timeless_window("

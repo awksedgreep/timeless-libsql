@@ -974,6 +974,55 @@
       "expected_empty": true
     },
     {
+      "id": "PQL-R10-stddev-over-time-boundary",
+      "query": "stddev_over_time(oracle_temporal[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0.5],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R10-stddev-over-subquery-boundary",
+      "query": "stddev_over_time(oracle_temporal[20s:10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0.5],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R10-stddev-over-time-singleton",
+      "query": "stddev_over_time(oracle_temporal[5s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-R10-stddev-over-time-wide-magnitude",
+      "query": "stddev_over_time(oracle_range_avg_precision[30s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": ["8164965809277260"]
+    },
+    {
+      "id": "PQL-R10-stddev-over-time-ieee",
+      "query": "stddev_over_time(oracle_range_extrema[20s])",
+      "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "all_nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "mixed", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "infinite", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "zero_reverse", "job": "oracle"}, "value": 0}
+      ]
+    },
+    {
+      "id": "PQL-R10-stddev-over-time-empty",
+      "query": "stddev_over_time(oracle_temporal[20s])",
+      "evaluation_offset_ms": 600000,
+      "expected_empty": true
+    },
+    {
       "id": "PQL-O14-topk-tie-input-order",
       "query": "topk(1, oracle_rank_tie)",
       "evaluation_offset_ms": 30000,

@@ -69,6 +69,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-025`](#sql-prom-025-last_over_time) | `PQL-R06` | current | exact last stored float in each window |
 | [`SQL-PROM-026`](#sql-prom-026-present_over_time) | `PQL-R08` | current | exact non-empty float-window presence |
 | [`SQL-PROM-027`](#sql-prom-027-quantile_over_time) | `PQL-R09` | current foundation | exact finite-value linear interpolation per float window; API owns raw IEEE edge semantics |
+| [`SQL-PROM-028`](#sql-prom-028-stddev_over_time) | `PQL-R10` | current foundation | finite-value population Welford deviation per float window; API owns raw IEEE edge semantics |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -411,6 +412,94 @@ subqueries, limits, cancellation, and envelopes. This is an honest public SQL
 foundation rather than an IEEE-parity claim. Direct regression:
 `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_six_promql_quantile_over_time_interpolates_ieee_and_reopens`.
+
+### SQL-PROM-028: `stddev_over_time`
+
+For finite samples, apply Welford's population second-moment update to every
+series and evaluation window through a recursive CTE:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    ROW_NUMBER() OVER (
+      PARTITION BY raw.series_id, evaluation.ts
+      ORDER BY raw.ts
+    ) AS sample_number,
+    COUNT(*) OVER (
+      PARTITION BY raw.series_id, evaluation.ts
+    ) AS sample_count,
+    raw.value
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+  WHERE raw.value IS NOT NULL
+), moments(
+  series_id, labels, ts, sample_number, sample_count, n, mean, m2
+) AS (
+  SELECT
+    series_id, labels, ts, sample_number, sample_count,
+    1.0, value, 0.0
+  FROM selected
+  WHERE sample_number = 1
+
+  UNION ALL
+
+  SELECT
+    next.series_id,
+    next.labels,
+    next.ts,
+    next.sample_number,
+    next.sample_count,
+    moments.n + 1.0,
+    moments.mean + (next.value - moments.mean) / (moments.n + 1.0),
+    moments.m2
+      + (next.value - moments.mean)
+      * (
+          next.value
+          - (
+              moments.mean
+              + (next.value - moments.mean) / (moments.n + 1.0)
+            )
+        )
+  FROM moments
+  JOIN selected AS next
+    ON next.series_id = moments.series_id
+   AND next.ts = moments.ts
+   AND next.sample_number = moments.sample_number + 1
+)
+SELECT labels, ts, SQRT(m2 / n) AS value
+FROM moments
+WHERE sample_number = sample_count
+ORDER BY labels, ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
+seconds. Output grid bounds are inclusive and sample windows are exactly
+`(T-window,T]`. A singleton returns `0.0`; an empty window emits no row.
+Canonical labels/timestamp ordering is deterministic. Samples with duplicate
+timestamps require a caller-defined ingest order, as Prometheus normally
+admits only one sample per series/timestamp.
+
+The statement is exact for finite SQLite REAL inputs and avoids the unstable
+`AVG(x*x)-AVG(x)*AVG(x)` cancellation form. SQLite projects packed NaN as SQL
+NULL, so the Rust API reads public packed raw frames and owns raw NaN,
+infinity, signed-zero, metric-name removal, millisecond outer timestamps,
+subqueries, limits, cancellation, and Prometheus envelopes. Native histogram
+samples are not stored. Direct regression: `tests/cli.sh` section 45;
+HTTP/oracle/reopen regression:
+`session_six_promql_stddev_over_time_is_population_ieee_and_reopenable`.
 
 ### SQL-PROM-006: range selector
 

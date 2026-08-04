@@ -118,7 +118,7 @@ correctness fallback.
 | `PQL-R07` | experimental `first_over_time`; Prometheus 3.13.2 rejects it unless `promql-experimental-functions` is enabled, so the stable Timeless tier rejects it explicitly until a separately enabled experimental compatibility tier and oracle gate exist | experimental | yes | `RAW`, `SQL` | `API` | EXP |
 | `PQL-R08` | `present_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-026-present_over_time)); exact non-empty presence, boundaries, IEEE samples, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `WINDOW`, `SQL` | `API` | P0 |
 | `PQL-R09` | `quantile_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-027-quantile_over_time)); scalar expressions, interpolation, raw-NaN rank, infinities, stable signed-zero order, exact boundaries, subqueries, errors, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
-| `PQL-R10` | `stddev_over_time` | missing | yes | `RAW` | `API` | P0 |
+| `PQL-R10` | `stddev_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-028-stddev_over_time)); population Welford state, wide magnitudes, IEEE values, exact boundaries, subqueries, errors, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R11` | `stdvar_over_time` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R12` | `rate` | missing | yes | `RAW`, `WINDOW` | `API` | P0 |
 | `PQL-R13` | `irate` | missing | yes | `RAW` | `API` | P0 |

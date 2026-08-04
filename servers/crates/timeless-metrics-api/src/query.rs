@@ -402,6 +402,7 @@ enum PromRangeOp {
     Count,
     Present,
     Quantile,
+    StdDev,
     Last,
 }
 
@@ -415,6 +416,7 @@ impl PromRangeOp {
             Self::Count => "count_over_time",
             Self::Present => "present_over_time",
             Self::Quantile => "quantile_over_time",
+            Self::StdDev => "stddev_over_time",
             Self::Last => "last_over_time",
         }
     }
@@ -427,7 +429,7 @@ impl PromRangeOp {
             Self::Sum => Some("sum"),
             Self::Count => Some("count"),
             Self::Present => Some("count"),
-            Self::Quantile | Self::Last => None,
+            Self::Quantile | Self::StdDev | Self::Last => None,
         }
     }
 
@@ -438,6 +440,7 @@ impl PromRangeOp {
             Self::Max => Some(PromAggregateOp::Max),
             Self::Sum => Some(PromAggregateOp::Sum),
             Self::Count => Some(PromAggregateOp::Count),
+            Self::StdDev => Some(PromAggregateOp::StdDev),
             Self::Present | Self::Quantile | Self::Last => None,
         }
     }
@@ -955,6 +958,7 @@ fn lower_promql_expr(
                     | "sum_over_time"
                     | "count_over_time"
                     | "present_over_time"
+                    | "stddev_over_time"
                     | "last_over_time"
             ) =>
         {
@@ -965,6 +969,7 @@ fn lower_promql_expr(
                 "sum_over_time" => PromRangeOp::Sum,
                 "count_over_time" => PromRangeOp::Count,
                 "present_over_time" => PromRangeOp::Present,
+                "stddev_over_time" => PromRangeOp::StdDev,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
