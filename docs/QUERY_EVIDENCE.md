@@ -1591,3 +1591,39 @@ steps, scalar expressions, range grids, nested transforms, invalid types,
 limits, shutdown, and cold reopen. No new storage finding arose, and no
 extension signature, storage/frame format, batching, compression, index,
 rollup, retention, transaction, or migration behavior changed.
+
+## Session 8 `PQL-F03` clamp transforms
+
+The checked-in
+[`2026-08-04_session8_pql_f03.json`](evidence/2026-08-04_session8_pql_f03.json)
+was captured from exact extension and server build
+`0e3af9fae99040cd959de1733f846cf72ed6ea6c`. The measured `clamp` shapes use
+one bounded public packed-raw read, evaluate both scalar bounds on the outer
+grid, and compact the selected vector in place. They are the most expensive
+member of the row; `clamp_min` and `clamp_max` evaluate only one scalar child.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `clamp(metric, 0, 10000)` | 1 | 132 | 0.393 | 0.549 | 0.613 | 3 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `clamp(metric, 0, 10000)` | 2,048 | 67,620 | 4.413 | 4.800 | 4.824 | 2,056 | 16,384 | 512 | 16,384 | 53,831 |
+
+The parameterized wide request adds exactly eight scalar grid points—two for
+each of four outer timestamps—to the same 2,048-point bounded vector bridge
+used by the other transforms. It does not add a storage read. Candidate
+chunks, decoded samples, returned raw samples, packed payload bytes, and final
+response bytes remain identical to the `abs`/`round` wide shapes. Stable
+in-place compaction means inverted bounds do not allocate a second result
+vector. At 4.800 ms p95, moving clamp into the extension would not avoid the
+already-required vector decode or boundary crossing; direct SQL users have
+the executable finite-value `SQL-PROM-040` foundation.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 36,508 KiB. No benchmark request required cancellation; shared composed-
+evaluator cancellation plus focused work-limit coverage pins reader reuse.
+Pinned oracle and real-extension tests cover scalar bounds and expressions,
+finite values, NaN, infinities, both signed-zero choices, inverted bounds,
+range grids, nested transforms, invalid types, limits, shutdown, and cold
+reopen. No new storage finding arose, and no extension signature,
+storage/frame format, batching, compression, index, rollup, retention,
+transaction, or migration behavior changed.
