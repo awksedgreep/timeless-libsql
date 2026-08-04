@@ -407,6 +407,8 @@ enum PromFunctionOp {
     Clamp,
     ClampMax,
     ClampMin,
+    Cos,
+    Cosh,
     Exp,
     Floor,
     Ln,
@@ -414,7 +416,11 @@ enum PromFunctionOp {
     Log10,
     Round,
     Sgn,
+    Sin,
+    Sinh,
     Sqrt,
+    Tan,
+    Tanh,
 }
 
 impl PromFunctionOp {
@@ -436,6 +442,8 @@ impl PromFunctionOp {
             }
             Self::ClampMax => Some(prometheus_math_min(parameters[0], value)),
             Self::ClampMin => Some(prometheus_math_max(parameters[0], value)),
+            Self::Cos => Some(value.cos()),
+            Self::Cosh => Some(value.cosh()),
             Self::Exp => Some(value.exp()),
             Self::Floor => Some(value.floor()),
             Self::Ln => Some(value.ln()),
@@ -452,7 +460,11 @@ impl PromFunctionOp {
             } else {
                 value
             }),
+            Self::Sin => Some(value.sin()),
+            Self::Sinh => Some(value.sinh()),
             Self::Sqrt => Some(value.sqrt()),
+            Self::Tan => Some(value.tan()),
+            Self::Tanh => Some(value.tanh()),
         }
     }
 }
@@ -1089,6 +1101,8 @@ fn lower_promql_expr(
                     | "atan"
                     | "atanh"
                     | "ceil"
+                    | "cos"
+                    | "cosh"
                     | "exp"
                     | "floor"
                     | "ln"
@@ -1096,7 +1110,11 @@ fn lower_promql_expr(
                     | "log10"
                     | "round"
                     | "sgn"
+                    | "sin"
+                    | "sinh"
                     | "sqrt"
+                    | "tan"
+                    | "tanh"
             ) =>
         {
             let op = match call.func.name {
@@ -1107,6 +1125,8 @@ fn lower_promql_expr(
                 "atan" => PromFunctionOp::Atan,
                 "atanh" => PromFunctionOp::Atanh,
                 "ceil" => PromFunctionOp::Ceil,
+                "cos" => PromFunctionOp::Cos,
+                "cosh" => PromFunctionOp::Cosh,
                 "exp" => PromFunctionOp::Exp,
                 "floor" => PromFunctionOp::Floor,
                 "ln" => PromFunctionOp::Ln,
@@ -1114,7 +1134,11 @@ fn lower_promql_expr(
                 "log10" => PromFunctionOp::Log10,
                 "round" => PromFunctionOp::Round,
                 "sgn" => PromFunctionOp::Sgn,
+                "sin" => PromFunctionOp::Sin,
+                "sinh" => PromFunctionOp::Sinh,
                 "sqrt" => PromFunctionOp::Sqrt,
+                "tan" => PromFunctionOp::Tan,
+                "tanh" => PromFunctionOp::Tanh,
                 _ => unreachable!("guarded numeric transform"),
             };
             let (argument, parameter) = match call.args.args.as_slice() {

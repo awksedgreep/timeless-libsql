@@ -2250,6 +2250,87 @@
       "expected_metric": {"case": "negative_zero", "job": "oracle"},
       "expected_values": [0],
       "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F07-cos-ieee-values",
+      "query": "cos(oracle_trig{case=~\"zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "zero", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F07-cosh-ieee-values",
+      "query": "cosh(oracle_trig{case=~\"negative_zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "+Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F07-sin-and-sinh-ieee-values",
+      "query": "sin(oracle_trig{case=~\"negative_zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F07-sinh-infinity-and-zero",
+      "query": "sinh(oracle_trig{case=~\"negative_zero|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F07-tan-and-tanh-ieee-values",
+      "query": "tan(oracle_trig{case=~\"negative_zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F07-tanh-infinity-and-zero",
+      "query": "tanh(oracle_trig{case=~\"negative_zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": -1}
+      ]
+    },
+    {
+      "id": "PQL-F07-sin-range-grid-and-name-policy",
+      "query": "sin(oracle_trig{case=\"range\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "range", "job": "oracle"},
+      "expected_values": [0, 1]
+    },
+    {
+      "id": "PQL-F07-nested-trig-transform",
+      "query": "abs(sin(oracle_trig{case=\"negative_zero\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "negative_zero", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
     }
   ],
   "operator_error_cases": [

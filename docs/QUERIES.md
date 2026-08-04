@@ -881,6 +881,9 @@ Bounded inverse trigonometric and hyperbolic functions use
 [`SQL-PROM-043`](QUERY_SQL_EQUIVALENTS.md#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions);
 the Rust API supplies the packed IEEE/domain distinctions ordinary SQLite
 reports as SQL NULL.
+Bounded trigonometric and hyperbolic functions use
+[`SQL-PROM-044`](QUERY_SQL_EQUIVALENTS.md#sql-prom-044-trigonometric-and-hyperbolic-functions)
+with the same honest SQL-NULL versus packed-IEEE boundary.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

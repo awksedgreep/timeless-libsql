@@ -3752,6 +3752,25 @@ assert inverse_by_case['two'][3] is None
 assert inverse_by_case['two'][6] is None
 assert inverse_by_case['zero'][2] is None
 
+trig_transforms = db.execute(
+    "SELECT labels,ts,cos(value),cosh(value),sin(value),"
+    "sinh(value),tan(value),tanh(value) FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    " WHERE labels=:labels ORDER BY labels,ts",
+    {
+        'metric': 'math_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+        'labels': '{"case":"zero"}',
+    },
+).fetchall()
+assert trig_transforms == [
+    ('{"case":"zero"}', 100, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+]
+
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
     "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "

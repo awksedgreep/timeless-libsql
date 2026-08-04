@@ -85,6 +85,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-041`](#sql-prom-041-sqrt-exp-ln-log2-and-log10) | `PQL-F04` | current foundation | bounded SQLite math transforms for valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-PROM-042`](#sql-prom-042-sgn) | `PQL-F05` | current foundation | exact bounded sign mapping for every row-visible finite value, infinity, and signed zero; API owns packed NaN, names, limits, and envelopes |
 | [`SQL-PROM-043`](#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions) | `PQL-F06` | current foundation | bounded SQLite inverse math transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
+| [`SQL-PROM-044`](#sql-prom-044-trigonometric-and-hyperbolic-functions) | `PQL-F07` | current foundation | bounded SQLite trigonometric and hyperbolic transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1534,6 +1535,37 @@ extension primitive would save neither a read nor a decode.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_inverse_transforms_pin_domains_ieee_and_reopen`.
+
+### SQL-PROM-044: trigonometric and hyperbolic functions
+
+SQLite's public math functions directly express the bounded transforms:
+
+```sql
+SELECT labels, ts, cos(value) AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+Substitute `cosh(value)`, `sin(value)`, `sinh(value)`, `tan(value)`, or
+`tanh(value)`. Bounds, step, and lookback use the metric table's configured
+timestamp unit (integer seconds for the default table); grid bounds are
+inclusive and lookback is open on the left. Missing samples remain absent,
+canonical label JSON is returned, and ordering is deterministic.
+
+This recipe is exact over each SQLite function's valid row-visible domain.
+SQLite represents invalid trigonometric infinity inputs and stored NaN as SQL
+NULL, which cannot distinguish Prometheus `NaN` from an absent/NULL value. The
+Rust API reads the public bit-exact packed frame and owns those IEEE results,
+hyperbolic infinities, signed zero, metric-name removal, types, nesting,
+limits, cancellation, and HTTP envelopes. Standard SQLite math already
+benefits direct users; a specialized extension primitive would not save a
+storage read or decode.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_trig_transforms_pin_ieee_ranges_and_reopen`.
 
 ### SQL-PROM-006: range selector
 
