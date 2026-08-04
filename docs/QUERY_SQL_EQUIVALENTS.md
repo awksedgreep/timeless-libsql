@@ -84,6 +84,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-040`](#sql-prom-040-clamp-clamp_min-and-clamp_max) | `PQL-F03` | current foundation | bounded finite-value clamping and inverted-bound omission; API owns packed IEEE fidelity, scalar ASTs, names, limits, and envelopes |
 | [`SQL-PROM-041`](#sql-prom-041-sqrt-exp-ln-log2-and-log10) | `PQL-F04` | current foundation | bounded SQLite math transforms for valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-PROM-042`](#sql-prom-042-sgn) | `PQL-F05` | current foundation | exact bounded sign mapping for every row-visible finite value, infinity, and signed zero; API owns packed NaN, names, limits, and envelopes |
+| [`SQL-PROM-043`](#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions) | `PQL-F06` | current foundation | bounded SQLite inverse math transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1502,6 +1503,37 @@ extension primitive would add no pruning or decode benefit.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_sgn_preserves_ieee_signs_ranges_and_reopen`.
+
+### SQL-PROM-043: inverse trigonometric and hyperbolic functions
+
+SQLite's public math functions directly express the bounded transforms:
+
+```sql
+SELECT labels, ts, acos(value) AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+Substitute `acosh(value)`, `asin(value)`, `asinh(value)`, `atan(value)`, or
+`atanh(value)`. Bounds, step, and lookback use the metric table's configured
+timestamp unit (integer seconds for the default table); grid bounds are
+inclusive and lookback is open on the left. Missing samples remain absent,
+canonical label JSON is returned, and ordering is deterministic.
+
+This recipe is exact over each SQLite function's valid row-visible domain.
+SQLite reports invalid domains as SQL NULL, and a stored NaN is also
+row-projected as NULL. That cannot represent Prometheus's distinctions among
+`NaN`, endpoint `+Inf`/`-Inf`, and an absent sample. The Rust API reads the
+public bit-exact packed frame and owns those IEEE/domain results, signed zero,
+metric-name removal, types, nesting, limits, cancellation, and HTTP envelopes.
+The standard functions already serve direct SQLite/libSQL users; a specialized
+extension primitive would save neither a read nor a decode.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_inverse_transforms_pin_domains_ieee_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

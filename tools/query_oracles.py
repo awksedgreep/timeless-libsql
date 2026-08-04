@@ -457,6 +457,23 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             [(value, timestamp_ms + offset_ms) for value, offset_ms in points],
             {"case": case},
         )
+    for case, points in [
+        ("range", [(0.0, 20_000), (1.0, 30_000)]),
+        ("negative_one", [(-1.0, 30_000)]),
+        ("negative_zero", [(-0.0, 30_000)]),
+        ("zero", [(0.0, 30_000)]),
+        ("half", [(0.5, 30_000)]),
+        ("one", [(1.0, 30_000)]),
+        ("two", [(2.0, 30_000)]),
+        ("nan", [(float("nan"), 30_000)]),
+        ("positive_inf", [(float("inf"), 30_000)]),
+        ("negative_inf", [(float("-inf"), 30_000)]),
+    ]:
+        write_request += series(
+            "oracle_inverse",
+            [(value, timestamp_ms + offset_ms) for value, offset_ms in points],
+            {"case": case},
+        )
     return snappy_literal(write_request)
 
 

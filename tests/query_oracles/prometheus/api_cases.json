@@ -2171,6 +2171,85 @@
       "expected_metric": {"case": "negative", "job": "oracle"},
       "expected_values": [1],
       "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F06-acos-domain-values",
+      "query": "acos(oracle_inverse{case=~\"one|two|nan\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "one", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "two", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F06-acosh-domain-values",
+      "query": "acosh(oracle_inverse{case=~\"zero|one|positive_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "zero", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "one", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F06-asin-domain-and-signed-zero",
+      "query": "asin(oracle_inverse{case=~\"negative_zero|one|two\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "one", "job": "oracle"}, "value": 1.5707963267948966},
+        {"metric": {"case": "two", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F06-asinh-ieee-values",
+      "query": "asinh(oracle_inverse{case=~\"negative_zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F06-atan-ieee-values",
+      "query": "atan(oracle_inverse{case=~\"negative_zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": 1.5707963267948966},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": -1.5707963267948966}
+      ]
+    },
+    {
+      "id": "PQL-F06-atanh-domain-endpoints-and-zero",
+      "query": "atanh(oracle_inverse{case=~\"negative_one|negative_zero|one|two\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_one", "job": "oracle"}, "value": "-Inf"},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "one", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "two", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F06-asin-range-grid-and-name-policy",
+      "query": "asin(oracle_inverse{case=\"range\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "range", "job": "oracle"},
+      "expected_values": [0, 1.5707963267948966]
+    },
+    {
+      "id": "PQL-F06-nested-inverse-transform",
+      "query": "abs(asin(oracle_inverse{case=\"negative_zero\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "negative_zero", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
     }
   ],
   "operator_error_cases": [

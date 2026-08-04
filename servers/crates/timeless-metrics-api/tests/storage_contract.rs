@@ -8435,6 +8435,158 @@ async fn session_eight_promql_sgn_preserves_ieee_signs_ranges_and_reopen() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_inverse_transforms_pin_domains_ieee_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_inverse.db");
+    let base = 1_700_850_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "transform_inverse{{case=\"range\"}} 0 {}\n",
+            "transform_inverse{{case=\"range\"}} 1 {}\n",
+            "transform_inverse{{case=\"negative_one\"}} -1 {}\n",
+            "transform_inverse{{case=\"negative_zero\"}} -0 {}\n",
+            "transform_inverse{{case=\"zero\"}} 0 {}\n",
+            "transform_inverse{{case=\"half\"}} 0.5 {}\n",
+            "transform_inverse{{case=\"one\"}} 1 {}\n",
+            "transform_inverse{{case=\"two\"}} 2 {}\n",
+            "transform_inverse{{case=\"nan\"}} NaN {}\n",
+            "transform_inverse{{case=\"positive_inf\"}} +Inf {}\n",
+            "transform_inverse{{case=\"negative_inf\"}} -Inf {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (expression, case, expected) in [
+        ("acos(transform_inverse{case=\"one\"})", "one", "0"),
+        ("acosh(transform_inverse{case=\"one\"})", "one", "0"),
+        (
+            "asin(transform_inverse{case=\"one\"})",
+            "one",
+            "1.5707963267948966",
+        ),
+        (
+            "asinh(transform_inverse{case=\"negative_zero\"})",
+            "negative_zero",
+            "-0",
+        ),
+        (
+            "atan(transform_inverse{case=\"negative_inf\"})",
+            "negative_inf",
+            "-1.5707963267948966",
+        ),
+        ("atanh(transform_inverse{case=\"one\"})", "one", "+Inf"),
+        ("acos(transform_inverse{case=\"two\"})", "two", "NaN"),
+        ("acosh(transform_inverse{case=\"zero\"})", "zero", "NaN"),
+        ("asin(transform_inverse{case=\"two\"})", "two", "NaN"),
+        ("atanh(transform_inverse{case=\"two\"})", "two", "NaN"),
+        (
+            "asinh(transform_inverse{case=\"positive_inf\"})",
+            "positive_inf",
+            "+Inf",
+        ),
+        ("atan(transform_inverse{case=\"nan\"})", "nan", "NaN"),
+    ] {
+        let response = prom_query(&app, expression, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{expression}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({"case": case})
+        );
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+
+    let range = prom_query_range(
+        &app,
+        "asin(transform_inverse{case=\"range\"})",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "range"},
+            "values": [[base, "0"], [base + 10, "1.5707963267948966"]]
+        }])
+    );
+    let nested = prom_query(
+        &app,
+        "abs(asin(transform_inverse{case=\"negative_zero\"}))",
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "0");
+
+    for query in [
+        "acos(1)",
+        "asinh(transform_inverse[1m])",
+        "atan(transform_inverse, 1)",
+    ] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "atan(transform_inverse)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_result = prom_query(
+        &reopened_app,
+        "acosh(transform_inverse{case=\"one\"})",
+        base,
+    )
+    .await;
+    assert_eq!(reopened_result.0, StatusCode::OK, "{}", reopened_result.1);
+    assert_eq!(reopened_result.1["data"]["result"][0]["value"][1], "0");
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

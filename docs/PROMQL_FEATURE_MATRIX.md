@@ -147,7 +147,7 @@ bounded frames.
 | `PQL-F03` | `clamp`, `clamp_min`, `clamp_max` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-040-clamp-clamp_min-and-clamp_max)); scalar bounds, finite/IEEE values, signed zero, inverted bounds, range grids, names, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F04` | `sqrt`, `exp`, `ln`, `log2`, `log10` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-041-sqrt-exp-ln-log2-and-log10)); valid domains, NaN/infinities/signed zero, range grids, names, nesting, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F05` | `sgn` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-042-sgn)); finite/IEEE values, signed zero, range grids, names, nesting, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-F06` | `acos`, `acosh`, `asin`, `asinh`, `atan`, `atanh` | missing | yes | `SQL` | `API` | P0 |
+| `PQL-F06` | `acos`, `acosh`, `asin`, `asinh`, `atan`, `atanh` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions)); domains, endpoint infinities, NaN/signed zero, range grids, names, nesting, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F07` | `cos`, `cosh`, `sin`, `sinh`, `tan`, `tanh` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F08` | `deg`, `rad`, `pi` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F09` | `label_replace` | missing | yes | `SQL` | `API` | P0 |

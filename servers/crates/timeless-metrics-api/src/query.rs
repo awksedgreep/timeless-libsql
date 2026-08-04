@@ -397,6 +397,12 @@ pub(crate) enum PromPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromFunctionOp {
     Abs,
+    Acos,
+    Acosh,
+    Asin,
+    Asinh,
+    Atan,
+    Atanh,
     Ceil,
     Clamp,
     ClampMax,
@@ -415,6 +421,12 @@ impl PromFunctionOp {
     fn apply(self, value: f64, parameters: &[f64]) -> Option<f64> {
         match self {
             Self::Abs => Some(value.abs()),
+            Self::Acos => Some(value.acos()),
+            Self::Acosh => Some(value.acosh()),
+            Self::Asin => Some(value.asin()),
+            Self::Asinh => Some(value.asinh()),
+            Self::Atan => Some(value.atan()),
+            Self::Atanh => Some(value.atanh()),
             Self::Ceil => Some(value.ceil()),
             Self::Clamp => {
                 let minimum = parameters[0];
@@ -1070,7 +1082,13 @@ fn lower_promql_expr(
         promql::Expr::Call(call)
             if matches!(
                 call.func.name,
-                "ceil"
+                "acos"
+                    | "acosh"
+                    | "asin"
+                    | "asinh"
+                    | "atan"
+                    | "atanh"
+                    | "ceil"
                     | "exp"
                     | "floor"
                     | "ln"
@@ -1082,6 +1100,12 @@ fn lower_promql_expr(
             ) =>
         {
             let op = match call.func.name {
+                "acos" => PromFunctionOp::Acos,
+                "acosh" => PromFunctionOp::Acosh,
+                "asin" => PromFunctionOp::Asin,
+                "asinh" => PromFunctionOp::Asinh,
+                "atan" => PromFunctionOp::Atan,
+                "atanh" => PromFunctionOp::Atanh,
                 "ceil" => PromFunctionOp::Ceil,
                 "exp" => PromFunctionOp::Exp,
                 "floor" => PromFunctionOp::Floor,

@@ -877,6 +877,10 @@ SQLite reports as SQL NULL.
 Bounded `sgn` is [`SQL-PROM-042`](QUERY_SQL_EQUIVALENTS.md#sql-prom-042-sgn);
 ordinary SQL preserves row-visible signed zero and the packed Rust path
 retains true NaN.
+Bounded inverse trigonometric and hyperbolic functions use
+[`SQL-PROM-043`](QUERY_SQL_EQUIVALENTS.md#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions);
+the Rust API supplies the packed IEEE/domain distinctions ordinary SQLite
+reports as SQL NULL.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

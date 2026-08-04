@@ -3567,6 +3567,7 @@ db.executemany(
         ('math_metric', '{"case":"eight"}', 100, 8.0),
         ('math_metric', '{"case":"hundred"}', 100, 100.0),
         ('math_metric', '{"case":"negative"}', 100, -4.0),
+        ('math_metric', '{"case":"two"}', 100, 2.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3725,8 +3726,31 @@ assert sign_by_case == {
     'negative': -1.0,
     'one': 1.0,
     'sqrt': 1.0,
+    'two': 1.0,
     'zero': 0.0,
 }
+
+inverse_transforms = db.execute(
+    "SELECT labels,ts,acos(value),acosh(value),asin(value),"
+    "asinh(value),atan(value),atanh(value) FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    " ORDER BY labels,ts",
+    {
+        'metric': 'math_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+    },
+).fetchall()
+inverse_by_case = {json.loads(labels)['case']: row for labels, *row in inverse_transforms}
+assert inverse_by_case['one'][1:4] == [0.0, 0.0, math.pi / 2]
+assert inverse_by_case['zero'][4:] == [0.0, 0.0, 0.0]
+assert inverse_by_case['two'][1] is None
+assert inverse_by_case['two'][3] is None
+assert inverse_by_case['two'][6] is None
+assert inverse_by_case['zero'][2] is None
 
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
