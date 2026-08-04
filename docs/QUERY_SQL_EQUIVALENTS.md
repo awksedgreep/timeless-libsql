@@ -31,6 +31,13 @@ lookback/staleness policy, output label/name rules, pipeline semantics,
 resource limits, and cancellation. SQL recipes let embedded users reach the
 same stored data and mechanical reductions without running that API.
 
+PromQL scalar literals are intentionally not labeled `SQL`. A finite value can
+of course be bound with `SELECT CAST(:value AS REAL)`, but SQLite commonly
+normalizes IEEE NaN to SQL NULL and does not define Prometheus's `"NaN"`,
+`"+Inf"`, and `"-Inf"` response strings or evaluation timestamps. Claiming
+that statement as an exact `PQL-S11` recipe would be misleading; those
+language/value-envelope semantics belong to the Rust API.
+
 ## Recipe index
 
 | recipe | matrix rows | state | semantic class |

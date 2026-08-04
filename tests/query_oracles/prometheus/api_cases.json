@@ -33,6 +33,82 @@
         "errorType": "bad_data",
         "error": "invalid parameter \"query\": invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
       }
+    },
+    {
+      "id": "PQL-S11-finite-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "1", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "1"]}
+      }
+    },
+    {
+      "id": "PQL-S11-nan-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "NaN", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "NaN"]}
+      }
+    },
+    {
+      "id": "PQL-S11-positive-infinity-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "+Inf", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "+Inf"]}
+      }
+    },
+    {
+      "id": "PQL-S11-negative-infinity-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "-Inf", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "-Inf"]}
+      }
+    },
+    {
+      "id": "PQL-S11-underscored-hex-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "0x_12", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "18"]}
+      }
+    },
+    {
+      "id": "PQL-S11-underscored-exponent-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "1e2_3", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {
+          "resultType": "scalar",
+          "result": [2, "100000000000000000000000"]
+        }
+      }
+    },
+    {
+      "id": "PQL-S11-scalar-range-grid",
+      "endpoint": "/api/v1/query_range",
+      "params": {"query": "NaN", "start": "0", "end": "2", "step": "1"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {
+          "resultType": "matrix",
+          "result": [{"metric": {}, "values": [[0, "NaN"], [1, "NaN"], [2, "NaN"]]}]
+        }
+      }
     }
   ]
 }

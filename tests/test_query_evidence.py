@@ -38,6 +38,12 @@ class QueryEvidenceTests(unittest.TestCase):
         self.assertEqual(query_evidence.ndjson_cardinality(b"{}\n{}\n"), 2)
         with self.assertRaises(RuntimeError):
             query_evidence.query_json_cardinality(b'{"status":"error"}')
+        self.assertEqual(
+            query_evidence.scalar_json_cardinality(
+                b'{"status":"success","data":{"resultType":"scalar","result":[2,"NaN"]}}'
+            ),
+            1,
+        )
 
     def test_evidence_rejects_a_stale_release_binary_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

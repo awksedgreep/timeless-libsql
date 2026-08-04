@@ -189,6 +189,16 @@ def query_json_cardinality(body: bytes) -> int:
     return len(response["data"]["result"])
 
 
+def scalar_json_cardinality(body: bytes) -> int:
+    response = json.loads(body)
+    if response.get("status") != "success" or response.get("data", {}).get("resultType") != "scalar":
+        raise RuntimeError(f"scalar query failed: {response}")
+    result = response["data"]["result"]
+    if not isinstance(result, list) or len(result) != 2:
+        raise RuntimeError(f"invalid scalar result: {response}")
+    return 1
+
+
 def ndjson_cardinality(body: bytes) -> int:
     return sum(1 for line in body.splitlines() if line)
 
@@ -258,6 +268,12 @@ def metrics_evidence(
             query = urllib.parse.urlencode({"query": expression, "time": at})
             return http(server.base, f"/api/v1/query?{query}")[1]
 
+        def promql_range(expression: str, start: int, end: int, step: int) -> bytes:
+            query = urllib.parse.urlencode(
+                {"query": expression, "start": start, "end": end, "step": step}
+            )
+            return http(server.base, f"/api/v1/query_range?{query}")[1]
+
         stat = lambda: stats(server.base, "/select/metrics/stats")
         narrow = measure(
             "metrics-narrow",
@@ -295,6 +311,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        scalar_instant = measure(
+            "metrics-scalar-instant",
+            lambda: promql("NaN"),
+            scalar_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        scalar_range_limit = measure(
+            "metrics-scalar-range-limit",
+            lambda: promql_range("NaN", at, at + 10_999, 1),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
         final_stats = stat()
         return {
             "build": identity,
@@ -312,6 +346,8 @@ def metrics_evidence(
                 "wide": wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
+                "scalar_instant": scalar_instant,
+                "scalar_range_11000": scalar_range_limit,
             },
             "storage": {
                 key: final_stats[key]

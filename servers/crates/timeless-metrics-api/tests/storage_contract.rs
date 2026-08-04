@@ -714,7 +714,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
                 "resultType": "matrix",
                 "result": [{
                     "metric": {"__name__": "prom_cpu", "env": "prod", "host": "a"},
-                    "values": [[base, "10.0"], [base + 10, "20.0"], [base + 20, "30.0"]]
+                    "values": [[base, "10"], [base + 10, "20"], [base + 20, "30"]]
                 }]
             }
         })
@@ -738,7 +738,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     .await;
     assert_eq!(
         partial_grid.1["data"]["result"][0]["values"],
-        serde_json::json!([[base, "10.0"], [base + 10, "20.0"]])
+        serde_json::json!([[base, "10"], [base + 10, "20"]])
     );
 
     let average = get_json(
@@ -752,7 +752,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     assert_eq!(average.0, StatusCode::OK);
     assert_eq!(
         average.1["data"]["result"][0]["values"],
-        serde_json::json!([[base, "10.0"], [base + 10, "15.0"], [base + 20, "25.0"]])
+        serde_json::json!([[base, "10"], [base + 10, "15"], [base + 20, "25"]])
     );
     assert_eq!(
         average.1["data"]["result"][0]["metric"],
@@ -773,7 +773,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
         range_vector.1["data"]["result"],
         serde_json::json!([{
             "metric": {"__name__": "prom_cpu", "env": "prod", "host": "a"},
-            "values": [[base + 10, "20.0"], [base + 20, "30.0"]]
+            "values": [[base + 10, "20"], [base + 20, "30"]]
         }])
     );
 
@@ -805,7 +805,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     assert_eq!(instant.1["data"]["resultType"], "vector");
     assert_eq!(
         instant.1["data"]["result"][0]["value"],
-        serde_json::json!([base + 20, "30.0"])
+        serde_json::json!([base + 20, "30"])
     );
 
     let stale = get_json(&app, &format!("/api/v1/query?query=prom_stale&time={base}")).await;
@@ -830,7 +830,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     )
     .await;
     assert_eq!(posted.0, StatusCode::OK);
-    assert_eq!(posted.1["data"]["result"][0]["values"][0][1], "10.0");
+    assert_eq!(posted.1["data"]["result"][0]["values"][0][1], "10");
 
     for path in [
         "/prometheus/api/v1/query_range?start=0&end=10&step=1",
@@ -867,6 +867,57 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     assert_eq!(recovered.1, instant.1);
     drop(reopened_app);
     reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_promql_scalar_literals_match_prometheus() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two_promql_scalars.db");
+    let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let app = router(storage.clone());
+
+    for (query, expected) in [
+        ("1", "1"),
+        ("1.5", "1.5"),
+        ("NaN", "NaN"),
+        ("Inf", "+Inf"),
+        ("%2BInf", "+Inf"),
+        ("-Inf", "-Inf"),
+        ("0x_12", "18"),
+        ("00_1_23_4.56_7_8", "1234.5678"),
+        ("1e2_3", "100000000000000000000000"),
+    ] {
+        let response = get_json(&app, &format!("/api/v1/query?query={query}&time=2")).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], "scalar");
+        assert_eq!(
+            response.1["data"]["result"],
+            serde_json::json!([2, expected])
+        );
+    }
+
+    let range = get_json(&app, "/api/v1/query_range?query=NaN&start=0&end=2&step=1").await;
+    assert_eq!(range.0, StatusCode::OK);
+    assert_eq!(range.1["data"]["resultType"], "matrix");
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[0, "NaN"], [1, "NaN"], [2, "NaN"]]
+        }])
+    );
+
+    for query in ["1__2", "1_", "1._2"] {
+        let error = get_json(&app, &format!("/api/v1/query?query={query}&time=2")).await;
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1["errorType"], "bad_data");
+    }
+
+    drop(app);
+    storage.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -926,7 +977,7 @@ async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
     .await
     .expect("reader did not recover after cancellation");
     assert_eq!(fresh.0, StatusCode::OK);
-    assert_eq!(fresh.1["data"]["result"][0]["value"][1], "0.0");
+    assert_eq!(fresh.1["data"]["result"][0]["value"][1], "0");
 
     drop(app);
     storage.shutdown().await.unwrap();

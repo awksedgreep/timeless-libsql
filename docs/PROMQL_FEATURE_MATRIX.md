@@ -60,7 +60,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S08` | `@ timestamp`, `@ start()`, `@ end()` | missing | yes | `RAW`, `GRID` | `API` | P0 | Evaluation-time semantics belong in the planner. |
 | `PQL-S09` | subqueries `[range:resolution]` | missing | yes | `RAW`, `GRID` | `API` | P0 | Bound intermediate points and cancellation. |
 | `PQL-S10` | step-relative ranges such as `[5i]` | missing | yes | `RAW`, `GRID` | `API` | P2 | MetricsQL-compatible extension used by the existing oracle. |
-| `PQL-S11` | scalar literals and IEEE `NaN`/`Inf` behavior | missing | yes | `SQL` | `API` | P0 | Preserve float bits and Prometheus JSON string formatting. |
+| `PQL-S11` | scalar literals and IEEE `NaN`/`Inf` behavior | in progress | yes | none | `API` | P0 | Decimal/exponent, hexadecimal, octal, underscored, signed, `NaN`, and `Inf` roots use Prometheus value strings; SQLite cannot portably preserve NaN as an ordinary REAL. |
 | `PQL-S12` | duration literals, including compound and `ms` | partial | yes | none | `API` | P0 | Rust currently handles integer `s/m/h/d/w/y`, not the complete upstream literal grammar. |
 | `PQL-S13` | string literals and escaping | missing | yes | none | `API` | P0 | Needed by label functions and `count_values`. |
 | `PQL-S14` | UTF-8 quoted metric names | missing | no | `CAT`, `RAW` | `API` | P2 | Add only with ingestion/name round-trip fixtures. |

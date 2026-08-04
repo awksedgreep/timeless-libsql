@@ -24,8 +24,9 @@ retention commands.
 - `GET /api/v1/series`
 - Prometheus aliases for instant/range queries and label/series discovery
 
-The current PromQL slice supports instant vector selectors, root range
-selectors on instant queries, and `avg_over_time(selector[window])`. It
+The current PromQL slice supports scalar literals (including `NaN` and
+infinities), instant vector selectors, root range selectors on instant
+queries, and `avg_over_time(selector[window])`. It
 deliberately rejects every other
 function, operator, aggregation, subquery, offset, or modifier with a
 Prometheus `bad_data` response. There is no hidden Elixir fallback. The

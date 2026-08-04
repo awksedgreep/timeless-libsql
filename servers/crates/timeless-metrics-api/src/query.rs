@@ -292,6 +292,7 @@ pub(crate) enum ReadRequest {
 
 #[derive(Clone, Debug)]
 pub(crate) enum PromPlan {
+    Scalar(f64),
     Selector {
         metric: String,
         filter: FilterPlan,
@@ -481,6 +482,7 @@ fn lower_promql(input: &str) -> Result<PromPlan, String> {
         Ok((metric, FilterPlan::new(matchers)))
     };
     match parsed {
+        promql::Expr::NumberLiteral(number) => Ok(PromPlan::Scalar(number.val)),
         promql::Expr::VectorSelector(selector) => {
             let (metric, filter) = lower_selector(selector)?;
             Ok(PromPlan::Selector {
@@ -1595,6 +1597,9 @@ fn execute_prometheus(
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     match plan {
+        PromPlan::Scalar(value) => {
+            execute_prometheus_scalar(*value, start, stop, step, instant, cancelled)
+        }
         PromPlan::Selector {
             metric,
             filter,
@@ -1633,6 +1638,50 @@ fn execute_prometheus(
             conn, features, metric, filter, stop, *window, cancelled,
         ),
     }
+}
+
+fn execute_prometheus_scalar(
+    value: f64,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let mut body = Vec::new();
+    let mut points = 0_u64;
+    if instant {
+        body.extend_from_slice(br#"{"status":"success","data":{"resultType":"scalar","result":"#);
+        write_prometheus_sample(&mut body, start, value)?;
+        body.extend_from_slice(b"}}");
+        points = 1;
+    } else {
+        body.extend_from_slice(
+            br#"{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":["#,
+        );
+        let mut timestamp = start;
+        loop {
+            check_cancelled(cancelled)?;
+            comma(&mut body, points as usize);
+            write_prometheus_sample(&mut body, timestamp, value)?;
+            points += 1;
+            if timestamp >= stop {
+                break;
+            }
+            let Some(next) = timestamp.checked_add(step).filter(|next| *next <= stop) else {
+                break;
+            };
+            timestamp = next;
+        }
+        body.extend_from_slice(b"]}]}}");
+    }
+    Ok(ReadOutput {
+        body,
+        frame_bytes: 0,
+        series: u64::from(!instant),
+        points,
+        rows: points,
+    })
 }
 
 fn execute_prometheus_range_selector(
@@ -2004,11 +2053,7 @@ fn format_prometheus_value(value: f64) -> String {
     if value == f64::NEG_INFINITY {
         return "-Inf".into();
     }
-    let mut formatted = value.to_string();
-    if !formatted.contains(['.', 'e', 'E']) {
-        formatted.push_str(".0");
-    }
-    formatted
+    value.to_string()
 }
 
 enum BucketValue {
