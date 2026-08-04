@@ -3509,6 +3509,11 @@ db.executemany(
         ('cpu', '{"host":"web-1","service":"api"}', 100, 10.0),
         ('cpu', '{"host":"web-2","service":"api"}', 100, 20.0),
         ('cpu', '{"host":"web-1","service":"api"}', 110, 30.0),
+        ('avg_precision', '{}', 10, 1e16),
+        ('avg_precision', '{}', 20, 1.0),
+        ('avg_precision', '{}', 30, -1e16),
+        ('avg_overflow', '{}', 20, sys.float_info.max),
+        ('avg_overflow', '{}', 30, sys.float_info.max),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3634,6 +3639,17 @@ window = db.execute(
     },
 ).fetchall()
 assert len(window) == 4
+
+precision_avg = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','avg_precision',NULL,30,30,1,30,'avg')"
+).fetchone()[0]
+assert precision_avg == 1.0 / 3.0
+overflow_avg = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','avg_overflow',NULL,30,30,1,20,'avg')"
+).fetchone()[0]
+assert overflow_avg == sys.float_info.max
 
 cross_sum = db.execute(
     "WITH selected AS ("

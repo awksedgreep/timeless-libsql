@@ -129,6 +129,13 @@ and applies exact `(T-window,T]` boundaries in Rust. This preserves the public
 storage format and Prometheus semantics without presenting a second-native
 extension kernel as millisecond-aware.
 
+Every `avg_over_time` path uses the same compensated average and
+overflow-safe incremental-mean fallback as the pinned Prometheus oracle.
+This includes packed whole-second windows, raw modifier/subsecond fallbacks,
+and materialized subqueries; valid `NaN` and infinities remain values rather
+than frame errors. All paths remove `__name__`, omit empty windows, enforce
+cumulative work/output/deadline limits, and remain cancellation-aware.
+
 Both query endpoints accept Prometheus's request-scoped `lookback_delta`.
 Omission and an explicit zero select the five-minute default; positive numeric
 seconds or compound duration syntax replace it. Selector samples use the exact

@@ -153,8 +153,12 @@ ORDER BY labels, ts;
 
 The window is `(T-window,T]`, matching PromQL range boundaries. Set
 `:start = :end` for an instant evaluation. This recipe is exact for stored
-float samples; native histogram samples are not stored. Direct regression:
-`tests/cli.sh` sections 22, 33, and 35.
+float samples: the public window kernel uses compensated summation and switches
+to an incremental mean before a finite average would overflow. It preserves
+Prometheus `NaN`, positive/negative infinity, and signed-zero float behavior;
+the API still owns language parsing, metric-name removal, timestamp units,
+limits, and result envelopes. Native histogram samples are not stored. Direct
+regression: `tests/cli.sh` sections 22, 33, 35, and 45.
 
 ### SQL-PROM-006: range selector
 

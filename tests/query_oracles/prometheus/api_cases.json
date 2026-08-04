@@ -631,6 +631,41 @@
       ]
     },
     {
+      "id": "PQL-R01-avg-over-time-compensated",
+      "query": "avg_over_time(oracle_range_avg_precision[30s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0.3333333333333333],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R01-avg-over-subquery-compensated",
+      "query": "avg_over_time(oracle_range_avg_precision[30s:10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0.3333333333333333],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R01-avg-over-time-overflow",
+      "query": "avg_over_time(oracle_range_avg_overflow[20s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": ["1.7976931348623157e+308"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R01-avg-over-time-ieee",
+      "query": "avg_over_time(oracle_range_avg_ieee[20s])",
+      "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "mixed", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
       "id": "PQL-O14-topk-tie-input-order",
       "query": "topk(1, oracle_rank_tie)",
       "evaluation_offset_ms": 30000,

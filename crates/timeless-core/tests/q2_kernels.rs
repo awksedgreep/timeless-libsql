@@ -67,7 +67,47 @@ fn naive_grid_last(
     out
 }
 
-/// Naive window agg: collect the window, fold left-to-right.
+fn reference_compensated_average(values: &[f64]) -> f64 {
+    let add = |increment: f64, sum: f64, compensation: f64| {
+        let total = sum + increment;
+        let compensation = if total.is_infinite() {
+            0.0
+        } else if sum.abs() >= increment.abs() {
+            compensation + ((sum - total) + increment)
+        } else {
+            compensation + ((increment - total) + sum)
+        };
+        (total, compensation)
+    };
+    let mut sum = values[0];
+    let mut compensation = 0.0;
+    let mut mean = sum;
+    let mut count = 1.0;
+    let mut incremental = false;
+    for &value in &values[1..] {
+        count += 1.0;
+        if !incremental {
+            let (next_sum, next_compensation) = add(value, sum, compensation);
+            if !next_sum.is_infinite() {
+                sum = next_sum;
+                compensation = next_compensation;
+                continue;
+            }
+            incremental = true;
+            mean = sum / (count - 1.0);
+            compensation /= count - 1.0;
+        }
+        let weight = (count - 1.0) / count;
+        (mean, compensation) = add(value / count, weight * mean, weight * compensation);
+    }
+    if incremental {
+        mean + compensation
+    } else {
+        sum / count + compensation / count
+    }
+}
+
+/// Reference window agg: collect the complete window and apply each pinned fold.
 fn naive_window_agg(
     samples: &[(i64, f64)],
     start: i64,
@@ -88,7 +128,7 @@ fn naive_window_agg(
             let value = match agg {
                 AggFn::Count => win.len() as f64,
                 AggFn::Sum => win.iter().fold(0.0f64, |a, &v| a + v),
-                AggFn::Avg => win.iter().fold(0.0f64, |a, &v| a + v) / win.len() as f64,
+                AggFn::Avg => reference_compensated_average(&win),
                 AggFn::Min => win[1..].iter().fold(win[0], |a, &v| f64::min(a, v)),
                 AggFn::Max => win[1..].iter().fold(win[0], |a, &v| f64::max(a, v)),
             };
@@ -287,6 +327,50 @@ fn labeled_wrappers_match_by_id() {
             &expect,
             &format!("batched window sid {expected_sid}"),
         );
+    }
+    engine.shutdown().unwrap();
+}
+
+#[test]
+fn window_average_compensates_cancellation_and_falls_back_before_overflow() {
+    let dir = temp_dir("compensated_average");
+    let engine = new_engine(&dir);
+    let labels = HashMap::new();
+
+    let precision = engine.resolve_cached("precision", &labels).unwrap();
+    for (timestamp, value) in [(10, 1e16), (20, 1.0), (30, -1e16)] {
+        engine.write_point(precision, timestamp, value);
+    }
+    let average = engine
+        .query_window_agg_by_id(precision, 30, 30, 1, 30, AggFn::Avg)
+        .unwrap();
+    assert_eq!(average[0].1.to_bits(), (1.0_f64 / 3.0).to_bits());
+
+    let overflow = engine.resolve_cached("overflow", &labels).unwrap();
+    engine.write_point(overflow, 20, f64::MAX);
+    engine.write_point(overflow, 30, f64::MAX);
+    let average = engine
+        .query_window_agg_by_id(overflow, 30, 30, 1, 20, AggFn::Avg)
+        .unwrap();
+    assert_eq!(average[0].1.to_bits(), f64::MAX.to_bits());
+
+    for (name, values, expected) in [
+        ("nan", [f64::NAN, 1.0], f64::NAN),
+        ("positive", [f64::INFINITY, 1.0], f64::INFINITY),
+        ("mixed", [f64::INFINITY, f64::NEG_INFINITY], f64::NAN),
+    ] {
+        let series = engine.resolve_cached(name, &labels).unwrap();
+        engine.write_point(series, 20, values[0]);
+        engine.write_point(series, 30, values[1]);
+        let average = engine
+            .query_window_agg_by_id(series, 30, 30, 1, 20, AggFn::Avg)
+            .unwrap()[0]
+            .1;
+        if expected.is_nan() {
+            assert!(average.is_nan(), "{name}");
+        } else {
+            assert_eq!(average.to_bits(), expected.to_bits(), "{name}");
+        }
     }
     engine.shutdown().unwrap();
 }

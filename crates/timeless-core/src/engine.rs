@@ -3166,7 +3166,7 @@ impl Engine {
             WindowOp::Agg(agg) => Some(match agg {
                 AggFn::Count => win.len() as f64,
                 AggFn::Sum => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v),
-                AggFn::Avg => win.iter().fold(0.0f64, |acc, &(_, v)| acc + v) / win.len() as f64,
+                AggFn::Avg => Self::compensated_window_average(win),
                 AggFn::Min => win[1..]
                     .iter()
                     .fold(win[0].1, |acc, &(_, v)| f64::min(acc, v)),
@@ -3196,6 +3196,43 @@ impl Engine {
                 let kept = &sorted[k..n - k];
                 Some(kept.iter().fold(0.0f64, |acc, &v| acc + v) / kept.len() as f64)
             }
+        }
+    }
+
+    /// Cancellation-safe average with the direct-sum/overflow fallback used
+    /// by Prometheus. This remains a general float window reduction: language
+    /// parsing and response semantics stay above the storage boundary.
+    fn compensated_window_average(win: &[(i64, f64)]) -> f64 {
+        debug_assert!(!win.is_empty());
+        let mut sum = win[0].1;
+        let mut compensation = 0.0;
+        let mut mean = sum;
+        let mut count = 1.0;
+        let mut incremental_mean = false;
+        for &(_, value) in &win[1..] {
+            count += 1.0;
+            if !incremental_mean {
+                let (next_sum, next_compensation) = compensated_add(value, sum, compensation);
+                if !next_sum.is_infinite() {
+                    sum = next_sum;
+                    compensation = next_compensation;
+                    continue;
+                }
+                incremental_mean = true;
+                mean = sum / (count - 1.0);
+                compensation /= count - 1.0;
+            }
+            let previous_weight = (count - 1.0) / count;
+            (mean, compensation) = compensated_add(
+                value / count,
+                previous_weight * mean,
+                previous_weight * compensation,
+            );
+        }
+        if incremental_mean {
+            mean + compensation
+        } else {
+            sum / count + compensation / count
         }
     }
 
@@ -4526,6 +4563,18 @@ pub struct EngineInfo {
     pub raw_batch_query_decoded_points: u64,
     pub raw_batch_query_buffered_points_considered: u64,
     pub raw_batch_query_returned_points: u64,
+}
+
+fn compensated_add(increment: f64, sum: f64, compensation: f64) -> (f64, f64) {
+    let total = sum + increment;
+    let compensation = if total.is_infinite() {
+        0.0
+    } else if sum.abs() >= increment.abs() {
+        compensation + ((sum - total) + increment)
+    } else {
+        compensation + ((increment - total) + sum)
+    };
+    (total, compensation)
 }
 
 /// F7 window operations (FEATURE_PLAN.md "The SQL query tier") — the

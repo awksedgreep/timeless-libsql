@@ -3969,10 +3969,6 @@ fn execute_prometheus_avg_subquery(
         write_prometheus_item_prefix(&mut body, None, &series.labels, instant, limits)?;
         let mut lo = 0_usize;
         let mut hi = 0_usize;
-        let mut finite_sum = 0.0_f64;
-        let mut nan_count = 0_usize;
-        let mut positive_infinity_count = 0_usize;
-        let mut negative_infinity_count = 0_usize;
         let mut item_points = 0_u64;
         let mut outer = start;
         loop {
@@ -3981,24 +3977,10 @@ fn execute_prometheus_avg_subquery(
                 .timing
                 .selection_time(outer, query_start, query_end)?;
             while hi < series.points.len() && series.points[hi].0 <= effective {
-                add_window_value(
-                    series.points[hi].1,
-                    &mut finite_sum,
-                    &mut nan_count,
-                    &mut positive_infinity_count,
-                    &mut negative_infinity_count,
-                );
                 hi += 1;
             }
             let lower = checked_timestamp_sub(effective, subquery.window, "subquery range")?;
             while lo < hi && series.points[lo].0 <= lower {
-                remove_window_value(
-                    series.points[lo].1,
-                    &mut finite_sum,
-                    &mut nan_count,
-                    &mut positive_infinity_count,
-                    &mut negative_infinity_count,
-                );
                 lo += 1;
             }
             if hi > lo {
@@ -4006,13 +3988,7 @@ fn execute_prometheus_avg_subquery(
                 if !instant {
                     comma(&mut body, item_points as usize);
                 }
-                let value = average_window_value(
-                    hi - lo,
-                    finite_sum,
-                    nan_count,
-                    positive_infinity_count,
-                    negative_infinity_count,
-                );
+                let value = prometheus_range_average(&series.points[lo..hi], cancelled)?;
                 write_prometheus_sample(&mut body, outer, value)?;
                 item_points += 1;
                 enforce_prometheus_output(
@@ -4169,58 +4145,13 @@ fn checked_timestamp_sub(timestamp: i64, duration: i64, name: &str) -> Result<i6
         .ok_or_else(|| format!("PromQL timestamp overflow while applying {name}"))
 }
 
-fn add_window_value(
-    value: f64,
-    finite_sum: &mut f64,
-    nan_count: &mut usize,
-    positive_infinity_count: &mut usize,
-    negative_infinity_count: &mut usize,
-) {
-    if value.is_nan() {
-        *nan_count += 1;
-    } else if value == f64::INFINITY {
-        *positive_infinity_count += 1;
-    } else if value == f64::NEG_INFINITY {
-        *negative_infinity_count += 1;
-    } else {
-        *finite_sum += value;
+fn prometheus_range_average(points: &[(i64, f64)], cancelled: &AtomicBool) -> Result<f64, String> {
+    let mut average = PromAggregateState::new(PromAggregateOp::Avg, points[0].1);
+    for &(_, value) in &points[1..] {
+        check_cancelled(cancelled)?;
+        average.add(PromAggregateOp::Avg, value);
     }
-}
-
-fn remove_window_value(
-    value: f64,
-    finite_sum: &mut f64,
-    nan_count: &mut usize,
-    positive_infinity_count: &mut usize,
-    negative_infinity_count: &mut usize,
-) {
-    if value.is_nan() {
-        *nan_count -= 1;
-    } else if value == f64::INFINITY {
-        *positive_infinity_count -= 1;
-    } else if value == f64::NEG_INFINITY {
-        *negative_infinity_count -= 1;
-    } else {
-        *finite_sum -= value;
-    }
-}
-
-fn average_window_value(
-    count: usize,
-    finite_sum: f64,
-    nan_count: usize,
-    positive_infinity_count: usize,
-    negative_infinity_count: usize,
-) -> f64 {
-    if nan_count > 0 || positive_infinity_count > 0 && negative_infinity_count > 0 {
-        f64::NAN
-    } else if positive_infinity_count > 0 {
-        f64::INFINITY
-    } else if negative_infinity_count > 0 {
-        f64::NEG_INFINITY
-    } else {
-        finite_sum / count as f64
-    }
+    Ok(average.finish(PromAggregateOp::Avg))
 }
 
 fn empty_prometheus_matrix(limits: PromQueryLimits) -> Result<ReadOutput, String> {
@@ -4740,16 +4671,23 @@ fn execute_prometheus_avg_raw(
                     lo += 1;
                 }
                 if hi > lo {
-                    let mut sum = 0.0;
-                    for index in lo..hi {
+                    let mut average = PromAggregateState::new(
+                        PromAggregateOp::Avg,
+                        series.value(raw.frame.as_deref(), lo)?,
+                    );
+                    for index in lo + 1..hi {
                         check_cancelled(cancelled)?;
-                        sum += series.value(raw.frame.as_deref(), index)?;
+                        average.add(
+                            PromAggregateOp::Avg,
+                            series.value(raw.frame.as_deref(), index)?,
+                        );
                     }
+                    let value = average.finish(PromAggregateOp::Avg);
                     admit_prometheus_point(points.saturating_add(item_points), limits)?;
                     if !instant {
                         comma(&mut body, item_points as usize);
                     }
-                    write_prometheus_sample(&mut body, t, sum / (hi - lo) as f64)?;
+                    write_prometheus_sample(&mut body, t, value)?;
                     item_points += 1;
                     enforce_prometheus_output(&body, points.saturating_add(item_points), limits)?;
                 }
@@ -5343,15 +5281,8 @@ fn decode_window_batch(bytes: &[u8]) -> Result<WindowBatch<'_>, String> {
     validate_bitmap(&bytes[bitmap_start..values_start], count, "TWB1")?;
     for index in 0..count {
         let word = u64_at(bytes, values_start + index * 8);
-        if bit(&bytes[bitmap_start..values_start], index) {
-            let value = f64::from_bits(word);
-            if value.is_nan() {
-                return Err(format!("TWB1 valid value {index} is NaN"));
-            }
-        } else {
-            if word != 0 {
-                return Err(format!("TWB1 null value {index} has nonzero bits"));
-            }
+        if !bit(&bytes[bitmap_start..values_start], index) && word != 0 {
+            return Err(format!("TWB1 null value {index} has nonzero bits"));
         }
     }
     Ok(WindowBatch {
@@ -5629,6 +5560,15 @@ mod tests {
         raw.extend_from_slice(&10_i64.to_le_bytes());
         raw.extend_from_slice(&1.5_f64.to_bits().to_le_bytes());
         assert!(decode_raw_frame(&raw).is_err());
+
+        let mut window = Vec::new();
+        window.extend_from_slice(b"TWB1");
+        window.extend_from_slice(&1_u32.to_le_bytes());
+        window.extend_from_slice(&10_i64.to_le_bytes());
+        window.push(1);
+        window.extend_from_slice(&f64::NAN.to_bits().to_le_bytes());
+        let decoded = decode_window_batch(&window).unwrap();
+        assert_eq!(decoded.value(0).unwrap().to_bits(), f64::NAN.to_bits());
     }
 
     #[test]

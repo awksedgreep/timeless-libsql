@@ -4560,6 +4560,150 @@ async fn session_two_promql_limits_bound_grid_work_results_response_and_deadline
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_six_promql_avg_over_time_is_compensated_ieee_bounded_and_reopenable() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_six_avg_over_time.db");
+    let base = 1_700_600_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_avg_precision 1e16 {}\n",
+            "range_avg_precision 1 {}\n",
+            "range_avg_precision -1e16 {}\n",
+            "range_avg_overflow 1.7976931348623157e308 {}\n",
+            "range_avg_overflow 1.7976931348623157e308 {}\n",
+            "range_avg_ieee{{case=\"nan\"}} NaN {}\n",
+            "range_avg_ieee{{case=\"nan\"}} 1 {}\n",
+            "range_avg_ieee{{case=\"positive\"}} +Inf {}\n",
+            "range_avg_ieee{{case=\"positive\"}} 1 {}\n",
+            "range_avg_ieee{{case=\"mixed\"}} +Inf {}\n",
+            "range_avg_ieee{{case=\"mixed\"}} -Inf {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let direct = prom_query(&app, "avg_over_time(range_avg_precision[30s])", base + 30).await;
+    assert_eq!(direct.0, StatusCode::OK, "{}", direct.1);
+    assert_eq!(
+        direct.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "value": [base + 30, "0.3333333333333333"]
+        }])
+    );
+
+    let subquery = prom_query(
+        &app,
+        "avg_over_time(range_avg_precision[30s:10s])",
+        base + 30,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(subquery.1, direct.1);
+
+    let overflow = prom_query(&app, "avg_over_time(range_avg_overflow[20s])", base + 30).await;
+    assert_eq!(overflow.0, StatusCode::OK, "{}", overflow.1);
+    assert_eq!(
+        overflow.1["data"]["result"][0]["value"][1]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            .to_bits(),
+        f64::MAX.to_bits()
+    );
+
+    let ieee = prom_query(&app, "avg_over_time(range_avg_ieee[20s])", base + 30).await;
+    assert_eq!(ieee.0, StatusCode::OK, "{}", ieee.1);
+    assert_eq!(
+        ieee.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "mixed"}, "value": [base + 30, "NaN"]},
+            {"metric": {"case": "nan"}, "value": [base + 30, "NaN"]},
+            {"metric": {"case": "positive"}, "value": [base + 30, "+Inf"]}
+        ])
+    );
+
+    let empty = prom_query(
+        &app,
+        "avg_over_time(range_avg_precision[30s])",
+        base + 1_000,
+    )
+    .await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "avg_over_time(range_avg_precision[30s])",
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 2 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "avg_over_time(range_avg_precision[30s])",
+            base + 30,
+        )
+        .await
+        .1,
+        direct.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

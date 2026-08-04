@@ -113,6 +113,8 @@
 //!   SELECT labels, ts, value FROM timeless_window(
 //!     'metrics', 'cpu_usage', NULL,
 //!     :start, :stop, :step, :window, 'avg');   -- sum|min|max|count|avg
+//! `avg` uses compensated summation plus an overflow-safe incremental mean;
+//! the other folds retain their documented IEEE behavior.
 //!
 //! Embedded hosts can request one versioned bucket blob per series instead of
 //! crossing the SQLite boundary once per grid point:

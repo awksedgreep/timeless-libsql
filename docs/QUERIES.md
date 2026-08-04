@@ -706,6 +706,12 @@ sparse form while supplying the limit. Omit both trailing arguments to retain
 the original call. Zero, negative, NULL-as-a-supplied-limit, and non-integer
 limits fail explicitly.
 
+The `avg` window fold uses compensated summation for cancellation-prone
+finite values and an incremental-mean fallback before the running sum would
+overflow. `NaN`, infinities, and signed zero remain IEEE values in the packed
+frame. This is a general direct-SQL reduction; PromQL parsing, label/name
+policy, timestamps, limits, and envelopes remain in the Rust metrics API.
+
 The `buckets` blob is versioned and little-endian:
 
 ```text

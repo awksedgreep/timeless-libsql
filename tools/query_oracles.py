@@ -317,6 +317,34 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             [(5.0, timestamp_ms + 30_000)],
             {"host": host},
         )
+    write_request += series(
+        "oracle_range_avg_precision",
+        [
+            (1e16, timestamp_ms + 10_000),
+            (1.0, timestamp_ms + 20_000),
+            (-1e16, timestamp_ms + 30_000),
+        ],
+    )
+    write_request += series(
+        "oracle_range_avg_overflow",
+        [
+            (float.fromhex("0x1.fffffffffffffp+1023"), timestamp_ms + 20_000),
+            (float.fromhex("0x1.fffffffffffffp+1023"), timestamp_ms + 30_000),
+        ],
+    )
+    for case, values in [
+        ("nan", [float("nan"), 1.0]),
+        ("positive", [float("inf"), 1.0]),
+        ("mixed", [float("inf"), float("-inf")]),
+    ]:
+        write_request += series(
+            "oracle_range_avg_ieee",
+            [
+                (values[0], timestamp_ms + 20_000),
+                (values[1], timestamp_ms + 30_000),
+            ],
+            {"case": case},
+        )
     return snappy_literal(write_request)
 
 
