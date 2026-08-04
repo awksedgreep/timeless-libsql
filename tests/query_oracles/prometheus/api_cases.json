@@ -2011,6 +2011,62 @@
       "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
       "expected_metric": {"case": "negative", "job": "oracle"},
       "expected_values": [-1, -2]
+    },
+    {
+      "id": "PQL-F03-clamp-finite-and-ieee-values",
+      "query": "clamp(oracle_clamp, 0, 5)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "below", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "inside", "job": "oracle"}, "value": 2},
+        {"metric": {"case": "above", "job": "oracle"}, "value": 5},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "positive_zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": 5},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": 0}
+      ]
+    },
+    {
+      "id": "PQL-F03-clamp-min-signed-zero-and-ieee-values",
+      "query": "clamp_min(oracle_clamp{case=~\"below|negative_zero|positive_inf|nan\"}, 0)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "below", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F03-clamp-max-signed-zero",
+      "query": "clamp_max(oracle_clamp{case=\"positive_zero\"}, -0)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "positive_zero", "job": "oracle"},
+      "expected_values": ["-0"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F03-clamp-inverted-bounds-empty",
+      "query": "clamp(oracle_clamp, 5, 0)",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-F03-clamp-range-grid-and-name-policy",
+      "query": "clamp(oracle_clamp{case=\"below\"}, -2.5, -1)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "below", "job": "oracle"},
+      "expected_values": [-2, -2.5]
+    },
+    {
+      "id": "PQL-F03-clamp-nested-and-scalar-expression",
+      "query": "clamp_max(abs(oracle_clamp{case=\"below\"}), 1 + 1)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "below", "job": "oracle"},
+      "expected_values": [2],
+      "drop_metric_name": true
     }
   ],
   "operator_error_cases": [

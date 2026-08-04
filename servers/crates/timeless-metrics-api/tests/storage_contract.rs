@@ -8013,6 +8013,158 @@ async fn session_eight_promql_rounding_functions_match_float_and_step_semantics(
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_clamp_functions_bound_ieee_vectors_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_clamp.db");
+    let base = 1_700_820_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "transform_clamp{{case=\"below\"}} -2 {}\n",
+            "transform_clamp{{case=\"below\"}} -3 {}\n",
+            "transform_clamp{{case=\"inside\"}} 2 {}\n",
+            "transform_clamp{{case=\"above\"}} 8 {}\n",
+            "transform_clamp{{case=\"negative_zero\"}} -0 {}\n",
+            "transform_clamp{{case=\"positive_zero\"}} 0 {}\n",
+            "transform_clamp{{case=\"nan\"}} NaN {}\n",
+            "transform_clamp{{case=\"positive_inf\"}} +Inf {}\n",
+            "transform_clamp{{case=\"negative_inf\"}} -Inf {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (function, case, expected) in [
+        ("clamp", "below", "0"),
+        ("clamp", "inside", "2"),
+        ("clamp", "above", "5"),
+        ("clamp", "negative_zero", "0"),
+        ("clamp", "nan", "NaN"),
+        ("clamp", "positive_inf", "5"),
+        ("clamp", "negative_inf", "0"),
+        ("clamp_min", "below", "0"),
+        ("clamp_min", "negative_zero", "0"),
+        ("clamp_min", "positive_inf", "+Inf"),
+        ("clamp_max", "above", "5"),
+        ("clamp_max", "negative_inf", "-Inf"),
+    ] {
+        let expression = if function == "clamp" {
+            format!("clamp(transform_clamp{{case=\"{case}\"}}, 0, 5)")
+        } else if function == "clamp_min" {
+            format!("clamp_min(transform_clamp{{case=\"{case}\"}}, 0)")
+        } else {
+            format!("clamp_max(transform_clamp{{case=\"{case}\"}}, 5)")
+        };
+        let response = prom_query(&app, &expression, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{expression}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({"case": case})
+        );
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+
+    let negative_zero = prom_query(
+        &app,
+        "clamp_max(transform_clamp{case=\"positive_zero\"}, -0)",
+        base,
+    )
+    .await;
+    assert_eq!(negative_zero.0, StatusCode::OK, "{}", negative_zero.1);
+    assert_eq!(negative_zero.1["data"]["result"][0]["value"][1], "-0");
+
+    let empty = prom_query(&app, "clamp(transform_clamp, 5, 0)", base).await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+
+    let range = prom_query_range(
+        &app,
+        "clamp(transform_clamp{case=\"below\"}, -2.5, -1)",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "below"},
+            "values": [[base, "-2"], [base + 10, "-2.5"]]
+        }])
+    );
+    let nested = prom_query(
+        &app,
+        "clamp_max(abs(transform_clamp{case=\"below\"}), 1 + 1)",
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "2");
+
+    for query in [
+        "clamp(1, 0, 5)",
+        "clamp_min(transform_clamp[1m], 0)",
+        "clamp_max(transform_clamp, transform_clamp)",
+    ] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "clamp(transform_clamp, 0, 5)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_result = prom_query(
+        &reopened_app,
+        "clamp(transform_clamp{case=\"above\"}, 0, 5)",
+        base,
+    )
+    .await;
+    assert_eq!(reopened_result.0, StatusCode::OK, "{}", reopened_result.1);
+    assert_eq!(reopened_result.1["data"]["result"][0]["value"][1], "5");
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

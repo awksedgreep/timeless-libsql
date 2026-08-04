@@ -398,21 +398,64 @@ pub(crate) enum PromPlan {
 enum PromFunctionOp {
     Abs,
     Ceil,
+    Clamp,
+    ClampMax,
+    ClampMin,
     Floor,
     Round,
 }
 
 impl PromFunctionOp {
-    fn apply(self, value: f64, parameter: Option<f64>) -> f64 {
+    fn apply(self, value: f64, parameters: &[f64]) -> Option<f64> {
         match self {
-            Self::Abs => value.abs(),
-            Self::Ceil => value.ceil(),
-            Self::Floor => value.floor(),
+            Self::Abs => Some(value.abs()),
+            Self::Ceil => Some(value.ceil()),
+            Self::Clamp => {
+                let minimum = parameters[0];
+                let maximum = parameters[1];
+                (minimum <= maximum)
+                    .then(|| prometheus_math_max(minimum, prometheus_math_min(maximum, value)))
+            }
+            Self::ClampMax => Some(prometheus_math_min(parameters[0], value)),
+            Self::ClampMin => Some(prometheus_math_max(parameters[0], value)),
+            Self::Floor => Some(value.floor()),
             Self::Round => {
-                let inverse = 1.0 / parameter.unwrap_or(1.0);
-                (value * inverse + 0.5).floor() / inverse
+                let inverse = 1.0 / parameters.first().copied().unwrap_or(1.0);
+                Some((value * inverse + 0.5).floor() / inverse)
             }
         }
+    }
+}
+
+fn prometheus_math_min(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        f64::NAN
+    } else if lhs == 0.0 && rhs == 0.0 {
+        if lhs.is_sign_negative() || rhs.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else if lhs < rhs {
+        lhs
+    } else {
+        rhs
+    }
+}
+
+fn prometheus_math_max(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        f64::NAN
+    } else if lhs == 0.0 && rhs == 0.0 {
+        if lhs.is_sign_positive() || rhs.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else if lhs > rhs {
+        lhs
+    } else {
+        rhs
     }
 }
 
@@ -420,7 +463,7 @@ impl PromFunctionOp {
 pub(crate) struct PromFunctionPlan {
     op: PromFunctionOp,
     inner: Box<PromPlan>,
-    parameter: Option<Box<PromPlan>>,
+    parameters: Vec<PromPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1003,7 +1046,7 @@ fn lower_promql_expr(
             Ok(PromPlan::Function(PromFunctionPlan {
                 op: PromFunctionOp::Abs,
                 inner: Box::new(inner),
-                parameter: None,
+                parameters: Vec::new(),
             }))
         }
         promql::Expr::Call(call)
@@ -1043,13 +1086,58 @@ fn lower_promql_expr(
                     if parameter.value_type() != PromValueType::Scalar {
                         return Err("round step must be a scalar".to_string());
                     }
-                    Ok(Box::new(parameter))
+                    Ok(parameter)
                 })
                 .transpose()?;
             Ok(PromPlan::Function(PromFunctionPlan {
                 op,
                 inner: Box::new(inner),
-                parameter,
+                parameters: parameter.into_iter().collect(),
+            }))
+        }
+        promql::Expr::Call(call)
+            if matches!(call.func.name, "clamp" | "clamp_min" | "clamp_max") =>
+        {
+            let (op, argument, parameters) = match call.args.args.as_slice() {
+                [argument, minimum, maximum] if call.func.name == "clamp" => (
+                    PromFunctionOp::Clamp,
+                    argument,
+                    vec![minimum, maximum],
+                ),
+                [argument, maximum] if call.func.name == "clamp_max" => {
+                    (PromFunctionOp::ClampMax, argument, vec![maximum])
+                }
+                [argument, minimum] if call.func.name == "clamp_min" => {
+                    (PromFunctionOp::ClampMin, argument, vec![minimum])
+                }
+                _ => {
+                    return Err(format!(
+                        "{} requires an instant vector and {} scalar parameter{}",
+                        call.func.name,
+                        if call.func.name == "clamp" { "two" } else { "one" },
+                        if call.func.name == "clamp" { "s" } else { "" }
+                    ));
+                }
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err(format!("{} requires an instant vector", call.func.name));
+            }
+            let parameters = parameters
+                .into_iter()
+                .map(|parameter| {
+                    let parameter =
+                        lower_promql_expr((**parameter).clone(), lookback, depth + 1)?;
+                    if parameter.value_type() != PromValueType::Scalar {
+                        return Err(format!("{} bounds must be scalars", call.func.name));
+                    }
+                    Ok(parameter)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(PromPlan::Function(PromFunctionPlan {
+                op,
+                inner: Box::new(inner),
+                parameters,
             }))
         }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
@@ -3608,7 +3696,8 @@ fn execute_prometheus_function(
     let mut intermediate_points = child.intermediate_points.saturating_add(child.points);
     enforce_intermediate_work(intermediate_points, limits)?;
     let mut frame_bytes = child.frame_bytes;
-    let parameters = if let Some(parameter) = &function.parameter {
+    let mut parameters = Vec::with_capacity(function.parameters.len());
+    for parameter in &function.parameters {
         check_cancelled(cancelled)?;
         let output = execute_prometheus(
             conn,
@@ -3638,10 +3727,8 @@ fn execute_prometheus_function(
         else {
             unreachable!("function parameter type was checked while lowering")
         };
-        Some(points.into_iter().collect::<BTreeMap<_, _>>())
-    } else {
-        None
-    };
+        parameters.push(points.into_iter().collect::<BTreeMap<_, _>>());
+    }
     let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
         &child.body,
         PromValueType::Vector,
@@ -3655,19 +3742,25 @@ fn execute_prometheus_function(
     for item in &mut series {
         check_cancelled(cancelled)?;
         item.labels.remove("__name__");
-        for (timestamp, value) in &mut item.points {
+        let mut values = Vec::with_capacity(parameters.len());
+        let mut write_index = 0;
+        for read_index in 0..item.points.len() {
             check_cancelled(cancelled)?;
-            let parameter = parameters
-                .as_ref()
-                .map(|parameters| {
-                    parameters.get(timestamp).copied().ok_or_else(|| {
-                        "PromQL function parameter is missing an evaluation timestamp".to_string()
-                    })
-                })
-                .transpose()?;
-            *value = function.op.apply(*value, parameter);
+            let (timestamp, value) = item.points[read_index];
+            values.clear();
+            for parameter in &parameters {
+                values.push(parameter.get(&timestamp).copied().ok_or_else(|| {
+                    "PromQL function parameter is missing an evaluation timestamp".to_string()
+                })?);
+            }
+            if let Some(value) = function.op.apply(value, &values) {
+                item.points[write_index] = (timestamp, value);
+                write_index += 1;
+            }
         }
+        item.points.truncate(write_index);
     }
+    series.retain(|item| !item.points.is_empty());
     encode_prometheus_intermediate(
         IntermediateValue::Vector(series),
         instant,

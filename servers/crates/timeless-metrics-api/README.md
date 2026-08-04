@@ -39,10 +39,12 @@ selectors on instant queries, and
 `deriv(selector[window])`, `predict_linear(selector[window], horizon)`, and
 ordered float-transition `changes(selector[window])` and strict float-counter
 decrease `resets(selector[window])`.
-The bounded instant-vector transforms `abs`, `ceil`, `floor`, and `round`
+The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
+`clamp`, `clamp_min`, and `clamp_max`
 preserve all float sample classes while removing the metric name, including in
 range queries and nested expressions. `round` accepts Prometheus's optional
-scalar nearest-multiple expression and exact upward-tie behavior.
+scalar nearest-multiple expression and exact upward-tie behavior. Clamp bounds
+are scalar expressions evaluated per step; inverted bounds omit every sample.
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
@@ -84,7 +86,7 @@ The authoritative support contract is the
 Rust API rows at this revision are listed below for CI; prose in this README
 must not imply a broader language surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are
@@ -300,8 +302,10 @@ Numeric transforms use that bridge over already bounded vector frames. They
 perform no additional storage read, check cancellation while visiting series
 and samples, remove `__name__`, and transform values in place. `round`
 evaluates an optional scalar plan over the outer grid and charges those scalar
-points to the same cumulative work limit. Direct SQLite/libSQL users can use
-the executable `abs`, `ceil`, `floor`, and `round` recipes over
+points to the same cumulative work limit. Clamp functions evaluate one or two
+scalar plans the same way and omit empty series after inverted-bound filtering.
+Direct SQLite/libSQL users can use
+the executable `abs`, `ceil`, `floor`, `round`, and clamp recipes over
 `timeless_grid`; the packed Rust path is required only to preserve stored NaN
 bits and the complete PromQL response contract.
 

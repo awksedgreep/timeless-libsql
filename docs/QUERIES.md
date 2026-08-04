@@ -866,6 +866,10 @@ retains packed NaN fidelity and PromQL labels, types, limits, and envelopes.
 Bounded `ceil`, `floor`, and nearest-multiple `round` use
 [`SQL-PROM-039`](QUERY_SQL_EQUIVALENTS.md#sql-prom-039-ceil-floor-and-round),
 including Prometheus's exact tie and scalar-step arithmetic.
+Bounded `clamp`, `clamp_min`, and `clamp_max` use
+[`SQL-PROM-040`](QUERY_SQL_EQUIVALENTS.md#sql-prom-040-clamp-clamp_min-and-clamp_max);
+the Rust API adds bit-exact NaN/signed-zero behavior and per-step scalar-bound
+expressions to the ordinary finite SQL foundation.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

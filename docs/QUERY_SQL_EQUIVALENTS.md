@@ -81,6 +81,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-037`](#sql-prom-037-resets) | `PQL-R20` | current | exact ordered strict float-decrease count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
 | [`SQL-PROM-038`](#sql-prom-038-abs) | `PQL-F01` | current foundation | exact bounded absolute value for finite floats, infinities, and signed zero; API owns packed-NaN fidelity, language, names, limits, and envelopes |
 | [`SQL-PROM-039`](#sql-prom-039-ceil-floor-and-round) | `PQL-F02` | current foundation | exact bounded IEEE ceiling/floor and Prometheus nearest-multiple arithmetic for row-visible values; API owns packed-NaN fidelity, scalar ASTs, names, limits, and envelopes |
+| [`SQL-PROM-040`](#sql-prom-040-clamp-clamp_min-and-clamp_max) | `PQL-F03` | current foundation | bounded finite-value clamping and inverted-bound omission; API owns packed IEEE fidelity, scalar ASTs, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1383,6 +1384,56 @@ envelopes. These transforms do not justify an extension primitive: they add
 no pruning and require no additional decode beyond the selected vector.
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_rounding_functions_match_float_and_step_semantics`.
+
+### SQL-PROM-040: `clamp`, `clamp_min`, and `clamp_max`
+
+Bind the scalar lower and upper bounds through a one-row parameter CTE, then
+bound every selected value. The final predicate is significant: Prometheus
+returns an empty vector when the lower bound is greater than the upper bound.
+
+```sql
+WITH
+parameters(minimum, maximum) AS (
+  SELECT CAST(:minimum AS REAL), CAST(:maximum AS REAL)
+), selected AS (
+  SELECT labels, ts, value, minimum, maximum
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  ), parameters
+)
+SELECT labels, ts,
+       CASE
+         WHEN value <= minimum THEN minimum
+         WHEN value >= maximum THEN maximum
+         ELSE value
+       END AS value
+FROM selected
+WHERE minimum <= maximum
+ORDER BY labels, ts;
+```
+
+For `clamp_min(vector, minimum)`, omit `maximum` and project
+`CASE WHEN value <= minimum THEN minimum ELSE value END`. For
+`clamp_max(vector, maximum)`, project
+`CASE WHEN value >= maximum THEN maximum ELSE value END`. Bounds, step, and
+lookback use the metric table's configured timestamp unit (integer seconds for
+the default table); grid bounds are inclusive and lookback is open on the
+left. Missing grid samples remain absent, canonical label JSON is returned,
+and the explicit ordering is deterministic.
+
+This public-SQL recipe is exact for ordinary finite values and infinities.
+SQLite row projection maps a stored NaN to SQL NULL and does not expose enough
+information to reproduce Go's `math.Min`/`math.Max` choice between equal
+positive and negative zero in every bound order. The Rust API therefore reads
+the public bit-exact packed frame and implements those remaining Prometheus
+semantics, evaluates each scalar bound expression on every outer timestamp,
+removes `__name__`, and owns types, cumulative limits, cancellation, and HTTP
+envelopes. No extension primitive is warranted: clamping cannot improve
+storage pruning or avoid the already-required vector decode.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_clamp_functions_bound_ieee_vectors_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

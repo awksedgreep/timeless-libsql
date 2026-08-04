@@ -144,7 +144,7 @@ bounded frames.
 |---|---|---|---|---|---|---|
 | `PQL-F01` | `abs` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-038-abs)); finite and IEEE floats, signed zero, metric-name removal, range grids, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F02` | `ceil`, `floor`, `round` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-039-ceil-floor-and-round)); float/IEEE values, signed zero, round ties and scalar steps, range grids, names, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-F03` | `clamp`, `clamp_min`, `clamp_max` | missing | yes | `SQL` | `API` | P0 |
+| `PQL-F03` | `clamp`, `clamp_min`, `clamp_max` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-040-clamp-clamp_min-and-clamp_max)); scalar bounds, finite/IEEE values, signed zero, inverted bounds, range grids, names, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F04` | `sqrt`, `exp`, `ln`, `log2`, `log10` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F05` | `sgn` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F06` | `acos`, `acosh`, `asin`, `asinh`, `atan`, `atanh` | missing | yes | `SQL` | `API` | P0 |

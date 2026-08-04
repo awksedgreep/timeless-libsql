@@ -3557,6 +3557,9 @@ db.executemany(
         ('round_metric', '{"case":"negative"}', 100, -1.6),
         ('round_metric', '{"case":"negative_zero"}', 100, -0.0),
         ('round_metric', '{"case":"positive"}', 100, 1.6),
+        ('clamp_metric', '{"case":"below"}', 100, -3.0),
+        ('clamp_metric', '{"case":"inside"}', 100, 2.0),
+        ('clamp_metric', '{"case":"above"}', 100, 8.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3635,6 +3638,39 @@ assert rounding == [
 assert math.copysign(1.0, rounding[1][2]) == -1.0
 assert math.copysign(1.0, rounding[1][3]) == -1.0
 assert math.copysign(1.0, rounding[1][4]) == 1.0
+
+clamped = db.execute(
+    "WITH parameters(minimum,maximum) AS ("
+    " SELECT CAST(:minimum AS REAL),CAST(:maximum AS REAL)),"
+    " selected AS (SELECT labels,ts,value,minimum,maximum"
+    " FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback),parameters)"
+    " SELECT labels,ts,CASE WHEN value<=minimum THEN minimum"
+    " WHEN value>=maximum THEN maximum ELSE value END"
+    " FROM selected WHERE minimum<=maximum ORDER BY labels,ts",
+    {
+        'metric': 'clamp_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+        'minimum': 0.0,
+        'maximum': 5.0,
+    },
+).fetchall()
+assert clamped == [
+    ('{"case":"above"}', 100, 5.0),
+    ('{"case":"below"}', 100, 0.0),
+    ('{"case":"inside"}', 100, 2.0),
+]
+inverted_clamp = db.execute(
+    "WITH parameters(minimum,maximum) AS (SELECT 5.0,0.0)"
+    " SELECT labels FROM timeless_grid("
+    "'metrics','clamp_metric',NULL,100,100,1,1),parameters"
+    " WHERE minimum<=maximum"
+).fetchall()
+assert inverted_clamp == []
 
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
