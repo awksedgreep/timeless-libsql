@@ -113,6 +113,13 @@ async fn main() -> ExitCode {
             Ok(value) => value,
             Err(error) => return usage_error(error),
         },
+        default_subquery_step: match duration_millis_from_env(
+            "TIMELESS_METRICS_PROMQL_DEFAULT_SUBQUERY_STEP_MS",
+            defaults.prom_query_limits.default_subquery_step,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
         deadline: match duration_millis_from_env(
             "TIMELESS_METRICS_PROMQL_DEADLINE_MS",
             defaults.prom_query_limits.deadline,

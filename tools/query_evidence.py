@@ -505,6 +505,46 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        subquery_root_narrow = measure(
+            "metrics-subquery-root-narrow",
+            lambda: promql('query_contract_cpu{host="h0000"}[5m:10s]'),
+            matrix_point_cardinality,
+            30,
+            stat,
+            iterations,
+            warmup,
+        )
+        subquery_root_wide = measure(
+            "metrics-subquery-root-wide",
+            lambda: promql("query_contract_cpu[5m:10s]"),
+            matrix_point_cardinality,
+            series * 30,
+            stat,
+            iterations,
+            warmup,
+        )
+        subquery_avg_narrow = measure(
+            "metrics-subquery-avg-narrow",
+            lambda: promql(
+                'avg_over_time(query_contract_cpu{host="h0000"}[5m:10s])'
+            ),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        subquery_avg_wide = measure(
+            "metrics-subquery-avg-wide",
+            lambda: promql_range(
+                "avg_over_time(query_contract_cpu[5m:10s])", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -758,6 +798,10 @@ def metrics_evidence(
                 "offset_negative_wide": offset_negative_wide,
                 "at_numeric_narrow": at_numeric_narrow,
                 "at_end_wide": at_end_wide,
+                "subquery_root_narrow": subquery_root_narrow,
+                "subquery_root_wide": subquery_root_wide,
+                "subquery_avg_narrow": subquery_avg_narrow,
+                "subquery_avg_wide": subquery_avg_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,
@@ -794,6 +838,7 @@ def metrics_evidence(
                 "result_points": 100_000,
                 "work_points": 100_000,
                 "response_bytes": 16 * 1024 * 1024,
+                "default_subquery_step_ms": 15_000,
                 "deadline_ms": 30_000,
                 "contract_test": "session_two_promql_limits_bound_grid_work_results_response_and_deadline",
             },

@@ -38,6 +38,10 @@ pub struct PromQueryLimits {
     pub max_result_points: usize,
     pub max_work_points: usize,
     pub max_response_bytes: usize,
+    /// Resolution used by PromQL subqueries that omit their step. This is a
+    /// query-engine setting (Prometheus calls it the global evaluation
+    /// interval), not an extension or storage-table property.
+    pub default_subquery_step: Duration,
     pub deadline: Duration,
 }
 
@@ -48,6 +52,7 @@ impl Default for PromQueryLimits {
             max_result_points: 100_000,
             max_work_points: 100_000,
             max_response_bytes: 16 * 1024 * 1024,
+            default_subquery_step: Duration::from_secs(15),
             deadline: Duration::from_secs(30),
         }
     }
@@ -66,6 +71,11 @@ impl PromQueryLimits {
         }
         if self.max_response_bytes == 0 {
             return Err("max_response_bytes must be positive".into());
+        }
+        if self.default_subquery_step.is_zero()
+            || self.default_subquery_step.as_millis() > i64::MAX as u128
+        {
+            return Err("default_subquery_step must be in 1ms..=i64::MAXms".into());
         }
         if self.deadline.is_zero() {
             return Err("PromQL deadline must be positive".into());
@@ -236,6 +246,22 @@ mod tests {
         assert_eq!(
             config.validate().unwrap_err(),
             "max_response_bytes must be positive"
+        );
+    }
+
+    #[test]
+    fn default_subquery_resolution_is_positive_and_bounded() {
+        assert_eq!(
+            PromQueryLimits::default().default_subquery_step,
+            Duration::from_secs(15)
+        );
+        let limits = PromQueryLimits {
+            default_subquery_step: Duration::ZERO,
+            ..PromQueryLimits::default()
+        };
+        assert_eq!(
+            limits.validate().unwrap_err(),
+            "default_subquery_step must be in 1ms..=i64::MAXms"
         );
     }
 }

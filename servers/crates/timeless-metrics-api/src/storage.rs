@@ -132,6 +132,7 @@ pub struct StorageStats {
     pub api_read_response_bytes: u64,
     pub api_read_result_series: u64,
     pub api_read_result_points: u64,
+    pub api_promql_intermediate_points: u64,
     pub api_flush_count: u64,
     pub api_flush_total_ns: u64,
     pub api_flush_sqlite_ns: u64,
@@ -225,6 +226,7 @@ struct ApiProfile {
     read_response_bytes: u64,
     read_result_series: u64,
     read_result_points: u64,
+    promql_intermediate_points: u64,
     explicit_flush_count: u64,
     explicit_flush_total_ns: u64,
     explicit_flush_sqlite_ns: u64,
@@ -853,6 +855,9 @@ fn record_read_completion(
                 .saturating_add(output.body.len() as u64);
             profile.read_result_series = profile.read_result_series.saturating_add(output.series);
             profile.read_result_points = profile.read_result_points.saturating_add(output.points);
+            profile.promql_intermediate_points = profile
+                .promql_intermediate_points
+                .saturating_add(output.intermediate_points);
         }
         Err(error) => {
             profile.read_errors = profile.read_errors.saturating_add(1);
@@ -1499,6 +1504,7 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.api_read_response_bytes = profile.read_response_bytes;
     stats.api_read_result_series = profile.read_result_series;
     stats.api_read_result_points = profile.read_result_points;
+    stats.api_promql_intermediate_points = profile.promql_intermediate_points;
     stats.api_flush_count = profile.explicit_flush_count;
     stats.api_flush_total_ns = profile.explicit_flush_total_ns;
     stats.api_flush_sqlite_ns = profile.explicit_flush_sqlite_ns;

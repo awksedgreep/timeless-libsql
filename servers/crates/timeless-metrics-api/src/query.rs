@@ -386,7 +386,17 @@ pub(crate) enum PromPlan {
     String(String),
     Selector { selector: Selector, lookback: i64 },
     AvgOverTime { selector: Selector, window: i64 },
+    AvgOverSubquery(SubqueryPlan),
     RangeSelector { selector: Selector, window: i64 },
+    Subquery(SubqueryPlan),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubqueryPlan {
+    inner: Box<PromPlan>,
+    window: i64,
+    resolution: Option<i64>,
+    timing: SelectorTiming,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -552,7 +562,7 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
     let plan = lower_promql(query, lookback)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     match plan {
-        PromPlan::RangeSelector { .. } => {
+        PromPlan::RangeSelector { .. } | PromPlan::Subquery(_) => {
             return Err("invalid parameter \"query\": invalid expression type \"range vector\" for range query, must be Scalar or instant Vector".into());
         }
         PromPlan::String(_) => {
@@ -593,49 +603,26 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
             format!("parse error: {error}")
         }
     })?;
-    let lower_selector = |selector: promql::VectorSelector| -> Result<_, String> {
-        let timing = SelectorTiming::lower(selector.offset, selector.at)?;
-        if !selector.matchers.or_matchers.is_empty() {
-            return Err("PromQL OR matcher groups are not shipped yet".into());
-        }
-        let metric = selector.name;
-        let mut name_matchers = Vec::new();
-        let mut matchers = Vec::with_capacity(selector.matchers.matchers.len());
-        for matcher in selector.matchers.matchers {
-            let op = match matcher.op {
-                promql::MatchOp::Equal => MatcherOp::Eq,
-                promql::MatchOp::NotEqual => MatcherOp::NotEq,
-                promql::MatchOp::Re(_) => MatcherOp::Regex,
-                promql::MatchOp::NotRe(_) => MatcherOp::NotRegex,
-            };
-            if matcher.name == "__name__" {
-                if metric.is_some() {
-                    return Err("metric name specified twice".into());
-                }
-                name_matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
-                continue;
-            }
-            matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
-        }
-        Ok(Selector {
-            metric: match (metric, name_matchers.as_slice()) {
-                (Some(metric), []) => MetricSelection::Exact(metric),
-                (None, []) => MetricSelection::All,
-                (None, [matcher]) if matcher.op == MatcherOp::Eq => {
-                    MetricSelection::Exact(matcher.value.clone())
-                }
-                (None, _) => MetricSelection::Matchers(name_matchers),
-                (Some(_), _) => return Err("metric name specified twice".into()),
-            },
-            filter: FilterPlan::new(matchers),
-            timing,
-        })
-    };
+    lower_promql_expr(parsed, lookback, 0)
+}
+
+const MAX_PROMQL_NESTING: usize = 16;
+
+fn lower_promql_expr(
+    parsed: promql::Expr,
+    lookback: i64,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    if depth >= MAX_PROMQL_NESTING {
+        return Err(format!(
+            "PromQL expression exceeds the maximum nesting depth of {MAX_PROMQL_NESTING}"
+        ));
+    }
     match parsed {
         promql::Expr::NumberLiteral(number) => Ok(PromPlan::Scalar(number.val)),
         promql::Expr::StringLiteral(string) => Ok(PromPlan::String(string.val)),
         promql::Expr::VectorSelector(selector) => {
-            let selector = lower_selector(selector)?;
+            let selector = lower_promql_selector(selector)?;
             Ok(PromPlan::Selector { selector, lookback })
         }
         promql::Expr::MatrixSelector(selector) => {
@@ -644,29 +631,109 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
             if window == 0 {
                 return Err("PromQL range duration must be at least 1ms".into());
             }
-            let selector = lower_selector(selector.vs)?;
+            let selector = lower_promql_selector(selector.vs)?;
             Ok(PromPlan::RangeSelector { selector, window })
         }
+        promql::Expr::Paren(paren) => lower_promql_expr(*paren.expr, lookback, depth + 1),
+        promql::Expr::Subquery(subquery) => Ok(PromPlan::Subquery(lower_promql_subquery(
+            subquery,
+            lookback,
+            depth + 1,
+        )?)),
         promql::Expr::Call(call) if call.func.name == "avg_over_time" => {
             let [argument] = call.args.args.as_slice() else {
                 return Err("avg_over_time requires exactly one range vector".into());
             };
-            let promql::Expr::MatrixSelector(selector) = argument.as_ref() else {
-                return Err("avg_over_time requires a range vector".into());
-            };
-            let window = i64::try_from(selector.range.as_millis())
-                .map_err(|_| "PromQL range duration overflow".to_string())?;
-            if window == 0 {
-                return Err("PromQL range duration must be at least 1ms".into());
+            match argument.as_ref() {
+                promql::Expr::MatrixSelector(selector) => {
+                    let window = duration_millis_i64(selector.range, "range")?;
+                    if window == 0 {
+                        return Err("PromQL range duration must be at least 1ms".into());
+                    }
+                    let selector = lower_promql_selector(selector.vs.clone())?;
+                    Ok(PromPlan::AvgOverTime { selector, window })
+                }
+                promql::Expr::Subquery(subquery) => Ok(PromPlan::AvgOverSubquery(
+                    lower_promql_subquery(subquery.clone(), lookback, depth + 1)?,
+                )),
+                _ => Err("avg_over_time requires a range vector".into()),
             }
-            let selector = lower_selector(selector.vs.clone())?;
-            Ok(PromPlan::AvgOverTime { selector, window })
         }
         other => Err(format!(
             "unsupported PromQL expression (parsed as {})",
             promql_expression_name(&other)
         )),
     }
+}
+
+fn lower_promql_subquery(
+    subquery: promql_parser::parser::SubqueryExpr,
+    lookback: i64,
+    depth: usize,
+) -> Result<SubqueryPlan, String> {
+    let window = duration_millis_i64(subquery.range, "subquery range")?;
+    if window == 0 {
+        return Err("PromQL subquery range must be at least 1ms".into());
+    }
+    let resolution = subquery
+        .step
+        .map(|step| duration_millis_i64(step, "subquery resolution"))
+        .transpose()?;
+    if resolution == Some(0) {
+        return Err("PromQL subquery resolution must be at least 1ms".into());
+    }
+    let inner = lower_promql_expr(*subquery.expr, lookback, depth)?;
+    if !matches!(
+        inner,
+        PromPlan::Selector { .. } | PromPlan::AvgOverTime { .. } | PromPlan::AvgOverSubquery(_)
+    ) {
+        return Err("PromQL subquery requires an instant-vector expression".into());
+    }
+    Ok(SubqueryPlan {
+        inner: Box::new(inner),
+        window,
+        resolution,
+        timing: SelectorTiming::lower(subquery.offset, subquery.at)?,
+    })
+}
+
+fn lower_promql_selector(selector: promql::VectorSelector) -> Result<Selector, String> {
+    let timing = SelectorTiming::lower(selector.offset, selector.at)?;
+    if !selector.matchers.or_matchers.is_empty() {
+        return Err("PromQL OR matcher groups are not shipped yet".into());
+    }
+    let metric = selector.name;
+    let mut name_matchers = Vec::new();
+    let mut matchers = Vec::with_capacity(selector.matchers.matchers.len());
+    for matcher in selector.matchers.matchers {
+        let op = match matcher.op {
+            promql::MatchOp::Equal => MatcherOp::Eq,
+            promql::MatchOp::NotEqual => MatcherOp::NotEq,
+            promql::MatchOp::Re(_) => MatcherOp::Regex,
+            promql::MatchOp::NotRe(_) => MatcherOp::NotRegex,
+        };
+        if matcher.name == "__name__" {
+            if metric.is_some() {
+                return Err("metric name specified twice".into());
+            }
+            name_matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
+            continue;
+        }
+        matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
+    }
+    Ok(Selector {
+        metric: match (metric, name_matchers.as_slice()) {
+            (Some(metric), []) => MetricSelection::Exact(metric),
+            (None, []) => MetricSelection::All,
+            (None, [matcher]) if matcher.op == MatcherOp::Eq => {
+                MetricSelection::Exact(matcher.value.clone())
+            }
+            (None, _) => MetricSelection::Matchers(name_matchers),
+            (Some(_), _) => return Err("metric name specified twice".into()),
+        },
+        filter: FilterPlan::new(matchers),
+        timing,
+    })
 }
 
 fn promql_expression_name(expression: &promql::Expr) -> &'static str {
@@ -1102,6 +1169,9 @@ pub(crate) struct ReadOutput {
     pub frame_bytes: usize,
     pub series: u64,
     pub points: u64,
+    /// Evaluator points materialized only to feed a parent AST node. Final
+    /// result points are reported separately in `points`.
+    pub intermediate_points: u64,
     pub rows: u64,
 }
 
@@ -1160,7 +1230,7 @@ pub(crate) fn execute(
             instant,
             limits,
         } => execute_prometheus(
-            conn, features, &plan, start, stop, step, instant, limits, cancelled,
+            conn, features, &plan, start, stop, step, instant, start, stop, limits, cancelled,
         ),
     }
 }
@@ -1452,6 +1522,7 @@ fn execute_latest(
         frame_bytes,
         series: rows.len() as u64,
         points: rows.len() as u64,
+        intermediate_points: 0,
         rows: rows.len() as u64,
     })
 }
@@ -1556,6 +1627,7 @@ fn execute_export(
         frame_bytes: raw.frame_bytes,
         series: emitted,
         points,
+        intermediate_points: 0,
         rows: points,
     })
 }
@@ -1854,6 +1926,7 @@ fn execute_native_range(
         frame_bytes,
         series: emitted as u64,
         points,
+        intermediate_points: 0,
         rows: points,
     })
 }
@@ -1918,6 +1991,7 @@ fn execute_raw_range(
         frame_bytes: raw.frame_bytes,
         series: emitted as u64,
         points: point_count,
+        intermediate_points: 0,
         rows: point_count,
     })
 }
@@ -1938,6 +2012,8 @@ fn execute_prometheus(
     stop: i64,
     step: i64,
     instant: bool,
+    query_start: i64,
+    query_end: i64,
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
@@ -1947,7 +2023,18 @@ fn execute_prometheus(
         }
         PromPlan::String(value) => execute_prometheus_string(value, start, instant, limits),
         PromPlan::Selector { selector, lookback } => execute_prometheus_selector(
-            conn, features, selector, start, stop, step, *lookback, instant, limits, cancelled,
+            conn,
+            features,
+            selector,
+            start,
+            stop,
+            step,
+            *lookback,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
         ),
         PromPlan::AvgOverTime { selector, window }
             if features.window_batches
@@ -1976,12 +2063,457 @@ fn execute_prometheus(
             )
         }
         PromPlan::AvgOverTime { selector, window } => execute_prometheus_avg_raw(
-            conn, features, selector, start, stop, step, *window, instant, limits, cancelled,
+            conn,
+            features,
+            selector,
+            start,
+            stop,
+            step,
+            *window,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
         ),
         PromPlan::RangeSelector { selector, window } => execute_prometheus_range_selector(
-            conn, features, selector, stop, *window, limits, cancelled,
+            conn,
+            features,
+            selector,
+            stop,
+            *window,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
+        PromPlan::Subquery(subquery) => execute_prometheus_subquery(
+            conn,
+            features,
+            subquery,
+            start,
+            stop,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
+        PromPlan::AvgOverSubquery(subquery) => execute_prometheus_avg_subquery(
+            conn,
+            features,
+            subquery,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
         ),
     }
+}
+
+#[derive(Debug)]
+struct IntermediateSeries {
+    labels: BTreeMap<String, String>,
+    points: Vec<(i64, f64)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_subquery(
+    conn: &Connection,
+    features: QueryFeatures,
+    subquery: &SubqueryPlan,
+    start: i64,
+    stop: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    if !instant {
+        return Err("invalid expression type \"range vector\" for range query, must be Scalar or instant Vector".into());
+    }
+    let effective_start = subquery
+        .timing
+        .selection_time(start, query_start, query_end)?;
+    let effective_stop = subquery
+        .timing
+        .selection_time(stop, query_start, query_end)?;
+    let resolution = subquery_resolution(subquery, limits)?;
+    let Some((inner_start, inner_stop, points_per_series)) = aligned_subquery_grid(
+        effective_start.min(effective_stop),
+        effective_start.max(effective_stop),
+        subquery.window,
+        resolution,
+    )?
+    else {
+        return empty_prometheus_matrix(limits);
+    };
+    enforce_intermediate_grid(points_per_series, limits)?;
+    check_cancelled(cancelled)?;
+    execute_prometheus(
+        conn,
+        features,
+        &subquery.inner,
+        inner_start,
+        inner_stop,
+        resolution,
+        false,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_avg_subquery(
+    conn: &Connection,
+    features: QueryFeatures,
+    subquery: &SubqueryPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let effective_start = subquery
+        .timing
+        .selection_time(start, query_start, query_end)?;
+    let effective_stop = subquery
+        .timing
+        .selection_time(stop, query_start, query_end)?;
+    let resolution = subquery_resolution(subquery, limits)?;
+    let Some((inner_start, inner_stop, points_per_series)) = aligned_subquery_grid(
+        effective_start.min(effective_stop),
+        effective_start.max(effective_stop),
+        subquery.window,
+        resolution,
+    )?
+    else {
+        return empty_prometheus_vector_or_matrix(instant, limits);
+    };
+    enforce_intermediate_grid(points_per_series, limits)?;
+    let inner = execute_prometheus(
+        conn,
+        features,
+        &subquery.inner,
+        inner_start,
+        inner_stop,
+        resolution,
+        false,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let frame_bytes = inner.frame_bytes;
+    let intermediate_points = inner.intermediate_points.saturating_add(inner.points);
+    let intermediate = decode_prometheus_matrix(&inner.body, limits, cancelled)?;
+    let mut body = Vec::new();
+    write_prometheus_prefix(&mut body, instant);
+    enforce_prometheus_output(&body, 0, limits)?;
+    let mut emitted = 0_usize;
+    let mut result_points = 0_u64;
+
+    for mut series in intermediate {
+        check_cancelled(cancelled)?;
+        series.labels.remove("__name__");
+        let item_start = body.len();
+        comma(&mut body, emitted);
+        write_prometheus_item_prefix(&mut body, None, &series.labels, instant, limits)?;
+        let mut lo = 0_usize;
+        let mut hi = 0_usize;
+        let mut finite_sum = 0.0_f64;
+        let mut nan_count = 0_usize;
+        let mut positive_infinity_count = 0_usize;
+        let mut negative_infinity_count = 0_usize;
+        let mut item_points = 0_u64;
+        let mut outer = start;
+        loop {
+            check_cancelled(cancelled)?;
+            let effective = subquery
+                .timing
+                .selection_time(outer, query_start, query_end)?;
+            while hi < series.points.len() && series.points[hi].0 <= effective {
+                add_window_value(
+                    series.points[hi].1,
+                    &mut finite_sum,
+                    &mut nan_count,
+                    &mut positive_infinity_count,
+                    &mut negative_infinity_count,
+                );
+                hi += 1;
+            }
+            let lower = checked_timestamp_sub(effective, subquery.window, "subquery range")?;
+            while lo < hi && series.points[lo].0 <= lower {
+                remove_window_value(
+                    series.points[lo].1,
+                    &mut finite_sum,
+                    &mut nan_count,
+                    &mut positive_infinity_count,
+                    &mut negative_infinity_count,
+                );
+                lo += 1;
+            }
+            if hi > lo {
+                admit_prometheus_point(result_points.saturating_add(item_points), limits)?;
+                if !instant {
+                    comma(&mut body, item_points as usize);
+                }
+                let value = average_window_value(
+                    hi - lo,
+                    finite_sum,
+                    nan_count,
+                    positive_infinity_count,
+                    negative_infinity_count,
+                );
+                write_prometheus_sample(&mut body, outer, value)?;
+                item_points += 1;
+                enforce_prometheus_output(
+                    &body,
+                    result_points.saturating_add(item_points),
+                    limits,
+                )?;
+            }
+            if outer >= stop {
+                break;
+            }
+            let Some(next) = outer.checked_add(step).filter(|next| *next <= stop) else {
+                break;
+            };
+            outer = next;
+        }
+        if item_points == 0 {
+            body.truncate(item_start);
+        } else {
+            write_prometheus_item_suffix(&mut body, instant);
+            emitted += 1;
+            result_points = result_points.saturating_add(item_points);
+        }
+    }
+    write_prometheus_suffix(&mut body);
+    enforce_prometheus_output(&body, result_points, limits)?;
+    Ok(ReadOutput {
+        body,
+        frame_bytes,
+        series: emitted as u64,
+        points: result_points,
+        intermediate_points,
+        rows: result_points,
+    })
+}
+
+fn subquery_resolution(subquery: &SubqueryPlan, limits: PromQueryLimits) -> Result<i64, String> {
+    match subquery.resolution {
+        Some(resolution) => Ok(resolution),
+        None => i64::try_from(limits.default_subquery_step.as_millis())
+            .map_err(|_| "PromQL default subquery resolution overflow".to_string()),
+    }
+}
+
+fn aligned_subquery_grid(
+    effective_start: i64,
+    effective_stop: i64,
+    window: i64,
+    resolution: i64,
+) -> Result<Option<(i64, i64, usize)>, String> {
+    if resolution <= 0 {
+        return Err("PromQL subquery resolution must be positive".into());
+    }
+    let resolution = i128::from(resolution);
+    let lower = i128::from(effective_start) - i128::from(window);
+    // Range vectors are open on the left, so the first point is the first
+    // globally aligned timestamp strictly greater than effective_start-range.
+    let first = (lower.div_euclid(resolution) + 1) * resolution;
+    let last = i128::from(effective_stop).div_euclid(resolution) * resolution;
+    if first > last {
+        return Ok(None);
+    }
+    let count = (last - first) / resolution + 1;
+    let first =
+        i64::try_from(first).map_err(|_| "PromQL subquery start timestamp overflow".to_string())?;
+    let last =
+        i64::try_from(last).map_err(|_| "PromQL subquery end timestamp overflow".to_string())?;
+    let count =
+        usize::try_from(count).map_err(|_| "PromQL subquery point count overflow".to_string())?;
+    Ok(Some((first, last, count)))
+}
+
+fn enforce_intermediate_grid(
+    points_per_series: usize,
+    limits: PromQueryLimits,
+) -> Result<(), String> {
+    if points_per_series > limits.max_work_points {
+        return Err(format!(
+            "query exceeded the maximum intermediate-work limit of {} points",
+            limits.max_work_points
+        ));
+    }
+    Ok(())
+}
+
+fn decode_prometheus_matrix(
+    body: &[u8],
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let document: Value = serde_json::from_slice(body)
+        .map_err(|error| format!("decode bounded subquery result: {error}"))?;
+    if document["data"]["resultType"] != "matrix" {
+        return Err("PromQL subquery inner expression did not produce an instant vector".into());
+    }
+    let rows = document["data"]["result"]
+        .as_array()
+        .ok_or_else(|| "PromQL subquery result is not a matrix array".to_string())?;
+    let mut output = Vec::with_capacity(rows.len());
+    let mut points = 0_usize;
+    for row in rows {
+        check_cancelled(cancelled)?;
+        let labels = serde_json::from_value::<BTreeMap<String, String>>(row["metric"].clone())
+            .map_err(|error| format!("decode PromQL subquery labels: {error}"))?;
+        let values = row["values"]
+            .as_array()
+            .ok_or_else(|| "PromQL subquery series has no values array".to_string())?;
+        let mut series_points = Vec::with_capacity(values.len());
+        for sample in values {
+            check_cancelled(cancelled)?;
+            points = points.saturating_add(1);
+            if points > limits.max_work_points {
+                return Err(format!(
+                    "query exceeded the maximum intermediate-work limit of {} points",
+                    limits.max_work_points
+                ));
+            }
+            let pair = sample
+                .as_array()
+                .filter(|pair| pair.len() == 2)
+                .ok_or_else(|| {
+                    "PromQL subquery sample is not a timestamp/value pair".to_string()
+                })?;
+            let timestamp_text = pair[0].to_string();
+            let timestamp = parse_prom_time(Some(&timestamp_text), 0)
+                .map_err(|error| format!("decode PromQL subquery timestamp: {error}"))?;
+            let value = pair[1]
+                .as_str()
+                .ok_or_else(|| "PromQL subquery sample value is not a string".to_string())?;
+            series_points.push((timestamp, parse_prometheus_value(value)?));
+        }
+        output.push(IntermediateSeries {
+            labels,
+            points: series_points,
+        });
+    }
+    Ok(output)
+}
+
+fn parse_prometheus_value(value: &str) -> Result<f64, String> {
+    match value {
+        "NaN" => Ok(f64::NAN),
+        "+Inf" | "Inf" => Ok(f64::INFINITY),
+        "-Inf" => Ok(f64::NEG_INFINITY),
+        _ => value
+            .parse()
+            .map_err(|error| format!("decode PromQL subquery value {value:?}: {error}")),
+    }
+}
+
+fn checked_timestamp_sub(timestamp: i64, duration: i64, name: &str) -> Result<i64, String> {
+    timestamp
+        .checked_sub(duration)
+        .ok_or_else(|| format!("PromQL timestamp overflow while applying {name}"))
+}
+
+fn add_window_value(
+    value: f64,
+    finite_sum: &mut f64,
+    nan_count: &mut usize,
+    positive_infinity_count: &mut usize,
+    negative_infinity_count: &mut usize,
+) {
+    if value.is_nan() {
+        *nan_count += 1;
+    } else if value == f64::INFINITY {
+        *positive_infinity_count += 1;
+    } else if value == f64::NEG_INFINITY {
+        *negative_infinity_count += 1;
+    } else {
+        *finite_sum += value;
+    }
+}
+
+fn remove_window_value(
+    value: f64,
+    finite_sum: &mut f64,
+    nan_count: &mut usize,
+    positive_infinity_count: &mut usize,
+    negative_infinity_count: &mut usize,
+) {
+    if value.is_nan() {
+        *nan_count -= 1;
+    } else if value == f64::INFINITY {
+        *positive_infinity_count -= 1;
+    } else if value == f64::NEG_INFINITY {
+        *negative_infinity_count -= 1;
+    } else {
+        *finite_sum -= value;
+    }
+}
+
+fn average_window_value(
+    count: usize,
+    finite_sum: f64,
+    nan_count: usize,
+    positive_infinity_count: usize,
+    negative_infinity_count: usize,
+) -> f64 {
+    if nan_count > 0 || positive_infinity_count > 0 && negative_infinity_count > 0 {
+        f64::NAN
+    } else if positive_infinity_count > 0 {
+        f64::INFINITY
+    } else if negative_infinity_count > 0 {
+        f64::NEG_INFINITY
+    } else {
+        finite_sum / count as f64
+    }
+}
+
+fn empty_prometheus_matrix(limits: PromQueryLimits) -> Result<ReadOutput, String> {
+    let body = br#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#.to_vec();
+    enforce_prometheus_output(&body, 0, limits)?;
+    Ok(ReadOutput {
+        body,
+        frame_bytes: 0,
+        series: 0,
+        points: 0,
+        intermediate_points: 0,
+        rows: 0,
+    })
+}
+
+fn empty_prometheus_vector_or_matrix(
+    instant: bool,
+    limits: PromQueryLimits,
+) -> Result<ReadOutput, String> {
+    let mut body = Vec::new();
+    write_prometheus_prefix(&mut body, instant);
+    write_prometheus_suffix(&mut body);
+    enforce_prometheus_output(&body, 0, limits)?;
+    Ok(ReadOutput {
+        body,
+        frame_bytes: 0,
+        series: 0,
+        points: 0,
+        intermediate_points: 0,
+        rows: 0,
+    })
 }
 
 fn execute_prometheus_string(
@@ -2010,6 +2542,7 @@ fn execute_prometheus_string(
         frame_bytes: 0,
         series: 0,
         points: 1,
+        intermediate_points: 0,
         rows: 1,
     })
 }
@@ -2062,6 +2595,7 @@ fn execute_prometheus_scalar(
         frame_bytes: 0,
         series: u64::from(!instant),
         points,
+        intermediate_points: 0,
         rows: points,
     })
 }
@@ -2073,13 +2607,14 @@ fn execute_prometheus_range_selector(
     selector: &Selector,
     evaluation_time: i64,
     window: i64,
+    query_start: i64,
+    query_end: i64,
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let selection_time =
-        selector
-            .timing
-            .selection_time(evaluation_time, evaluation_time, evaluation_time)?;
+    let selection_time = selector
+        .timing
+        .selection_time(evaluation_time, query_start, query_end)?;
     let lower = selection_time.saturating_sub(window);
     let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
     let mut body = br#"{"status":"success","data":{"resultType":"matrix","result":["#.to_vec();
@@ -2155,6 +2690,7 @@ fn execute_prometheus_range_selector(
         frame_bytes,
         series: emitted,
         points,
+        intermediate_points: 0,
         rows: points,
     })
 }
@@ -2169,11 +2705,17 @@ fn execute_prometheus_selector(
     step: i64,
     lookback: i64,
     instant: bool,
+    query_start: i64,
+    query_end: i64,
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let selection_start = selector.timing.selection_time(start, start, stop)?;
-    let selection_stop = selector.timing.selection_time(stop, start, stop)?;
+    let selection_start = selector
+        .timing
+        .selection_time(start, query_start, query_end)?;
+    let selection_stop = selector
+        .timing
+        .selection_time(stop, query_start, query_end)?;
     let read_start = selection_start.min(selection_stop);
     let read_stop = selection_start.max(selection_stop);
     let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
@@ -2224,7 +2766,7 @@ fn execute_prometheus_selector(
             let mut t = start;
             loop {
                 check_cancelled(cancelled)?;
-                let selection_time = selector.timing.selection_time(t, start, stop)?;
+                let selection_time = selector.timing.selection_time(t, query_start, query_end)?;
                 while hi < series.len()
                     && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?)
                         <= selection_time
@@ -2274,6 +2816,7 @@ fn execute_prometheus_selector(
         frame_bytes,
         series: emitted as u64,
         points,
+        intermediate_points: 0,
         rows: points,
     })
 }
@@ -2369,6 +2912,7 @@ fn execute_prometheus_window(
         frame_bytes,
         series: emitted as u64,
         points,
+        intermediate_points: 0,
         rows: points,
     })
 }
@@ -2383,11 +2927,17 @@ fn execute_prometheus_avg_raw(
     step: i64,
     window: i64,
     instant: bool,
+    query_start: i64,
+    query_end: i64,
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let selection_start = selector.timing.selection_time(start, start, stop)?;
-    let selection_stop = selector.timing.selection_time(stop, start, stop)?;
+    let selection_start = selector
+        .timing
+        .selection_time(start, query_start, query_end)?;
+    let selection_stop = selector
+        .timing
+        .selection_time(stop, query_start, query_end)?;
     let read_start = selection_start.min(selection_stop);
     let read_stop = selection_start.max(selection_stop);
     let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
@@ -2438,7 +2988,7 @@ fn execute_prometheus_avg_raw(
             let mut t = start;
             loop {
                 check_cancelled(cancelled)?;
-                let selection_time = selector.timing.selection_time(t, start, stop)?;
+                let selection_time = selector.timing.selection_time(t, query_start, query_end)?;
                 while hi < series.len()
                     && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?)
                         <= selection_time
@@ -2489,6 +3039,7 @@ fn execute_prometheus_avg_raw(
         frame_bytes,
         series: emitted as u64,
         points,
+        intermediate_points: 0,
         rows: points,
     })
 }
@@ -2825,6 +3376,7 @@ fn execute_series(
         frame_bytes: 0,
         series: series.len() as u64,
         points: 0,
+        intermediate_points: 0,
         rows: series.len() as u64,
     })
 }
@@ -2882,6 +3434,7 @@ fn success_array<T: Serialize + Ord>(
         frame_bytes,
         series,
         points: 0,
+        intermediate_points: 0,
         rows,
     })
 }
@@ -3286,6 +3839,44 @@ mod tests {
             panic!("pre-epoch selector lowered to the wrong plan")
         };
         assert_eq!(selector.timing.at, Some(SelectorAt::Timestamp(-1_000)));
+    }
+
+    #[test]
+    fn promql_subqueries_lower_and_align_over_the_complete_timestamp_domain() {
+        let PromPlan::Subquery(subquery) = lower_promql("cpu[30s:10s] offset 5s", 300_000).unwrap()
+        else {
+            panic!("subquery lowered to the wrong plan")
+        };
+        assert_eq!(subquery.window, 30_000);
+        assert_eq!(subquery.resolution, Some(10_000));
+        assert_eq!(subquery.timing.offset_ms, 5_000);
+        assert!(matches!(*subquery.inner, PromPlan::Selector { .. }));
+        assert_eq!(
+            aligned_subquery_grid(25_000, 25_000, 30_000, 10_000).unwrap(),
+            Some((0, 20_000, 3))
+        );
+        assert_eq!(
+            aligned_subquery_grid(-1, -1, 20, 10).unwrap(),
+            Some((-20, -10, 2))
+        );
+
+        let PromPlan::AvgOverSubquery(average) =
+            lower_promql("avg_over_time(cpu[30s:])", 300_000).unwrap()
+        else {
+            panic!("subquery range function lowered to the wrong plan")
+        };
+        assert_eq!(average.resolution, None);
+        assert!(matches!(*average.inner, PromPlan::Selector { .. }));
+
+        let PromPlan::AvgOverSubquery(nested) = lower_promql(
+            "avg_over_time(avg_over_time(cpu[20s:10s])[20s:10s])",
+            300_000,
+        )
+        .unwrap() else {
+            panic!("nested subquery lowered to the wrong plan")
+        };
+        assert!(matches!(*nested.inner, PromPlan::AvgOverSubquery(_)));
+        assert!(aligned_subquery_grid(0, 0, 10, 0).is_err());
     }
 
     #[test]

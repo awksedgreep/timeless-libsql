@@ -95,3 +95,18 @@ tests:
         exp_samples:
           - labels: '{host="t"}'
             value: 4.5
+      - expr: 'avg_over_time(query_contract_temporal[20s:10s])'
+        eval_time: 60s
+        exp_samples:
+          - labels: '{host="t"}'
+            value: 6.5
+      - expr: 'avg_over_time(query_contract_temporal[20s:10s] offset 10s)'
+        eval_time: 60s
+        exp_samples:
+          - labels: '{host="t"}'
+            value: 5.5
+      - expr: 'avg_over_time(avg_over_time(query_contract_temporal[20s:10s])[20s:10s])'
+        eval_time: 60s
+        exp_samples:
+          - labels: '{host="t"}'
+            value: 6

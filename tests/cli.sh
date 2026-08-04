@@ -3435,6 +3435,39 @@ assert fixed == [
     ('{"host":"web-2","service":"api"}', 110, 20.0),
 ]
 
+subquery = db.execute(
+    "WITH timing AS ("
+    " SELECT :at-:offset effective_at,:window window,:resolution resolution"
+    "), bounds AS ("
+    " SELECT effective_at-window lower,effective_at,resolution,"
+    " ((effective_at-window)%resolution+resolution)%resolution lower_mod,"
+    " (effective_at%resolution+resolution)%resolution upper_mod FROM timing"
+    "), aligned AS ("
+    " SELECT lower-lower_mod+resolution first_ts,"
+    " effective_at-upper_mod last_ts,resolution FROM bounds"
+    ") SELECT labels,ts,value FROM timeless_grid("
+    " 'metrics',:metric,:filter_json,(SELECT first_ts FROM aligned),"
+    " (SELECT last_ts FROM aligned),(SELECT resolution FROM aligned),:lookback)"
+    " WHERE (SELECT first_ts<=last_ts FROM aligned) ORDER BY labels,ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'at': 125,
+        'offset': 0,
+        'window': 30,
+        'resolution': 10,
+        'lookback': 30,
+    },
+).fetchall()
+assert subquery == [
+    ('{"host":"web-1","service":"api"}', 100, 10.0),
+    ('{"host":"web-1","service":"api"}', 110, 30.0),
+    ('{"host":"web-1","service":"api"}', 120, 30.0),
+    ('{"host":"web-2","service":"api"}', 100, 20.0),
+    ('{"host":"web-2","service":"api"}', 110, 20.0),
+    ('{"host":"web-2","service":"api"}', 120, 20.0),
+]
+
 window = db.execute(
     "SELECT labels,ts,value FROM timeless_window("
     "'metrics',:metric,:filter_json,:start,:end,:step,:window,'avg') "
@@ -3554,7 +3587,7 @@ buckets = db.execute(
 assert sum(row[2] for row in buckets) == 2
 
 print(f"prom|{len(instant)}|{len(window)}|{len(top)}|{ratio:.1f}|"
-      f"{len(offset)}|{len(fixed)}")
+      f"{len(offset)}|{len(fixed)}|{len(subquery)}")
 print(f"logs|{len(bounded)}|{len(substring)}|{count}|{len(values)}|"
       f"{len(metadata)}|{sum(row[2] for row in buckets)}")
 db.close()
@@ -3563,7 +3596,7 @@ PY
 
 check_eq "documented SQL equivalents execute through the public extension" \
   "$got" \
-$'prom|2|4|2|0.2|2|4\nlogs|1|1|1|2|1|2'
+$'prom|2|4|2|0.2|2|4|6\nlogs|1|1|1|2|1|2'
 
 # ---------------------------------------------------------------------------
 echo

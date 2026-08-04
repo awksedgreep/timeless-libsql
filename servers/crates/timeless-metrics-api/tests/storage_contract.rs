@@ -1354,6 +1354,247 @@ async fn session_three_promql_temporal_modifiers_preserve_selection_and_output_t
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_three_promql_subqueries_align_bound_cancel_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_three_subqueries.db");
+    // A minute-aligned base makes the pinned 15-second default-resolution
+    // expectations readable without weakening global-alignment coverage.
+    let base = 1_700_300_040_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        2,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"subquery_metric\",\"host\":\"a\"}},",
+            "\"values\":[1,2,3,4,5,6,7],\"timestamps\":[{},{},{},{},{},{},{}]}}"
+        ),
+        (base - 30) * 1_000,
+        (base - 20) * 1_000,
+        (base - 10) * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let aligned = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=subquery_metric%5B30s%3A10s%5D&time={}",
+            base + 25
+        ),
+    )
+    .await;
+    assert_eq!(aligned.0, StatusCode::OK, "{}", aligned.1);
+    assert_eq!(aligned.1["data"]["resultType"], "matrix");
+    assert_eq!(
+        aligned.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "4"], [base + 10, "5"], [base + 20, "6"]])
+    );
+
+    let default_resolution = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=subquery_metric%5B30s%3A%5D&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(
+        default_resolution.0,
+        StatusCode::OK,
+        "{}",
+        default_resolution.1
+    );
+    assert_eq!(
+        default_resolution.1["data"]["result"][0]["values"],
+        serde_json::json!([[base + 15, "5"], [base + 30, "7"]])
+    );
+
+    let offset = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=subquery_metric%5B20s%3A10s%5D%20offset%2010s&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(offset.0, StatusCode::OK, "{}", offset.1);
+    assert_eq!(
+        offset.1["data"]["result"][0]["values"],
+        serde_json::json!([[base + 10, "5"], [base + 20, "6"]])
+    );
+
+    let fixed = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=subquery_metric%5B20s%3A10s%5D%20%40%20{}&time={}",
+            base + 20,
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(fixed.0, StatusCode::OK, "{}", fixed.1);
+    assert_eq!(fixed.1["data"]["result"], offset.1["data"]["result"]);
+
+    let average = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=avg_over_time%28subquery_metric%5B20s%3A10s%5D%29&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(average.0, StatusCode::OK, "{}", average.1);
+    assert_eq!(
+        average.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a"},
+            "value": [base + 30, "6.5"]
+        }])
+    );
+
+    let average_range = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=avg_over_time%28subquery_metric%5B20s%3A10s%5D%29&start={base}&end={}&step=10",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(average_range.0, StatusCode::OK, "{}", average_range.1);
+    assert_eq!(
+        average_range.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base, "3.5"],
+            [base + 10, "4.5"],
+            [base + 20, "5.5"],
+            [base + 30, "6.5"]
+        ])
+    );
+
+    for (anchor, value) in [("start%28%29", "3.5"), ("end%28%29", "6.5")] {
+        let fixed_range = get_json(
+            &app,
+            &format!(
+                "/prometheus/api/v1/query_range?query=avg_over_time%28subquery_metric%5B20s%3A10s%5D%20%40%20{anchor}%29&start={base}&end={}&step=10",
+                base + 30
+            ),
+        )
+        .await;
+        assert_eq!(fixed_range.0, StatusCode::OK, "{}", fixed_range.1);
+        assert_eq!(
+            fixed_range.1["data"]["result"][0]["values"],
+            serde_json::json!([
+                [base, value],
+                [base + 10, value],
+                [base + 20, value],
+                [base + 30, value]
+            ])
+        );
+    }
+
+    let nested_root = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=avg_over_time%28subquery_metric%5B20s%3A10s%5D%29%5B20s%3A10s%5D&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(nested_root.0, StatusCode::OK, "{}", nested_root.1);
+    assert_eq!(
+        nested_root.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a"},
+            "values": [[base + 20, "5.5"], [base + 30, "6.5"]]
+        }])
+    );
+
+    let nested_average = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=avg_over_time%28avg_over_time%28subquery_metric%5B20s%3A10s%5D%29%5B20s%3A10s%5D%29&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(nested_average.0, StatusCode::OK, "{}", nested_average.1);
+    assert_eq!(nested_average.1["data"]["result"][0]["value"][1], "6");
+    let query_stats = storage.stats().await.unwrap();
+    assert!(
+        query_stats.api_promql_intermediate_points > 0,
+        "subquery intermediate accounting stayed zero: {query_stats:?}"
+    );
+
+    let range_root = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=subquery_metric%5B20s%3A10s%5D&start={base}&end={}&step=10",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(range_root.0, StatusCode::BAD_REQUEST);
+    assert_eq!(range_root.1["errorType"], "bad_data");
+    assert!(range_root.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("range vector"));
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = get_json(
+        &limited,
+        &format!(
+            "/prometheus/api/v1/query?query=avg_over_time%28subquery_metric%5B30s%3A10s%5D%29&time={}",
+            base + 30
+        ),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 2 points"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = get_json(
+        &reopened_app,
+        &format!(
+            "/prometheus/api/v1/query?query=subquery_metric%5B30s%3A10s%5D&time={}",
+            base + 25
+        ),
+    )
+    .await;
+    assert_eq!(recovered.1, aligned.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
@@ -1896,7 +2137,7 @@ async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
 
     let slow_app = app.clone();
     let request = format!(
-        "/prometheus/api/v1/query_range?query=cancel_metric&start={base}&end={}&step=1",
+        "/prometheus/api/v1/query_range?query=avg_over_time%28cancel_metric%5B5m%3A1s%5D%29&start={base}&end={}&step=1",
         base + 10_999
     );
     let task = tokio::spawn(async move {

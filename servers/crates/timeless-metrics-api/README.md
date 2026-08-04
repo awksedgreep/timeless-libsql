@@ -1,7 +1,6 @@
 # timeless-metrics-api release server
 
-This first-class signal server was promoted from the completed metrics API
-process-boundary POC. It is not a new storage engine. The binary owns HTTP
+This first-class signal server is not a new storage engine. The binary owns HTTP
 scheduling and SQLite connections while
 the existing `timeless_metrics` extension continues to own series identity,
 the 4,096-point per-series buffer threshold, compression, chunks, rollups, and
@@ -16,9 +15,9 @@ retention commands.
 - `POST /api/v1/flush`
 - `POST /api/v1/import/prometheus`
 - `POST /api/v1/import`
-- `GET|POST /api/v1/query` (native `metric=` exact latest or Session 4 `query=` PromQL)
+- `GET|POST /api/v1/query` (native `metric=` exact latest or `query=` PromQL)
 - `GET /api/v1/export` (VictoriaMetrics JSON-line raw export)
-- `GET|POST /api/v1/query_range` (native exact range aggregation or Session 4 `query=` PromQL)
+- `GET|POST /api/v1/query_range` (native exact range aggregation or `query=` PromQL)
 - `GET /api/v1/labels`
 - `GET /api/v1/label/{name}/values`
 - `GET /api/v1/series`
@@ -29,9 +28,13 @@ infinities), string literals, exact-name and nameless instant vector
 selectors, anchored regex/negative/duplicate `__name__` matchers, root range
 selectors on instant queries, and
 `avg_over_time(selector[window])`. Selectors and range selectors accept signed
-`offset` plus numeric/`start()`/`end()` `@` modifiers. It
+`offset` plus numeric/`start()`/`end()` `@` modifiers. Selector and shipped
+range-function expressions may be evaluated as bounded subqueries with
+`[range:resolution]`, including omitted/default resolution, nesting, and
+subquery timing modifiers. Root subqueries return range vectors only from an
+instant query; `avg_over_time` consumes them as instant vectors. It
 deliberately rejects every other
-function, operator, aggregation, subquery, offset, or modifier with a
+function, operator, or aggregation with a
 Prometheus `bad_data` response. There is no hidden Elixir fallback. The
 release binary requires Phoenix-managed policy authentication by default;
 cluster and product control routes remain in Phoenix. The
@@ -133,7 +136,8 @@ status, error type, parameter ownership, and unsupported behavior are stable.
 
 PromQL remains bounded even with authentication disabled. Defaults are 11,000
 grid points per series, 100,000 final result points, 100,000 storage work
-points, a 16 MiB serialized response, and a 30-second deadline. The packed raw
+or subquery intermediate points, a 16 MiB serialized response, a 15-second
+omitted subquery resolution, and a 30-second deadline. The packed raw
 and window limits are pushed into the extension before payload reads; result
 and response limits are checked during serialization; cancellation is checked
 inside catalog, evaluator, and raw-fold loops. Nameless catalog expansion
@@ -162,6 +166,16 @@ root range vectors continue to expose the selected raw sample timestamps.
 Modified window functions deliberately use the bounded public raw path because
 the extension's window timestamps are lookup timestamps, not PromQL's outer
 evaluation timestamps.
+
+Subquery grids are globally aligned and open on the left. An omitted
+resolution uses the configurable 15-second global evaluation interval. The
+planner evaluates a shipped instant-vector inner plan once over the union of
+needed inner timestamps. Root subqueries can stream that bounded matrix
+directly; a consuming range function decodes it into a bounded Rust matrix and
+folds windows while checking cancellation. This composition leaves the
+ordinary selector/window streaming paths and every extension/storage format
+unchanged. Stats report final points and
+`api_promql_intermediate_points` separately.
 
 Every read carries a cancellation token. A dropped HTTP future stops host grid
 evaluation between points and installs a scoped SQLite progress handler; the
@@ -219,6 +233,7 @@ Positive environment overrides:
 - `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` (default `100000`)
 - `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` (default `100000`)
 - `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` (default `16777216`)
+- `TIMELESS_METRICS_PROMQL_DEFAULT_SUBQUERY_STEP_MS` (default `15000`)
 - `TIMELESS_METRICS_PROMQL_DEADLINE_MS` (default `30000`)
 
 ## Ownership and accounting
@@ -249,6 +264,9 @@ Stats separate units instead of conflating them:
   total socket-to-result time, errors,
   packed frame bytes, response bytes, returned series, and returned points are
   cumulative and do not require `timeless_stats` work on the query hot path;
+- `api_promql_intermediate_points` counts materialized evaluator points that
+  fed a parent subquery/range-function node and is distinct from returned
+  result points;
 - extension `raw_batch_query_*` counters attribute selected series, candidate
   chunks, payload bytes, fully decoded/buffered points, returned points, and
   engine time for the same packed read waist used by direct SQLite clients.
@@ -283,7 +301,9 @@ malformed selectors, missing-label equality/inequality behavior, explicit
 PromQL rejection, read accounting, and exact latest after shutdown/reopen.
 The Session 4 contracts add selector and `avg_over_time` vector/matrix bodies,
 strict lookback/window boundaries, request formats/errors, reopen, and a
-4,000-series cancellation/reuse regression. All five extension-backed
+4,000-series subquery cancellation/reuse regression. Session 3 additionally
+pins explicit/default subquery grids, nested range functions, timing modifiers,
+intermediate limits/accounting, SQL composition, and reopen. All extension-backed
 contracts pass together.
 
 That test exposed and fixed an existing extension gap: the engine queued a

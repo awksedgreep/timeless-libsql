@@ -50,6 +50,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-006`](#sql-prom-006-range-selector) | `PQL-S06` | current | exact root range-vector storage selection; API shapes the matrix |
 | [`SQL-PROM-007`](#sql-prom-007-bounded-packed-storage-work) | `PQL-S20` | current foundation | exact pre-decode work bounds; API owns language/result/deadline limits |
 | [`SQL-PROM-008`](#sql-prom-008-temporal-selector-modifiers) | `PQL-S07`, `PQL-S08` | current foundation | exact shifted/fixed lookup time; API owns parser and outer query context |
+| [`SQL-PROM-009`](#sql-prom-009-aligned-selector-subquery) | `PQL-S09` | current foundation | exact open-left global subquery grid for a stored selector; API owns arbitrary inner expressions and range consumption |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -253,6 +254,65 @@ millisecond conversion, overflow errors, range-vector raw timestamps,
 function label policy, limits, cancellation, and Prometheus envelopes. Direct
 regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_three_promql_temporal_modifiers_preserve_selection_and_output_time`.
+
+### SQL-PROM-009: aligned selector subquery
+
+For a selector subquery `metric{...}[:window::resolution]` at `:at`, derive
+the globally aligned evaluation grid and run the ordinary public selector
+surface on it:
+
+```sql
+WITH timing AS (
+  SELECT
+    :at - :offset AS effective_at,
+    :window AS window,
+    :resolution AS resolution
+), bounds AS (
+  SELECT
+    effective_at - window AS lower,
+    effective_at,
+    resolution,
+    ((effective_at - window) % resolution + resolution) % resolution AS lower_mod,
+    (effective_at % resolution + resolution) % resolution AS upper_mod
+  FROM timing
+), aligned AS (
+  SELECT
+    lower - lower_mod + resolution AS first_ts,
+    effective_at - upper_mod AS last_ts,
+    resolution
+  FROM bounds
+)
+SELECT labels, ts, value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  (SELECT first_ts FROM aligned),
+  (SELECT last_ts FROM aligned),
+  (SELECT resolution FROM aligned),
+  :lookback
+)
+WHERE (SELECT first_ts <= last_ts FROM aligned)
+ORDER BY labels, ts;
+```
+
+All parameters use the metric table's native unit: integer seconds for the
+default table. `:window`, `:resolution`, and `:lookback` must be positive;
+`:offset` is signed and defaults to zero. The normalized modulo expressions
+preserve Euclidean/global alignment for pre-epoch timestamps. Adding one
+resolution after the aligned floor makes the range open on the left, so this
+returns evaluations strictly inside
+`(:at - :offset - :window, :at - :offset]`. `timeless_grid` supplies the
+newest stored float in each evaluation point's own open-left lookback window;
+missing evaluations remain sparse. Labels are canonical JSON and ordering is
+deterministic by labels then timestamp.
+
+This is exact storage work for a selector subquery. The Rust API still owns
+PromQL parsing, a configurable default resolution when the colon has no
+duration, `@ start()`/`@ end()` outer context, arbitrary/nested instant-vector
+inner expressions, matrix envelopes, function consumption, label/name policy,
+millisecond conversion, intermediate/result limits, cancellation, and
+deadline errors. Direct executable regression: `tests/cli.sh` section 45;
+HTTP/oracle/reopen regression:
+`session_three_promql_subqueries_align_bound_cancel_and_reopen`.
 
 ### SQL-PROM-003: cross-series sum by label
 

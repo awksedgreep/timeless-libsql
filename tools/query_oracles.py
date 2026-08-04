@@ -225,7 +225,7 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
             print("prometheus API oracle did not become ready", file=sys.stderr)
             return 1
 
-        sample_timestamp_ms = int(time.time() * 1_000) - 1_000
+        sample_timestamp_ms = (int(time.time() * 1_000) // 60_000 - 1) * 60_000
         write = urllib.request.Request(
             base + "/api/v1/write",
             data=prometheus_remote_write(sample_timestamp_ms),
@@ -335,6 +335,87 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
             url = base + endpoint + "?" + urllib.parse.urlencode(params)
             with urllib.request.urlopen(url, timeout=10) as response:
                 body = json.loads(response.read())
+            valid = (
+                response.status == 200
+                and body.get("status") == "success"
+                and body.get("data", {}).get("resultType") == expected_result_type
+                and body.get("data", {}).get("result") == expected_result
+            )
+            if not valid:
+                print(
+                    f"{case['id']}: expected {expected_result!r}; got {body!r}",
+                    file=sys.stderr,
+                )
+                failures += 1
+            else:
+                print(f"{case['id']}: ok")
+        for case in fixture.get("subquery_cases", []):
+            query = case["query"]
+            if "at_offset_ms" in case:
+                at_ms = sample_timestamp_ms + case["at_offset_ms"]
+                query = query.format(at=str(at_ms / 1_000))
+            evaluation_ms = sample_timestamp_ms + case["evaluation_offset_ms"]
+            range_case = case.get("range")
+            if range_case:
+                start_ms = sample_timestamp_ms + range_case["start_offset_ms"]
+                end_ms = sample_timestamp_ms + range_case["end_offset_ms"]
+                params = {
+                    "query": query,
+                    "start": str(start_ms / 1_000),
+                    "end": str(end_ms / 1_000),
+                    "step": range_case["step"],
+                }
+                endpoint = "/api/v1/query_range"
+            else:
+                params = {"query": query, "time": str(evaluation_ms / 1_000)}
+                endpoint = "/api/v1/query"
+            url = base + endpoint + "?" + urllib.parse.urlencode(params)
+            with urllib.request.urlopen(url, timeout=10) as response:
+                body = json.loads(response.read())
+            if range_case:
+                expected_result_type = "matrix"
+                expected_values = case["expected_values"]
+                expected_timestamps = [
+                    start_ms
+                    + index * (end_ms - start_ms) // (len(expected_values) - 1)
+                    for index in range(len(expected_values))
+                ]
+                expected_result = [
+                    {
+                        "metric": {"job": "oracle"},
+                        "values": [
+                            [timestamp / 1_000, str(value)]
+                            for timestamp, value in zip(
+                                expected_timestamps, expected_values
+                            )
+                        ],
+                    }
+                ]
+            elif "expected_matrix" in case:
+                expected_result_type = "matrix"
+                expected_metric = {"job": "oracle"}
+                if not case.get("drop_metric_name"):
+                    expected_metric["__name__"] = "oracle_temporal"
+                expected_result = [
+                    {
+                        "metric": expected_metric,
+                        "values": [
+                            [
+                                (sample_timestamp_ms + timestamp_offset_ms) / 1_000,
+                                str(value),
+                            ]
+                            for timestamp_offset_ms, value in case["expected_matrix"]
+                        ],
+                    }
+                ]
+            else:
+                expected_result_type = "vector"
+                expected_result = [
+                    {
+                        "metric": {"job": "oracle"},
+                        "value": [evaluation_ms / 1_000, str(case["expected_values"][0])],
+                    }
+                ]
             valid = (
                 response.status == 200
                 and body.get("status") == "success"

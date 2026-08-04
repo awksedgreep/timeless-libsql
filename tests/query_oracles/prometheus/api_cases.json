@@ -60,6 +60,73 @@
       "expected_values": [7, 7, 7, 7]
     }
   ],
+  "subquery_cases": [
+    {
+      "id": "PQL-S09-global-resolution-alignment",
+      "query": "oracle_temporal[30s:10s]",
+      "evaluation_offset_ms": 25000,
+      "expected_matrix": [[0, 4], [10000, 5], [20000, 6]]
+    },
+    {
+      "id": "PQL-S09-default-resolution",
+      "query": "oracle_temporal[30s:]",
+      "evaluation_offset_ms": 30000,
+      "expected_matrix": [[15000, 5], [30000, 7]]
+    },
+    {
+      "id": "PQL-S09-root-offset-shifts-output-grid",
+      "query": "oracle_temporal[20s:10s] offset 10s",
+      "evaluation_offset_ms": 30000,
+      "expected_matrix": [[10000, 5], [20000, 6]]
+    },
+    {
+      "id": "PQL-S09-root-at-uses-fixed-inner-grid",
+      "query": "oracle_temporal[20s:10s] @ {at}",
+      "at_offset_ms": 20000,
+      "evaluation_offset_ms": 30000,
+      "expected_matrix": [[10000, 5], [20000, 6]]
+    },
+    {
+      "id": "PQL-S09-avg-over-subquery-open-left-window",
+      "query": "avg_over_time(oracle_temporal[20s:10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [6.5]
+    },
+    {
+      "id": "PQL-S09-range-evaluation-preserves-outer-grid",
+      "query": "avg_over_time(oracle_temporal[20s:10s])",
+      "evaluation_offset_ms": 0,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [3.5, 4.5, 5.5, 6.5]
+    },
+    {
+      "id": "PQL-S09-range-at-start-fixes-inner-grid",
+      "query": "avg_over_time(oracle_temporal[20s:10s] @ start())",
+      "evaluation_offset_ms": 0,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [3.5, 3.5, 3.5, 3.5]
+    },
+    {
+      "id": "PQL-S09-range-at-end-fixes-inner-grid",
+      "query": "avg_over_time(oracle_temporal[20s:10s] @ end())",
+      "evaluation_offset_ms": 0,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [6.5, 6.5, 6.5, 6.5]
+    },
+    {
+      "id": "PQL-S09-nested-subquery-root",
+      "query": "avg_over_time(oracle_temporal[20s:10s])[20s:10s]",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_matrix": [[20000, 5.5], [30000, 6.5]]
+    },
+    {
+      "id": "PQL-S09-nested-subquery-function",
+      "query": "avg_over_time(avg_over_time(oracle_temporal[20s:10s])[20s:10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [6]
+    }
+  ],
   "cases": [
     {
       "id": "PQL-S06-root-range-vector-instant-type",

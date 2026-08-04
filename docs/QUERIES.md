@@ -185,6 +185,35 @@ and function results keep the outer evaluation grid. See executable direct-SQL
 forms in
 [`SQL-PROM-008`](QUERY_SQL_EQUIVALENTS.md#sql-prom-008-temporal-selector-modifiers).
 
+## PromQL subqueries
+
+The Rust metrics API evaluates shipped instant-vector expressions over a
+globally aligned inner grid:
+
+```promql
+http_requests_total[30m:30s]
+avg_over_time(http_requests_total[30m:30s])
+avg_over_time(http_requests_total[30m:])
+avg_over_time(http_requests_total[30m:30s] @ end() offset 5m)
+avg_over_time(avg_over_time(http_requests_total[5m:30s])[30m:1m])
+```
+
+The interval is `(effective_time-range,effective_time]`; explicit resolutions
+are aligned to Unix epoch multiples rather than the outer query start. When
+the resolution is omitted, the API uses
+`TIMELESS_METRICS_PROMQL_DEFAULT_SUBQUERY_STEP_MS` (15 seconds by default).
+Subquery `@` is resolved against the original request start/end before signed
+`offset` is subtracted. Root subqueries are range vectors and therefore work
+only on an instant-query endpoint; range functions return their result on the
+outer instant/range grid.
+
+Intermediate points share the hard `max_work_points` bound, serialized inner
+matrices share the response-byte bound, and cancellation is checked during
+inner execution, decode, and folding. Direct SQLite/libSQL callers can build a
+selector subquery with the executable, pre-epoch-safe alignment recipe in
+[`SQL-PROM-009`](QUERY_SQL_EQUIVALENTS.md#sql-prom-009-aligned-selector-subquery).
+PromQL syntax and arbitrary AST composition remain in Rust, not the extension.
+
 ## Scalar aggregate without raw materialization
 
 ```sql
