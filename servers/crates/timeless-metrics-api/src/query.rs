@@ -407,6 +407,7 @@ enum PromFunctionOp {
     Log2,
     Log10,
     Round,
+    Sgn,
     Sqrt,
 }
 
@@ -432,6 +433,13 @@ impl PromFunctionOp {
                 let inverse = 1.0 / parameters.first().copied().unwrap_or(1.0);
                 Some((value * inverse + 0.5).floor() / inverse)
             }
+            Self::Sgn => Some(if value > 0.0 {
+                1.0
+            } else if value < 0.0 {
+                -1.0
+            } else {
+                value
+            }),
             Self::Sqrt => Some(value.sqrt()),
         }
     }
@@ -1062,7 +1070,15 @@ fn lower_promql_expr(
         promql::Expr::Call(call)
             if matches!(
                 call.func.name,
-                "ceil" | "exp" | "floor" | "ln" | "log2" | "log10" | "round" | "sqrt"
+                "ceil"
+                    | "exp"
+                    | "floor"
+                    | "ln"
+                    | "log2"
+                    | "log10"
+                    | "round"
+                    | "sgn"
+                    | "sqrt"
             ) =>
         {
             let op = match call.func.name {
@@ -1073,6 +1089,7 @@ fn lower_promql_expr(
                 "log2" => PromFunctionOp::Log2,
                 "log10" => PromFunctionOp::Log10,
                 "round" => PromFunctionOp::Round,
+                "sgn" => PromFunctionOp::Sgn,
                 "sqrt" => PromFunctionOp::Sqrt,
                 _ => unreachable!("guarded numeric transform"),
             };

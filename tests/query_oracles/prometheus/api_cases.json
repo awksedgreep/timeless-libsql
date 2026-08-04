@@ -2141,6 +2141,36 @@
       "expected_metric": {"case": "zero", "job": "oracle"},
       "expected_values": [0],
       "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F05-sgn-finite-and-ieee-values",
+      "query": "sgn(oracle_math{case=~\"negative|zero|negative_zero|one|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative", "job": "oracle"}, "value": -1},
+        {"metric": {"case": "zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "one", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": 1},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": -1}
+      ]
+    },
+    {
+      "id": "PQL-F05-sgn-range-grid-and-name-policy",
+      "query": "sgn(oracle_math{case=\"sqrt\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "sqrt", "job": "oracle"},
+      "expected_values": [1, 1]
+    },
+    {
+      "id": "PQL-F05-sgn-nested-transform",
+      "query": "abs(sgn(oracle_math{case=\"negative\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "negative", "job": "oracle"},
+      "expected_values": [1],
+      "drop_metric_name": true
     }
   ],
   "operator_error_cases": [

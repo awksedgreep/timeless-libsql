@@ -3703,6 +3703,31 @@ assert by_case['negative'][1] is None
 assert by_case['negative'][3:] == [None, None, None]
 assert by_case['zero'][3:] == [None, None, None]
 
+signs = db.execute(
+    "SELECT labels,ts,CASE WHEN value>0.0 THEN 1.0"
+    " WHEN value<0.0 THEN -1.0 ELSE value END"
+    " FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    " ORDER BY labels,ts",
+    {
+        'metric': 'math_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+    },
+).fetchall()
+sign_by_case = {json.loads(labels)['case']: value for labels, _, value in signs}
+assert sign_by_case == {
+    'eight': 1.0,
+    'hundred': 1.0,
+    'negative': -1.0,
+    'one': 1.0,
+    'sqrt': 1.0,
+    'zero': 0.0,
+}
+
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
     "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "

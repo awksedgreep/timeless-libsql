@@ -83,6 +83,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-039`](#sql-prom-039-ceil-floor-and-round) | `PQL-F02` | current foundation | exact bounded IEEE ceiling/floor and Prometheus nearest-multiple arithmetic for row-visible values; API owns packed-NaN fidelity, scalar ASTs, names, limits, and envelopes |
 | [`SQL-PROM-040`](#sql-prom-040-clamp-clamp_min-and-clamp_max) | `PQL-F03` | current foundation | bounded finite-value clamping and inverted-bound omission; API owns packed IEEE fidelity, scalar ASTs, names, limits, and envelopes |
 | [`SQL-PROM-041`](#sql-prom-041-sqrt-exp-ln-log2-and-log10) | `PQL-F04` | current foundation | bounded SQLite math transforms for valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
+| [`SQL-PROM-042`](#sql-prom-042-sgn) | `PQL-F05` | current foundation | exact bounded sign mapping for every row-visible finite value, infinity, and signed zero; API owns packed NaN, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1467,6 +1468,40 @@ direct SQLite/libSQL users already have these standard functions.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_math_transforms_match_domains_ieee_and_reopen`.
+
+### SQL-PROM-042: `sgn`
+
+Use an ordered `CASE` so both infinities map to a unit sign while either zero
+falls through with its original sign bit:
+
+```sql
+SELECT labels, ts,
+       CASE
+         WHEN value > 0.0 THEN 1.0
+         WHEN value < 0.0 THEN -1.0
+         ELSE value
+       END AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+Bounds, step, and lookback use the metric table's configured timestamp unit
+(integer seconds for the default table); grid bounds are inclusive and
+lookback is open on the left. Missing samples remain absent, canonical label
+JSON is returned, and ordering is deterministic. This statement is exact for
+finite values, both infinities, and both signed zeros visible through rows.
+
+A stored NaN is row-projected as SQL NULL, so ordinary row SQL returns NULL
+rather than Prometheus `NaN`. The Rust API reads the public bit-exact packed
+frame and owns that final fidelity distinction together with metric-name
+removal, types, nesting, limits, cancellation, and HTTP envelopes. A new
+extension primitive would add no pruning or decode benefit.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_sgn_preserves_ieee_signs_ranges_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

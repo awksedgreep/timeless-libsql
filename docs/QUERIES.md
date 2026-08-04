@@ -874,6 +874,9 @@ Bounded `sqrt`, `exp`, `ln`, `log2`, and `log10` use
 [`SQL-PROM-041`](QUERY_SQL_EQUIVALENTS.md#sql-prom-041-sqrt-exp-ln-log2-and-log10);
 the Rust API preserves Prometheus `NaN`/infinity domain results that ordinary
 SQLite reports as SQL NULL.
+Bounded `sgn` is [`SQL-PROM-042`](QUERY_SQL_EQUIVALENTS.md#sql-prom-042-sgn);
+ordinary SQL preserves row-visible signed zero and the packed Rust path
+retains true NaN.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

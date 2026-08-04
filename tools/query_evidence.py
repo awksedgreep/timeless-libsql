@@ -1028,6 +1028,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        sgn_narrow = measure(
+            "metrics-sgn-narrow",
+            lambda: promql('sgn(query_contract_cpu{host="h0000"})'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        sgn_wide = measure(
+            "metrics-sgn-wide",
+            lambda: promql_range("sgn(query_contract_cpu)", at - 30, at, 10),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         arithmetic_narrow = measure(
             "metrics-arithmetic-vector-scalar-narrow",
             lambda: promql('query_contract_cpu{host="h0000"} * 2'),
@@ -1614,6 +1632,8 @@ def metrics_evidence(
                 "clamp_wide": clamp_wide,
                 "math_narrow": math_narrow,
                 "math_wide": math_wide,
+                "sgn_narrow": sgn_narrow,
+                "sgn_wide": sgn_wide,
                 "arithmetic_vector_scalar_narrow": arithmetic_narrow,
                 "arithmetic_one_to_one_wide": arithmetic_wide,
                 "comparison_filter_narrow": comparison_narrow,
