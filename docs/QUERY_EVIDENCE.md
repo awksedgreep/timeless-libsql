@@ -2155,3 +2155,56 @@ collisions, range grids, types, arity, cumulative work limits, cancellation,
 shutdown, and cold reopen. Native histogram behavior remains deferred pending
 an explicit typed storage design. No extension, frame, batching, compression,
 index, rollup, retention, transaction, migration, or storage format changed.
+
+## Session 10 LogsQL P0 parity
+
+The checked-in
+[`2026-08-04_session10_logsql_p0.json`](evidence/2026-08-04_session10_logsql_p0.json)
+was captured from exact extension, metrics-server, and logs-server build
+`c70ae1f8466ae1c2b0a6a59b8cd8f7612ff513e4`. The log fixture contains 8,192
+typed/nested rich entries across all eight severities and crosses the
+extension's authoritative 8,192-entry buffer exactly once. All entries were
+completed and durable with zero queued work before any query ran.
+
+| shape | API result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate/decoded blocks per query | decoded entries per query | extension payload bytes per query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact `level:error service:api status:=500`, descending, offset 1, limit 100 | 100 | 17,067 | 6.273 | 9.734 | 9.995 | 1 / 1 | 4,096 | 546,985 |
+| exact phrase `"query contract"`, ascending, limit 10,000 | 8,192 | 1,424,639 | 22.222 | 28.450 | 28.809 | 4 / 4 | 8,192 | 1,088,919 |
+| `service:api | stats count() as total` | 1 | 15 | 7.366 | 8.986 | 9.412 | 2 / 2 | 5,120 | 679,661 |
+
+The narrow storage predicate prunes to one coarse severity block. That block
+contains 4,096 entries because physical severity partitioning is intentionally
+coarser than the eight-value logical vocabulary; the public extension emits
+1,024 level/service candidates, and bounded Rust composition applies exact
+typed numeric equality, offset, and the 100-row result cap. The phrase query
+must inspect all four blocks because every message matches and portable SQLite
+has no equivalent Unicode word-boundary predicate. The service count prunes to
+two mixed-service blocks and performs the necessary exact decode. These are the
+retained write/compression tradeoffs already described by `QSF-005`, `QSF-006`,
+and `QSF-009`; the evidence does not justify another storage index or a
+LogsQL-specific extension primitive.
+
+One ingestion request was admitted at 928,985 entries/s; the request plus
+explicit durability barrier completed at 252,299 entries/s. Relative to the
+original query baseline, this single run's admission duration was 23.5% higher
+and its barrier duration 5.9% higher. Those are one-request latency samples,
+not a stable ingestion-throughput regression, and query work did not change
+the batching, block, codec, index, or flush path. The resulting aggregate
+storage counters exactly match the baseline: 1,088,919 block-payload
+bytes, 1,126,400 SQLite page bytes, 1,190,496 physical database/WAL/SHM bytes,
+four raw blocks, zero compressed blocks, and a 16,384-byte index allocation.
+Whole-process RSS HWM was 54,248 KiB, only 44 KiB above the baseline run.
+
+No benchmark request required cancellation, so `api_query_cancelled` remained
+zero and `api_query_in_flight` was zero at capture. The named real-extension
+regression deliberately times out active work, observes the cancellation and
+in-flight counters until the SQLite reader has actually stopped, then reuses
+that reader successfully. The complete real-extension gate also covers work,
+row, response, and deadline limits; strict malformed/unsupported JSON errors;
+relative and absolute microsecond edges; all integer timestamp units; exact
+quoted bytes and escapes; typed nested metadata; optimize; shutdown; and cold
+reopen. The pinned VictoriaLogs 1.52.0 run passed all 25 applicable cases.
+`QSF-064` records the additional public `timeless_stats('logs')` boundary that
+removed every logs-server dependency on private shadow layout. No storage
+format, authoritative batching, compression, index, retention, transaction,
+migration, or maintenance command changed.
