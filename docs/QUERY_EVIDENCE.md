@@ -1521,3 +1521,37 @@ invalid types, limits, shutdown, and cold reopen. No extension signature,
 storage/frame format, batching, compression, index, rollup, retention,
 transaction, or migration behavior changed, and this row produced no new
 storage finding.
+
+## Session 8 `PQL-F01` bounded absolute-value transform
+
+The checked-in
+[`2026-08-04_session8_pql_f01.json`](evidence/2026-08-04_session8_pql_f01.json)
+was captured from exact extension and server build
+`7b3fc07cd4a70228668dfd0b5c411384153cbe99`. Both shapes perform one bounded
+public packed-raw read, materialize only the already selected vector points,
+and apply IEEE absolute value in place in the Rust PromQL evaluator.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `abs(metric)` | 1 | 132 | 0.673 | 0.938 | 1.087 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `abs(metric)` | 2,048 | 67,620 | 4.111 | 4.604 | 4.726 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request has the same candidate chunks, decoded samples, returned raw
+points, and intermediate cardinality as the same-run unary-vector bridge. Its
+4.604 ms p95 is within 0.186 ms of unary minus's 4.418 ms p95. The only
+additional operation is an in-place `f64::abs` per selected point, so neither
+storage pushdown nor a new extension primitive would avoid material work.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,168 KiB. No benchmark request required cancellation; the shared
+composed-evaluator cancellation regression and the focused bounded-limit test
+cover cancellation and reader reuse. Pinned oracle and real-extension tests
+cover positive and negative finite values, NaN, both infinities, negative
+zero, metric-name removal, range grids, nested subquery composition, invalid
+types, limits, shutdown, and cold reopen. `QSF-051` records that SQLite's
+built-in `abs(-0.0)` retains the negative-zero bits; executable
+`SQL-PROM-038` explicitly normalizes zero and otherwise uses only public
+extension surfaces. No extension signature, storage/frame format, batching,
+compression, index, rollup, retention, transaction, or migration behavior
+changed.
