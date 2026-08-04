@@ -1039,3 +1039,30 @@ cancellation of the shared range executor, shutdown, and cold reopen. The
 public SQL recipe executes precision and overflow cases. No extension
 signature, storage/frame format, batching, compression, index, rollup,
 retention, transaction, or migration behavior changed.
+
+## Session 6 `PQL-R05` range sample count
+
+The checked-in
+[`2026-08-04_session6_pql_r05.json`](evidence/2026-08-04_session6_pql_r05.json)
+was captured from exact extension and server build
+`d1db19386378637fcd31ded11fd1fc18d72c5373`. Both measured shapes use the
+unchanged public packed count window.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, native `count_over_time(...[5m])` | 1 | 132 | 0.250 | 0.358 | 0.396 | 0 | 1 | 32 | 131 |
+| 512 series × four steps, native `count_over_time(...[5m])` | 2,048 | 65,854 | 2.911 | 7.041 | 7.130 | 0 | 512 | 16,384 | 53,831 |
+
+The wide result is exactly 2,048 sparse points from 512 candidate chunks and
+16,384 decoded inputs, with no intermediate matrix. Its p95/p99 tail is
+recorded honestly rather than smoothed away; storage work and response
+cardinality are identical to the neighboring native range reductions.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,436 KiB. Pinned oracle and real-extension regressions cover exact
+open-left windows, empty omission, subqueries, NaN, infinities, signed zeros,
+work limits, cancellation of the shared range executor, shutdown, and cold
+reopen. Direct SQL proves the public count form. No extension primitive or
+storage, frame, batching, compression, index, rollup, retention, transaction,
+or migration behavior changed.
