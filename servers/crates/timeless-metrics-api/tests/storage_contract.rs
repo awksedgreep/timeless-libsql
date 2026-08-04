@@ -1013,6 +1013,28 @@ async fn session_three_promql_nameless_selectors_expand_before_reads_and_reopen(
         .unwrap()
         .contains("maximum result-point limit of 1"));
 
+    let catalog_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 3,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = get_json(
+        &catalog_limited,
+        &format!(
+            "/prometheus/api/v1/query?query=%7Bjob%3D%22api%22%7D&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum catalog-work limit of 3 series"));
+
+    drop(catalog_limited);
     drop(limited);
     drop(app);
     storage.shutdown().await.unwrap();

@@ -134,7 +134,9 @@ grid points per series, 100,000 final result points, 100,000 storage work
 points, a 16 MiB serialized response, and a 30-second deadline. The packed raw
 and window limits are pushed into the extension before payload reads; result
 and response limits are checked during serialization; cancellation is checked
-inside evaluator and raw-fold loops. A deadline returns HTTP `504` with
+inside catalog, evaluator, and raw-fold loops. Nameless catalog expansion
+streams at most the storage-work series limit and retains at most the response
+byte limit in selected metric/label metadata. A deadline returns HTTP `504` with
 `errorType="timeout"`; other execution-limit failures return HTTP `422` with
 `errorType="execution"`. Auth claims may lower their own row, byte, and time
 allowances but cannot raise these owner limits.

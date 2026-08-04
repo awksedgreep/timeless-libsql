@@ -1222,25 +1222,83 @@ fn prometheus_catalogs(
     conn: &Connection,
     table: MetricsTable,
     selector: &Selector,
+    limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<Vec<(String, Vec<SeriesMeta>)>, String> {
-    let metrics = match &selector.metric {
-        MetricSelection::Exact(metric) => vec![metric.clone()],
-        MetricSelection::Regex(regex) => all_metrics(conn, table)?
-            .into_iter()
-            .filter(|metric| regex.is_match(metric))
-            .collect(),
-        MetricSelection::All => all_metrics(conn, table)?,
-    };
-    let mut selected = Vec::new();
-    for metric in metrics {
-        check_cancelled(cancelled)?;
-        let catalog = catalog(conn, table, &metric, &selector.filter)?;
-        if !catalog.is_empty() {
-            selected.push((metric, catalog));
-        }
+    if let MetricSelection::Exact(metric) = &selector.metric {
+        let catalog = catalog(conn, table, metric, &selector.filter)?;
+        return Ok(if catalog.is_empty() {
+            Vec::new()
+        } else {
+            vec![(metric.clone(), catalog)]
+        });
     }
-    Ok(selected)
+
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT series_id, name, labels
+               FROM timeless_series('{}')
+              ORDER BY name, labels, series_id",
+            table.name()
+        ))
+        .map_err(|error| format!("prepare PromQL complete series catalog: {error}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|error| format!("query PromQL complete series catalog: {error}"))?;
+    let mut considered = 0_usize;
+    let mut selected_bytes = 0_usize;
+    let mut grouped = BTreeMap::<String, Vec<SeriesMeta>>::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("read PromQL complete series catalog: {error}"))?
+    {
+        check_cancelled(cancelled)?;
+        considered = considered.saturating_add(1);
+        if considered > limits.max_work_points {
+            return Err(format!(
+                "query exceeded the maximum catalog-work limit of {} series",
+                limits.max_work_points
+            ));
+        }
+        let id = row
+            .get::<_, i64>(0)
+            .map_err(|error| format!("read PromQL catalog series id: {error}"))?;
+        let metric = row
+            .get::<_, String>(1)
+            .map_err(|error| format!("read PromQL catalog metric: {error}"))?;
+        let selected_metric = match &selector.metric {
+            MetricSelection::Regex(regex) => regex.is_match(&metric),
+            MetricSelection::All => true,
+            MetricSelection::Exact(_) => unreachable!("handled before complete scan"),
+        };
+        if !selected_metric {
+            continue;
+        }
+        let labels_json = row
+            .get::<_, String>(2)
+            .map_err(|error| format!("read PromQL catalog labels: {error}"))?;
+        let labels = decode_labels(&labels_json)?;
+        if !selector.filter.matches(&labels) {
+            continue;
+        }
+        selected_bytes = selected_bytes
+            .checked_add(metric.len())
+            .and_then(|bytes| bytes.checked_add(labels_json.len()))
+            .ok_or_else(|| "PromQL catalog byte accounting overflow".to_string())?;
+        if selected_bytes > limits.max_response_bytes {
+            return Err(format!(
+                "query exceeded the maximum catalog-size limit of {} bytes",
+                limits.max_response_bytes
+            ));
+        }
+        grouped.entry(metric.clone()).or_default().push(SeriesMeta {
+            id,
+            metric,
+            labels_json,
+            labels,
+        });
+    }
+    Ok(grouped.into_iter().collect())
 }
 
 fn consume_prometheus_work(
@@ -1939,7 +1997,7 @@ fn execute_prometheus_range_selector(
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let lower = evaluation_time.saturating_sub(window);
-    let catalogs = prometheus_catalogs(conn, features.table, selector, cancelled)?;
+    let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
     let mut body = br#"{"status":"success","data":{"resultType":"matrix","result":["#.to_vec();
     enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_u64;
@@ -2030,7 +2088,7 @@ fn execute_prometheus_selector(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let catalogs = prometheus_catalogs(conn, features.table, selector, cancelled)?;
+    let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
     enforce_prometheus_output(&body, 0, limits)?;
@@ -2238,7 +2296,7 @@ fn execute_prometheus_avg_raw(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let catalogs = prometheus_catalogs(conn, features.table, selector, cancelled)?;
+    let catalogs = prometheus_catalogs(conn, features.table, selector, limits, cancelled)?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
     enforce_prometheus_output(&body, 0, limits)?;
