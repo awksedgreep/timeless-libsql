@@ -1929,3 +1929,41 @@ one process environment variable; serializing those mutations preserves their
 existing product contract and pins reliable parallel CI. No storage, frame,
 batching, compression, index, rollup, retention, transaction, migration, or
 extension signature changed, and no new query-storage finding arose.
+
+## Session 8 `PQL-F13` value sorting
+
+The checked-in
+[`2026-08-04_session8_pql_f13.json`](evidence/2026-08-04_session8_pql_f13.json)
+was captured from exact extension and server build
+`32d02ff31153c45354b0f85ae7d30831394cad10`. The narrow shape sorts one exact
+series; the wide shape performs an actual descending instant sort over all 512
+selected series.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, instant `sort(metric{host="h0000"})` | 1 | 164 | 0.426 | 0.534 | 0.581 | 1 | 31 | 1 | 32 | 131 |
+| 512 series, instant `sort_desc(metric)` | 512 | 53,497 | 3.709 | 3.975 | 5.135 | 512 | 15,872 | 512 | 16,384 | 53,831 |
+
+Both shapes read the same bounded packed selector frames as neighboring
+one-vector functions. Sorting changes only the order in which already-decoded
+instant samples are written; it adds no storage read, result point, frame
+copy, or label mutation. NaN is last in both directions, infinities retain
+numeric order, and the packed frame preserves signed zero. Equal values have
+no PromQL order promise, so canonical labels provide deterministic output.
+Pinned Prometheus also confirms that a range endpoint returns a label-ordered
+matrix rather than applying one evaluation step's ordering to whole series.
+At 3.975 ms wide p95, ordinary bounded Rust composition is the correct
+language boundary. Direct SQLite/libSQL users have the executable instant and
+range statements in `SQL-PROM-049`; no sort-specific extension primitive is
+justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 35,656 KiB. No benchmark request required cancellation; the focused work-
+limit regression and shared dropped-request regression pin bounded execution,
+cancellation, and reader reuse. Pinned oracle and real-extension tests cover
+ascending/descending IEEE order, NaN-last behavior, negative zero, preserved
+metric names and child label policy, nested and empty vectors, range-matrix
+ordering, type errors, limits, shutdown, and cold reopen. No storage, frame,
+batching, compression, index, rollup, retention, transaction, migration, or
+extension contract changed, and no new query-storage finding arose.
