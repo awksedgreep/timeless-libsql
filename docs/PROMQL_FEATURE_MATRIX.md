@@ -82,7 +82,7 @@ they do not justify a PromQL-aware extension API.
 |---|---|---|---|---|---|---|
 | `PQL-O01` | unary minus ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-010-unary-minus)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O02` | arithmetic `+ - * / % ^` across scalar/vector pairs ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O03` | comparisons `== != > < >= <=` and `bool` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-011-comparison-filter-and-bool)) | in progress | yes | `SQL` | `API` | P0 |
+| `PQL-O03` | comparisons `== != > < >= <=` and `bool` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-011-comparison-filter-and-bool)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O04` | set operators `and`, `or`, `unless` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O05` | one-to-one vector matching ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O06` | `on(...)` and `ignoring(...)` | missing | yes | `SQL` | `API` | P0 |

@@ -531,3 +531,36 @@ Section 33 executes all six SQLite operations using public grids and an
 exact-label join. No extension opcode, private table, storage format,
 batching, compression, rollup, retention, transaction, or migration behavior
 changed.
+
+## Session 4 `PQL-O03` comparison result
+
+The checked-in
+[`2026-08-04_session4_pql_o03.json`](evidence/2026-08-04_session4_pql_o03.json)
+was captured from exact extension and server build
+`17c5091c1c20a424601b9411ed83819d01cb416a`. The narrow shape applies a true
+filter to one exact-host instant vector. The wide shape maps a scalar `bool`
+comparison over 512 series and four timestamps.
+
+| shape | final points | intermediate points/query | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `metric > 30` | 1 | 2 | 164 | 0.511 | 0.858 | 0.915 | 32 |
+| 512 series × four points, `metric > bool 0` | 2,048 | 2,052 | 63,806 | 4.291 | 4.666 | 4.814 | 16,384 |
+
+The filter retains the original vector value and metric name. The `bool`
+shape reads the vector once, generates four scalar-grid child points without
+storage, maps every vector point to `0` or `1`, and removes the name. Its
+storage counters exactly match the same-run unary wide shape; comparison adds
+0.294 ms p50 and 0.417 ms p95 for scalar-grid decode and predicate mapping.
+All 2,048 vector plus four scalar child points are reported as bounded
+intermediate work.
+
+The run durably completed all 118,457 fixture points with zero failed or
+queued work. Live SQLite/WAL/SHM storage remained 672,688 bytes and
+whole-process RSS HWM was 35,672 KiB. Prometheus 3.13.2 API and promtool
+fixtures pin scalar `bool`, NaN behavior, both scalar/vector directions,
+true/false filters, sparse range output, vector/vector matching, original
+value/name retention, and `bool` name removal. The real-extension regression
+adds all six operators, exact ordering, cumulative limits, shutdown, and cold
+reopen. Section 33 executes both public-grid SQL forms. No extension opcode,
+private table, storage format, batching, compression, rollup, retention,
+transaction, or migration behavior changed.
