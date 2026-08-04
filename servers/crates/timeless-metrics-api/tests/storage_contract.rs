@@ -377,23 +377,23 @@ async fn session_two_preserves_native_ingest_and_partial_success_contracts() {
     let flush = post_json(&app, "/api/v1/flush").await;
     assert_eq!(flush.0, StatusCode::OK);
     assert_eq!(flush.1["through_batches"], 5);
-    assert_eq!(flush.1["through_points"], 4);
+    assert_eq!(flush.1["through_points"], 6);
     assert_eq!(flush.1["completed_batches"], 5);
-    assert_eq!(flush.1["completed_points"], 4);
+    assert_eq!(flush.1["completed_points"], 6);
     assert_eq!(flush.1["failed_batches"], 0);
     assert_eq!(flush.1["queued_batches"], 0);
     assert_eq!(flush.1["in_flight_batches"], 0);
 
     let health = get_json(&app, "/health").await;
-    assert_eq!(health.1["points"], 4);
+    assert_eq!(health.1["points"], 6);
     assert_eq!(health.1["series"], 2);
-    assert_eq!(health.1["import_errors"], 8);
+    assert_eq!(health.1["import_errors"], 6);
     let stats = storage.stats().await.unwrap();
     assert_eq!(stats.admitted_batches, 5);
-    assert_eq!(stats.admitted_points, 4);
+    assert_eq!(stats.admitted_points, 6);
     assert_eq!(stats.completed_batches, 5);
-    assert_eq!(stats.completed_points, 4);
-    assert_eq!(stats.import_errors, 8);
+    assert_eq!(stats.completed_points, 6);
+    assert_eq!(stats.import_errors, 6);
     assert_eq!(stats.api_ingest_requests, 5);
     assert_eq!(stats.api_victoria_requests, 2);
     assert_eq!(stats.api_prometheus_requests, 3);
@@ -407,8 +407,8 @@ async fn session_two_preserves_native_ingest_and_partial_success_contracts() {
     assert!(stats.api_parse_ns > 0);
     assert!(stats.api_batch_encode_ns > 0);
     assert_eq!(stats.extension_prometheus_ingest_batches, 2);
-    assert_eq!(stats.extension_prometheus_ingest_points, 1);
-    assert_eq!(stats.extension_prometheus_ingest_errors, 5);
+    assert_eq!(stats.extension_prometheus_ingest_points, 3);
+    assert_eq!(stats.extension_prometheus_ingest_errors, 3);
     assert!(stats.extension_prometheus_ingest_total_ns > 0);
     assert_eq!(stats.queued_unknown_point_batches, 0);
     assert_eq!(stats.queued_body_bytes, 0);
@@ -421,18 +421,39 @@ async fn session_two_preserves_native_ingest_and_partial_success_contracts() {
     assert_eq!(
         rows,
         vec![
-            ("contract_prom".into(), 1_700_000_000, 4.5),
-            ("contract_vm".into(), 1_700_000_000, 1.5),
-            ("contract_vm".into(), 1_700_000_001, 2.5),
-            ("contract_vm".into(), 1_700_000_002, 3.5),
+            ("contract_prom".into(), 1_700_000_000, Some(4.5)),
+            ("contract_prom".into(), 1_700_000_001, None),
+            ("contract_prom".into(), 1_700_000_002, Some(f64::INFINITY),),
+            ("contract_vm".into(), 1_700_000_000, Some(1.5)),
+            ("contract_vm".into(), 1_700_000_001, Some(2.5)),
+            ("contract_vm".into(), 1_700_000_002, Some(3.5)),
         ]
     );
 
     let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
     let recovered = reopened.stats().await.unwrap();
     assert_eq!(recovered.series, 2);
-    assert_eq!(recovered.disk_points, 4);
+    assert_eq!(recovered.disk_points, 6);
     assert_eq!(recovered.buffered_points, 0);
+    let reopened_app = router(reopened.clone());
+    let ieee = prom_query_range(
+        &reopened_app,
+        "contract_prom",
+        1_700_000_000,
+        1_700_000_002,
+        1,
+    )
+    .await;
+    assert_eq!(ieee.0, StatusCode::OK, "{}", ieee.1);
+    assert_eq!(
+        ieee.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [1_700_000_000, "4.5"],
+            [1_700_000_001, "NaN"],
+            [1_700_000_002, "+Inf"]
+        ])
+    );
+    drop(reopened_app);
     reopened.shutdown().await.unwrap();
 }
 
@@ -837,7 +858,6 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     for path in [
         "/prometheus/api/v1/query_range?start=0&end=10&step=1",
         "/prometheus/api/v1/query_range?query=rate%28prom_cpu%5B1m%5D%29&start=0&end=10&step=1",
-        "/prometheus/api/v1/query_range?query=sum%28prom_cpu%29&start=0&end=10&step=1",
     ] {
         let error = get_json(&app, path).await;
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
@@ -845,9 +865,16 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
         assert_eq!(error.1["errorType"], "bad_data");
         assert!(error.1["error"].as_str().unwrap().len() > 8);
     }
+    let sum = get_json(
+        &app,
+        "/prometheus/api/v1/query_range?query=sum%28prom_cpu%29&start=0&end=10&step=1",
+    )
+    .await;
+    assert_eq!(sum.0, StatusCode::OK, "{}", sum.1);
+    assert_eq!(sum.1["data"]["result"], serde_json::json!([]));
 
     let stats = storage.stats().await.unwrap();
-    assert_eq!(stats.api_promql_requests, 9);
+    assert_eq!(stats.api_promql_requests, 10);
     assert_eq!(stats.api_read_errors, 0);
     assert!(stats.api_read_frame_bytes > 0);
     assert!(stats.api_read_result_points >= 9);
@@ -4632,7 +4659,7 @@ fn assert_no_content(response: (StatusCode, Vec<u8>)) {
     assert!(response.1.is_empty());
 }
 
-fn persisted_rows(database: &Path, extension: &Path) -> Vec<(String, i64, f64)> {
+fn persisted_rows(database: &Path, extension: &Path) -> Vec<(String, i64, Option<f64>)> {
     let conn = open_with_extension(database, extension);
     let mut stmt = conn
         .prepare("SELECT name, ts, value FROM metric_samples ORDER BY name, ts, value")
