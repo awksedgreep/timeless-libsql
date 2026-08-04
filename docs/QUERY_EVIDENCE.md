@@ -401,3 +401,53 @@ functions, root range-vector timestamps, millisecond/pre-epoch conversion,
 limits, cancellation, shutdown, and reopen. Section 45 executes both direct
 SQL forms. No extension opcode, storage format, batching, compression, rollup,
 retention, transaction, or migration behavior changed.
+
+## Session 3 `PQL-S09` subquery result
+
+The checked-in
+[`2026-08-04_session3_pql_s09.json`](evidence/2026-08-04_session3_pql_s09.json)
+was captured from exact extension and server build
+`7b30ff62eeb33c41a806afda7aa3377e78ac5eea` on the same 512-series,
+18,432-point fixture. Root shapes expose a 30-point globally aligned inner
+grid. Consuming shapes run `avg_over_time` over that grid; the wide case emits
+four outer points for every series.
+
+| shape | final points | intermediate points/query | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact host, root `[5m:10s]` | 30 | 0 | 681 | 0.391 | 0.587 | 0.638 | 32 |
+| 512 series, root `[5m:10s]` | 15,360 | 0 | 334,673 | 4.372 | 5.597 | 7.055 | 16,384 |
+| exact host, `avg_over_time(...[5m:10s])` | 1 | 30 | 134 | 0.412 | 0.658 | 0.714 | 32 |
+| 512 series × four outer points, `avg_over_time(...[5m:10s])` | 2,048 | 16,384 | 70,633 | 8.300 | 9.494 | 9.864 | 16,384 |
+
+A root subquery's inner points are its final matrix, so they are not counted
+again as intermediate work. A consuming function reports its materialized
+inner matrix through `api_promql_intermediate_points`; measured deltas were
+exactly 1,500 and 819,200 across 50 narrow/wide requests. Every shape performs
+one bounded packed raw read for the selected metric, not one storage read per
+outer point. Candidate chunks, payload bytes, decoded points, frame bytes,
+final points, intermediate points, and response bytes are all present in the
+evidence.
+
+The cumulative intermediate bound includes inherited nested-subquery work.
+The real-extension regression isolates a shape where each level stays within
+the limit but their sum does not, and rejects it before the outer matrix is
+decoded.
+
+The run durably completed all 18,432 fixture points with zero failed or queued
+work. Live SQLite/WAL/SHM storage remained exactly 672,688 bytes, matching the
+preceding temporal-modifier run. RSS HWM was 36,332 KiB, 2,988 KiB (8.96%)
+above that preceding 33,344 KiB measurement. This is the honest cost of the
+wide bounded intermediate matrix plus its serialized bridge; ordinary
+selector/window hot paths remain streaming. Both point count and bridge bytes
+are capped, cancellation is checked during inner evaluation/decode/folding,
+and the 4,000-series dropped-request regression proves the sole reader is
+released and reusable.
+
+Prometheus 3.13.2 API and promtool fixtures pin open-left ranges, global
+alignment, the 15-second default resolution, numeric/start/end anchors,
+offset ordering, outer range timestamps, nested subqueries, metric-name
+removal, and result types. The real-extension contract additionally pins the
+work-limit error, public intermediate counter, clean shutdown, and cold
+reopen. Section 45 executes the equivalent aligned selector grid using only
+public SQL. No extension opcode, private table, storage format, batching,
+compression, rollup, retention, transaction, or migration behavior changed.
