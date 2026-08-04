@@ -13,7 +13,8 @@
       "version_args": ["--version"],
       "version_contains": "3.13.2",
       "fixtures": [
-        "tests/query_oracles/prometheus/promql_smoke.yml"
+        "tests/query_oracles/prometheus/promql_smoke.yml",
+        "tests/query_oracles/prometheus/api_cases.json"
       ]
     },
     "victoriametrics": {

@@ -38,6 +38,14 @@ class QueryOracleManifestTests(unittest.TestCase):
         encoded = json.dumps(self.manifest, indent=2, sort_keys=True)
         self.assertIn('"schema_version": 1', encoded)
 
+    def test_prometheus_api_fixture_has_unique_row_addressed_cases(self) -> None:
+        fixture = query_oracles.load_manifest(
+            ROOT, "tests/query_oracles/prometheus/api_cases.json"
+        )
+        identifiers = [case["id"] for case in fixture["cases"]]
+        self.assertEqual(len(identifiers), len(set(identifiers)))
+        self.assertTrue(all(identifier.startswith("PQL-") for identifier in identifiers))
+
 
 if __name__ == "__main__":
     unittest.main()

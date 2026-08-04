@@ -263,6 +263,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        range_narrow = measure(
+            "metrics-range-vector-narrow",
+            lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        range_wide = measure(
+            "metrics-range-vector-wide",
+            lambda: promql("query_contract_cpu[5m]"),
+            query_json_cardinality,
+            series,
+            stat,
+            iterations,
+            warmup,
+        )
         final_stats = stat()
         return {
             "build": build_identity(binary),
@@ -275,7 +293,12 @@ def metrics_evidence(
                 "failed_points": after_flush["failed_points"],
                 "queued_points": after_flush["queued_points"],
             },
-            "queries": {"narrow": narrow, "wide": wide},
+            "queries": {
+                "narrow": narrow,
+                "wide": wide,
+                "range_vector_narrow": range_narrow,
+                "range_vector_wide": range_wide,
+            },
             "storage": {
                 key: final_stats[key]
                 for key in (

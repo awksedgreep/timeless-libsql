@@ -80,9 +80,13 @@ containers and execute the baseline Prometheus fixture:
 ```bash
 python3 tools/query_oracles.py probe
 python3 tools/query_oracles.py prometheus-smoke
+python3 tools/query_oracles.py prometheus-api
 ```
 
 The manifest is
 [`tests/query_oracles/manifest.json`](../tests/query_oracles/manifest.json).
-The smoke fixture pins the currently shipped selector and `avg_over_time`
-semantics; later sessions add row-addressed fixtures before implementation.
+The rule smoke fixture pins selector and `avg_over_time` sample semantics. The
+row-addressed API fixture pins result types and exact HTTP error envelopes; the
+refresh command starts and removes only its uniquely named temporary
+Prometheus container. Later sessions extend these fixtures before
+implementation.

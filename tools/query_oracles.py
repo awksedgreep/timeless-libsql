@@ -5,9 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import socket
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 
@@ -113,9 +119,85 @@ def prometheus_smoke(root: Path, runtime: str, manifest: dict) -> int:
     return subprocess.run(command, timeout=180).returncode
 
 
+def free_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
+    oracle = manifest["oracles"]["prometheus"]
+    fixture_path = next(
+        root / path for path in oracle["fixtures"] if path.endswith("api_cases.json")
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    port = free_port()
+    name = f"timeless-promql-oracle-{os.getpid()}"
+    command = [
+        runtime,
+        "run",
+        "--rm",
+        "-d",
+        "--name",
+        name,
+        "--platform",
+        "linux/amd64",
+        "-p",
+        f"127.0.0.1:{port}:9090",
+        oracle["image"],
+    ]
+    started = subprocess.run(command, text=True, capture_output=True, timeout=180)
+    if started.returncode != 0:
+        print(started.stderr, file=sys.stderr)
+        return 1
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(base + "/-/ready", timeout=1) as response:
+                    if response.status == 200:
+                        break
+            except (OSError, urllib.error.URLError):
+                time.sleep(0.1)
+        else:
+            print("prometheus API oracle did not become ready", file=sys.stderr)
+            return 1
+
+        failures = 0
+        for case in fixture["cases"]:
+            url = base + case["endpoint"] + "?" + urllib.parse.urlencode(case["params"])
+            try:
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    status = response.status
+                    body = json.loads(response.read())
+            except urllib.error.HTTPError as error:
+                status = error.code
+                body = json.loads(error.read())
+            if status != case["status"] or body != case["body"]:
+                print(
+                    f"{case['id']}: expected {case['status']} {case['body']!r}; "
+                    f"got {status} {body!r}",
+                    file=sys.stderr,
+                )
+                failures += 1
+            else:
+                print(f"{case['id']}: ok")
+        return 1 if failures else 0
+    finally:
+        subprocess.run(
+            [runtime, "rm", "-f", name],
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("validate", "probe", "prometheus-smoke"))
+    parser.add_argument(
+        "command", choices=("validate", "probe", "prometheus-smoke", "prometheus-api")
+    )
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest", default="tests/query_oracles/manifest.json")
     parser.add_argument("--runtime", default="docker")
@@ -132,7 +214,9 @@ def main() -> int:
         return 0
     if args.command == "probe":
         return probe(args.runtime, manifest)
-    return prometheus_smoke(root, args.runtime, manifest)
+    if args.command == "prometheus-smoke":
+        return prometheus_smoke(root, args.runtime, manifest)
+    return prometheus_api(root, args.runtime, manifest)
 
 
 if __name__ == "__main__":

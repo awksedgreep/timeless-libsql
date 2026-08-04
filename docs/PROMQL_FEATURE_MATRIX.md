@@ -55,7 +55,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S03` | duplicate matchers use AND semantics | shipped | yes | `CAT`, `RAW` | `API` | P0 | Keep a regression for duplicates on the same label. |
 | `PQL-S04` | nameless selectors such as `{job="api"}` | missing | yes | `CAT`, `RAW` | `API` | P0 | Requires catalog expansion across metric names. |
 | `PQL-S05` | regex/negative `__name__` and multi-metric selection | missing | yes | `CAT`, `RAW` | `API` | P0 | Do not materialize unrelated chunks before catalog filtering. |
-| `PQL-S06` | range selector `[W]` with `(T-W,T]` boundaries ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-002-avg_over_time)) | partial | yes | `RAW`, `WINDOW` | `API` | P0 | Only accepted under `avg_over_time`; make it a general AST value. |
+| `PQL-S06` | range selector `[W]` with `(T-W,T]` boundaries ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-006-range-selector)) | in progress | yes | `RAW`, `WINDOW` | `API` | P0 | Root range vectors are evaluated by the Rust API over public raw storage. |
 | `PQL-S07` | positive and negative `offset` | missing | yes | `RAW`, `GRID` | `API` | P0 | Planner time shift; no extension feature required. |
 | `PQL-S08` | `@ timestamp`, `@ start()`, `@ end()` | missing | yes | `RAW`, `GRID` | `API` | P0 | Evaluation-time semantics belong in the planner. |
 | `PQL-S09` | subqueries `[range:resolution]` | missing | yes | `RAW`, `GRID` | `API` | P0 | Bound intermediate points and cancellation. |

@@ -302,6 +302,11 @@ pub(crate) enum PromPlan {
         filter: FilterPlan,
         window: i64,
     },
+    RangeSelector {
+        metric: String,
+        filter: FilterPlan,
+        window: i64,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -426,8 +431,15 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
                 .into(),
         );
     }
+    let plan = lower_promql(query)?;
+    if matches!(plan, PromPlan::RangeSelector { .. }) {
+        return Err(
+            "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
+                .into(),
+        );
+    }
     Ok(ReadRequest::Prometheus {
-        plan: lower_promql(query)?,
+        plan,
         start,
         stop,
         step,
@@ -437,21 +449,39 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
 
 fn lower_promql(input: &str) -> Result<PromPlan, String> {
     let parsed = promql::parse(input).map_err(|error| format!("PromQL parse error: {error}"))?;
-    let lower_selector = |selector: promql::Selector| -> Result<_, String> {
-        let mut matchers = Vec::with_capacity(selector.matchers.len());
-        for matcher in selector.matchers {
-            let op = match matcher.op {
-                promql::MatcherOp::Eq => MatcherOp::Eq,
-                promql::MatcherOp::NotEq => MatcherOp::NotEq,
-                promql::MatcherOp::Regex => MatcherOp::Regex,
-                promql::MatcherOp::NotRegex => MatcherOp::NotRegex,
-            };
-            matchers.push(Matcher::new(matcher.key, op, matcher.value)?);
+    let lower_selector = |selector: promql::VectorSelector| -> Result<_, String> {
+        if selector.offset.is_some() || selector.at.is_some() {
+            return Err("PromQL modifiers are not shipped yet".into());
         }
-        Ok((selector.metric, FilterPlan::new(matchers)))
+        if !selector.matchers.or_matchers.is_empty() {
+            return Err("PromQL OR matcher groups are not shipped yet".into());
+        }
+        let mut metric = selector.name;
+        let mut matchers = Vec::with_capacity(selector.matchers.matchers.len());
+        for matcher in selector.matchers.matchers {
+            if matcher.name == "__name__" {
+                if metric.is_some() {
+                    return Err("metric name specified twice".into());
+                }
+                if !matches!(matcher.op, promql::MatchOp::Equal) {
+                    return Err("non-exact __name__ matchers are not shipped yet".into());
+                }
+                metric = Some(matcher.value);
+                continue;
+            }
+            let op = match matcher.op {
+                promql::MatchOp::Equal => MatcherOp::Eq,
+                promql::MatchOp::NotEqual => MatcherOp::NotEq,
+                promql::MatchOp::Re(_) => MatcherOp::Regex,
+                promql::MatchOp::NotRe(_) => MatcherOp::NotRegex,
+            };
+            matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
+        }
+        let metric = metric.ok_or_else(|| "nameless selectors are not shipped yet".to_string())?;
+        Ok((metric, FilterPlan::new(matchers)))
     };
     match parsed {
-        promql::Plan::Selector(selector) => {
+        promql::Expr::VectorSelector(selector) => {
             let (metric, filter) = lower_selector(selector)?;
             Ok(PromPlan::Selector {
                 metric,
@@ -459,14 +489,58 @@ fn lower_promql(input: &str) -> Result<PromPlan, String> {
                 lookback: 300,
             })
         }
-        promql::Plan::AvgOverTime { selector, window } => {
-            let (metric, filter) = lower_selector(selector)?;
+        promql::Expr::MatrixSelector(selector) => {
+            let window = i64::try_from(selector.range.as_secs())
+                .map_err(|_| "PromQL range duration overflow".to_string())?;
+            if window == 0 || selector.range.subsec_millis() != 0 {
+                return Err("subsecond PromQL ranges are not shipped yet".into());
+            }
+            let (metric, filter) = lower_selector(selector.vs)?;
+            Ok(PromPlan::RangeSelector {
+                metric,
+                filter,
+                window,
+            })
+        }
+        promql::Expr::Call(call) if call.func.name == "avg_over_time" => {
+            let [argument] = call.args.args.as_slice() else {
+                return Err("avg_over_time requires exactly one range vector".into());
+            };
+            let promql::Expr::MatrixSelector(selector) = argument.as_ref() else {
+                return Err("avg_over_time requires a range vector".into());
+            };
+            let window = i64::try_from(selector.range.as_secs())
+                .map_err(|_| "PromQL range duration overflow".to_string())?;
+            if window == 0 || selector.range.subsec_millis() != 0 {
+                return Err("subsecond PromQL ranges are not shipped yet".into());
+            }
+            let (metric, filter) = lower_selector(selector.vs.clone())?;
             Ok(PromPlan::AvgOverTime {
                 metric,
                 filter,
                 window,
             })
         }
+        other => Err(format!(
+            "unsupported PromQL expression (parsed as {})",
+            promql_expression_name(&other)
+        )),
+    }
+}
+
+fn promql_expression_name(expression: &promql::Expr) -> &'static str {
+    match expression {
+        promql::Expr::Aggregate(_) => "aggregation",
+        promql::Expr::Unary(_) => "unary expression",
+        promql::Expr::Binary(_) => "binary expression",
+        promql::Expr::Paren(_) => "parenthesized expression",
+        promql::Expr::Subquery(_) => "subquery",
+        promql::Expr::NumberLiteral(_) => "scalar",
+        promql::Expr::StringLiteral(_) => "string",
+        promql::Expr::VectorSelector(_) => "instant vector",
+        promql::Expr::MatrixSelector(_) => "range vector",
+        promql::Expr::Call(_) => "function call",
+        promql::Expr::Extension(_) => "extension",
     }
 }
 
@@ -1551,7 +1625,75 @@ fn execute_prometheus(
         } => execute_prometheus_avg_raw(
             conn, features, metric, filter, start, stop, step, *window, instant, cancelled,
         ),
+        PromPlan::RangeSelector {
+            metric,
+            filter,
+            window,
+        } => execute_prometheus_range_selector(
+            conn, features, metric, filter, stop, *window, cancelled,
+        ),
     }
+}
+
+fn execute_prometheus_range_selector(
+    conn: &Connection,
+    features: QueryFeatures,
+    metric: &str,
+    filter: &FilterPlan,
+    evaluation_time: i64,
+    window: i64,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let lower = evaluation_time.saturating_sub(window);
+    let catalog = catalog(conn, features.table, metric, filter)?;
+    let raw = raw_query(conn, features, metric, filter, lower, evaluation_time)?;
+    let by_id: HashMap<_, _> = raw
+        .series
+        .iter()
+        .map(|series| (series.id, series))
+        .collect();
+    let mut body = br#"{"status":"success","data":{"resultType":"matrix","result":["#.to_vec();
+    let mut emitted = 0_u64;
+    let mut points = 0_u64;
+    for meta in &catalog {
+        check_cancelled(cancelled)?;
+        let Some(series) = by_id.get(&meta.id) else {
+            continue;
+        };
+        let item_start = body.len();
+        comma(&mut body, emitted as usize);
+        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, false)?;
+        let mut item_points = 0_u64;
+        for index in 0..series.len() {
+            check_cancelled(cancelled)?;
+            let timestamp = series.timestamp(raw.frame.as_deref(), index)?;
+            if timestamp <= lower || timestamp > evaluation_time {
+                continue;
+            }
+            comma(&mut body, item_points as usize);
+            write_prometheus_sample(
+                &mut body,
+                timestamp,
+                series.value(raw.frame.as_deref(), index)?,
+            )?;
+            item_points += 1;
+        }
+        if item_points == 0 {
+            body.truncate(item_start);
+        } else {
+            write_prometheus_item_suffix(&mut body, false);
+            emitted += 1;
+            points = points.saturating_add(item_points);
+        }
+    }
+    write_prometheus_suffix(&mut body);
+    Ok(ReadOutput {
+        body,
+        frame_bytes: raw.frame_bytes,
+        series: emitted,
+        points,
+        rows: points,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1592,7 +1734,7 @@ fn execute_prometheus_selector(
         };
         let item_start = body.len();
         comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, metric, &meta.labels, instant)?;
+        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, instant)?;
         let mut lo = 0_usize;
         let mut hi = 0_usize;
         let mut item_points = 0_u64;
@@ -1683,7 +1825,7 @@ fn execute_prometheus_window(
         let decoded = decode_window_batch(&buckets)?;
         let item_start = body.len();
         comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, metric, &labels, instant)?;
+        write_prometheus_item_prefix(&mut body, None, &labels, instant)?;
         let mut item_points = 0_u64;
         for index in 0..decoded.len() {
             check_cancelled(cancelled)?;
@@ -1752,7 +1894,7 @@ fn execute_prometheus_avg_raw(
         };
         let item_start = body.len();
         comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, metric, &meta.labels, instant)?;
+        write_prometheus_item_prefix(&mut body, None, &meta.labels, instant)?;
         let mut lo = 0_usize;
         let mut hi = 0_usize;
         let mut item_points = 0_u64;
@@ -1813,12 +1955,14 @@ fn write_prometheus_prefix(output: &mut Vec<u8>, instant: bool) {
 
 fn write_prometheus_item_prefix(
     output: &mut Vec<u8>,
-    metric: &str,
+    metric: Option<&str>,
     labels: &BTreeMap<String, String>,
     instant: bool,
 ) -> Result<(), String> {
     let mut labels = labels.clone();
-    labels.insert("__name__".into(), metric.into());
+    if let Some(metric) = metric {
+        labels.insert("__name__".into(), metric.into());
+    }
     output.extend_from_slice(b"{\"metric\":");
     write_json(output, &labels)?;
     output.extend_from_slice(if instant {

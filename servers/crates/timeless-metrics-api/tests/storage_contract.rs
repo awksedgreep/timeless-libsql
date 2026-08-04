@@ -756,8 +756,42 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     );
     assert_eq!(
         average.1["data"]["result"][0]["metric"],
-        serde_json::json!({"__name__": "prom_cpu", "env": "prod", "host": "a"})
+        serde_json::json!({"env": "prod", "host": "a"})
     );
+
+    let range_vector = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=prom_cpu%7Bhost%3D%22a%22%7D%5B20s%5D&time={}",
+            base + 20
+        ),
+    )
+    .await;
+    assert_eq!(range_vector.0, StatusCode::OK);
+    assert_eq!(range_vector.1["data"]["resultType"], "matrix");
+    assert_eq!(
+        range_vector.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "prom_cpu", "env": "prod", "host": "a"},
+            "values": [[base + 10, "20.0"], [base + 20, "30.0"]]
+        }])
+    );
+
+    let range_vector_over_grid = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=prom_cpu%5B20s%5D&start={base}&end={}&step=10",
+            base + 20
+        ),
+    )
+    .await;
+    assert_eq!(range_vector_over_grid.0, StatusCode::BAD_REQUEST);
+    assert_eq!(range_vector_over_grid.1["status"], "error");
+    assert_eq!(range_vector_over_grid.1["errorType"], "bad_data");
+    assert!(range_vector_over_grid.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("range vector"));
 
     let instant = get_json(
         &app,
@@ -811,7 +845,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     }
 
     let stats = storage.stats().await.unwrap();
-    assert_eq!(stats.api_promql_requests, 8);
+    assert_eq!(stats.api_promql_requests, 9);
     assert_eq!(stats.api_read_errors, 0);
     assert!(stats.api_read_frame_bytes > 0);
     assert!(stats.api_read_result_points >= 9);

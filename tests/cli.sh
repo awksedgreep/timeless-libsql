@@ -2077,6 +2077,12 @@ SELECT 'nf', ts, COALESCE(value, '-')
 
 -- recipe: discovery
 SELECT 'lv', value FROM timeless_label_values('ck','cpu','host');
+
+-- SQL-PROM-006: root range selector at T=60 over (0,60]
+SELECT 'range_selector', labels, ts, value
+  FROM timeless_raw('ck','cpu','{"host":"a"}',0,60)
+ WHERE ts > 0 AND ts <= 60
+ ORDER BY labels, ts;
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2110,6 +2116,9 @@ check_eq "label discovery (cookbook)" \
 'lv|a
 lv|b
 lv|c'
+check_eq "SQL-PROM-006 range selector uses exact (T-W,T] bounds" \
+  "$(grep '^range_selector|' <<<"$got")" \
+'range_selector|{"host":"a"}|60|10.0'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "oracle": "prometheus-v3.13.2",
+  "cases": [
+    {
+      "id": "PQL-S06-root-range-vector-instant-type",
+      "endpoint": "/api/v1/query",
+      "params": {
+        "query": "up[5m]",
+        "time": "2.5"
+      },
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {
+          "resultType": "matrix",
+          "result": []
+        }
+      }
+    },
+    {
+      "id": "PQL-S06-root-range-vector-range-error",
+      "endpoint": "/api/v1/query_range",
+      "params": {
+        "query": "up[5m]",
+        "start": "0.5",
+        "end": "2.5",
+        "step": "1"
+      },
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
+      }
+    }
+  ]
+}

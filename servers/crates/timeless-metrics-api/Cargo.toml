@@ -11,6 +11,7 @@ bytes = "1"
 form_urlencoded = "1"
 fs2 = "0.4"
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
+promql-parser = "=0.10.0"
 chrono = { version = "0.4", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "load_extension"] }

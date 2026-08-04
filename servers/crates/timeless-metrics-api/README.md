@@ -24,8 +24,9 @@ retention commands.
 - `GET /api/v1/series`
 - Prometheus aliases for instant/range queries and label/series discovery
 
-The Session 4 PromQL slice supports an instant vector selector and
-`avg_over_time(selector[window])`. It deliberately rejects every other
+The current PromQL slice supports instant vector selectors, root range
+selectors on instant queries, and `avg_over_time(selector[window])`. It
+deliberately rejects every other
 function, operator, aggregation, subquery, offset, or modifier with a
 Prometheus `bad_data` response. There is no hidden Elixir fallback. The
 release binary requires Phoenix-managed policy authentication by default;
@@ -76,11 +77,16 @@ semantics, fully anchors regexes, and treats a missing label as the empty
 string. Native exact routes keep their Session 0 response envelopes and
 inclusive timestamp bounds.
 
-PromQL parsing is storage-independent. The query layer lowers plain selectors
+PromQL parsing is storage-independent and uses the exactly locked
+`promql-parser` 0.10.0 AST frontend. That parser's own historical compatibility
+claim is not a Timeless compatibility claim: each AST node remains gated until
+its matrix row passes the pinned Prometheus 3.13.2 oracle. The query layer lowers plain selectors
 to `timeless_raw_frame` and performs a linear last-sample sweep over the exact
 300-second `(T-lookback,T]` window. `avg_over_time` lowers directly to
-`timeless_window_batches`, preserving `(T-window,T]`, grid timestamps, and the
-metric name. The Rust process writes the final vector/matrix response without
+`timeless_window_batches`, preserving `(T-window,T]`, grid timestamps, and
+Prometheus metric-name removal. A root range selector reads public raw frames,
+applies the same open-left boundary, and returns a matrix only from an instant
+query; range-query use fails as `bad_data`. The Rust process writes the final vector/matrix response without
 BEAM/NIF or per-series transport. RFC3339 and numeric times, duration/numeric
 steps, duplicate matcher AND semantics, and the 11,000-point resolution limit
 match the existing service contract.

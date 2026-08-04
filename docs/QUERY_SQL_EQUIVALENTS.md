@@ -40,6 +40,7 @@ same stored data and mechanical reductions without running that API.
 | [`SQL-PROM-003`](#sql-prom-003-cross-series-sum-by-label) | `PQL-O09` | reference | SQL equivalent available; Rust PromQL row remains missing |
 | [`SQL-PROM-004`](#sql-prom-004-vector-arithmetic-with-label-matching) | `PQL-O02`, `PQL-O05` | reference | SQL equivalent available for explicit match keys |
 | [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | reference | SQL equivalent available; API still owes PromQL ordering/labels |
+| [`SQL-PROM-006`](#sql-prom-006-range-selector) | `PQL-S06` | current | exact root range-vector storage selection; API shapes the matrix |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -123,6 +124,31 @@ The window is `(T-window,T]`, matching PromQL range boundaries. Set
 `:start = :end` for an instant evaluation. This recipe is exact for stored
 float samples; native histogram samples are not stored. Direct regression:
 `tests/cli.sh` sections 22, 33, and 35.
+
+### SQL-PROM-006: range selector
+
+At instant evaluation timestamp `:at`, return every stored float sample in
+the PromQL range-vector interval `(:at - :window, :at]`:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_raw(
+  'metrics', :metric, :filter_json,
+  :at - :window, :at
+)
+WHERE ts > :at - :window
+  AND ts <= :at
+ORDER BY labels, ts;
+```
+
+`:at` and `:window` are integer seconds for a default `timeless_metrics`
+table. The explicit predicates turn the public raw surface's inclusive read
+bounds into PromQL's open-left, closed-right interval. Values remain SQLite
+REALs, including IEEE NaN/Inf where the SQLite build preserves them; labels
+are canonical JSON. The Rust API owns parsing, matrix envelopes, value-string
+formatting, limits, and rejection of a root range vector on a range query.
+Direct regression: `tests/cli.sh` section 33 and the metrics API
+`session_four_pins_promql_selector_window_errors_and_reopen` contract.
 
 ### SQL-PROM-003: cross-series sum by label
 
