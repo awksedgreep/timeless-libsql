@@ -399,6 +399,7 @@ enum PromRangeOp {
     Min,
     Max,
     Sum,
+    Count,
 }
 
 impl PromRangeOp {
@@ -408,6 +409,7 @@ impl PromRangeOp {
             Self::Min => "min_over_time",
             Self::Max => "max_over_time",
             Self::Sum => "sum_over_time",
+            Self::Count => "count_over_time",
         }
     }
 
@@ -417,6 +419,7 @@ impl PromRangeOp {
             Self::Min => "min",
             Self::Max => "max",
             Self::Sum => "sum",
+            Self::Count => "count",
         }
     }
 
@@ -426,6 +429,7 @@ impl PromRangeOp {
             Self::Min => PromAggregateOp::Min,
             Self::Max => PromAggregateOp::Max,
             Self::Sum => PromAggregateOp::Sum,
+            Self::Count => PromAggregateOp::Count,
         }
     }
 }
@@ -889,7 +893,11 @@ fn lower_promql_expr(
         promql::Expr::Call(call)
             if matches!(
                 call.func.name,
-                "avg_over_time" | "min_over_time" | "max_over_time" | "sum_over_time"
+                "avg_over_time"
+                    | "min_over_time"
+                    | "max_over_time"
+                    | "sum_over_time"
+                    | "count_over_time"
             ) =>
         {
             let op = match call.func.name {
@@ -897,6 +905,7 @@ fn lower_promql_expr(
                 "min_over_time" => PromRangeOp::Min,
                 "max_over_time" => PromRangeOp::Max,
                 "sum_over_time" => PromRangeOp::Sum,
+                "count_over_time" => PromRangeOp::Count,
                 _ => unreachable!("guarded range function"),
             };
             let [argument] = call.args.args.as_slice() else {

@@ -113,7 +113,7 @@ correctness fallback.
 | `PQL-R02` | `min_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-021-min_over_time)); exact boundaries, IEEE/NaN and stable signed-zero behavior, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `WINDOW`, `RAW` | `API` | P0 |
 | `PQL-R03` | `max_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-022-max_over_time)); exact boundaries, IEEE/NaN and stable signed-zero behavior, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `WINDOW`, `RAW` | `API` | P0 |
 | `PQL-R04` | `sum_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-023-sum_over_time)); compensated cancellation, overflow, IEEE values, exact boundaries, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `WINDOW`, `RAW` | `API` | P0 |
-| `PQL-R05` | `count_over_time` | missing | yes | `WINDOW` | `API` | P0 |
+| `PQL-R05` | `count_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-024-count_over_time)); every IEEE sample, exact boundaries, subqueries, empty windows, limits, cancellation, and reopen are pinned | in progress | yes | `WINDOW`, `RAW` | `API` | P0 |
 | `PQL-R06` | `last_over_time` | missing | yes | `WINDOW`, `RAW` | `API` | P0 |
 | `PQL-R07` | `first_over_time` | missing | yes | `WINDOW`, `RAW` | `API` | P0 |
 | `PQL-R08` | `present_over_time` | missing | yes | `WINDOW` | `API` | P0 |

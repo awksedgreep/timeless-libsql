@@ -196,6 +196,7 @@ avg_over_time(http_requests_total[30m:30s])
 min_over_time(http_requests_total[30m:30s])
 max_over_time(http_requests_total[30m:30s])
 sum_over_time(http_requests_total[30m:30s])
+count_over_time(http_requests_total[30m:30s])
 avg_over_time(http_requests_total[30m:])
 avg_over_time(http_requests_total[30m:30s] @ end() offset 5m)
 avg_over_time(avg_over_time(http_requests_total[5m:30s])[30m:1m])
@@ -724,11 +725,12 @@ limits fail explicitly.
 The `avg` window fold uses compensated summation for cancellation-prone
 finite values and an incremental-mean fallback before the running sum would
 overflow. The `sum` fold uses the same compensated addition but retains
-infinite overflow as its result. `NaN`, infinities, and signed zero remain IEEE
-values in the packed frame. The `min` and `max` folds ignore an incoming NaN once they have an
+infinite overflow as its result. `count` includes every stored float regardless
+of its IEEE value. `NaN`, infinities, and signed zero remain IEEE values in the
+packed frame. The `min` and `max` folds ignore an incoming NaN once they have an
 ordered extremum, replace a leading NaN with the first numeric sample, retain
-NaN for an all-NaN window, and preserve the first of equal signed zeros. These are
-general direct-SQL reductions; PromQL parsing, label/name
+NaN for an all-NaN window, and preserve the first of equal signed zeros. These
+are general direct-SQL reductions; PromQL parsing, label/name
 policy, timestamps, limits, and envelopes remain in the Rust metrics API.
 
 The `buckets` blob is versioned and little-endian:

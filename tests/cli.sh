@@ -3683,6 +3683,11 @@ overflow_sum = db.execute(
     "'metrics','avg_overflow',NULL,30,30,1,20,'sum')"
 ).fetchone()[0]
 assert math.isinf(overflow_sum) and overflow_sum > 0
+sample_count = db.execute(
+    "SELECT value FROM timeless_window("
+    "'metrics','avg_precision',NULL,30,30,1,30,'count')"
+).fetchone()[0]
+assert sample_count == 3.0
 
 minimum = db.execute(
     "SELECT value FROM timeless_window("
