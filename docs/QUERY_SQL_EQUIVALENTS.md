@@ -95,6 +95,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-051`](#sql-prom-051-time-and-timestamp) | `PQL-F16` | current foundation | exact evaluation grid and stored timestamps; API owns AST sample provenance and envelopes |
 | [`SQL-PROM-052`](#sql-prom-052-minute-hour-day_of_week-and-day_of_month) | `PQL-F17` | current foundation | UTC extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
 | [`SQL-PROM-053`](#sql-prom-053-day_of_year-days_in_month-month-and-year) | `PQL-F18` | current foundation | UTC calendar extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
+| [`SQL-PROM-054`](#sql-prom-054-histogram_quantile-over-classic-buckets) | `PQL-H01` | current foundation | bounded classic-bucket grouping, monotonic correction, and linear interpolation; API owns strict bound parsing, tolerance, annotations, IEEE, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -2108,6 +2109,114 @@ already contain every value required, so no extension primitive is justified.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_calendar_part_two_pins_leap_years_and_reopens`.
+
+### SQL-PROM-054: `histogram_quantile` over classic buckets
+
+For a classic histogram metric whose series carry cumulative counts in an
+`le` label, this parameterized ordinary-SQL recipe computes one quantile per
+remaining label set and evaluation step:
+
+```sql
+WITH selected AS (
+  SELECT json_remove(labels, '$.le') AS labels, ts,
+         json_extract(labels, '$.le') AS le, value AS count
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+), parsed AS (
+  SELECT labels, ts,
+         CASE WHEN le IN ('+Inf','Inf','+Infinity','Infinity')
+              THEN 1 ELSE 0 END AS is_inf,
+         CASE
+           WHEN le IN ('+Inf','Inf','+Infinity','Infinity') THEN NULL
+           WHEN le IN ('-Inf','-Infinity') THEN -1e999
+           ELSE CAST(le AS REAL)
+         END AS upper_bound,
+         count
+  FROM selected
+  WHERE le IS NOT NULL
+), coalesced AS (
+  SELECT labels, ts, is_inf, upper_bound, SUM(count) AS count
+  FROM parsed
+  GROUP BY labels, ts, is_inf, upper_bound
+), monotonic AS (
+  SELECT labels, ts, is_inf, upper_bound,
+         MAX(count) OVER (
+           PARTITION BY labels, ts
+           ORDER BY is_inf, upper_bound
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) AS count
+  FROM coalesced
+), positioned AS (
+  SELECT *,
+         ROW_NUMBER() OVER (
+           PARTITION BY labels, ts ORDER BY is_inf, upper_bound
+         ) AS position,
+         LAG(upper_bound) OVER (
+           PARTITION BY labels, ts ORDER BY is_inf, upper_bound
+         ) AS lower_bound,
+         LAG(count) OVER (
+           PARTITION BY labels, ts ORDER BY is_inf, upper_bound
+         ) AS lower_count
+  FROM monotonic
+), stats AS (
+  SELECT labels, ts,
+         MAX(CASE WHEN is_inf = 1 THEN count END) AS total,
+         COUNT(*) AS buckets,
+         MAX(CASE WHEN is_inf = 0 THEN upper_bound END) AS last_finite
+  FROM positioned
+  GROUP BY labels, ts
+), chosen AS (
+  SELECT p.*,
+         ROW_NUMBER() OVER (
+           PARTITION BY p.labels, p.ts ORDER BY p.upper_bound
+         ) AS choice
+  FROM positioned AS p
+  JOIN stats AS s USING (labels, ts)
+  WHERE p.is_inf = 0 AND p.count >= :quantile * s.total
+)
+SELECT s.labels, s.ts,
+       CASE
+         WHEN s.total IS NULL OR s.total = 0 OR s.buckets < 2 THEN NULL
+         WHEN :quantile < 0 THEN -1e999
+         WHEN :quantile > 1 THEN 1e999
+         WHEN c.choice IS NULL THEN s.last_finite
+         WHEN c.position = 1 AND c.upper_bound <= 0 THEN c.upper_bound
+         ELSE COALESCE(c.lower_bound, 0)
+              + (c.upper_bound - COALESCE(c.lower_bound, 0))
+              * ((:quantile * s.total - COALESCE(c.lower_count, 0))
+                 / (c.count - COALESCE(c.lower_count, 0)))
+       END AS value
+FROM stats AS s
+LEFT JOIN chosen AS c
+  ON c.labels = s.labels AND c.ts = s.ts AND c.choice = 1
+ORDER BY s.labels, s.ts;
+```
+
+`:metric` names one classic `*_bucket` family; `:filter_json` is a public
+Timeless matcher object or NULL. `:start`, `:end`, `:step`, and `:lookback`
+use the metric table's native timestamp unit, bounds are inclusive, and
+lookback is open-left. `:quantile` is the scalar rank. Input label JSON must be
+canonical and each participating series must have a valid numeric `le` or a
+positive-infinity spelling shown above. Equal parsed bounds are summed,
+output labels omit `le`, rows are ordered by labels then timestamp, the first
+positive bucket interpolates from zero, and a rank in the infinite bucket
+returns the largest finite bound. NULL represents the no-`+Inf`, fewer-than-two
+buckets, or zero-total result that the API serializes as `NaN`.
+
+This recipe is an honest direct-SQL foundation, not the PromQL parser. Its
+running maximum provides ordinary monotonic correction, but SQL numeric casts
+do not provide Prometheus's strict float-label parser, raw packed NaN fidelity,
+or the `1e-12` relative-delta suppression rule. The Rust API supplies those
+rules, keeps metric names as internal family discriminators before dropping
+them from output, evaluates scalar ASTs per step, and owns warnings/infos,
+limits, cancellation, and Prometheus envelopes. The bounded public grid
+already crosses each selected bucket once, so no histogram-specific extension
+primitive is justified.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_nine_promql_classic_histogram_quantile_matches_oracle_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

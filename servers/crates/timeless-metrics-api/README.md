@@ -96,6 +96,16 @@ out-of-range conversion behavior. The executable direct-SQL foundation is
 UTC contract, with one-indexed fields and Gregorian leap-year handling. Their
 executable direct-SQL foundation is
 [`SQL-PROM-053`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-prom-053-day_of_year-days_in_month-month-and-year).
+`histogram_quantile(scalar, vector)` evaluates classic float `*_bucket`
+families with exact Prometheus bound coalescing, monotonicity correction,
+`1e-12` small-delta suppression, boundary interpolation, invalid-quantile
+values, and label/name policy. It composes with aggregation and counter
+functions, is bounded by the cumulative work limit, and does not claim native
+histogram support. Missing or malformed `le` series are excluded; exact
+optional warning/info response annotations remain tracked separately by
+`PQL-S23`. Direct SQLite/libSQL users have the executable ordinary-SQL
+foundation in
+[`SQL-PROM-054`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-prom-054-histogram_quantile-over-classic-buckets).
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves

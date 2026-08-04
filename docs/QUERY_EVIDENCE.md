@@ -5,7 +5,8 @@ narrow/wide performance record. Performance never overrides oracle semantics;
 it decides whether ordinary Rust/SQL composition is sufficient or whether a
 general extension primitive has earned its storage-aware complexity.
 
-`tools/query_evidence.py` starts the release metrics and logs binaries on
+The Rust-native `tools/query-harness` evidence command starts the release
+metrics and logs binaries on
 loopback with authentication disabled, uses a temporary database, ingests a
 deterministic fixture through the public HTTP/batch path, crosses the explicit
 flush durability barrier, and measures the public query APIs. It never reads a
@@ -37,9 +38,14 @@ TIMELESS_BUILD_COMMIT="$(git rev-parse HEAD)" \
 TIMELESS_BUILD_COMMIT="$(git rev-parse HEAD)" \
   cargo build --manifest-path servers/Cargo.toml \
     -p timeless-metrics-api -p timeless-logs-api --release --locked
-python3 tools/query_evidence.py \
+cargo run --release --manifest-path tools/query-harness/Cargo.toml --locked -- \
+  evidence \
   --output docs/evidence/$(date +%F)_query_baseline.json
 ```
+
+The command refuses a dirty worktree as well as stale artifacts. This keeps
+the recorded commit tied to the exact source used to build and measure every
+result.
 
 The checked-in Session 0 record is
 [`2026-08-04_query_baseline.json`](evidence/2026-08-04_query_baseline.json).

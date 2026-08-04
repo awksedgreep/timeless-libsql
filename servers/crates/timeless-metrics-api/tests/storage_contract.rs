@@ -10506,6 +10506,288 @@ async fn session_eight_promql_calendar_part_two_pins_leap_years_and_reopens() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_nine_promql_classic_histogram_quantile_matches_oracle_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_nine_histogram_quantile.db");
+    let base = 1_700_900_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut fixture = format!(
+        concat!(
+            "contract_hist_bucket{{host=\"a\",le=\"0.1\"}} 5 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"0.1\"}} 8 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"0.1\"}} 10 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"0.5\"}} 10 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"0.5\"}} 16 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"0.5\"}} 20 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"1\"}} 15 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"1\"}} 24 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"1\"}} 30 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"+Inf\"}} 20 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"+Inf\"}} 32 {}\n",
+            "contract_hist_bucket{{host=\"a\",le=\"+Inf\"}} 40 {}\n",
+            "contract_hist_bucket{{host=\"b\",le=\"0.1\"}} 3 {}\n",
+            "contract_hist_bucket{{host=\"b\",le=\"0.5\"}} 6 {}\n",
+            "contract_hist_bucket{{host=\"b\",le=\"1\"}} 9 {}\n",
+            "contract_hist_bucket{{host=\"b\",le=\"+Inf\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"missing\",le=\"1\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"missing\",le=\"2\"}} 20 {}\n",
+            "contract_hist_special_bucket{{case=\"negative\",le=\"-5\"}} 2 {}\n",
+            "contract_hist_special_bucket{{case=\"negative\",le=\"-1\"}} 4 {}\n",
+            "contract_hist_special_bucket{{case=\"negative\",le=\"+Inf\"}} 4 {}\n",
+            "contract_hist_special_bucket{{case=\"positive\",le=\"10\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"positive\",le=\"+Inf\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"decrease\",le=\"1\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"decrease\",le=\"2\"}} 9 {}\n",
+            "contract_hist_special_bucket{{case=\"decrease\",le=\"+Inf\"}} 20 {}\n",
+            "contract_hist_special_bucket{{case=\"duplicate\",le=\"1\"}} 3 {}\n",
+            "contract_hist_special_bucket{{case=\"duplicate\",le=\"1.0\"}} 4 {}\n",
+            "contract_hist_special_bucket{{case=\"duplicate\",le=\"2\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"duplicate\",le=\"+Inf\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"malformed\",le=\"bogus\"}} 9 {}\n",
+            "contract_hist_special_bucket{{case=\"malformed\",le=\"1\"}} 5 {}\n",
+            "contract_hist_special_bucket{{case=\"malformed\",le=\"+Inf\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"absent\"}} 123 {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+    );
+    fixture.push_str(&format!(
+        concat!(
+            "contract_hist_special_bucket{{case=\"tiny\",le=\"1\"}} 1000000000000 {}\n",
+            "contract_hist_special_bucket{{case=\"tiny\",le=\"2\"}} 1000000000000.5 {}\n",
+            "contract_hist_special_bucket{{case=\"tiny\",le=\"3\"}} 2000000000000 {}\n",
+            "contract_hist_special_bucket{{case=\"tiny\",le=\"+Inf\"}} 3000000000000 {}\n",
+            "contract_hist_special_bucket{{case=\"only_inf\",le=\"+Inf\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"zero\",le=\"1\"}} 0 {}\n",
+            "contract_hist_special_bucket{{case=\"zero\",le=\"+Inf\"}} 0 {}\n",
+            "contract_hist_special_bucket{{case=\"nan_count\",le=\"1\"}} NaN {}\n",
+            "contract_hist_special_bucket{{case=\"nan_count\",le=\"2\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"nan_count\",le=\"+Inf\"}} 20 {}\n",
+            "contract_hist_special_bucket{{case=\"infinite_total\",le=\"1\"}} 10 {}\n",
+            "contract_hist_special_bucket{{case=\"infinite_total\",le=\"+Inf\"}} +Inf {}\n",
+            "contract_hist_special_bucket{{case=\"infinite_finite\",le=\"1\"}} +Inf {}\n",
+            "contract_hist_special_bucket{{case=\"infinite_finite\",le=\"+Inf\"}} +Inf {}\n",
+            "contract_hist_other_bucket{{host=\"a\",le=\"10\"}} 10 {}\n",
+            "contract_hist_other_bucket{{host=\"a\",le=\"+Inf\"}} 10 {}\n"
+        ),
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+    ));
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let grouped = prom_query(
+        &app,
+        "histogram_quantile(0.5, contract_hist_bucket)",
+        base + 30,
+    )
+    .await;
+    assert_eq!(grouped.0, StatusCode::OK, "{}", grouped.1);
+    assert_eq!(
+        grouped.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a"}, "value": [base + 30, "0.5"]},
+            {"metric": {"host": "b"}, "value": [base + 30, "0.3666666666666667"]}
+        ])
+    );
+    let collision = prom_query(
+        &app,
+        "histogram_quantile(0.5, {__name__=~\"contract_hist(_other)?_bucket\",host=\"a\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        collision.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        collision.1
+    );
+    assert_eq!(collision.1["errorType"], "execution");
+    assert!(collision.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("vector cannot contain metrics with the same labelset"));
+
+    for (case, quantile, expected) in [
+        ("missing", "0.5", "NaN"),
+        ("negative", "0.5", "-5"),
+        ("positive", "0.5", "5"),
+        ("decrease", "0.4", "0.8"),
+        ("tiny", "0.5", "2.5"),
+        ("duplicate", "0.5", "0.7142857142857143"),
+        ("malformed", "0.5", "1"),
+        ("only_inf", "0.5", "NaN"),
+        ("zero", "0.5", "NaN"),
+        ("nan_count", "0.5", "NaN"),
+        ("infinite_total", "0.5", "1"),
+        ("infinite_finite", "0.5", "NaN"),
+    ] {
+        let query = format!(
+            "histogram_quantile({quantile}, contract_hist_special_bucket{{case=\"{case}\"}})"
+        );
+        let response = prom_query(&app, &query, base + 30).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+    let absent = prom_query(
+        &app,
+        "histogram_quantile(0.5, contract_hist_special_bucket{case=\"absent\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(absent.0, StatusCode::OK, "{}", absent.1);
+    assert_eq!(absent.1["data"]["result"], serde_json::json!([]));
+
+    let range = prom_query_range(
+        &app,
+        "histogram_quantile(0.5, contract_hist_bucket{host=\"a\"})",
+        base + 10,
+        base + 30,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base + 10, "0.5"], [base + 20, "0.5"], [base + 30, "0.5"]])
+    );
+    let composed = prom_query(
+        &app,
+        "histogram_quantile(0.5, sum by (host, le) (rate(contract_hist_bucket[20s])))",
+        base + 30,
+    )
+    .await;
+    assert_eq!(composed.0, StatusCode::OK, "{}", composed.1);
+    assert_eq!(
+        composed.1["data"]["result"],
+        serde_json::json!([{"metric": {"host": "a"}, "value": [base + 30, "0.5"]}])
+    );
+    let nested = prom_query(
+        &app,
+        "abs(histogram_quantile(0.5, contract_hist_bucket{host=\"a\"}))",
+        base + 30,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "0.5");
+
+    for (quantile, expected) in [("-1", "-Inf"), ("2", "+Inf"), ("NaN", "NaN")] {
+        let query = format!("histogram_quantile({quantile}, contract_hist_bucket{{host=\"a\"}})");
+        let response = prom_query(&app, &query, base + 30).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+    for query in [
+        "histogram_quantile(vector(0.5), contract_hist_bucket)",
+        "histogram_quantile(0.5, 1)",
+        "histogram_quantile(0.5)",
+    ] {
+        let invalid = prom_query(&app, query, base + 30).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "histogram_quantile(0.5, contract_hist_bucket{host=\"a\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("work point limit"));
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "histogram_quantile(0.5, contract_hist_bucket)",
+            base + 30,
+        )
+        .await
+        .1,
+        grouped.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

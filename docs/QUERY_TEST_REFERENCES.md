@@ -1,8 +1,9 @@
 # Query conformance test references
 
 This index gives every matrix row marked `shipped` a concrete regression
-reference. `tools/query_contracts.py` verifies that the row set is exact, the
-file exists, and the named test symbol occurs in that file. A reference is not
+reference. The Rust-native `tools/query-harness` contracts command verifies
+that the row set is exact, the file exists, and the named test symbol occurs
+in that file. A reference is not
 permission to weaken the definition of shipped: the test must exercise the
 real extension when the behavior reaches storage.
 

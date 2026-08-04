@@ -14,13 +14,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Prove validator failure cases
-        run: >-
-          python3 -m unittest
-          tests/test_query_contracts.py
-          tests/test_query_oracles.py
-          tests/test_query_evidence.py
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prove harness and validator failure cases
+        run: cargo test --manifest-path tools/query-harness/Cargo.toml --locked
       - name: Validate query matrices and documentation
         run: |
-          python3 tools/query_contracts.py
-          python3 tools/query_oracles.py validate
+          cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- contracts
+          cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle validate

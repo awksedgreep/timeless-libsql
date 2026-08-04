@@ -1,0 +1,1424 @@
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+use chrono::{SecondsFormat, Utc};
+use clap::Args;
+use reqwest::blocking::Client;
+use reqwest::header::CONTENT_TYPE;
+use rusqlite::Connection;
+use serde_json::{json, Map, Number, Value};
+use tempfile::TempDir;
+use wait_timeout::ChildExt;
+
+#[derive(Args, Debug)]
+pub(crate) struct EvidenceArgs {
+    #[arg(long, default_value = "target/release/libtimeless_ext.so")]
+    extension: PathBuf,
+    #[arg(long, default_value = "servers/target/release/timeless-metrics-api")]
+    metrics_binary: PathBuf,
+    #[arg(long, default_value = "servers/target/release/timeless-logs-api")]
+    logs_binary: PathBuf,
+    #[arg(long, default_value_t = 50)]
+    iterations: usize,
+    #[arg(long, default_value_t = 5)]
+    warmup: usize,
+    #[arg(long, default_value_t = 512)]
+    metric_series: usize,
+    #[arg(long, default_value_t = 32)]
+    metric_points: usize,
+    #[arg(long, default_value_t = 8192)]
+    log_entries: usize,
+    #[arg(long, required = true)]
+    output: PathBuf,
+}
+
+fn free_port() -> Result<u16> {
+    Ok(std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port())
+}
+
+fn git_commit(root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        bail!("git rev-parse HEAD failed");
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn require_clean_worktree(root: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        bail!("git status failed while validating evidence source");
+    }
+    let status = String::from_utf8(output.stdout)?;
+    if !status.trim().is_empty() {
+        bail!(
+            "evidence requires a clean worktree so artifact identity describes the exact source; pending paths:\n{status}"
+        );
+    }
+    Ok(())
+}
+
+fn binary_identity(binary: &Path) -> Result<Value> {
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("run {} --version", binary.display()))?;
+    if !output.status.success() {
+        bail!("{} --version exited {}", binary.display(), output.status);
+    }
+    serde_json::from_slice(&output.stdout).context("decode binary build identity")
+}
+
+fn validate_build_identity(
+    identity: &Value,
+    expected_commit: &str,
+    artifact: &str,
+) -> Result<Value> {
+    let commit = identity.get("commit").and_then(Value::as_str);
+    if commit != Some(expected_commit) {
+        bail!(
+            "{artifact} build commit {commit:?} does not match evidence source {expected_commit:?}"
+        );
+    }
+    Ok(identity.clone())
+}
+
+fn require_binary_identity(binary: &Path, expected_commit: &str) -> Result<Value> {
+    validate_build_identity(
+        &binary_identity(binary)?,
+        expected_commit,
+        binary
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("binary"),
+    )
+}
+
+fn extension_identity(extension: &Path, expected_commit: &str) -> Result<Value> {
+    let connection = Connection::open_in_memory()?;
+    unsafe {
+        connection.load_extension_enable()?;
+        connection.load_extension(extension, None::<&str>)?;
+        connection.load_extension_disable()?;
+    }
+    let encoded: String =
+        connection.query_row("SELECT timeless_capabilities()", [], |row| row.get(0))?;
+    let capabilities: Value = serde_json::from_str(&encoded)?;
+    validate_build_identity(
+        capabilities.get("build").unwrap_or(&Value::Null),
+        expected_commit,
+        "extension",
+    )
+}
+
+struct Server {
+    binary_name: String,
+    base: String,
+    child: Child,
+    log_path: PathBuf,
+    closed: bool,
+}
+
+impl Server {
+    fn start(
+        binary: &Path,
+        extension: &Path,
+        database: &Path,
+        environment: &[(&str, &str)],
+        client: &Client,
+    ) -> Result<Self> {
+        let port = free_port()?;
+        let base = format!("http://127.0.0.1:{port}");
+        let log_path = database.with_extension("server.log");
+        let stdout = File::create(&log_path)?;
+        let stderr = stdout.try_clone()?;
+        let mut command = Command::new(binary);
+        command
+            .args([
+                extension.as_os_str(),
+                database.as_os_str(),
+                format!("127.0.0.1:{port}").as_ref(),
+            ])
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        let child = command
+            .spawn()
+            .with_context(|| format!("start {}", binary.display()))?;
+        let mut server = Self {
+            binary_name: binary
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("server")
+                .to_owned(),
+            base,
+            child,
+            log_path,
+            closed: false,
+        };
+        if let Err(error) = server.wait_live(client) {
+            let _ = server.shutdown(false);
+            return Err(error);
+        }
+        Ok(server)
+    }
+
+    fn wait_live(&mut self, client: &Client) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                bail!("{} exited during startup with {status}", self.binary_name);
+            }
+            if client
+                .get(format!("{}/live", self.base))
+                .timeout(Duration::from_millis(500))
+                .send()
+                .is_ok_and(|response| response.status().as_u16() == 200)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("{} did not become live at {}", self.binary_name, self.base);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn shutdown(&mut self, require_clean: bool) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        self.closed = true;
+        if self.child.try_wait()?.is_none() {
+            unsafe {
+                libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+            }
+            if self.child.wait_timeout(Duration::from_secs(30))?.is_none() {
+                self.child.kill()?;
+                let _ = self.child.wait_timeout(Duration::from_secs(5))?;
+            }
+        }
+        let status = self.child.wait()?;
+        if require_clean && !status.success() {
+            let output = fs::read_to_string(&self.log_path).unwrap_or_default();
+            bail!("{} shutdown={status}:\n{output}", self.binary_name);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.shutdown(false);
+    }
+}
+
+fn request_bytes(
+    client: &Client,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<(&[u8], &str)>,
+) -> Result<(u16, Vec<u8>)> {
+    let mut request = client.request(method, url);
+    if let Some((body, content_type)) = body {
+        request = request
+            .header(CONTENT_TYPE, content_type)
+            .body(body.to_vec());
+    }
+    let response = request.send()?;
+    let status = response.status().as_u16();
+    Ok((status, response.bytes()?.to_vec()))
+}
+
+fn stats(client: &Client, base: &str, path: &str) -> Result<Value> {
+    let (status, body) =
+        request_bytes(client, reqwest::Method::GET, &format!("{base}{path}"), None)?;
+    if status != 200 {
+        bail!(
+            "stats returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+fn number_delta(before: &Number, after: &Number) -> Option<Number> {
+    if let (Some(before), Some(after)) = (before.as_i64(), after.as_i64()) {
+        let delta = after - before;
+        return (delta != 0).then(|| Number::from(delta));
+    }
+    if let (Some(before), Some(after)) = (before.as_u64(), after.as_u64()) {
+        let delta = after as i128 - before as i128;
+        return (delta != 0).then(|| Number::from(delta as i64));
+    }
+    let delta = after.as_f64()? - before.as_f64()?;
+    (delta != 0.0).then(|| Number::from_f64(delta).expect("finite stats delta"))
+}
+
+fn numeric_delta(before: &Value, after: &Value) -> Value {
+    let Some(before) = before.as_object() else {
+        return json!({});
+    };
+    let Some(after) = after.as_object() else {
+        return json!({});
+    };
+    let mut delta = Map::new();
+    for (key, value) in after {
+        if let (Some(Value::Number(prior)), Value::Number(value)) = (before.get(key), value) {
+            if let Some(value) = number_delta(prior, value) {
+                delta.insert(key.clone(), Value::Number(value));
+            }
+        }
+    }
+    Value::Object(delta)
+}
+
+fn percentile(values: &[u128], quantile: f64) -> u128 {
+    let mut ordered = values.to_vec();
+    ordered.sort_unstable();
+    let index = ((ordered.len() as f64 * quantile).ceil() as usize)
+        .saturating_sub(1)
+        .min(ordered.len() - 1);
+    ordered[index]
+}
+
+#[derive(Clone, Copy)]
+enum Cardinality {
+    ResultSeries,
+    MatrixPoints,
+    Scalar,
+    String,
+    BadData,
+    ExecutionError,
+    Ndjson,
+}
+
+fn cardinality(body: &[u8], kind: Cardinality) -> Result<usize> {
+    if matches!(kind, Cardinality::Ndjson) {
+        return Ok(body
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count());
+    }
+    let response: Value = serde_json::from_slice(body)?;
+    if matches!(kind, Cardinality::BadData | Cardinality::ExecutionError) {
+        let object = response
+            .as_object()
+            .context("error envelope must be an object")?;
+        let expected = if matches!(kind, Cardinality::BadData) {
+            "bad_data"
+        } else {
+            "execution"
+        };
+        if object.len() != 3
+            || response.get("status") != Some(&json!("error"))
+            || response.get("errorType") != Some(&json!(expected))
+            || !response.get("error").is_some_and(Value::is_string)
+        {
+            bail!("unexpected error envelope: {response}");
+        }
+        return Ok(1);
+    }
+    if response.get("status") != Some(&json!("success")) {
+        bail!("query failed: {response}");
+    }
+    match kind {
+        Cardinality::ResultSeries => Ok(response
+            .pointer("/data/result")
+            .and_then(Value::as_array)
+            .context("result array")?
+            .len()),
+        Cardinality::MatrixPoints => Ok(response
+            .pointer("/data/result")
+            .and_then(Value::as_array)
+            .context("matrix result")?
+            .iter()
+            .map(|series| {
+                series
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len)
+            })
+            .sum()),
+        Cardinality::Scalar | Cardinality::String => {
+            let expected = if matches!(kind, Cardinality::Scalar) {
+                "scalar"
+            } else {
+                "string"
+            };
+            let result = response
+                .pointer("/data/result")
+                .and_then(Value::as_array)
+                .context("scalar/string result")?;
+            if response.pointer("/data/resultType") != Some(&json!(expected)) || result.len() != 2 {
+                bail!("invalid {expected} result: {response}");
+            }
+            if matches!(kind, Cardinality::String) && !result[1].is_string() {
+                bail!("invalid string value: {response}");
+            }
+            Ok(1)
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn measure(
+    name: &str,
+    request: &mut dyn FnMut() -> Result<Vec<u8>>,
+    kind: Cardinality,
+    expected: usize,
+    stats_before: &mut dyn FnMut() -> Result<Value>,
+    iterations: usize,
+    warmup: usize,
+) -> Result<Value> {
+    for _ in 0..warmup {
+        let body = request()?;
+        let actual = cardinality(&body, kind)?;
+        if actual != expected {
+            bail!("{name} warmup cardinality {actual}, expected {expected}");
+        }
+    }
+    let before = stats_before()?;
+    let mut latencies = Vec::with_capacity(iterations);
+    let mut response_bytes = 0;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let body = request()?;
+        latencies.push(started.elapsed().as_nanos());
+        response_bytes = body.len();
+        let actual = cardinality(&body, kind)?;
+        if actual != expected {
+            bail!("{name} cardinality {actual}, expected {expected}");
+        }
+    }
+    let after = stats_before()?;
+    Ok(json!({
+        "iterations": iterations,
+        "warmup": warmup,
+        "latency_ns": {
+            "min": latencies.iter().min().copied().unwrap_or(0),
+            "p50": percentile(&latencies, 0.50),
+            "p95": percentile(&latencies, 0.95),
+            "p99": percentile(&latencies, 0.99),
+            "max": latencies.iter().max().copied().unwrap_or(0),
+        },
+        "result_cardinality": expected,
+        "response_bytes": response_bytes,
+        "stats_delta": numeric_delta(&before, &after),
+    }))
+}
+
+fn hwm_kib(pid: u32) -> Result<u64> {
+    let content = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            return rest
+                .split_whitespace()
+                .next()
+                .context("VmHWM value")?
+                .parse()
+                .context("VmHWM integer");
+        }
+    }
+    bail!("VmHWM is unavailable for pid {pid}")
+}
+
+#[derive(Clone)]
+enum MetricRequest {
+    Instant(String),
+    InstantPost(String),
+    Range {
+        expression: String,
+        start: i64,
+        end: i64,
+        step: String,
+    },
+    Grid(String),
+    Expected {
+        path: String,
+        body: Option<Vec<u8>>,
+        status: u16,
+        contains: Option<String>,
+    },
+}
+
+struct MetricSpec {
+    key: String,
+    name: String,
+    request: MetricRequest,
+    cardinality: Cardinality,
+    expected: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SignalEvidence<'a> {
+    root: &'a Path,
+    extension: &'a Path,
+    binary: &'a Path,
+    directory: &'a Path,
+    iterations: usize,
+    warmup: usize,
+    client: &'a Client,
+}
+
+fn metric_request(
+    client: &Client,
+    base: &str,
+    at: i64,
+    request: &MetricRequest,
+) -> Result<Vec<u8>> {
+    let (status, body) = match request {
+        MetricRequest::Instant(expression) => {
+            let url = reqwest::Url::parse_with_params(
+                &format!("{base}/api/v1/query"),
+                [("query", expression.as_str()), ("time", &at.to_string())],
+            )?;
+            request_bytes(client, reqwest::Method::GET, url.as_str(), None)?
+        }
+        MetricRequest::InstantPost(expression) => {
+            let body = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("query", expression)
+                .append_pair("time", &at.to_string())
+                .finish();
+            request_bytes(
+                client,
+                reqwest::Method::POST,
+                &format!("{base}/api/v1/query"),
+                Some((body.as_bytes(), "application/x-www-form-urlencoded")),
+            )?
+        }
+        MetricRequest::Range {
+            expression,
+            start,
+            end,
+            step,
+        } => {
+            let url = reqwest::Url::parse_with_params(
+                &format!("{base}/api/v1/query_range"),
+                [
+                    ("query", expression.as_str()),
+                    ("start", &start.to_string()),
+                    ("end", &end.to_string()),
+                    ("step", step),
+                ],
+            )?;
+            request_bytes(client, reqwest::Method::GET, url.as_str(), None)?
+        }
+        MetricRequest::Grid(expression) => {
+            let start = (at - 10).to_string();
+            let end = at.to_string();
+            let url = reqwest::Url::parse_with_params(
+                &format!("{base}/api/v1/query_range"),
+                [
+                    ("query", expression.as_str()),
+                    ("start", &start),
+                    ("end", &end),
+                    ("step", "500ms"),
+                    ("lookback_delta", "10001ms"),
+                ],
+            )?;
+            request_bytes(client, reqwest::Method::GET, url.as_str(), None)?
+        }
+        MetricRequest::Expected {
+            path,
+            body,
+            status: expected,
+            contains,
+        } => {
+            let method = if body.is_some() {
+                reqwest::Method::POST
+            } else {
+                reqwest::Method::GET
+            };
+            let response = request_bytes(
+                client,
+                method,
+                &format!("{base}{path}"),
+                body.as_ref()
+                    .map(|body| (body.as_slice(), "application/x-www-form-urlencoded")),
+            )?;
+            if response.0 != *expected {
+                bail!(
+                    "expected HTTP {expected} for {path}, got {}: {}",
+                    response.0,
+                    String::from_utf8_lossy(&response.1)
+                );
+            }
+            if let Some(contains) = contains {
+                let decoded: Value = serde_json::from_slice(&response.1)?;
+                if !decoded
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .is_some_and(|error| error.contains(contains))
+                {
+                    bail!("unexpected execution error for {path}: {decoded}");
+                }
+            }
+            response
+        }
+    };
+    if !matches!(request, MetricRequest::Expected { .. }) && !(200..300).contains(&status) {
+        bail!(
+            "metric request returned HTTP {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    Ok(body)
+}
+
+fn instant(
+    key: impl Into<String>,
+    name: impl Into<String>,
+    expression: impl Into<String>,
+    expected: usize,
+) -> MetricSpec {
+    MetricSpec {
+        key: key.into(),
+        name: name.into(),
+        request: MetricRequest::Instant(expression.into()),
+        cardinality: Cardinality::ResultSeries,
+        expected,
+    }
+}
+
+fn range(
+    key: impl Into<String>,
+    name: impl Into<String>,
+    expression: impl Into<String>,
+    at: i64,
+    expected: usize,
+) -> MetricSpec {
+    MetricSpec {
+        key: key.into(),
+        name: name.into(),
+        request: MetricRequest::Range {
+            expression: expression.into(),
+            start: at - 30,
+            end: at,
+            step: "10".to_owned(),
+        },
+        cardinality: Cardinality::MatrixPoints,
+        expected,
+    }
+}
+
+fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec> {
+    let mut specs = vec![
+        instant(
+            "narrow",
+            "metrics-narrow",
+            r#"query_contract_cpu{host="h0000"}"#,
+            1,
+        ),
+        instant("wide", "metrics-wide", "query_contract_cpu", series),
+        instant(
+            "nameless_narrow",
+            "metrics-nameless-narrow",
+            r#"{selector_id="s0000"}"#,
+            1,
+        ),
+        instant(
+            "nameless_wide",
+            "metrics-nameless-wide",
+            r#"{selector_group="wide"}"#,
+            selector_names,
+        ),
+        instant(
+            "metric_name_regex_narrow",
+            "metrics-name-regex-narrow",
+            r#"{__name__=~"query_selector_metric_000[0-3]"}"#,
+            4,
+        ),
+        instant(
+            "metric_name_negative_wide",
+            "metrics-name-negative-wide",
+            r#"{__name__!="query_selector_metric_0000",selector_group="wide"}"#,
+            selector_names - 1,
+        ),
+        instant(
+            "offset_positive_narrow",
+            "metrics-offset-positive-narrow",
+            r#"query_contract_cpu{host="h0000"} offset 20s"#,
+            1,
+        ),
+        MetricSpec {
+            key: "offset_negative_wide".to_owned(),
+            name: "metrics-offset-negative-wide".to_owned(),
+            request: MetricRequest::Range {
+                expression: "query_contract_cpu offset -20s".to_owned(),
+                start: at - 50,
+                end: at - 20,
+                step: "10".to_owned(),
+            },
+            cardinality: Cardinality::MatrixPoints,
+            expected: series * 4,
+        },
+        instant(
+            "at_numeric_narrow",
+            "metrics-at-numeric-narrow",
+            format!(r#"query_contract_cpu{{host="h0000"}} @ {}"#, at - 20),
+            1,
+        ),
+        range(
+            "at_end_wide",
+            "metrics-at-end-wide",
+            "query_contract_cpu @ end()",
+            at,
+            series * 4,
+        ),
+        MetricSpec {
+            key: "subquery_root_narrow".to_owned(),
+            name: "metrics-subquery-root-narrow".to_owned(),
+            request: MetricRequest::Instant(
+                r#"query_contract_cpu{host="h0000"}[5m:10s]"#.to_owned(),
+            ),
+            cardinality: Cardinality::MatrixPoints,
+            expected: 30,
+        },
+        MetricSpec {
+            key: "subquery_root_wide".to_owned(),
+            name: "metrics-subquery-root-wide".to_owned(),
+            request: MetricRequest::Instant("query_contract_cpu[5m:10s]".to_owned()),
+            cardinality: Cardinality::MatrixPoints,
+            expected: series * 30,
+        },
+        instant(
+            "subquery_avg_narrow",
+            "metrics-subquery-avg-narrow",
+            r#"avg_over_time(query_contract_cpu{host="h0000"}[5m:10s])"#,
+            1,
+        ),
+        range(
+            "subquery_avg_wide",
+            "metrics-subquery-avg-wide",
+            "avg_over_time(query_contract_cpu[5m:10s])",
+            at,
+            series * 4,
+        ),
+    ];
+    let functions = [
+        ("range_avg", "avg_over_time", None),
+        ("range_min", "min_over_time", None),
+        ("range_max", "max_over_time", None),
+        ("range_sum", "sum_over_time", None),
+        ("range_count", "count_over_time", None),
+        ("range_present", "present_over_time", None),
+        ("range_quantile", "quantile_over_time", Some("0.95, ")),
+        ("range_stddev", "stddev_over_time", None),
+        ("range_stdvar", "stdvar_over_time", None),
+        ("range_rate", "rate", None),
+        ("range_irate", "irate", None),
+        ("range_increase", "increase", None),
+        ("range_delta", "delta", None),
+        ("range_idelta", "idelta", None),
+        ("range_deriv", "deriv", None),
+        ("range_predict_linear", "predict_linear", Some("")),
+        ("range_changes", "changes", None),
+        ("range_resets", "resets", None),
+        ("range_last", "last_over_time", None),
+    ];
+    for (key, function, prefix) in functions {
+        let narrow_expression = if function == "predict_linear" {
+            r#"predict_linear(query_contract_cpu{host="h0000"}[5m], 60)"#.to_owned()
+        } else {
+            format!(
+                r#"{function}({}query_contract_cpu{{host="h0000"}}[5m])"#,
+                prefix.unwrap_or("")
+            )
+        };
+        let wide_expression = if function == "predict_linear" {
+            "predict_linear(query_contract_cpu[5m], 60)".to_owned()
+        } else {
+            format!("{function}({}query_contract_cpu[5m])", prefix.unwrap_or(""))
+        };
+        let narrow_key = format!("{key}_narrow");
+        let wide_key = format!("{key}_wide");
+        let narrow_name = format!(
+            "metrics-{}-narrow",
+            key.replace('_', "-").trim_start_matches("range-")
+        );
+        let wide_name = format!(
+            "metrics-{}-wide",
+            key.replace('_', "-").trim_start_matches("range-")
+        );
+        specs.push(instant(narrow_key, narrow_name, narrow_expression, 1));
+        specs.push(range(wide_key, wide_name, wide_expression, at, series * 4));
+    }
+    let transforms = [
+        ("unary_minus", "unary-minus", "-", ""),
+        ("abs", "abs", "abs(", ")"),
+        ("round", "round", "round(", ", 0.5)"),
+        ("clamp", "clamp", "clamp(", ", 0, 10000)"),
+        ("math", "ln", "ln(", ")"),
+        ("sgn", "sgn", "sgn(", ")"),
+        ("inverse", "atan", "atan(", ")"),
+        ("trig", "sin", "sin(", ")"),
+        ("angle", "deg", "deg(", ")"),
+    ];
+    for (key, label, prefix, suffix) in transforms {
+        let narrow_key = format!("{key}_narrow");
+        let wide_key = format!("{key}_wide");
+        let narrow_name = format!("metrics-{label}-narrow");
+        let wide_name = format!("metrics-{label}-wide");
+        specs.push(instant(
+            narrow_key,
+            narrow_name,
+            format!(r#"{prefix}query_contract_cpu{{host="h0000"}}{suffix}"#),
+            1,
+        ));
+        specs.push(range(
+            wide_key,
+            wide_name,
+            format!("{prefix}query_contract_cpu{suffix}"),
+            at,
+            series * 4,
+        ));
+    }
+    specs.extend([
+        instant("label_replace_narrow", "metrics-label-replace-narrow", r#"label_replace(query_contract_cpu{host="h0000"}, "node", "$1", "host", "(.*)")"#, 1),
+        range("label_replace_wide", "metrics-label-replace-wide", r#"label_replace(query_contract_cpu, "node", "$1", "host", "(.*)")"#, at, series * 4),
+        instant("label_join_narrow", "metrics-label-join-narrow", r#"label_join(query_contract_cpu{host="h0000"}, "node", "/", "host", "rack")"#, 1),
+        range("label_join_wide", "metrics-label-join-wide", r#"label_join(query_contract_cpu, "node", "/", "host", "rack")"#, at, series * 4),
+        instant("absent_narrow", "metrics-absent-missing-narrow", r#"absent(query_contract_cpu{host="missing"})"#, 1),
+        range("absent_wide", "metrics-absent-present-wide", "absent(query_contract_cpu)", at, 0),
+        instant("absent_over_time_narrow", "metrics-absent-over-time-missing-narrow", r#"absent_over_time(query_contract_cpu{host="missing"}[30s])"#, 1),
+        range("absent_over_time_wide", "metrics-absent-over-time-present-wide", "absent_over_time(query_contract_cpu[30s])", at, 0),
+        instant("sort_narrow", "metrics-sort-narrow", r#"sort(query_contract_cpu{host="h0000"})"#, 1),
+        instant("sort_wide", "metrics-sort-desc-wide", "sort_desc(query_contract_cpu)", series),
+        MetricSpec { key: "conversion_narrow".to_owned(), name: "metrics-scalar-single-narrow".to_owned(), request: MetricRequest::Instant(r#"scalar(query_contract_cpu{host="h0000"})"#.to_owned()), cardinality: Cardinality::Scalar, expected: 1 },
+        MetricSpec { key: "conversion_wide".to_owned(), name: "metrics-scalar-cardinality-wide".to_owned(), request: MetricRequest::Instant("scalar(query_contract_cpu)".to_owned()), cardinality: Cardinality::Scalar, expected: 1 },
+        instant("timestamp_narrow", "metrics-timestamp-narrow", r#"timestamp(query_contract_cpu{host="h0000"})"#, 1),
+        instant("timestamp_wide", "metrics-timestamp-wide", "timestamp(query_contract_cpu)", series),
+        instant("calendar_narrow", "metrics-calendar-minute-narrow", r#"minute(query_contract_cpu{host="h0000"})"#, 1),
+        instant("calendar_wide", "metrics-calendar-day-of-week-wide", "day_of_week(query_contract_cpu)", series),
+        instant("calendar_part_two_narrow", "metrics-calendar-year-narrow", r#"year(query_contract_cpu{host="h0000"})"#, 1),
+        instant("calendar_part_two_wide", "metrics-calendar-day-of-year-wide", "day_of_year(query_contract_cpu)", series),
+        instant("histogram_quantile_narrow", "metrics-histogram-quantile-narrow", r#"histogram_quantile(0.95, query_contract_histogram_bucket{host="h0000"})"#, 1),
+        instant("histogram_quantile_wide", "metrics-histogram-quantile-wide", "histogram_quantile(0.95, query_contract_histogram_bucket)", series),
+        instant("arithmetic_vector_scalar_narrow", "metrics-arithmetic-vector-scalar-narrow", r#"query_contract_cpu{host="h0000"} * 2"#, 1),
+        range("arithmetic_one_to_one_wide", "metrics-arithmetic-one-to-one-wide", "query_contract_cpu + query_contract_cpu", at, series * 4),
+        instant("comparison_filter_narrow", "metrics-comparison-filter-narrow", r#"query_contract_cpu{host="h0000"} > 30"#, 1),
+        range("comparison_bool_wide", "metrics-comparison-bool-wide", "query_contract_cpu > bool 0", at, series * 4),
+        instant("set_and_narrow", "metrics-set-and-narrow", r#"query_contract_cpu{host="h0000"} and query_contract_cpu{host="h0000"}"#, 1),
+        range("set_or_wide", "metrics-set-or-wide", "query_contract_cpu or query_contract_cpu", at, series * 4),
+        instant("matching_on_narrow", "metrics-matching-on-narrow", r#"query_contract_cpu{host="h0000"} + on(host) query_contract_cpu{host="h0000"}"#, 1),
+        range("matching_on_wide", "metrics-matching-on-wide", "query_contract_cpu + on(host) query_contract_cpu", at, series * 4),
+        instant("group_left_narrow", "metrics-group-left-narrow", r#"query_contract_cpu{host="h0000"} + on(service) group_left(team) query_contract_service_factor"#, 1),
+        range("group_right_wide", "metrics-group-right-wide", "query_contract_service_factor - on(service) group_right(team) query_contract_cpu", at, series * 4),
+        instant("sum_by_narrow", "metrics-sum-by-narrow", r#"sum by(host) (query_contract_cpu{host="h0000"})"#, 1),
+        range("sum_by_wide", "metrics-sum-by-wide", "sum by(service) (query_contract_cpu)", at, 8),
+        instant("avg_by_narrow", "metrics-avg-by-narrow", r#"avg by(host) (query_contract_cpu{host="h0000"})"#, 1),
+        range("avg_by_wide", "metrics-avg-by-wide", "avg by(service) (query_contract_cpu)", at, 8),
+        instant("min_by_narrow", "metrics-min-by-narrow", r#"min by(host) (query_contract_cpu{host="h0000"})"#, 1),
+        range("max_by_wide", "metrics-max-by-wide", "max by(service) (query_contract_cpu)", at, 8),
+        instant("count_by_narrow", "metrics-count-by-narrow", r#"count by(host) (query_contract_cpu{host="h0000"})"#, 1),
+        range("group_by_wide", "metrics-group-by-wide", "group by(service) (query_contract_cpu)", at, 8),
+        instant("stdvar_by_narrow", "metrics-stdvar-by-narrow", r#"stdvar by(host) (query_contract_cpu{host="h0000"})"#, 1),
+        range("stddev_by_wide", "metrics-stddev-by-wide", "stddev by(service) (query_contract_cpu)", at, 8),
+        instant("topk_narrow", "metrics-topk-narrow", r#"topk(1, query_contract_cpu{host="h0000"})"#, 1),
+        range("bottomk_wide", "metrics-bottomk-wide", "bottomk by(service) (4, query_contract_cpu)", at, 32),
+        instant("quantile_narrow", "metrics-quantile-narrow", r#"quantile(0.5, query_contract_cpu{host="h0000"})"#, 1),
+        range("quantile_wide", "metrics-quantile-wide", "quantile by(service) (0.95, query_contract_cpu)", at, 8),
+        instant("count_values_narrow", "metrics-count-values-narrow", r#"count_values("value", query_contract_cpu{host="h0000"})"#, 1),
+        range("count_values_wide", "metrics-count-values-wide", r#"count_values by(service) ("value", query_contract_cpu)"#, at, series * 4),
+        instant("range_vector_narrow", "metrics-range-vector-narrow", r#"query_contract_cpu{host="h0000"}[5m]"#, 1),
+        instant("range_vector_wide", "metrics-range-vector-wide", "query_contract_cpu[5m]", series),
+        instant("duration_range_vector_narrow", "metrics-duration-range-vector-narrow", r#"query_contract_cpu{host="h0000"}[5m250ms]"#, 1),
+        instant("duration_range_vector_wide", "metrics-duration-range-vector-wide", "query_contract_cpu[5m250ms]", series),
+        MetricSpec { key: "scalar_instant".to_owned(), name: "metrics-scalar-instant".to_owned(), request: MetricRequest::Instant("NaN".to_owned()), cardinality: Cardinality::Scalar, expected: 1 },
+        MetricSpec { key: "scalar_range_11000".to_owned(), name: "metrics-scalar-range-limit".to_owned(), request: MetricRequest::Range { expression: "NaN".to_owned(), start: at, end: at + 10_999, step: "1".to_owned() }, cardinality: Cardinality::ResultSeries, expected: 1 },
+        MetricSpec { key: "string_instant".to_owned(), name: "metrics-string-instant".to_owned(), request: MetricRequest::Instant(r#""contract\nvalue""#.to_owned()), cardinality: Cardinality::String, expected: 1 },
+        MetricSpec { key: "string_64k".to_owned(), name: "metrics-string-64k".to_owned(), request: MetricRequest::InstantPost(format!("\"{}\"", "x".repeat(65_536))), cardinality: Cardinality::String, expected: 1 },
+        MetricSpec { key: "grid_lookback_narrow".to_owned(), name: "metrics-grid-lookback-narrow".to_owned(), request: MetricRequest::Grid(r#"query_contract_cpu{host="h0000"}"#.to_owned()), cardinality: Cardinality::ResultSeries, expected: 1 },
+        MetricSpec { key: "grid_lookback_wide".to_owned(), name: "metrics-grid-lookback-wide".to_owned(), request: MetricRequest::Grid("query_contract_cpu".to_owned()), cardinality: Cardinality::ResultSeries, expected: series },
+        MetricSpec { key: "error_narrow".to_owned(), name: "metrics-error-narrow".to_owned(), request: MetricRequest::Expected { path: "/prometheus/api/v1/query_range?query=1&start=0&end=1&step=bad".to_owned(), body: None, status: 400, contains: None }, cardinality: Cardinality::BadData, expected: 1 },
+        MetricSpec { key: "error_64k".to_owned(), name: "metrics-error-64k".to_owned(), request: MetricRequest::Expected { path: "/prometheus/api/v1/query".to_owned(), body: Some(url::form_urlencoded::Serializer::new(String::new()).append_pair("query", "up").append_pair("extra", &"x".repeat(65_536)).finish().into_bytes()), status: 400, contains: None }, cardinality: Cardinality::BadData, expected: 1 },
+        MetricSpec { key: "near_result_limit".to_owned(), name: "metrics-result-limit-near".to_owned(), request: MetricRequest::Range { expression: "query_contract_cpu".to_owned(), start: at - 194, end: at, step: "1".to_owned() }, cardinality: Cardinality::MatrixPoints, expected: series * 195 },
+    ]);
+    let over = reqwest::Url::parse_with_params(
+        "http://unused/api/v1/query_range",
+        [
+            ("query", "query_contract_cpu"),
+            ("start", &(at - 195).to_string()),
+            ("end", &at.to_string()),
+            ("step", "1"),
+        ],
+    )
+    .unwrap();
+    specs.push(MetricSpec {
+        key: "result_limit_rejected".to_owned(),
+        name: "metrics-result-limit-rejected".to_owned(),
+        request: MetricRequest::Expected {
+            path: format!("/api/v1/query_range?{}", over.query().unwrap()),
+            body: None,
+            status: 422,
+            contains: Some("result-point limit of 100000".to_owned()),
+        },
+        cardinality: Cardinality::ExecutionError,
+        expected: 1,
+    });
+    specs
+}
+
+fn append_json_line(payload: &mut Vec<u8>, value: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *payload, value)?;
+    payload.push(b'\n');
+    Ok(())
+}
+
+fn selected_stats(stats: &Value, keys: &[&str]) -> Value {
+    let mut selected = Map::new();
+    for key in keys {
+        selected.insert(
+            (*key).to_owned(),
+            stats.get(*key).cloned().unwrap_or(Value::Null),
+        );
+    }
+    Value::Object(selected)
+}
+
+fn metrics_evidence(context: &SignalEvidence<'_>, series: usize, points: usize) -> Result<Value> {
+    let expected_commit = git_commit(context.root)?;
+    let identity = require_binary_identity(context.binary, &expected_commit)?;
+    let mut server = Server::start(
+        context.binary,
+        context.extension,
+        &context.directory.join("metrics.db"),
+        &[
+            ("TIMELESS_AUTH_MODE", "disabled"),
+            ("TIMELESS_METRICS_FLUSH_INTERVAL_SECS", "3600"),
+            ("TIMELESS_METRICS_COMPACT_INTERVAL_SECS", "3600"),
+            ("TIMELESS_METRICS_RETENTION_INTERVAL_SECS", "3600"),
+        ],
+        context.client,
+    )?;
+    let result = (|| {
+        let base_ts = 1_800_000_000_i64;
+        let timestamps: Vec<_> = (0..points)
+            .map(|point| (base_ts + point as i64 * 10) * 1_000)
+            .collect();
+        let mut payload = Vec::new();
+        for index in 0..series {
+            append_json_line(
+                &mut payload,
+                &json!({
+                    "metric": {"__name__": "query_contract_cpu", "host": format!("h{index:04}"), "service": if index % 2 == 0 { "api" } else { "worker" }},
+                    "values": (0..points).map(|point| (index + point) as f64).collect::<Vec<_>>(),
+                    "timestamps": timestamps,
+                }),
+            )?;
+        }
+        for (service, team, value) in [("api", "frontend", 2.0), ("worker", "backend", 3.0)] {
+            append_json_line(
+                &mut payload,
+                &json!({
+                    "metric": {"__name__": "query_contract_service_factor", "service": service, "team": team},
+                    "values": vec![value; points], "timestamps": timestamps,
+                }),
+            )?;
+        }
+        let selector_names = 64;
+        for index in 0..selector_names {
+            append_json_line(
+                &mut payload,
+                &json!({
+                    "metric": {"__name__": format!("query_selector_metric_{index:04}"), "selector_group": "wide", "selector_id": format!("s{index:04}")},
+                    "values": (0..points).map(|point| (index + point) as f64).collect::<Vec<_>>(), "timestamps": timestamps,
+                }),
+            )?;
+        }
+        let histogram_bounds = [("0.1", 10.0), ("0.5", 20.0), ("1", 30.0), ("+Inf", 40.0)];
+        for index in 0..series {
+            for (bound, count) in histogram_bounds {
+                append_json_line(
+                    &mut payload,
+                    &json!({
+                        "metric": {"__name__": "query_contract_histogram_bucket", "host": format!("h{index:04}"), "service": if index % 2 == 0 { "api" } else { "worker" }, "le": bound},
+                        "values": [count + index as f64], "timestamps": [timestamps[points - 1]],
+                    }),
+                )?;
+            }
+        }
+        let started = Instant::now();
+        let (status, body) = request_bytes(
+            context.client,
+            reqwest::Method::POST,
+            &format!("{}/api/v1/import", server.base),
+            Some((&payload, "application/json")),
+        )?;
+        let admission_ns = started.elapsed().as_nanos();
+        if status != 204 {
+            bail!(
+                "metrics import returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let started = Instant::now();
+        let (status, body) = request_bytes(
+            context.client,
+            reqwest::Method::POST,
+            &format!("{}/api/v1/flush", server.base),
+            Some((&[], "application/json")),
+        )?;
+        let durable_ns = started.elapsed().as_nanos();
+        if status != 200 {
+            bail!(
+                "metrics flush returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let after_flush = stats(context.client, &server.base, "/select/metrics/stats")?;
+        let expected_points =
+            (series + selector_names + 2) * points + series * histogram_bounds.len();
+        if after_flush.get("completed_points").and_then(Value::as_u64)
+            != Some(expected_points as u64)
+            || after_flush.get("queued_points").and_then(Value::as_u64) != Some(0)
+        {
+            bail!("metrics durable watermark mismatch: {after_flush}");
+        }
+        let at = base_ts + (points as i64 - 1) * 10;
+        let mut queries = Map::new();
+        for spec in metric_specs(series, selector_names, at) {
+            let mut request = || metric_request(context.client, &server.base, at, &spec.request);
+            let mut stat = || stats(context.client, &server.base, "/select/metrics/stats");
+            let evidence = measure(
+                &spec.name,
+                &mut request,
+                spec.cardinality,
+                spec.expected,
+                &mut stat,
+                context.iterations,
+                context.warmup,
+            )?;
+            queries.insert(spec.key.to_owned(), evidence);
+        }
+
+        let limit_series = 25;
+        let limit_points = 4_001;
+        let limit_timestamps: Vec<_> = (0..limit_points)
+            .map(|point| (base_ts + point as i64) * 1_000)
+            .collect();
+        let mut limit_payload = Vec::new();
+        for index in 0..limit_series {
+            append_json_line(
+                &mut limit_payload,
+                &json!({
+                    "metric": {"__name__": "query_limit_work", "host": format!("limit-{index:02}")},
+                    "values": (0..limit_points).map(|point| (index + point) as f64).collect::<Vec<_>>(), "timestamps": limit_timestamps,
+                }),
+            )?;
+        }
+        let started = Instant::now();
+        let (status, body) = request_bytes(
+            context.client,
+            reqwest::Method::POST,
+            &format!("{}/api/v1/import", server.base),
+            Some((&limit_payload, "application/json")),
+        )?;
+        let limit_admission_ns = started.elapsed().as_nanos();
+        if status != 204 {
+            bail!(
+                "limit fixture import returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let started = Instant::now();
+        let (status, body) = request_bytes(
+            context.client,
+            reqwest::Method::POST,
+            &format!("{}/api/v1/flush", server.base),
+            Some((&[], "application/json")),
+        )?;
+        let limit_durable_ns = started.elapsed().as_nanos();
+        if status != 200 {
+            bail!(
+                "limit fixture flush returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let after_limit_flush = stats(context.client, &server.base, "/select/metrics/stats")?;
+        let limit_logical_points = limit_series * limit_points;
+        if after_limit_flush
+            .get("completed_points")
+            .and_then(Value::as_u64)
+            != Some((expected_points + limit_logical_points) as u64)
+        {
+            bail!("limit fixture durable watermark mismatch: {after_limit_flush}");
+        }
+        let query = reqwest::Url::parse_with_params(
+            "http://unused/api/v1/query",
+            [
+                ("query", "query_limit_work[4001s]"),
+                ("time", &(base_ts + limit_points as i64 - 1).to_string()),
+            ],
+        )?;
+        let work_spec = MetricSpec {
+            key: "work_limit_rejected".to_owned(),
+            name: "metrics-work-limit-rejected".to_owned(),
+            request: MetricRequest::Expected {
+                path: format!("/api/v1/query?{}", query.query().unwrap()),
+                body: None,
+                status: 422,
+                contains: Some("work point limit 100000 exceeded".to_owned()),
+            },
+            cardinality: Cardinality::ExecutionError,
+            expected: 1,
+        };
+        let mut request = || metric_request(context.client, &server.base, at, &work_spec.request);
+        let mut stat = || stats(context.client, &server.base, "/select/metrics/stats");
+        let work_evidence = measure(
+            &work_spec.name,
+            &mut request,
+            work_spec.cardinality,
+            work_spec.expected,
+            &mut stat,
+            context.iterations,
+            context.warmup,
+        )?;
+        if work_evidence
+            .pointer("/stats_delta/raw_batch_query_payload_bytes_read")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            != 0
+        {
+            bail!("work-limit rejection read persisted payload bytes before failing");
+        }
+        queries.insert(work_spec.key.to_owned(), work_evidence);
+        let final_stats = stats(context.client, &server.base, "/select/metrics/stats")?;
+        let hwm = hwm_kib(server.pid())?;
+        Ok(json!({
+            "build": identity,
+            "fixture": {"exact_metric_series": series, "selector_metric_names": selector_names, "points_per_series": points, "logical_points": expected_points},
+            "ingestion": {"wire_bytes": payload.len(), "admission_ns": admission_ns, "durability_barrier_ns": durable_ns, "completed_points": after_flush["completed_points"], "failed_points": after_flush["failed_points"], "queued_points": after_flush["queued_points"]},
+            "limit_fixture_ingestion": {"series": limit_series, "points_per_series": limit_points, "logical_points": limit_logical_points, "wire_bytes": limit_payload.len(), "admission_ns": limit_admission_ns, "durability_barrier_ns": limit_durable_ns, "completed_points_after": after_limit_flush["completed_points"], "failed_points_after": after_limit_flush["failed_points"], "queued_points_after": after_limit_flush["queued_points"]},
+            "queries": queries,
+            "storage": selected_stats(&final_stats, &["bytes_on_disk", "sqlite_index_bytes", "database_file_bytes", "database_wal_bytes", "database_shm_bytes", "physical_database_bytes", "buffer_memory_bytes", "chunks", "series"]),
+            "rss_hwm_kib": hwm,
+            "limits": {"points_per_series": 11_000, "result_points": 100_000, "work_points": 100_000, "response_bytes": 16 * 1024 * 1024, "default_subquery_step_ms": 15_000, "deadline_ms": 30_000, "contract_test": "session_two_promql_limits_bound_grid_work_results_response_and_deadline"},
+            "cancellation": {"cancelled_requests": final_stats["api_read_cancelled"], "contract_test": "session_four_cancels_dropped_promql_requests_and_reuses_the_reader"},
+        }))
+    })();
+    let shutdown = server.shutdown(true);
+    match (result, shutdown) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> {
+    let expected_commit = git_commit(context.root)?;
+    let identity = require_binary_identity(context.binary, &expected_commit)?;
+    let mut server = Server::start(
+        context.binary,
+        context.extension,
+        &context.directory.join("logs.db"),
+        &[
+            ("TIMELESS_AUTH_MODE", "disabled"),
+            ("TIMELESS_LOGS_FLUSH_INTERVAL_SECS", "3600"),
+            ("TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS", "3600"),
+        ],
+        context.client,
+    )?;
+    let result = (|| {
+        let severities = [
+            "debug",
+            "info",
+            "notice",
+            "warning",
+            "error",
+            "critical",
+            "alert",
+            "emergency",
+        ];
+        let base_ts = 1_800_000_000_000_000_i64;
+        let mut payload = Vec::new();
+        for index in 0..entries {
+            append_json_line(
+                &mut payload,
+                &json!({
+                    "_time": base_ts + index as i64, "_msg": format!("query contract event {index}"),
+                    "level": severities[index % severities.len()], "service": if index % 4 == 0 { "api" } else { "worker" },
+                    "host": format!("h{:02}", index % 64), "status": if index % 8 == 4 { 500 } else { 200 },
+                    "context": {"retry": index % 3 == 0, "attempt": index % 5},
+                }),
+            )?;
+        }
+        let started = Instant::now();
+        let (status, body) = request_bytes(
+            context.client,
+            reqwest::Method::POST,
+            &format!("{}/insert/jsonline", server.base),
+            Some((&payload, "application/x-ndjson")),
+        )?;
+        let admission_ns = started.elapsed().as_nanos();
+        if status != 204 {
+            bail!(
+                "logs ingest returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let started = Instant::now();
+        let (status, body) = request_bytes(
+            context.client,
+            reqwest::Method::GET,
+            &format!("{}/api/v1/flush", server.base),
+            None,
+        )?;
+        let durable_ns = started.elapsed().as_nanos();
+        if status != 200 {
+            bail!(
+                "logs flush returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let after_flush = stats(context.client, &server.base, "/select/logsql/stats")?;
+        if after_flush.get("completed_entries").and_then(Value::as_u64) != Some(entries as u64)
+            || after_flush.get("queued_entries").and_then(Value::as_u64) != Some(0)
+        {
+            bail!("logs durable watermark mismatch: {after_flush}");
+        }
+        let mut queries = Map::new();
+        for (key, name, expression, expected) in [
+            (
+                "narrow",
+                "logs-narrow",
+                "level:error service:api | limit 10000",
+                entries / severities.len(),
+            ),
+            ("wide", "logs-wide", "* | limit 10000", entries),
+        ] {
+            let mut request = || {
+                let body = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("query", expression)
+                    .finish();
+                let (status, response) = request_bytes(
+                    context.client,
+                    reqwest::Method::POST,
+                    &format!("{}/select/logsql/query", server.base),
+                    Some((body.as_bytes(), "application/x-www-form-urlencoded")),
+                )?;
+                if status != 200 {
+                    bail!(
+                        "LogsQL returned {status}: {}",
+                        String::from_utf8_lossy(&response)
+                    );
+                }
+                Ok(response)
+            };
+            let mut stat = || stats(context.client, &server.base, "/select/logsql/stats");
+            queries.insert(
+                key.to_owned(),
+                measure(
+                    name,
+                    &mut request,
+                    Cardinality::Ndjson,
+                    expected,
+                    &mut stat,
+                    context.iterations,
+                    context.warmup,
+                )?,
+            );
+        }
+        let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
+        let hwm = hwm_kib(server.pid())?;
+        Ok(json!({
+            "build": identity,
+            "fixture": {"logical_entries": entries, "severities": severities, "typed_nested_metadata": true},
+            "ingestion": {"wire_bytes": payload.len(), "admission_ns": admission_ns, "durability_barrier_ns": durable_ns, "completed_entries": after_flush["completed_entries"], "queued_entries": after_flush["queued_entries"]},
+            "queries": queries,
+            "storage": selected_stats(&final_stats, &["total_bytes", "disk_size", "index_size", "database_file_bytes", "database_wal_bytes", "database_shm_bytes", "physical_database_bytes", "raw_blocks", "compressed_blocks", "buffered_entries"]),
+            "rss_hwm_kib": hwm,
+            "cancellation": {"contract_test": "HTTP disconnect coverage is added per LogsQL evaluator row"},
+        }))
+    })();
+    let shutdown = server.shutdown(true);
+    match (result, shutdown) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn uname(flag: &str) -> String {
+    Command::new("uname")
+        .arg(flag)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default()
+}
+
+pub(crate) fn run(root: &Path, args: EvidenceArgs) -> Result<()> {
+    if args.iterations == 0
+        || args.metric_series == 0
+        || args.metric_points == 0
+        || args.log_entries == 0
+    {
+        bail!("workload sizes and iterations must be positive; warmup must be non-negative");
+    }
+    require_clean_worktree(root)?;
+    let extension = fs::canonicalize(root.join(&args.extension))
+        .with_context(|| format!("missing release artifact: {}", args.extension.display()))?;
+    let metrics_binary = fs::canonicalize(root.join(&args.metrics_binary)).with_context(|| {
+        format!(
+            "missing release artifact: {}",
+            args.metrics_binary.display()
+        )
+    })?;
+    let logs_binary = fs::canonicalize(root.join(&args.logs_binary))
+        .with_context(|| format!("missing release artifact: {}", args.logs_binary.display()))?;
+    let expected_commit = git_commit(root)?;
+    let extension_build = extension_identity(&extension, &expected_commit)?;
+    let temporary = TempDir::with_prefix("timeless-query-evidence-")?;
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
+    let metrics_context = SignalEvidence {
+        root,
+        extension: &extension,
+        binary: &metrics_binary,
+        directory: temporary.path(),
+        iterations: args.iterations,
+        warmup: args.warmup,
+        client: &client,
+    };
+    let logs_context = SignalEvidence {
+        binary: &logs_binary,
+        ..metrics_context
+    };
+    let evidence = json!({
+        "schema_version": 1,
+        "captured_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+        "git_commit": expected_commit,
+        "extension_build": extension_build,
+        "host": {"system": uname("-s"), "release": uname("-r"), "machine": uname("-m"), "processor": uname("-p")},
+        "workload": {"iterations": args.iterations, "warmup": args.warmup, "single_client": true, "loopback_http": true, "release_build": true},
+        "metrics": metrics_evidence(&metrics_context, args.metric_series, args.metric_points)?,
+        "logs": logs_evidence(&logs_context, args.log_entries)?,
+    });
+    let output = root.join(&args.output);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut encoded = serde_json::to_string_pretty(&evidence)?;
+    encoded.push('\n');
+    fs::write(&output, encoded)?;
+    println!("{}", output.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nearest_rank_percentiles_are_stable() {
+        let values: Vec<u128> = (1..=100).collect();
+        assert_eq!(percentile(&values, 0.50), 50);
+        assert_eq!(percentile(&values, 0.95), 95);
+        assert_eq!(percentile(&values, 0.99), 99);
+    }
+
+    #[test]
+    fn numeric_delta_omits_unchanged_gauges_and_strings() {
+        assert_eq!(
+            numeric_delta(
+                &json!({"count": 2, "bytes": 10, "module": "logs", "steady": 4}),
+                &json!({"count": 5, "bytes": 22, "module": "logs", "steady": 4}),
+            ),
+            json!({"count": 3, "bytes": 12})
+        );
+    }
+
+    #[test]
+    fn cardinality_parsers_reject_data_loss() {
+        assert_eq!(
+            cardinality(
+                br#"{"status":"success","data":{"result":[{},{}]}}"#,
+                Cardinality::ResultSeries
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(cardinality(b"{}\n{}\n", Cardinality::Ndjson).unwrap(), 2);
+        assert!(cardinality(br#"{"status":"error"}"#, Cardinality::ResultSeries).is_err());
+        assert_eq!(
+            cardinality(
+                br#"{"status":"success","data":{"resultType":"scalar","result":[2,"NaN"]}}"#,
+                Cardinality::Scalar
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn stale_binary_and_extension_identities_are_rejected() {
+        let identity = json!({"commit": "old", "name": "test"});
+        assert!(validate_build_identity(&identity, "new", "binary")
+            .unwrap_err()
+            .to_string()
+            .contains("does not match evidence source"));
+        assert!(validate_build_identity(&identity, "new", "extension")
+            .unwrap_err()
+            .to_string()
+            .contains("does not match evidence source"));
+    }
+
+    #[test]
+    fn metric_spec_keys_are_unique_and_include_histograms() {
+        let specs = metric_specs(512, 64, 1_800_000_310);
+        let mut keys = std::collections::BTreeSet::new();
+        for spec in &specs {
+            assert!(keys.insert(spec.key.as_str()), "duplicate {}", spec.key);
+        }
+        // The work-limit query is appended only after its 100,025-point
+        // fixture crosses the second durability barrier.
+        assert!(keys.insert("work_limit_rejected"));
+        assert_eq!(keys.len(), 131);
+        assert!(keys.contains("histogram_quantile_narrow"));
+        assert!(keys.contains("histogram_quantile_wide"));
+        assert!(keys.contains("result_limit_rejected"));
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let prior: Value = serde_json::from_slice(
+            &fs::read(root.join("docs/evidence/2026-08-04_session8_pql_f18.json")).unwrap(),
+        )
+        .unwrap();
+        let mut expected: std::collections::BTreeSet<&str> = prior
+            .pointer("/metrics/queries")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        expected.insert("histogram_quantile_narrow");
+        expected.insert("histogram_quantile_wide");
+        assert_eq!(keys, expected);
+    }
+}

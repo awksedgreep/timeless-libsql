@@ -1034,6 +1034,36 @@ The parameterized direct SQLite/libSQL foundation, including leap-year and
 zero-argument forms, is
 [`SQL-PROM-053`](QUERY_SQL_EQUIVALENTS.md#sql-prom-053-day_of_year-days_in_month-month-and-year).
 
+Classic float histograms use their ordinary cumulative `*_bucket` series:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+)
+```
+
+Buckets are grouped by every label except `le` while retaining the metric name
+as an internal family discriminator; both `le` and the metric name are removed
+from the result. Equal numeric bounds are coalesced, material decreases are
+made monotonic, relative deltas below Prometheus's `1e-12` tolerance are
+ignored, and ranks interpolate linearly. A missing `+Inf` bucket, fewer than
+two bounds, or a zero total returns NaN. Invalid quantiles retain Prometheus's
+NaN/infinity result behavior. Malformed or absent `le` series are excluded.
+If distinct metric families would produce the same visible label set at one
+step after name removal, evaluation fails instead of emitting an invalid
+duplicate vector.
+All bucket points and the scalar quantile expression count toward the bounded
+work limit, and the operation composes in Rust without another storage read.
+
+This function applies only to classic float bucket series. Native histograms
+remain deferred until the extension has an explicit typed storage model.
+Direct SQLite/libSQL users can execute the parameterized bounded-grid recipe
+in
+[`SQL-PROM-054`](QUERY_SQL_EQUIVALENTS.md#sql-prom-054-histogram_quantile-over-classic-buckets),
+including the documented distinction between its ordinary-SQL foundation and
+the API's complete Prometheus float/tolerance behavior.
+
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

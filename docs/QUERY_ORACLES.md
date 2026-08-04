@@ -71,16 +71,17 @@ run every prior oracle regression, and update the matrices in the same commit.
 Validate the machine-readable pins without network access:
 
 ```bash
-python3 tools/query_oracles.py validate
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- \
+  oracle validate
 ```
 
 When deliberately refreshing oracle evidence, probe the three immutable
 containers and execute the baseline Prometheus fixture:
 
 ```bash
-python3 tools/query_oracles.py probe
-python3 tools/query_oracles.py prometheus-smoke
-python3 tools/query_oracles.py prometheus-api
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle probe
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle prometheus-smoke
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle prometheus-api
 ```
 
 The manifest is

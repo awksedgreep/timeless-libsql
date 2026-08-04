@@ -3158,6 +3158,162 @@
       "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
       "expected_metric": {},
       "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "PQL-H01-grouping-interpolation-and-name-policy",
+      "query": "histogram_quantile(0.5, oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle"}, "value": 0.5},
+        {"metric": {"host": "b", "job": "oracle"}, "value": 0.3666666666666667}
+      ]
+    },
+    {
+      "id": "PQL-H01-infinite-bucket-returns-second-highest-bound",
+      "query": "histogram_quantile(0.9, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-H01-range-grid",
+      "query": "histogram_quantile(0.5, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": [0.5, 0.5, 0.5]
+    },
+    {
+      "id": "PQL-H01-invalid-quantiles",
+      "query": "histogram_quantile(-1, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": ["-Inf"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got -1 (1:20)"
+      ]
+    },
+    {
+      "id": "PQL-H01-above-one-quantile",
+      "query": "histogram_quantile(2, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": ["+Inf"]
+    },
+    {
+      "id": "PQL-H01-nan-quantile",
+      "query": "histogram_quantile(NaN, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H01-missing-infinite-bucket",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"missing_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "missing_inf", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H01-one-bucket",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"only_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "only_inf", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H01-zero-total",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"zero_total\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "zero_total", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H01-first-nonpositive-bound",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"negative_first\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "negative_first", "job": "oracle"},
+      "expected_values": [-5]
+    },
+    {
+      "id": "PQL-H01-first-positive-bound-interpolates-from-zero",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"positive_first\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "positive_first", "job": "oracle"},
+      "expected_values": [5]
+    },
+    {
+      "id": "PQL-H01-material-decrease-forces-monotonicity",
+      "query": "histogram_quantile(0.4, oracle_histogram_special_bucket{case=\"decrease\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "decrease", "job": "oracle"},
+      "expected_values": [0.8],
+      "expected_infos": [
+        "PromQL info: input to histogram_quantile needed to be fixed for monotonicity (see https://prometheus.io/docs/prometheus/latest/querying/functions/#histogram_quantile), from buckets 2 to 2, with a max diff of 1, over 1 samples from {evaluation_rfc3339} to {evaluation_rfc3339} (1:25)"
+      ]
+    },
+    {
+      "id": "PQL-H01-tiny-delta-is-ignored",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"tiny_delta\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "tiny_delta", "job": "oracle"},
+      "expected_values": [2.5]
+    },
+    {
+      "id": "PQL-H01-equal-parsed-bounds-are-coalesced",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"duplicate_bound\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "duplicate_bound", "job": "oracle"},
+      "expected_values": [0.7142857142857143]
+    },
+    {
+      "id": "PQL-H01-nan-cumulative-count",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"nan_count\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "nan_count", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H01-infinite-total-falls-in-infinite-bucket",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"infinite_total\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "infinite_total", "job": "oracle"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-H01-infinite-finite-bucket-interpolation",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"infinite_finite\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "infinite_finite", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H01-malformed-and-absent-bounds-are-skipped",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=~\"malformed_bound|absent_bound\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "malformed_bound", "job": "oracle"}, "value": 1}
+      ],
+      "expected_warnings": [
+        "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bogus\" (1:25)",
+        "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"\" (1:25)"
+      ]
+    },
+    {
+      "id": "PQL-H01-composes-with-rate-and-aggregation",
+      "query": "histogram_quantile(0.5, sum by (host, le) (rate(oracle_histogram_bucket[20s])))",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"host": "a"}, "value": 0.5},
+        {"metric": {"host": "b"}, "value": 0.36666666666666703}
+      ]
+    },
+    {
+      "id": "PQL-H01-composes-as-an-instant-vector",
+      "query": "abs(histogram_quantile(0.5, oracle_histogram_bucket{host=\"a\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": [0.5]
     }
   ],
   "operator_error_cases": [
@@ -3344,6 +3500,38 @@
       "status": 400,
       "error_type": "bad_data",
       "error_contains": "expected at most 1 argument"
+    },
+    {
+      "id": "PQL-H01-quantile-type-errors",
+      "query": "histogram_quantile(vector(0.5), oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type scalar"
+    },
+    {
+      "id": "PQL-H01-bucket-type-errors",
+      "query": "histogram_quantile(0.5, 1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-H01-arity-errors",
+      "query": "histogram_quantile(0.5)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected 2 argument"
+    },
+    {
+      "id": "PQL-H01-output-family-collision-errors",
+      "query": "histogram_quantile(0.5, {__name__=~\"oracle_histogram(_other)?_bucket\",host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "vector cannot contain metrics with the same labelset"
     }
   ],
   "cases": [

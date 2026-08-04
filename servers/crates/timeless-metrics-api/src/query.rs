@@ -394,6 +394,7 @@ pub(crate) enum PromPlan {
     Time,
     Timestamp(PromTimestampPlan),
     Calendar(PromCalendarPlan),
+    HistogramQuantile(PromHistogramQuantilePlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -563,6 +564,12 @@ pub(crate) struct PromConversionPlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PromTimestampPlan {
+    inner: Box<PromPlan>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromHistogramQuantilePlan {
+    quantile: Box<PromPlan>,
     inner: Box<PromPlan>,
 }
 
@@ -957,6 +964,7 @@ impl PromPlan {
             Self::Time => PromValueType::Scalar,
             Self::Timestamp(_) => PromValueType::Vector,
             Self::Calendar(_) => PromValueType::Vector,
+            Self::HistogramQuantile(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1399,6 +1407,25 @@ fn lower_promql_expr(
                 op,
                 inner: Box::new(inner),
                 parameters,
+            }))
+        }
+        promql::Expr::Call(call) if call.func.name == "histogram_quantile" => {
+            let [quantile, argument] = call.args.args.as_slice() else {
+                return Err(
+                    "histogram_quantile requires a scalar quantile and an instant vector".into(),
+                );
+            };
+            let quantile = lower_promql_expr((**quantile).clone(), lookback, depth + 1)?;
+            if quantile.value_type() != PromValueType::Scalar {
+                return Err("histogram_quantile quantile must be a scalar".into());
+            }
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err("histogram_quantile buckets must be an instant vector".into());
+            }
+            Ok(PromPlan::HistogramQuantile(PromHistogramQuantilePlan {
+                quantile: Box::new(quantile),
+                inner: Box::new(inner),
             }))
         }
         promql::Expr::Call(call) if call.func.name == "label_replace" => {
@@ -1991,6 +2018,7 @@ fn lower_promql_subquery(
             | PromPlan::Conversion(_)
             | PromPlan::Timestamp(_)
             | PromPlan::Calendar(_)
+            | PromPlan::HistogramQuantile(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -3446,6 +3474,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::HistogramQuantile(histogram) => execute_prometheus_histogram_quantile(
+            conn,
+            features,
+            histogram,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -4364,6 +4405,250 @@ fn execute_prometheus_function(
         limits,
         cancelled,
     )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PromClassicBucket {
+    upper_bound: f64,
+    count: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_histogram_quantile(
+    conn: &Connection,
+    features: QueryFeatures,
+    histogram: &PromHistogramQuantilePlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let quantile = execute_prometheus(
+        conn,
+        features,
+        &histogram.quantile,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let buckets = execute_prometheus(
+        conn,
+        features,
+        &histogram.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let frame_bytes = quantile.frame_bytes.saturating_add(buckets.frame_bytes);
+    let intermediate_points = quantile
+        .intermediate_points
+        .saturating_add(quantile.points)
+        .saturating_add(buckets.intermediate_points)
+        .saturating_add(buckets.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let IntermediateValue::Scalar(quantiles) = decode_prometheus_intermediate(
+        &quantile.body,
+        PromValueType::Scalar,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("histogram quantile type was checked while lowering")
+    };
+    let IntermediateValue::Vector(series) = decode_prometheus_intermediate(
+        &buckets.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("histogram bucket type was checked while lowering")
+    };
+    let quantiles: BTreeMap<i64, f64> = quantiles.into_iter().collect();
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, Vec<PromClassicBucket>>> =
+        BTreeMap::new();
+    for item in series {
+        check_cancelled(cancelled)?;
+        let Some(upper_bound) = item
+            .labels
+            .get("le")
+            .and_then(|value| parse_prometheus_bucket_bound(value).ok())
+        else {
+            // Prometheus emits an optional warning for a missing or malformed
+            // bound. Exact warning envelopes are tracked separately by
+            // PQL-S23; malformed series do not participate in the result.
+            continue;
+        };
+        let mut labels = item.labels;
+        labels.remove("le");
+        let group = groups.entry(labels).or_default();
+        for (timestamp, count) in item.points {
+            check_cancelled(cancelled)?;
+            group
+                .entry(timestamp)
+                .or_default()
+                .push(PromClassicBucket { upper_bound, count });
+        }
+    }
+
+    let mut output = Vec::with_capacity(groups.len());
+    for (mut labels, steps) in groups {
+        check_cancelled(cancelled)?;
+        // The metric name separates bucket families while grouping but every
+        // histogram_quantile result is nameless.
+        labels.remove("__name__");
+        let mut points = Vec::with_capacity(steps.len());
+        for (timestamp, buckets) in steps {
+            check_cancelled(cancelled)?;
+            let quantile = quantiles.get(&timestamp).copied().ok_or_else(|| {
+                "histogram_quantile scalar is missing an evaluation timestamp".to_string()
+            })?;
+            points.push((
+                timestamp,
+                prometheus_classic_bucket_quantile(quantile, buckets, cancelled)?,
+            ));
+        }
+        if !points.is_empty() {
+            output.push(IntermediateSeries { labels, points });
+        }
+    }
+    let output = normalize_prometheus_vector(output, cancelled)?;
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(output),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn parse_prometheus_bucket_bound(value: &str) -> Result<f64, ()> {
+    match value {
+        "NaN" => Ok(f64::NAN),
+        "+Inf" | "Inf" | "+Infinity" | "Infinity" => Ok(f64::INFINITY),
+        "-Inf" | "-Infinity" => Ok(f64::NEG_INFINITY),
+        _ if value
+            .bytes()
+            .any(|byte| byte.is_ascii_alphabetic() && !matches!(byte, b'e' | b'E')) =>
+        {
+            Err(())
+        }
+        _ => value.parse::<f64>().map_err(|_| ()),
+    }
+}
+
+fn prometheus_almost_equal(lhs: f64, rhs: f64, tolerance: f64) -> bool {
+    if lhs == rhs {
+        return true;
+    }
+    let lhs_abs = lhs.abs();
+    let rhs_abs = rhs.abs();
+    let sum = lhs_abs + rhs_abs;
+    let difference = (lhs - rhs).abs();
+    if lhs == 0.0 || rhs == 0.0 || sum < f64::MIN_POSITIVE {
+        difference < tolerance * f64::MIN_POSITIVE
+    } else {
+        difference / sum.min(f64::MAX) < tolerance
+    }
+}
+
+fn prometheus_classic_bucket_quantile(
+    quantile: f64,
+    mut buckets: Vec<PromClassicBucket>,
+    cancelled: &AtomicBool,
+) -> Result<f64, String> {
+    if quantile.is_nan() {
+        return Ok(f64::NAN);
+    }
+    if quantile < 0.0 {
+        return Ok(f64::NEG_INFINITY);
+    }
+    if quantile > 1.0 {
+        return Ok(f64::INFINITY);
+    }
+    buckets.sort_by(|lhs, rhs| {
+        if lhs.upper_bound < rhs.upper_bound {
+            std::cmp::Ordering::Less
+        } else if rhs.upper_bound < lhs.upper_bound {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    if !buckets
+        .last()
+        .is_some_and(|bucket| bucket.upper_bound == f64::INFINITY)
+    {
+        return Ok(f64::NAN);
+    }
+
+    let mut coalesced: Vec<PromClassicBucket> = Vec::with_capacity(buckets.len());
+    for bucket in buckets {
+        check_cancelled(cancelled)?;
+        if let Some(previous) = coalesced
+            .last_mut()
+            .filter(|previous| previous.upper_bound == bucket.upper_bound)
+        {
+            previous.count += bucket.count;
+        } else {
+            coalesced.push(bucket);
+        }
+    }
+    let mut previous = coalesced.first().map_or(0.0, |bucket| bucket.count);
+    for bucket in coalesced.iter_mut().skip(1) {
+        check_cancelled(cancelled)?;
+        if bucket.count == previous {
+            continue;
+        }
+        if prometheus_almost_equal(bucket.count, previous, 1e-12) || bucket.count < previous {
+            bucket.count = previous;
+        }
+        previous = bucket.count;
+    }
+    if coalesced.len() < 2 {
+        return Ok(f64::NAN);
+    }
+    let observations = coalesced.last().expect("nonempty buckets").count;
+    if observations == 0.0 {
+        return Ok(f64::NAN);
+    }
+    let mut rank = quantile * observations;
+    let bucket_index =
+        coalesced[..coalesced.len() - 1].partition_point(|bucket| bucket.count < rank);
+    if bucket_index == coalesced.len() - 1 {
+        return Ok(coalesced[bucket_index - 1].upper_bound);
+    }
+    let bucket = coalesced[bucket_index];
+    if bucket_index == 0 && bucket.upper_bound <= 0.0 {
+        return Ok(bucket.upper_bound);
+    }
+    let (lower_bound, lower_count) = if bucket_index == 0 {
+        (0.0, 0.0)
+    } else {
+        let lower = coalesced[bucket_index - 1];
+        (lower.upper_bound, lower.count)
+    };
+    rank -= lower_count;
+    let bucket_count = bucket.count - lower_count;
+    Ok(lower_bound + (bucket.upper_bound - lower_bound) * (rank / bucket_count))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8255,5 +8540,60 @@ mod tests {
             assert_eq!(PromCalendarOp::Month.apply(value), 12.0);
             assert_eq!(PromCalendarOp::Year.apply(value), 292_277_026_596.0);
         }
+    }
+
+    #[test]
+    fn prometheus_classic_histogram_quantile_corrects_precision_and_cancels() {
+        let cancelled = AtomicBool::new(false);
+        let value = prometheus_classic_bucket_quantile(
+            0.5,
+            vec![
+                PromClassicBucket {
+                    upper_bound: 1.0,
+                    count: 1e12,
+                },
+                PromClassicBucket {
+                    upper_bound: 2.0,
+                    count: 1e12 + 0.5,
+                },
+                PromClassicBucket {
+                    upper_bound: 3.0,
+                    count: 2e12,
+                },
+                PromClassicBucket {
+                    upper_bound: f64::INFINITY,
+                    count: 3e12,
+                },
+            ],
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(value, 2.5);
+
+        assert_eq!(parse_prometheus_bucket_bound("+Inf"), Ok(f64::INFINITY));
+        assert_eq!(
+            parse_prometheus_bucket_bound("-Infinity"),
+            Ok(f64::NEG_INFINITY)
+        );
+        assert!(parse_prometheus_bucket_bound("bogus").is_err());
+        assert!(parse_prometheus_bucket_bound("inf").is_err());
+
+        cancelled.store(true, Ordering::Relaxed);
+        let error = prometheus_classic_bucket_quantile(
+            0.5,
+            vec![
+                PromClassicBucket {
+                    upper_bound: 1.0,
+                    count: 1.0,
+                },
+                PromClassicBucket {
+                    upper_bound: f64::INFINITY,
+                    count: 2.0,
+                },
+            ],
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(error.contains("cancelled"), "{error}");
     }
 }
