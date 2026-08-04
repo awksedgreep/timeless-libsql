@@ -3688,6 +3688,16 @@ sample_count = db.execute(
     "'metrics','avg_precision',NULL,30,30,1,30,'count')"
 ).fetchone()[0]
 assert sample_count == 3.0
+sample_presence = db.execute(
+    "SELECT CAST(value>0 AS REAL) FROM timeless_window("
+    "'metrics','avg_precision',NULL,30,30,1,30,'count')"
+).fetchone()[0]
+assert sample_presence == 1.0
+empty_presence = db.execute(
+    "SELECT CAST(value>0 AS REAL) FROM timeless_window("
+    "'metrics','avg_precision',NULL,1000,1000,1,30,'count')"
+).fetchall()
+assert empty_presence == []
 
 minimum = db.execute(
     "SELECT value FROM timeless_window("

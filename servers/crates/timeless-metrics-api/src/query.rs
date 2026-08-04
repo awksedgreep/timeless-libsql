@@ -400,6 +400,7 @@ enum PromRangeOp {
     Max,
     Sum,
     Count,
+    Present,
     Last,
 }
 
@@ -411,6 +412,7 @@ impl PromRangeOp {
             Self::Max => "max_over_time",
             Self::Sum => "sum_over_time",
             Self::Count => "count_over_time",
+            Self::Present => "present_over_time",
             Self::Last => "last_over_time",
         }
     }
@@ -422,6 +424,7 @@ impl PromRangeOp {
             Self::Max => Some("max"),
             Self::Sum => Some("sum"),
             Self::Count => Some("count"),
+            Self::Present => Some("count"),
             Self::Last => None,
         }
     }
@@ -433,7 +436,7 @@ impl PromRangeOp {
             Self::Max => Some(PromAggregateOp::Max),
             Self::Sum => Some(PromAggregateOp::Sum),
             Self::Count => Some(PromAggregateOp::Count),
-            Self::Last => None,
+            Self::Present | Self::Last => None,
         }
     }
 
@@ -910,6 +913,7 @@ fn lower_promql_expr(
                     | "max_over_time"
                     | "sum_over_time"
                     | "count_over_time"
+                    | "present_over_time"
                     | "last_over_time"
             ) =>
         {
@@ -919,6 +923,7 @@ fn lower_promql_expr(
                 "max_over_time" => PromRangeOp::Max,
                 "sum_over_time" => PromRangeOp::Sum,
                 "count_over_time" => PromRangeOp::Count,
+                "present_over_time" => PromRangeOp::Present,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
@@ -4240,6 +4245,9 @@ fn prometheus_range_reduction(
     op: PromRangeOp,
     cancelled: &AtomicBool,
 ) -> Result<f64, String> {
+    if matches!(op, PromRangeOp::Present) {
+        return Ok(1.0);
+    }
     if matches!(op, PromRangeOp::Last) {
         return Ok(points[points.len() - 1].1);
     }
@@ -4656,9 +4664,12 @@ fn execute_prometheus_window(
         let mut item_points = 0_u64;
         for index in 0..decoded.len() {
             check_cancelled(cancelled)?;
-            let Some(value) = decoded.value(index) else {
+            let Some(mut value) = decoded.value(index) else {
                 continue;
             };
+            if matches!(op, PromRangeOp::Present) {
+                value = 1.0;
+            }
             admit_prometheus_point(points.saturating_add(item_points), limits)?;
             if !instant {
                 comma(&mut body, item_points as usize);
@@ -4783,7 +4794,9 @@ fn execute_prometheus_range_raw(
                     lo += 1;
                 }
                 if hi > lo {
-                    let value = if matches!(op, PromRangeOp::Last) {
+                    let value = if matches!(op, PromRangeOp::Present) {
+                        1.0
+                    } else if matches!(op, PromRangeOp::Last) {
                         series.value(raw.frame.as_deref(), hi - 1)?
                     } else {
                         let aggregate = op

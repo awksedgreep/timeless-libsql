@@ -116,7 +116,7 @@ correctness fallback.
 | `PQL-R05` | `count_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-024-count_over_time)); every IEEE sample, exact boundaries, subqueries, empty windows, limits, cancellation, and reopen are pinned | shipped | yes | `WINDOW`, `RAW` | `API` | P0 |
 | `PQL-R06` | `last_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-025-last_over_time)); exact last IEEE bits, boundaries, subqueries, exceptional metric-name retention, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R07` | experimental `first_over_time`; Prometheus 3.13.2 rejects it unless `promql-experimental-functions` is enabled, so the stable Timeless tier rejects it explicitly until a separately enabled experimental compatibility tier and oracle gate exist | experimental | yes | `RAW`, `SQL` | `API` | EXP |
-| `PQL-R08` | `present_over_time` | missing | yes | `WINDOW` | `API` | P0 |
+| `PQL-R08` | `present_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-026-present_over_time)); exact non-empty presence, boundaries, IEEE samples, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `WINDOW`, `SQL` | `API` | P0 |
 | `PQL-R09` | `quantile_over_time` | missing | yes | `WINDOW`, `RAW` | `API` | P0 |
 | `PQL-R10` | `stddev_over_time` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R11` | `stdvar_over_time` | missing | yes | `RAW` | `API` | P0 |

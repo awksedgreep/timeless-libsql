@@ -5368,7 +5368,9 @@ async fn session_six_promql_first_over_time_is_explicitly_experimental() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
     let directory = TempDir::new().unwrap();
-    let database = directory.path().join("session_six_first_over_time_experimental.db");
+    let database = directory
+        .path()
+        .join("session_six_first_over_time_experimental.db");
     let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
     let app = router(storage.clone());
 
@@ -5384,6 +5386,128 @@ async fn session_six_promql_first_over_time_is_explicitly_experimental() {
 
     drop(app);
     storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_six_promql_present_over_time_tracks_presence_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_six_present_over_time.db");
+    let base = 1_700_660_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_present 5 {}\n",
+            "range_present 3 {}\n",
+            "range_present 4 {}\n",
+            "range_present_ieee{{case=\"nan\"}} NaN {}\n",
+            "range_present_ieee{{case=\"infinite\"}} +Inf {}\n",
+            "range_present_ieee{{case=\"zero\"}} -0 {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let direct = prom_query(&app, "present_over_time(range_present[20s])", base + 30).await;
+    assert_eq!(direct.0, StatusCode::OK, "{}", direct.1);
+    assert_eq!(
+        direct.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base + 30, "1"]}])
+    );
+    let subquery = prom_query(&app, "present_over_time(range_present[20s:10s])", base + 30).await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(subquery.1, direct.1);
+    let range = prom_query_range(
+        &app,
+        "present_over_time(range_present[20s])",
+        base + 20,
+        base + 50,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base + 20, "1"], [base + 30, "1"], [base + 40, "1"]]
+        }])
+    );
+    let ieee = prom_query(
+        &app,
+        "present_over_time(range_present_ieee[20s])",
+        base + 30,
+    )
+    .await;
+    assert_eq!(ieee.0, StatusCode::OK, "{}", ieee.1);
+    assert_eq!(
+        ieee.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "infinite"}, "value": [base + 30, "1"]},
+            {"metric": {"case": "nan"}, "value": [base + 30, "1"]},
+            {"metric": {"case": "zero"}, "value": [base + 30, "1"]}
+        ])
+    );
+    let empty = prom_query(&app, "present_over_time(range_present[20s])", base + 1_000).await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "present_over_time(range_present[20s])", base + 30).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 1 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "present_over_time(range_present[20s])",
+            base + 30,
+        )
+        .await
+        .1,
+        direct.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
 }
 
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {

@@ -67,6 +67,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-023`](#sql-prom-023-sum_over_time) | `PQL-R04` | current | compensated float-window sum |
 | [`SQL-PROM-024`](#sql-prom-024-count_over_time) | `PQL-R05` | current | exact float-sample window count |
 | [`SQL-PROM-025`](#sql-prom-025-last_over_time) | `PQL-R06` | current | exact last stored float in each window |
+| [`SQL-PROM-026`](#sql-prom-026-present_over_time) | `PQL-R08` | current | exact non-empty float-window presence |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -302,6 +303,32 @@ metric name; direct SQL already returns `:metric` separately from canonical
 labels. Native histograms are not stored. Direct regression: `tests/cli.sh`
 section 45; HTTP/oracle/reopen regression:
 `session_six_promql_last_over_time_preserves_name_ieee_limits_and_reopen`.
+
+### SQL-PROM-026: `present_over_time`
+
+Map every non-empty stored float window to `1` on an exact range-query grid:
+
+```sql
+SELECT labels, ts, CAST(value > 0 AS REAL) AS value
+FROM timeless_window(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :window,
+  'count'
+)
+ORDER BY labels, ts;
+```
+
+Metric timestamps and all bound parameters are integer seconds. Set
+`:start = :end` for an instant evaluation. The public count kernel emits one
+positive count for each series/window containing at least one stored float in
+`(T-window,T]`, including NaN, either infinity, and either signed zero; empty
+windows emit no row. Casting the positive comparison to REAL therefore yields
+exactly `1.0` for every returned row without adding a presence-specific
+extension primitive. The Rust API owns PromQL parsing, metric-name removal,
+outer millisecond timestamps, subquery composition, limits, cancellation, and
+result envelopes. Native histogram samples are not stored. Direct regression:
+`tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_six_promql_present_over_time_tracks_presence_limits_and_reopen`.
 
 ### SQL-PROM-006: range selector
 
