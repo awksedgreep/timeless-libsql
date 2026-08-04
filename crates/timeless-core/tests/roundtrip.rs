@@ -3,7 +3,7 @@
 //! recover from disk after a restart.
 
 use std::collections::HashMap;
-use timeless_core::{AggFn, Engine};
+use timeless_core::{AggFn, Engine, WindowOp};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir =
@@ -49,6 +49,48 @@ fn write_flush_query_recover() {
             .unwrap();
         assert_eq!(buffered_batch[0], (sid + 10_000, Vec::new()));
         assert_eq!(buffered_batch[1], (sid, rows.clone()));
+        let error = engine
+            .query_range_batch_by_id_limited(&[sid], 0, n_points, 9_999)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "raw batch work point limit 9999 exceeded (candidate points: 10000)"
+        );
+        assert_eq!(
+            engine
+                .query_range_batch_by_id_limited(&[sid], 0, n_points, 10_000)
+                .unwrap(),
+            vec![(sid, rows.clone())],
+            "the work-point limit is inclusive for buffered data"
+        );
+        assert_eq!(
+            engine
+                .query_window_op_batch_by_id_limited(
+                    &[sid],
+                    0,
+                    9,
+                    1,
+                    10,
+                    WindowOp::Agg(AggFn::Avg),
+                    9,
+                )
+                .unwrap_err(),
+            "window batch work point limit 9 exceeded (possible output points: 10)"
+        );
+        assert_eq!(
+            engine
+                .query_window_op_batch_by_id_limited(
+                    &[sid],
+                    n_points - 1,
+                    n_points - 1,
+                    1,
+                    n_points,
+                    WindowOp::Agg(AggFn::Avg),
+                    9_999,
+                )
+                .unwrap_err(),
+            "window batch work point limit 9999 exceeded (candidate input points: 10000)"
+        );
 
         engine.flush_all().unwrap();
 
@@ -61,6 +103,13 @@ fn write_flush_query_recover() {
         );
         let persisted_batch = engine.query_range_batch_by_id(&[sid], 0, n_points).unwrap();
         assert_eq!(persisted_batch, vec![(sid, rows)]);
+        let error = engine
+            .query_range_batch_by_id_limited(&[sid], 0, n_points, 9_999)
+            .unwrap_err();
+        assert_eq!(
+            error, "raw batch work point limit 9999 exceeded (candidate points: 10000)",
+            "persisted chunks are rejected before their payloads are decoded"
+        );
 
         // Aggregate path.
         let aggs = engine

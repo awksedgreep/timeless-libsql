@@ -58,6 +58,16 @@ fn document() -> &'static str {
                     "authoritative_batch_spans": 8192,
                     "rich_span_fidelity": true
                 }
+            },
+            "query_surfaces": {
+                "timeless_raw_frame": {
+                    "format": "TRF1",
+                    "max_work_points": true
+                },
+                "timeless_window_batches": {
+                    "format": "TWB1",
+                    "max_work_points": true
+                }
             }
         })
         .to_string()
@@ -75,5 +85,13 @@ mod tests {
         assert_eq!(value["signals"]["metrics"]["rollups"], true);
         assert_eq!(value["signals"]["logs"]["typed_metadata"], true);
         assert_eq!(value["signals"]["traces"]["rich_span_fidelity"], true);
+        assert_eq!(
+            value["query_surfaces"]["timeless_raw_frame"]["max_work_points"],
+            true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_window_batches"]["max_work_points"],
+            true
+        );
     }
 }

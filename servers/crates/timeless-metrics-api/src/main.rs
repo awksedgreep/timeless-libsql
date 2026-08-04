@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
-use timeless_metrics_api::{run, Config};
+use timeless_metrics_api::{run, Config, PromQueryLimits};
 
 const USAGE: &str = "usage: timeless-metrics-api <libtimeless_ext.so> <database> [listen-address]";
 
@@ -84,6 +84,43 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
+    let prom_query_limits = PromQueryLimits {
+        max_points_per_series: match positive_usize_from_env(
+            "TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES",
+            defaults.prom_query_limits.max_points_per_series,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        max_result_points: match positive_usize_from_env(
+            "TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS",
+            defaults.prom_query_limits.max_result_points,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        max_work_points: match positive_usize_from_env(
+            "TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS",
+            defaults.prom_query_limits.max_work_points,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        max_response_bytes: match positive_usize_from_env(
+            "TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES",
+            defaults.prom_query_limits.max_response_bytes,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        deadline: match duration_millis_from_env(
+            "TIMELESS_METRICS_PROMQL_DEADLINE_MS",
+            defaults.prom_query_limits.deadline,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+    };
 
     let config = Config {
         extension_path: PathBuf::from(extension_path),
@@ -94,6 +131,7 @@ async fn main() -> ExitCode {
         flush_interval,
         compact_interval,
         retention_interval,
+        prom_query_limits,
         auth,
         ..defaults
     };
@@ -140,6 +178,21 @@ fn interval_from_env(name: &str, default: Duration) -> Result<Duration, String> 
         return Err(format!("{name} must be positive"));
     }
     Ok(Duration::from_secs(seconds))
+}
+
+fn duration_millis_from_env(name: &str, default: Duration) -> Result<Duration, String> {
+    let value = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(default),
+        Err(error) => return Err(format!("read {name}: {error}")),
+    };
+    let milliseconds = value
+        .parse::<u64>()
+        .map_err(|error| format!("invalid {name}={value:?}: {error}"))?;
+    if milliseconds == 0 {
+        return Err(format!("{name} must be positive"));
+    }
+    Ok(Duration::from_millis(milliseconds))
 }
 
 #[cfg(test)]

@@ -4,7 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+
+use crate::PromQueryLimits;
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 
 use crate::promql;
@@ -301,6 +304,7 @@ pub(crate) enum ReadRequest {
         stop: i64,
         step: i64,
         instant: bool,
+        limits: PromQueryLimits,
     },
 }
 
@@ -345,6 +349,28 @@ impl ReadRequest {
             }
             Self::Prometheus { .. } => ReadKind::Promql,
         }
+    }
+
+    pub(crate) fn with_prometheus_limits(
+        mut self,
+        limits: PromQueryLimits,
+    ) -> Result<Self, String> {
+        limits.validate()?;
+        if let Self::Prometheus {
+            start,
+            stop,
+            step,
+            instant,
+            limits: request_limits,
+            ..
+        } = &mut self
+        {
+            if !*instant {
+                enforce_prometheus_grid(*start, *stop, *step, limits.max_points_per_series)?;
+            }
+            *request_limits = limits;
+        }
+        Ok(self)
     }
 }
 
@@ -429,6 +455,7 @@ pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest,
         stop: time,
         step: 1_000,
         instant: true,
+        limits: PromQueryLimits::default(),
     })
 }
 
@@ -456,13 +483,12 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
     if step <= 0 {
         return Err("step must be positive".into());
     }
-    let grid_points = (i128::from(stop) - i128::from(start)) / i128::from(step) + 1;
-    if grid_points > 11_000 {
-        return Err(
-            "exceeded maximum resolution of 11000 points per timeseries — decrease the query resolution (increase step)"
-                .into(),
-        );
-    }
+    enforce_prometheus_grid(
+        start,
+        stop,
+        step,
+        PromQueryLimits::default().max_points_per_series,
+    )?;
     let plan = lower_promql(query, lookback)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     match plan {
@@ -480,7 +506,23 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
         stop,
         step,
         instant: false,
+        limits: PromQueryLimits::default(),
     })
+}
+
+fn enforce_prometheus_grid(
+    start: i64,
+    stop: i64,
+    step: i64,
+    max_points_per_series: usize,
+) -> Result<(), String> {
+    let grid_points = (i128::from(stop) - i128::from(start)) / i128::from(step) + 1;
+    if grid_points > max_points_per_series as i128 {
+        return Err(format!(
+            "exceeded maximum resolution of {max_points_per_series} points per timeseries — decrease the query resolution (increase step)"
+        ));
+    }
+    Ok(())
 }
 
 fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
@@ -963,6 +1005,8 @@ pub(crate) struct QueryFeatures {
     latest_frame: bool,
     raw_frame: bool,
     window_batches: bool,
+    raw_frame_work_limit: bool,
+    window_batch_work_limit: bool,
 }
 
 impl QueryFeatures {
@@ -979,11 +1023,21 @@ impl QueryFeatures {
             .map_err(|error| format!("read query modules: {error}"))?
             .collect::<Result<HashSet<_>, _>>()
             .map_err(|error| format!("collect query modules: {error}"))?;
+        let capability_document: String = conn
+            .query_row("SELECT timeless_capabilities()", [], |row| row.get(0))
+            .map_err(|error| format!("read extension query capabilities: {error}"))?;
+        let capabilities: serde_json::Value = serde_json::from_str(&capability_document)
+            .map_err(|error| format!("decode extension query capabilities: {error}"))?;
+        let has_work_limit = |surface: &str| {
+            capabilities["query_surfaces"][surface]["max_work_points"] == true
+        };
         Ok(Self {
             table,
             latest_frame: modules.contains("timeless_latest_frame"),
             raw_frame: modules.contains("timeless_raw_frame"),
             window_batches: modules.contains("timeless_window_batches"),
+            raw_frame_work_limit: has_work_limit("timeless_raw_frame"),
+            window_batch_work_limit: has_work_limit("timeless_window_batches"),
         })
     }
 }
@@ -1049,7 +1103,10 @@ pub(crate) fn execute(
             stop,
             step,
             instant,
-        } => execute_prometheus(conn, features, &plan, start, stop, step, instant, cancelled),
+            limits,
+        } => execute_prometheus(
+            conn, features, &plan, start, stop, step, instant, limits, cancelled,
+        ),
     }
 }
 
@@ -1059,6 +1116,37 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+fn admit_prometheus_point(current_points: u64, limits: PromQueryLimits) -> Result<(), String> {
+    if current_points >= limits.max_result_points as u64 {
+        Err(format!(
+            "query exceeded the maximum result-point limit of {}",
+            limits.max_result_points
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn enforce_prometheus_output(
+    body: &[u8],
+    result_points: u64,
+    limits: PromQueryLimits,
+) -> Result<(), String> {
+    if result_points > limits.max_result_points as u64 {
+        return Err(format!(
+            "query exceeded the maximum result-point limit of {}",
+            limits.max_result_points
+        ));
+    }
+    if body.len() > limits.max_response_bytes {
+        return Err(format!(
+            "query exceeded the maximum response-size limit of {} bytes",
+            limits.max_response_bytes
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1272,7 +1360,7 @@ fn execute_export(
     stop: i64,
 ) -> Result<ReadOutput, String> {
     let catalog = catalog(conn, features.table, metric, filter)?;
-    let raw = raw_query(conn, features, metric, filter, start, stop)?;
+    let raw = raw_query(conn, features, metric, filter, start, stop, None)?;
     let by_id: HashMap<_, _> = raw
         .series
         .iter()
@@ -1392,19 +1480,39 @@ fn raw_query(
     filter: &FilterPlan,
     start: i64,
     stop: i64,
+    max_work_points: Option<usize>,
 ) -> Result<RawQuery, String> {
+    let max_work_points = max_work_points
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| "PromQL max_work_points exceeds SQLite INTEGER range".to_string())?;
+    if max_work_points.is_some() && (!features.raw_frame || !features.raw_frame_work_limit) {
+        return Err(
+            "incompatible extension: timeless_raw_frame max_work_points capability is required for bounded PromQL execution"
+                .into(),
+        );
+    }
     if features.raw_frame {
-        let frame: Option<Vec<u8>> = conn
-            .query_row(
+        let frame: Option<Vec<u8>> = match max_work_points {
+            Some(limit) => conn.query_row(
+                &format!(
+                    "SELECT frame FROM timeless_raw_frame('{}', ?1, ?2, ?3, ?4, ?5)",
+                    features.table.name()
+                ),
+                params![metric, filter.pushdown_json, start, stop, limit],
+                |row| row.get(0),
+            ),
+            None => conn.query_row(
                 &format!(
                     "SELECT frame FROM timeless_raw_frame('{}', ?1, ?2, ?3, ?4)",
                     features.table.name()
                 ),
                 params![metric, filter.pushdown_json, start, stop],
                 |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("query raw frame: {error}"))?;
+            ),
+        }
+        .optional()
+        .map_err(|error| format!("query raw frame: {error}"))?;
         return match frame {
             Some(frame) => {
                 let frame_bytes = frame.len();
@@ -1434,6 +1542,7 @@ fn raw_query(
         .query(params![metric, filter.pushdown_json, start, stop])
         .map_err(|error| format!("query raw row fallback: {error}"))?;
     let mut series = Vec::<RawSeries>::new();
+    let mut observed_points = 0_usize;
     while let Some(row) = rows
         .next()
         .map_err(|error| format!("read raw row fallback: {error}"))?
@@ -1462,6 +1571,12 @@ fn raw_query(
             row.get(2)
                 .map_err(|error| format!("read raw value: {error}"))?,
         );
+        observed_points = observed_points.saturating_add(1);
+        if let Some(limit) = max_work_points.filter(|limit| observed_points > *limit as usize) {
+            return Err(format!(
+                "raw batch work point limit {limit} exceeded (candidate points: {observed_points})"
+            ));
+        }
     }
     Ok(RawQuery {
         series,
@@ -1601,6 +1716,7 @@ fn execute_raw_range(
         query.filter,
         query.start,
         query.stop,
+        None,
     )?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -1667,25 +1783,27 @@ fn execute_prometheus(
     stop: i64,
     step: i64,
     instant: bool,
+    limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     match plan {
         PromPlan::Scalar(value) => {
-            execute_prometheus_scalar(*value, start, stop, step, instant, cancelled)
+            execute_prometheus_scalar(*value, start, stop, step, instant, limits, cancelled)
         }
-        PromPlan::String(value) => execute_prometheus_string(value, start, instant),
+        PromPlan::String(value) => execute_prometheus_string(value, start, instant, limits),
         PromPlan::Selector {
             metric,
             filter,
             lookback,
         } => execute_prometheus_selector(
-            conn, features, metric, filter, start, stop, step, *lookback, instant, cancelled,
+            conn, features, metric, filter, start, stop, step, *lookback, instant, limits, cancelled,
         ),
         PromPlan::AvgOverTime {
             metric,
             filter,
             window,
         } if features.window_batches
+            && features.window_batch_work_limit
             && [start, stop, step, *window]
                 .into_iter()
                 .all(|value| value % 1_000 == 0) =>
@@ -1700,6 +1818,7 @@ fn execute_prometheus(
                 step / 1_000,
                 *window / 1_000,
                 instant,
+                limits,
                 cancelled,
             )
         }
@@ -1708,14 +1827,14 @@ fn execute_prometheus(
             filter,
             window,
         } => execute_prometheus_avg_raw(
-            conn, features, metric, filter, start, stop, step, *window, instant, cancelled,
+            conn, features, metric, filter, start, stop, step, *window, instant, limits, cancelled,
         ),
         PromPlan::RangeSelector {
             metric,
             filter,
             window,
         } => execute_prometheus_range_selector(
-            conn, features, metric, filter, stop, *window, cancelled,
+            conn, features, metric, filter, stop, *window, limits, cancelled,
         ),
     }
 }
@@ -1724,6 +1843,7 @@ fn execute_prometheus_string(
     value: &str,
     timestamp: i64,
     instant: bool,
+    limits: PromQueryLimits,
 ) -> Result<ReadOutput, String> {
     if !instant {
         return Err(
@@ -1733,10 +1853,13 @@ fn execute_prometheus_string(
     }
     let mut body = Vec::new();
     body.extend_from_slice(br#"{"status":"success","data":{"resultType":"string","result":["#);
+    enforce_prometheus_output(&body, 0, limits)?;
     write_prometheus_timestamp(&mut body, timestamp);
     body.push(b',');
-    write_json(&mut body, value)?;
+    enforce_prometheus_output(&body, 0, limits)?;
+    write_json_bounded(&mut body, value, limits.max_response_bytes)?;
     body.extend_from_slice(b"]}}");
+    enforce_prometheus_output(&body, 1, limits)?;
     Ok(ReadOutput {
         body,
         frame_bytes: 0,
@@ -1752,25 +1875,32 @@ fn execute_prometheus_scalar(
     stop: i64,
     step: i64,
     instant: bool,
+    limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let mut body = Vec::new();
     let mut points = 0_u64;
     if instant {
         body.extend_from_slice(br#"{"status":"success","data":{"resultType":"scalar","result":"#);
+        enforce_prometheus_output(&body, points, limits)?;
+        admit_prometheus_point(points, limits)?;
         write_prometheus_sample(&mut body, start, value)?;
         body.extend_from_slice(b"}}");
         points = 1;
+        enforce_prometheus_output(&body, points, limits)?;
     } else {
         body.extend_from_slice(
             br#"{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":["#,
         );
+        enforce_prometheus_output(&body, points, limits)?;
         let mut timestamp = start;
         loop {
             check_cancelled(cancelled)?;
+            admit_prometheus_point(points, limits)?;
             comma(&mut body, points as usize);
             write_prometheus_sample(&mut body, timestamp, value)?;
             points += 1;
+            enforce_prometheus_output(&body, points, limits)?;
             if timestamp >= stop {
                 break;
             }
@@ -1780,6 +1910,7 @@ fn execute_prometheus_scalar(
             timestamp = next;
         }
         body.extend_from_slice(b"]}]}}");
+        enforce_prometheus_output(&body, points, limits)?;
     }
     Ok(ReadOutput {
         body,
@@ -1790,6 +1921,7 @@ fn execute_prometheus_scalar(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_prometheus_range_selector(
     conn: &Connection,
     features: QueryFeatures,
@@ -1797,6 +1929,7 @@ fn execute_prometheus_range_selector(
     filter: &FilterPlan,
     evaluation_time: i64,
     window: i64,
+    limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let lower = evaluation_time.saturating_sub(window);
@@ -1808,6 +1941,7 @@ fn execute_prometheus_range_selector(
         filter,
         storage_seconds_floor(lower),
         storage_seconds_floor(evaluation_time),
+        Some(limits.max_work_points),
     )?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -1815,6 +1949,7 @@ fn execute_prometheus_range_selector(
         .map(|series| (series.id, series))
         .collect();
     let mut body = br#"{"status":"success","data":{"resultType":"matrix","result":["#.to_vec();
+    enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_u64;
     let mut points = 0_u64;
     for meta in &catalog {
@@ -1824,7 +1959,8 @@ fn execute_prometheus_range_selector(
         };
         let item_start = body.len();
         comma(&mut body, emitted as usize);
-        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, false)?;
+        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, false, limits)?;
+        enforce_prometheus_output(&body, points, limits)?;
         let mut item_points = 0_u64;
         for index in 0..series.len() {
             check_cancelled(cancelled)?;
@@ -1832,6 +1968,7 @@ fn execute_prometheus_range_selector(
             if timestamp <= lower || timestamp > evaluation_time {
                 continue;
             }
+            admit_prometheus_point(points.saturating_add(item_points), limits)?;
             comma(&mut body, item_points as usize);
             write_prometheus_sample(
                 &mut body,
@@ -1839,6 +1976,11 @@ fn execute_prometheus_range_selector(
                 series.value(raw.frame.as_deref(), index)?,
             )?;
             item_points += 1;
+            enforce_prometheus_output(
+                &body,
+                points.saturating_add(item_points),
+                limits,
+            )?;
         }
         if item_points == 0 {
             body.truncate(item_start);
@@ -1849,6 +1991,7 @@ fn execute_prometheus_range_selector(
         }
     }
     write_prometheus_suffix(&mut body);
+    enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
         body,
         frame_bytes: raw.frame_bytes,
@@ -1869,6 +2012,7 @@ fn execute_prometheus_selector(
     step: i64,
     lookback: i64,
     instant: bool,
+    limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let catalog = catalog(conn, features.table, metric, filter)?;
@@ -1879,6 +2023,7 @@ fn execute_prometheus_selector(
         filter,
         storage_seconds_floor(start.saturating_sub(lookback)),
         storage_seconds_floor(stop),
+        Some(limits.max_work_points),
     )?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -1887,6 +2032,7 @@ fn execute_prometheus_selector(
         .collect();
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
+    enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_usize;
     let mut points = 0_u64;
     for meta in &catalog {
@@ -1896,7 +2042,8 @@ fn execute_prometheus_selector(
         };
         let item_start = body.len();
         comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, instant)?;
+        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, instant, limits)?;
+        enforce_prometheus_output(&body, points, limits)?;
         let mut lo = 0_usize;
         let mut hi = 0_usize;
         let mut item_points = 0_u64;
@@ -1914,11 +2061,17 @@ fn execute_prometheus_selector(
                 lo += 1;
             }
             if hi > lo {
+                admit_prometheus_point(points.saturating_add(item_points), limits)?;
                 if !instant {
                     comma(&mut body, item_points as usize);
                 }
                 write_prometheus_sample(&mut body, t, series.value(raw.frame.as_deref(), hi - 1)?)?;
                 item_points += 1;
+                enforce_prometheus_output(
+                    &body,
+                    points.saturating_add(item_points),
+                    limits,
+                )?;
             }
             if t >= stop {
                 break;
@@ -1937,6 +2090,7 @@ fn execute_prometheus_selector(
         }
     }
     write_prometheus_suffix(&mut body);
+    enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
         body,
         frame_bytes: raw.frame_bytes,
@@ -1957,24 +2111,36 @@ fn execute_prometheus_window(
     step: i64,
     window: i64,
     instant: bool,
+    limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
+    let max_work_points = i64::try_from(limits.max_work_points)
+        .map_err(|_| "PromQL max_work_points exceeds SQLite INTEGER range".to_string())?;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT labels, buckets
-               FROM timeless_window_batches('{}', ?1, ?2, ?3, ?4, ?5, ?6, 'avg')
+               FROM timeless_window_batches('{}', ?1, ?2, ?3, ?4, ?5, ?6, 'avg', NULL, ?7)
               ORDER BY labels, series_id",
             table.name()
         ))
         .map_err(|error| format!("prepare PromQL window batches: {error}"))?;
     let rows = stmt
         .query_map(
-            params![metric, filter.pushdown_json, start, stop, step, window],
+            params![
+                metric,
+                filter.pushdown_json,
+                start,
+                stop,
+                step,
+                window,
+                max_work_points
+            ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
         .map_err(|error| format!("query PromQL window batches: {error}"))?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
+    enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_usize;
     let mut points = 0_u64;
     let mut frame_bytes = 0_usize;
@@ -1990,13 +2156,15 @@ fn execute_prometheus_window(
         let decoded = decode_window_batch(&buckets)?;
         let item_start = body.len();
         comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, None, &labels, instant)?;
+        write_prometheus_item_prefix(&mut body, None, &labels, instant, limits)?;
+        enforce_prometheus_output(&body, points, limits)?;
         let mut item_points = 0_u64;
         for index in 0..decoded.len() {
             check_cancelled(cancelled)?;
             let Some(value) = decoded.value(index) else {
                 continue;
             };
+            admit_prometheus_point(points.saturating_add(item_points), limits)?;
             if !instant {
                 comma(&mut body, item_points as usize);
             }
@@ -2006,6 +2174,11 @@ fn execute_prometheus_window(
                 value,
             )?;
             item_points += 1;
+            enforce_prometheus_output(
+                &body,
+                points.saturating_add(item_points),
+                limits,
+            )?;
         }
         if item_points == 0 {
             body.truncate(item_start);
@@ -2016,6 +2189,7 @@ fn execute_prometheus_window(
         }
     }
     write_prometheus_suffix(&mut body);
+    enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
         body,
         frame_bytes,
@@ -2036,6 +2210,7 @@ fn execute_prometheus_avg_raw(
     step: i64,
     window: i64,
     instant: bool,
+    limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let catalog = catalog(conn, features.table, metric, filter)?;
@@ -2046,6 +2221,7 @@ fn execute_prometheus_avg_raw(
         filter,
         storage_seconds_floor(start.saturating_sub(window)),
         storage_seconds_floor(stop),
+        Some(limits.max_work_points),
     )?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -2054,6 +2230,7 @@ fn execute_prometheus_avg_raw(
         .collect();
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
+    enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_usize;
     let mut points = 0_u64;
     for meta in &catalog {
@@ -2063,7 +2240,8 @@ fn execute_prometheus_avg_raw(
         };
         let item_start = body.len();
         comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, None, &meta.labels, instant)?;
+        write_prometheus_item_prefix(&mut body, None, &meta.labels, instant, limits)?;
+        enforce_prometheus_output(&body, points, limits)?;
         let mut lo = 0_usize;
         let mut hi = 0_usize;
         let mut item_points = 0_u64;
@@ -2083,13 +2261,20 @@ fn execute_prometheus_avg_raw(
             if hi > lo {
                 let mut sum = 0.0;
                 for index in lo..hi {
+                    check_cancelled(cancelled)?;
                     sum += series.value(raw.frame.as_deref(), index)?;
                 }
+                admit_prometheus_point(points.saturating_add(item_points), limits)?;
                 if !instant {
                     comma(&mut body, item_points as usize);
                 }
                 write_prometheus_sample(&mut body, t, sum / (hi - lo) as f64)?;
                 item_points += 1;
+                enforce_prometheus_output(
+                    &body,
+                    points.saturating_add(item_points),
+                    limits,
+                )?;
             }
             if t >= stop {
                 break;
@@ -2108,6 +2293,7 @@ fn execute_prometheus_avg_raw(
         }
     }
     write_prometheus_suffix(&mut body);
+    enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
         body,
         frame_bytes: raw.frame_bytes,
@@ -2130,19 +2316,50 @@ fn write_prometheus_item_prefix(
     metric: Option<&str>,
     labels: &BTreeMap<String, String>,
     instant: bool,
+    limits: PromQueryLimits,
 ) -> Result<(), String> {
-    let mut labels = labels.clone();
-    if let Some(metric) = metric {
-        labels.insert("__name__".into(), metric.into());
-    }
     output.extend_from_slice(b"{\"metric\":");
-    write_json(output, &labels)?;
+    enforce_prometheus_output(output, 0, limits)?;
+    write_json_bounded(
+        output,
+        &PrometheusLabels { metric, labels },
+        limits.max_response_bytes,
+    )?;
     output.extend_from_slice(if instant {
         b",\"value\":"
     } else {
         b",\"values\":["
     });
+    enforce_prometheus_output(output, 0, limits)?;
     Ok(())
+}
+
+struct PrometheusLabels<'a> {
+    metric: Option<&'a str>,
+    labels: &'a BTreeMap<String, String>,
+}
+
+impl Serialize for PrometheusLabels<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut entries: Vec<(&str, &str)> = self
+            .labels
+            .iter()
+            .filter(|(key, _)| self.metric.is_none() || key.as_str() != "__name__")
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        if let Some(metric) = self.metric {
+            entries.push(("__name__", metric));
+            entries.sort_unstable_by_key(|(key, _)| *key);
+        }
+        let mut map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, value) in entries {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
 }
 
 fn write_prometheus_item_suffix(output: &mut Vec<u8>, instant: bool) {
@@ -2692,6 +2909,47 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
 
 fn write_json<T: ?Sized + Serialize>(output: &mut Vec<u8>, value: &T) -> Result<(), String> {
     serde_json::to_writer(output, value).map_err(|error| format!("encode query response: {error}"))
+}
+
+struct BoundedVecWriter<'a> {
+    output: &'a mut Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl std::io::Write for BoundedVecWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.output.len());
+        if bytes.len() > remaining {
+            self.exceeded = true;
+            return Err(std::io::Error::other("response byte limit exceeded"));
+        }
+        self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_json_bounded<T: ?Sized + Serialize>(
+    output: &mut Vec<u8>,
+    value: &T,
+    limit: usize,
+) -> Result<(), String> {
+    let mut writer = BoundedVecWriter {
+        output,
+        limit,
+        exceeded: false,
+    };
+    let result = serde_json::to_writer(&mut writer, value);
+    if writer.exceeded {
+        return Err(format!(
+            "query exceeded the maximum response-size limit of {limit} bytes"
+        ));
+    }
+    result.map_err(|error| format!("encode query response: {error}"))
 }
 
 fn write_optional_float(output: &mut Vec<u8>, value: Option<f64>) -> Result<(), String> {

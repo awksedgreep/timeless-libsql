@@ -69,7 +69,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S17` | Prometheus stale-marker semantics | partial | partial | `RAW` | `EXT` | P1 | See `QSF-004`; first decide whether ingest/storage preserves stale markers. The API consumes the resulting contract. |
 | `PQL-S18` | instant vector, range vector, scalar, and string types | shipped | yes | none | `API` | P0 | Exact instant/empty result typing is pinned across all four Prometheus values; range evaluation accepts scalar/vector roots and returns a matrix while string/range-vector roots fail. Prometheus envelopes have no honest SQL equivalent. |
 | `PQL-S19` | deterministic Prometheus error/result envelopes | shipped | yes | none | `API` | P0 | Required range parameters, parameter/type diagnostics, strict unsupported behavior, and GET/POST envelopes are pinned for every shipped node. Each future grammar row must extend this contract; documented stricter resource/input choices remain intentional. |
-| `PQL-S20` | 11,000 points/series, sample, row, response, and deadline limits | partial | yes | none | `API` | P0 | Limits must cover intermediate values, not only output. |
+| `PQL-S20` | 11,000 points/series, sample, row, response, and deadline limits | in progress | yes | `RAW`, `WINDOW` | `API` | P0 | Limits must cover intermediate values, not only output. |
 | `PQL-S21` | cancellation and SQLite reader reuse | shipped | n/a | all | `API` | P0 | Every new evaluator loop must check the same cancellation token. |
 | `PQL-S22` | native histogram sample type | deferred | no | none | `DEFER` | DEFER | See `QSF-003`; classic `_bucket` series remain ordinary floats. |
 

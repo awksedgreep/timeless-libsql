@@ -56,11 +56,13 @@
 //! Very wide fanout queries can cross SQLite only once with the frame form:
 //!
 //!   SELECT frame FROM timeless_raw_frame(
-//!     'metrics', 'cpu_usage', NULL, :start, :stop);
+//!     'metrics', 'cpu_usage', NULL, :start, :stop, :max_work_points);
 //!
 //! `frame` is `TRF1`, u32 LE series count, u64 LE total point count, then
 //! columnar series IDs, per-series point counts, timestamps, and f64 value
 //! bits. Empty series are omitted and each point slice retains raw query order.
+//! The optional positive limit is inclusive and rejects conservative chunk +
+//! buffer work before persisted payload reads. Omit it for the original call.
 //!
 //! Scalar reductions stay below the SQLite/host materialization boundary:
 //!
@@ -117,13 +119,16 @@
 //!
 //!   SELECT series_id, labels, buckets FROM timeless_window_batches(
 //!     'metrics', 'cpu_usage', NULL,
-//!     :start, :stop, :step, :window, 'avg');
+//!     :start, :stop, :step, :window, 'avg', NULL, :max_work_points);
 //!
 //! `buckets` is `TWB1`, u32 LE count, i64 LE timestamps, a packed validity
 //! bitmap (one bit per timestamp, low bit first), then f64-bit LE values. The
 //! bitmap preserves `fill='null'`; sparse calls naturally contain only set
 //! bits. Unknown magic/version and malformed lengths must be rejected by the
 //! decoder rather than guessed.
+//! The optional positive `max_work_points` is inclusive and rejects before
+//! chunk reads when either conservative input points or possible grid output
+//! exceed the bound. Omit both trailing arguments for the original call.
 //!
 //! Stored rollups have an analogous all-aggregates batch form:
 //!
@@ -171,6 +176,20 @@ use crate::traces_vtab::TracesTab;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
+}
+
+fn positive_work_limit(module: &str, args: &Filters<'_>, slot: usize) -> Result<u64> {
+    let value = integer_affinity(args.get::<Value>(slot)?).ok_or_else(|| {
+        module_err(format!(
+            "{module}: max_work_points must be a positive INTEGER"
+        ))
+    })?;
+    if value <= 0 {
+        return Err(module_err(format!(
+            "{module}: max_work_points must be positive, got {value}"
+        )));
+    }
+    Ok(value as u64)
 }
 
 fn read_permit<'a, E>(
@@ -440,6 +459,9 @@ pub(crate) struct KernelArgs {
     fill: bool,
     /// Optional relational series-handle constraint supplied by SQLite.
     series_selection: SeriesSelection,
+    /// Optional inclusive cap on input and materialized work points for the
+    /// packed batch surfaces that support bounded execution.
+    max_work_points: Option<u64>,
 }
 
 /// Decode the hidden-column EQ args per the best_index bitmask.
@@ -531,6 +553,11 @@ fn decode_args(
         Some(s) => Some(get_text(s, "agg")?),
     };
 
+    let max_work_points = match find("max_work_points") {
+        None => None,
+        Some(slot) => Some(positive_work_limit(module, args, slot)?),
+    };
+
     // fill is optional everywhere it exists; NULL = default = 'none'.
     let fill = match find("fill") {
         None => false,
@@ -561,6 +588,7 @@ fn decode_args(
         agg_name,
         fill,
         series_selection: decode_series_selection(idx_num, names.len(), args)?,
+        max_work_points,
     })
 }
 
@@ -867,6 +895,18 @@ impl KernelVTab for GridTab {
 const WINDOW_ARGS: &[&str] = &[
     "tbl", "metric", "filter", "start", "stop", "step", "window", "agg", "fill",
 ];
+const WINDOW_BATCH_ARGS: &[&str] = &[
+    "tbl",
+    "metric",
+    "filter",
+    "start",
+    "stop",
+    "step",
+    "window",
+    "agg",
+    "fill",
+    "max_work_points",
+];
 // All required except filter (bit 2) and fill (bit 8).
 const WINDOW_REQUIRED: c_int = 0b0_1111_1011;
 
@@ -964,7 +1004,8 @@ unsafe impl<'vtab> VTab<'vtab> for WindowBatchTab {
             Cow::Borrowed(
                 c"CREATE TABLE x(series_id INTEGER, labels TEXT, buckets BLOB, \
                             tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, \
-                            stop HIDDEN, step HIDDEN, window HIDDEN, agg HIDDEN, fill HIDDEN)",
+                            stop HIDDEN, step HIDDEN, window HIDDEN, agg HIDDEN, fill HIDDEN, \
+                            max_work_points HIDDEN)",
             ),
             WindowBatchTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -974,7 +1015,7 @@ unsafe impl<'vtab> VTab<'vtab> for WindowBatchTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args_with_series_id(info, 3, WINDOW_ARGS.len() as c_int, Some(0))
+        best_index_args_with_series_id(info, 3, WINDOW_BATCH_ARGS.len() as c_int, Some(0))
     }
 
     fn open(&mut self) -> Result<WindowBatchCursor<'vtab>> {
@@ -1000,7 +1041,7 @@ pub(crate) struct WindowBatchCursor<'vtab> {
 unsafe impl VTabCursor for WindowBatchCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         const M: &str = "timeless_window_batches";
-        let ka = decode_args(M, WINDOW_ARGS, WINDOW_REQUIRED, idx_num, args)?;
+        let ka = decode_args(M, WINDOW_BATCH_ARGS, WINDOW_REQUIRED, idx_num, args)?;
         let op = parse_window_op(M, ka.agg_name.as_deref())?;
 
         let _bind = DbGuard::bind(self.db);
@@ -1021,10 +1062,26 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
         );
 
         let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
-        let batch = shared
-            .engine
-            .query_window_op_batch_by_id(&series_ids, ka.start, ka.stop, ka.step, ka.width, op)
-            .map_err(module_err)?;
+        let batch = match ka.max_work_points {
+            Some(limit) => shared.engine.query_window_op_batch_by_id_limited(
+                &series_ids,
+                ka.start,
+                ka.stop,
+                ka.step,
+                ka.width,
+                op,
+                limit,
+            ),
+            None => shared.engine.query_window_op_batch_by_id(
+                &series_ids,
+                ka.start,
+                ka.stop,
+                ka.step,
+                ka.width,
+                op,
+            ),
+        }
+        .map_err(module_err)?;
 
         let mut rows = Vec::new();
         for ((sid, labels), (result_sid, points)) in candidates.into_iter().zip(batch) {
@@ -1152,6 +1209,7 @@ mod window_batch_tests {
             agg_name: Some("avg".into()),
             fill,
             series_selection: SeriesSelection::All,
+            max_work_points: None,
         }
     }
 
@@ -1791,6 +1849,14 @@ unsafe impl VTabCursor for LatestFrameCursor<'_> {
 const RAW_ARGS: &[&str] = &["tbl", "metric", "filter", "start", "stop"];
 const RAW_REQUIRED: c_int = 0b1_1011; // all except filter
 const RAW_FIRST_ARG: c_int = 4;
+const RAW_FRAME_ARGS: &[&str] = &[
+    "tbl",
+    "metric",
+    "filter",
+    "start",
+    "stop",
+    "max_work_points",
+];
 
 #[repr(C)]
 pub(crate) struct RawTab {
@@ -2124,7 +2190,7 @@ unsafe impl<'vtab> VTab<'vtab> for RawFrameTab {
         Ok((
             Cow::Borrowed(
                 c"CREATE TABLE x(frame BLOB, tbl HIDDEN, metric HIDDEN, filter HIDDEN, \
-                            start HIDDEN, stop HIDDEN)",
+                            start HIDDEN, stop HIDDEN, max_work_points HIDDEN)",
             ),
             RawFrameTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -2134,7 +2200,7 @@ unsafe impl<'vtab> VTab<'vtab> for RawFrameTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args(info, 1, RAW_ARGS.len() as c_int)
+        best_index_args(info, 1, RAW_FRAME_ARGS.len() as c_int)
     }
 
     fn open(&mut self) -> Result<RawFrameCursor<'vtab>> {
@@ -2160,7 +2226,7 @@ pub(crate) struct RawFrameCursor<'vtab> {
 unsafe impl VTabCursor for RawFrameCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         const M: &str = "timeless_raw_frame";
-        let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
+        let slots = named_slots(M, RAW_FRAME_ARGS, RAW_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
             let v: Option<String> = args.get(slots[i].unwrap())?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
@@ -2180,6 +2246,10 @@ unsafe impl VTabCursor for RawFrameCursor<'_> {
             Some(txt) => compile_filter(M, txt)?,
         };
         let (start, stop) = (int(3, "start")?, int(4, "stop")?);
+        let max_work_points = match slots[5] {
+            None => None,
+            Some(slot) => Some(positive_work_limit(M, args, slot)?),
+        };
         if start > stop {
             self.rows.clear();
             self.pos = 0;
@@ -2204,10 +2274,17 @@ unsafe impl VTabCursor for RawFrameCursor<'_> {
                 .collect()
         };
 
-        let batch = shared
-            .engine
-            .query_range_batch_by_id(&series_ids, start, stop)
-            .map_err(module_err)?;
+        let batch = match max_work_points {
+            Some(limit) => {
+                shared
+                    .engine
+                    .query_range_batch_by_id_limited(&series_ids, start, stop, limit)
+            }
+            None => shared
+                .engine
+                .query_range_batch_by_id(&series_ids, start, stop),
+        }
+        .map_err(module_err)?;
         let frame = encode_raw_frame(&batch)?;
         self.rows = if frame.is_empty() {
             Vec::new()

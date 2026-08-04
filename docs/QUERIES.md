@@ -78,7 +78,8 @@ SELECT frame
 
 -- every raw series in one versioned columnar frame for wide embedded reads
 SELECT frame
-  FROM timeless_raw_frame('metrics', 'cpu_usage', NULL, :t0, :t1);
+  FROM timeless_raw_frame(
+    'metrics', 'cpu_usage', NULL, :t0, :t1, :max_work_points);
 
 -- label filters: plain string = equality; {"neq"|"re"|"nre": ...} match
 -- against the whole value (anchored); absent label matches as ""
@@ -316,8 +317,14 @@ non-empty result set:
 ```sql
 SELECT frame
   FROM timeless_raw_frame(
-    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1,
+    :max_work_points);
 ```
+
+The optional trailing `max_work_points` is an inclusive positive INTEGER cap
+on conservative stored-chunk point counts plus buffered points. It is checked
+before persisted payload reads. Exceeding it returns an error and no partial
+frame; omit the argument for the backward-compatible unbounded call.
 
 The versioned little-endian frame is:
 
@@ -359,8 +366,15 @@ than once per grid point:
 SELECT series_id, labels, buckets
   FROM timeless_window_batches(
     'metrics', 'cpu_usage', '{"env":"prod"}',
-    :t0, :t1, 60, 300, 'avg');
+    :t0, :t1, 60, 300, 'avg', NULL, :max_work_points);
 ```
+
+The optional argument after `fill` caps both conservative input points and the
+maximum `matched series × grid points` output, independently and inclusively,
+before chunk payloads are read. Bind `NULL` for `fill` to request the default
+sparse form while supplying the limit. Omit both trailing arguments to retain
+the original call. Zero, negative, NULL-as-a-supplied-limit, and non-integer
+limits fail explicitly.
 
 The `buckets` blob is versioned and little-endian:
 

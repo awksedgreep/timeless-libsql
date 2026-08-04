@@ -5,7 +5,9 @@ use axum::http::{Request, StatusCode};
 use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
-use timeless_metrics_api::{router, Storage, DEFAULT_RAW_RETENTION};
+use timeless_metrics_api::{
+    router, router_with_limits, PromQueryLimits, Storage, DEFAULT_RAW_RETENTION,
+};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -1449,6 +1451,189 @@ async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
 
     drop(app);
     storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_promql_limits_bound_grid_work_results_response_and_deadline() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two_promql_limits.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let base = 1_700_000_000_i64;
+    let victoria = format!(
+        "{{\"metric\":{{\"__name__\":\"limit_metric\",\"host\":\"a\"}},\"values\":[1,2,3],\"timestamps\":[{},{},{}]}}\n",
+        base * 1_000,
+        (base + 1) * 1_000,
+        (base + 2) * 1_000
+    );
+    let ingest_app = router(storage.clone());
+    assert_no_content(post_body(&ingest_app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(
+        post_json(&ingest_app, "/api/v1/flush").await.0,
+        StatusCode::OK
+    );
+
+    let grid_app = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_points_per_series: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let grid = get_json(
+        &grid_app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=1&start={base}&end={}&step=1",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(grid.0, StatusCode::BAD_REQUEST, "{}", grid.1);
+    assert_eq!(grid.1["errorType"], "bad_data");
+    assert!(grid.1["error"].as_str().unwrap().contains("2 points"));
+
+    let result_app = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_result_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let result = get_json(
+        &result_app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=1&start={base}&end={}&step=1",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(result.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", result.1);
+    assert_eq!(result.1["errorType"], "execution");
+    assert!(result.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("result-point limit of 2"));
+
+    let work_app = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    for query in ["limit_metric%5B10s%5D", "avg_over_time%28limit_metric%5B10s%5D%29"] {
+        let work = get_json(
+            &work_app,
+            &format!(
+                "/prometheus/api/v1/query?query={query}&time={}",
+                base + 2
+            ),
+        )
+        .await;
+        assert_eq!(work.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", work.1);
+        assert_eq!(work.1["errorType"], "execution");
+        assert!(work.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 2 exceeded"));
+    }
+
+    let response_app = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_response_bytes: 32,
+            ..PromQueryLimits::default()
+        },
+    );
+    let response = get_json(
+        &response_app,
+        "/prometheus/api/v1/query?query=%22a-long-string%22&time=1",
+    )
+    .await;
+    assert_eq!(
+        response.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        response.1
+    );
+    assert!(response.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("response-size limit of 32 bytes"));
+
+    let mut deadline_fixture = String::new();
+    for series in 0..2_000 {
+        use std::fmt::Write;
+        writeln!(
+            deadline_fixture,
+            "{{\"metric\":{{\"__name__\":\"deadline_metric\",\"host\":\"h{series}\"}},\"values\":[{series}],\"timestamps\":[{}]}}",
+            base * 1_000
+        )
+        .unwrap();
+    }
+    assert_no_content(
+        post_body(&ingest_app, "/api/v1/import", deadline_fixture.as_bytes()).await,
+    );
+    assert_eq!(
+        post_json(&ingest_app, "/api/v1/flush").await.0,
+        StatusCode::OK
+    );
+
+    let deadline_app = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            deadline: std::time::Duration::from_millis(1),
+            ..PromQueryLimits::default()
+        },
+    );
+    let deadline = get_json(
+        &deadline_app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=deadline_metric&start={base}&end={}&step=1",
+            base + 49
+        ),
+    )
+    .await;
+    assert_eq!(deadline.0, StatusCode::GATEWAY_TIMEOUT, "{}", deadline.1);
+    assert_eq!(deadline.1["errorType"], "timeout");
+
+    let recovered = get_json(
+        &ingest_app,
+        &format!(
+            "/prometheus/api/v1/query?query=limit_metric&time={}",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(recovered.0, StatusCode::OK, "{}", recovered.1);
+    assert_eq!(recovered.1["data"]["result"][0]["value"][1], "3");
+
+    drop((grid_app, result_app, work_app, response_app, deadline_app, ingest_app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let durable = get_json(
+        &reopened_app,
+        &format!(
+            "/prometheus/api/v1/query?query=limit_metric&time={}",
+            base + 2
+        ),
+    )
+    .await;
+    assert_eq!(durable.0, StatusCode::OK, "{}", durable.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
 }
 
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {

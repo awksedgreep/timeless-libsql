@@ -20,7 +20,7 @@ use timeless_api_common::{
 };
 use tokio::net::TcpListener;
 
-pub use api::router;
+pub use api::{router, router_with_limits};
 pub use scrape::{
     ScrapeAuth, ScrapeTarget, ScrapeTargetReport, ScrapeTargetSet, ScrapeTargetSetReport,
 };
@@ -28,6 +28,51 @@ pub use storage::{FlushReport, Storage, StorageStats};
 pub use timeless_api_common::BackupReport;
 
 pub const DEFAULT_RAW_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Hard PromQL execution limits that apply even when API authentication is
+/// disabled. Authentication claims may impose tighter request-specific
+/// limits, but can never raise these storage-owner bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PromQueryLimits {
+    pub max_points_per_series: usize,
+    pub max_result_points: usize,
+    pub max_work_points: usize,
+    pub max_response_bytes: usize,
+    pub deadline: Duration,
+}
+
+impl Default for PromQueryLimits {
+    fn default() -> Self {
+        Self {
+            max_points_per_series: 11_000,
+            max_result_points: 100_000,
+            max_work_points: 100_000,
+            max_response_bytes: 16 * 1024 * 1024,
+            deadline: Duration::from_secs(30),
+        }
+    }
+}
+
+impl PromQueryLimits {
+    pub fn validate(self) -> Result<(), String> {
+        if self.max_points_per_series == 0 || self.max_points_per_series > 11_000 {
+            return Err("max_points_per_series must be in 1..=11000".into());
+        }
+        if self.max_result_points == 0 {
+            return Err("max_result_points must be positive".into());
+        }
+        if self.max_work_points == 0 {
+            return Err("max_work_points must be positive".into());
+        }
+        if self.max_response_bytes == 0 {
+            return Err("max_response_bytes must be positive".into());
+        }
+        if self.deadline.is_zero() {
+            return Err("PromQL deadline must be positive".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -40,6 +85,7 @@ pub struct Config {
     pub compact_interval: Duration,
     pub retention_interval: Duration,
     pub raw_retention: Duration,
+    pub prom_query_limits: PromQueryLimits,
     pub auth: AuthConfig,
 }
 
@@ -58,6 +104,7 @@ impl Default for Config {
             compact_interval: Duration::from_secs(5 * 60),
             retention_interval: Duration::from_secs(60 * 60),
             raw_retention: DEFAULT_RAW_RETENTION,
+            prom_query_limits: PromQueryLimits::default(),
             auth: AuthConfig::disabled(),
         }
     }
@@ -85,6 +132,7 @@ impl Config {
         {
             return Err("maintenance and retention intervals must be positive".into());
         }
+        self.prom_query_limits.validate()?;
         self.auth.preflight()?;
         Ok(())
     }
@@ -99,7 +147,10 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.command_queue_batches,
         config.raw_retention,
     )?;
-    let app = protect_router(router(storage.clone()), config.auth.clone());
+    let app = protect_router(
+        router_with_limits(storage.clone(), config.prom_query_limits),
+        config.auth.clone(),
+    );
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|error| format!("bind {}: {error}", config.listen))?;
@@ -172,6 +223,19 @@ mod tests {
         assert_eq!(
             config.validate().unwrap_err(),
             "maintenance and retention intervals must be positive"
+        );
+
+        config.flush_interval = Duration::from_secs(1);
+        config.prom_query_limits.max_points_per_series = 11_001;
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "max_points_per_series must be in 1..=11000"
+        );
+        config.prom_query_limits.max_points_per_series = 11_000;
+        config.prom_query_limits.max_response_bytes = 0;
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "max_response_bytes must be positive"
         );
     }
 }

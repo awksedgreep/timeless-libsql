@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -10,11 +10,18 @@ use serde_json::json;
 use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
 
 use crate::query::{self, Params, ReadRequest};
-use crate::{victoria, ScrapeTargetSet, Storage};
+use crate::{victoria, PromQueryLimits, ScrapeTargetSet, Storage};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn router(storage: Storage) -> Router {
+    router_with_limits(storage, PromQueryLimits::default())
+}
+
+pub fn router_with_limits(storage: Storage, limits: PromQueryLimits) -> Router {
+    limits
+        .validate()
+        .expect("PromQL router limits must be valid");
     Router::new()
         .route("/live", get(liveness))
         .route("/ready", get(health))
@@ -47,6 +54,7 @@ pub fn router(storage: Storage) -> Router {
         )
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(Extension(limits))
         .with_state(storage)
 }
 
@@ -56,12 +64,13 @@ async fn liveness() -> Response {
 
 async fn latest(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
     let params = params(query, &body);
     if params.get("query").is_some() {
-        prometheus_read_route(storage, query::prometheus_instant_request(&params)).await
+        prometheus_read_route(storage, limits, query::prometheus_instant_request(&params)).await
     } else {
         read_route(storage, query::latest_request(&params)).await
     }
@@ -75,10 +84,15 @@ async fn export(
     read_route(storage, query::export_request(&params(query, &body))).await
 }
 
-async fn range(State(storage): State<Storage>, RawQuery(query): RawQuery, body: Bytes) -> Response {
+async fn range(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
     let params = params(query, &body);
     if params.get("query").is_some() {
-        prometheus_read_route(storage, query::prometheus_range_request(&params)).await
+        prometheus_read_route(storage, limits, query::prometheus_range_request(&params)).await
     } else {
         read_route(storage, query::range_request(&params)).await
     }
@@ -86,11 +100,13 @@ async fn range(State(storage): State<Storage>, RawQuery(query): RawQuery, body: 
 
 async fn prometheus_instant(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
     prometheus_read_route(
         storage,
+        limits,
         query::prometheus_instant_request(&params(query, &body)),
     )
     .await
@@ -98,11 +114,13 @@ async fn prometheus_instant(
 
 async fn prometheus_range(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
     prometheus_read_route(
         storage,
+        limits,
         query::prometheus_range_request(&params(query, &body)),
     )
     .await
@@ -168,13 +186,25 @@ async fn read_route(storage: Storage, request: Result<ReadRequest, String>) -> R
     }
 }
 
-async fn prometheus_read_route(storage: Storage, request: Result<ReadRequest, String>) -> Response {
-    let request = match request {
+async fn prometheus_read_route(
+    storage: Storage,
+    limits: PromQueryLimits,
+    request: Result<ReadRequest, String>,
+) -> Response {
+    let request = match request.and_then(|request| request.with_prometheus_limits(limits)) {
         Ok(request) => request,
         Err(error) => return prometheus_error(StatusCode::BAD_REQUEST, "bad_data", error),
     };
-    match storage.read(request).await {
-        Ok(output) => (
+    match tokio::time::timeout(limits.deadline, storage.read(request)).await {
+        Err(_) => prometheus_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+            format!(
+                "query exceeded the {}ms execution deadline",
+                limits.deadline.as_millis()
+            ),
+        ),
+        Ok(Ok(output)) => (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE.as_str(), "application/json".to_owned()),
@@ -183,7 +213,9 @@ async fn prometheus_read_route(storage: Storage, request: Result<ReadRequest, St
             Bytes::from(output.body),
         )
             .into_response(),
-        Err(error) => prometheus_error(StatusCode::UNPROCESSABLE_ENTITY, "execution", error),
+        Ok(Err(error)) => {
+            prometheus_error(StatusCode::UNPROCESSABLE_ENTITY, "execution", error)
+        }
     }
 }
 

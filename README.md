@@ -255,7 +255,9 @@ SELECT series_id, labels, points
 
 -- Wide fanout form: every non-empty series in one versioned columnar frame:
 SELECT frame
-  FROM timeless_raw_frame('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
+  FROM timeless_raw_frame(
+    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1,
+    :max_work_points);
 
 -- one scalar reduction per matched series; inclusive [:t0, :t1]
 -- aggregate: avg | sum | min | max | count
@@ -291,8 +293,15 @@ SELECT labels, ts, value
 -- Same result, one versioned bucket blob per series for embedded/remote hosts:
 SELECT series_id, labels, buckets
   FROM timeless_window_batches(
-    'metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
+    'metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate',
+    NULL, :max_work_points);
 ```
+
+Both packed calls retain their original unbounded arity. A supplied positive
+`max_work_points` is an inclusive, pre-decode guard: raw frames cap candidate
+stored/buffered points; window batches independently cap candidate input and
+possible grid output. Errors return no partial blob. The capability document
+advertises each guarded surface under `query_surfaces`.
 
 `timeless_window_batches` uses `TWB1 | count:u32 LE | timestamps:i64 LE[] |
 validity bitmap | value_bits:u64 LE[]`. The bitmap also preserves the optional

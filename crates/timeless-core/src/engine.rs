@@ -2346,6 +2346,31 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        self.query_range_batch_by_id_inner(series_ids, t_start, t_end, None)
+    }
+
+    /// The bounded form of [`Self::query_range_batch_by_id`]. `max_work_points`
+    /// caps the conservative number of stored chunk points plus buffered
+    /// points that the query may inspect. The inclusive limit is checked
+    /// before persisted payloads are read, so callers can bound decode and
+    /// result-allocation work without relying on a post-query row limit.
+    pub fn query_range_batch_by_id_limited(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+        max_work_points: u64,
+    ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        self.query_range_batch_by_id_inner(series_ids, t_start, t_end, Some(max_work_points))
+    }
+
+    fn query_range_batch_by_id_inner(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+        max_work_points: Option<u64>,
+    ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
         let started = Instant::now();
         if t_start > t_end {
             self.record_raw_batch_query(started, series_ids.len(), 0, 0, 0, 0, 0);
@@ -2377,6 +2402,29 @@ impl Engine {
             .flat_map(|chunks| chunks.iter())
             .map(|meta| u64::from(meta.point_count))
             .sum::<u64>();
+        let preflight_buffered_points = series_ids.iter().fold(0_u64, |total, &series_id| {
+            let pk = PartitionKey { series_id };
+            total.saturating_add(
+                self.partitions
+                    .get(&pk)
+                    .map_or(0, |buffer| buffer.timestamps.len() as u64),
+            )
+        });
+        let preflight_work_points = decoded_points.saturating_add(preflight_buffered_points);
+        if let Some(limit) = max_work_points.filter(|limit| preflight_work_points > *limit) {
+            self.record_raw_batch_query(
+                started,
+                series_ids.len(),
+                locs.len(),
+                0,
+                decoded_points,
+                preflight_buffered_points,
+                0,
+            );
+            return Err(format!(
+                "raw batch work point limit {limit} exceeded (candidate points: {preflight_work_points})"
+            ));
+        }
         let chunk_bytes = self.store.read_chunks(&locs)?;
         if chunk_bytes.len() != locs.len() {
             return Err(format!(
@@ -2408,6 +2456,22 @@ impl Engine {
             if let Some(buffer) = self.partitions.get(&pk) {
                 buffered_points_considered =
                     buffered_points_considered.saturating_add(buffer.timestamps.len() as u64);
+                let observed_work_points =
+                    decoded_points.saturating_add(buffered_points_considered);
+                if let Some(limit) = max_work_points.filter(|limit| observed_work_points > *limit) {
+                    self.record_raw_batch_query(
+                        started,
+                        series_ids.len(),
+                        candidate_chunks,
+                        payload_bytes,
+                        decoded_points,
+                        buffered_points_considered,
+                        returned_points,
+                    );
+                    return Err(format!(
+                        "raw batch work point limit {limit} exceeded (candidate points: {observed_work_points})"
+                    ));
+                }
                 for index in 0..buffer.timestamps.len() {
                     let timestamp = buffer.timestamps[index];
                     if timestamp >= t_start && timestamp <= t_end {
@@ -3274,6 +3338,46 @@ impl Engine {
         window: i64,
         op: WindowOp,
     ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        self.query_window_op_batch_by_id_inner(series_ids, start, stop, step, window, op, None)
+    }
+
+    /// Bounded form of [`Self::query_window_op_batch_by_id`]. Both the
+    /// conservative input points inspected and the maximum grid points that
+    /// could be materialized are independently capped by the inclusive
+    /// `max_work_points` value before chunk payloads are read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_window_op_batch_by_id_limited(
+        &self,
+        series_ids: &[i64],
+        start: i64,
+        stop: i64,
+        step: i64,
+        window: i64,
+        op: WindowOp,
+        max_work_points: u64,
+    ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        self.query_window_op_batch_by_id_inner(
+            series_ids,
+            start,
+            stop,
+            step,
+            window,
+            op,
+            Some(max_work_points),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn query_window_op_batch_by_id_inner(
+        &self,
+        series_ids: &[i64],
+        start: i64,
+        stop: i64,
+        step: i64,
+        window: i64,
+        op: WindowOp,
+        max_work_points: Option<u64>,
+    ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
         match op {
             WindowOp::Percentile(q) if !(q > 0.0 && q <= 100.0) => {
                 return Err(format!("percentile must be in (0, 100], got {q}"));
@@ -3283,8 +3387,15 @@ impl Engine {
             }
             _ => {}
         }
-        if Self::validate_window(start, stop, step, window)? == 0 {
+        let grid_points = Self::validate_window(start, stop, step, window)?;
+        if grid_points == 0 {
             return Ok(series_ids.iter().map(|&sid| (sid, Vec::new())).collect());
+        }
+        let possible_output_points = (series_ids.len() as u64).saturating_mul(grid_points as u64);
+        if let Some(limit) = max_work_points.filter(|limit| possible_output_points > *limit) {
+            return Err(format!(
+                "window batch work point limit {limit} exceeded (possible output points: {possible_output_points})"
+            ));
         }
 
         let _transition = self.transition_read();
@@ -3308,6 +3419,25 @@ impl Engine {
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
             .collect();
+        let decoded_points = matching
+            .iter()
+            .flat_map(|chunks| chunks.iter())
+            .map(|meta| u64::from(meta.point_count))
+            .sum::<u64>();
+        let preflight_buffered_points = series_ids.iter().fold(0_u64, |total, &series_id| {
+            let pk = PartitionKey { series_id };
+            total.saturating_add(
+                self.partitions
+                    .get(&pk)
+                    .map_or(0, |buffer| buffer.timestamps.len() as u64),
+            )
+        });
+        let preflight_work_points = decoded_points.saturating_add(preflight_buffered_points);
+        if let Some(limit) = max_work_points.filter(|limit| preflight_work_points > *limit) {
+            return Err(format!(
+                "window batch work point limit {limit} exceeded (candidate input points: {preflight_work_points})"
+            ));
+        }
         let chunk_bytes = self.store.read_chunks(&locs)?;
         if chunk_bytes.len() != locs.len() {
             return Err(format!(
@@ -3319,6 +3449,7 @@ impl Engine {
 
         let mut payloads = chunk_bytes.into_iter();
         let mut result = Vec::with_capacity(series_ids.len());
+        let mut buffered_points_considered = 0_u64;
         for (&sid, chunks) in series_ids.iter().zip(matching) {
             let mut samples = Vec::new();
             for meta in chunks {
@@ -3330,6 +3461,15 @@ impl Engine {
 
             let pk = PartitionKey { series_id: sid };
             if let Some(buf) = self.partitions.get(&pk) {
+                buffered_points_considered =
+                    buffered_points_considered.saturating_add(buf.timestamps.len() as u64);
+                let observed_work_points =
+                    decoded_points.saturating_add(buffered_points_considered);
+                if let Some(limit) = max_work_points.filter(|limit| observed_work_points > *limit) {
+                    return Err(format!(
+                        "window batch work point limit {limit} exceeded (candidate input points: {observed_work_points})"
+                    ));
+                }
                 for index in 0..buf.timestamps.len() {
                     let timestamp = buf.timestamps[index];
                     if timestamp >= range_start && timestamp <= stop {

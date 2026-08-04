@@ -1283,6 +1283,8 @@ SELECT 'batch_sparse', labels, hex(buckets)
 SELECT 'batch_dense', labels, hex(buckets)
   FROM timeless_window_batches('m', 'cpu', NULL, 100, 140, 20, 30, 'sum', 'null')
   ORDER BY labels;
+SELECT 'batch_limited', COUNT(*)
+  FROM timeless_window_batches('m', 'cpu', NULL, 100, 140, 20, 30, 'sum', NULL, 6);
 
 .print -- label filter + metric isolation
 SELECT 'filtered', labels, ts, value
@@ -1313,6 +1315,8 @@ check_eq "packed dense window blobs mark empty grid points in the validity bitma
   "$(grep '^batch_dense|' <<<"$got")" \
 'batch_dense|{"host":"a"}|5457423103000000640000000000000078000000000000008C0000000000000007000000000000F03F00000000000008400000000000001C40
 batch_dense|{"host":"b"}|5457423103000000640000000000000078000000000000008C0000000000000006000000000000000000000000000025400000000000403440'
+check_eq "packed window max_work_points is inclusive" \
+  "$(grep '^batch_limited|' <<<"$got")" 'batch_limited|2'
 check_eq "label filter restricts to host b" \
   "$(grep '^filtered|' <<<"$got")" \
 'filtered|{"host":"b"}|110|10.5
@@ -1339,6 +1343,10 @@ err=$(sqlite3 "$Q2DB" ".load $EXT" \
   "SELECT * FROM timeless_window_batches('m', 'cpu', NULL, 100, 140, 20, 30, 'bogus');" 2>&1 || true)
 check_eq "packed window errors name their own public module" \
   "$(grep -c 'timeless_window_batches: unknown agg' <<<"$err")" "1"
+err=$(sqlite3 "$Q2DB" ".load $EXT" \
+  "SELECT * FROM timeless_window_batches('m','cpu',NULL,140,140,20,100,'sum',NULL,4);" 2>&1 || true)
+check_eq "packed window max_work_points rejects excess input before decode" \
+  "$(grep -c 'work point limit 4 exceeded.*candidate input points: 5' <<<"$err")" "1"
 
 # Fresh-connection recovery: the TVF must build the engine itself (no
 # prior vtab query on this connection) and still see flushed data.
@@ -2083,6 +2091,12 @@ SELECT 'range_selector', labels, ts, value
   FROM timeless_raw('ck','cpu','{"host":"a"}',0,60)
  WHERE ts > 0 AND ts <= 60
  ORDER BY labels, ts;
+-- SQL-PROM-007: bounded packed foundations
+SELECT 'bounded_raw', length(frame) > 0
+  FROM timeless_raw_frame('ck','cpu','{"host":"a"}',0,60,2);
+SELECT 'bounded_window', COUNT(*)
+  FROM timeless_window_batches(
+    'ck','cpu','{"host":"a"}',0,60,60,60,'avg',NULL,2);
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2119,6 +2133,9 @@ lv|c'
 check_eq "SQL-PROM-006 range selector uses exact (T-W,T] bounds" \
   "$(grep '^range_selector|' <<<"$got")" \
 'range_selector|{"host":"a"}|60|10.0'
+check_eq "SQL-PROM-007 bounds packed raw and window storage work" \
+  "$(grep -E '^bounded_(raw|window)\|' <<<"$got")" \
+$'bounded_raw|1\nbounded_window|1'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="
@@ -2148,6 +2165,8 @@ SELECT 'raw_batch', series_id, length(points), hex(substr(points,1,4))
   FROM timeless_raw_batches('em','cpu','{"host":{"re":"web-.*"}}',0,30);
 SELECT 'raw_frame', length(frame), hex(substr(frame,1,16))
   FROM timeless_raw_frame('em','cpu','{"host":{"re":"web-.*"}}',0,30);
+SELECT 'raw_frame_limit', length(frame)
+  FROM timeless_raw_frame('em','cpu','{"host":{"re":"web-.*"}}',0,30,2);
 SELECT 'empty_frame', COUNT(*)
   FROM timeless_raw_frame('em','cpu','{"host":"missing"}',0,30);
 SELECT 'raw_profile',
@@ -2158,6 +2177,13 @@ SELECT 'raw_profile',
        MAX(CASE WHEN key='raw_batch_query_decoded_points' THEN value END),
        MAX(CASE WHEN key='raw_batch_query_returned_points' THEN value END)
   FROM timeless_stats('em');
+BEGIN;
+INSERT INTO em(em) VALUES (readfile('$E34BLOB'));
+SELECT 'raw_frame_tx', length(frame)
+  FROM timeless_raw_frame('em','cpu','{"host":{"re":"web-.*"}}',0,30,4);
+ROLLBACK;
+SELECT 'raw_frame_rollback', length(frame)
+  FROM timeless_raw_frame('em','cpu','{"host":{"re":"web-.*"}}',0,30,2);
 SELECT 'catalog', name, labels, series_id FROM timeless_series('em') ORDER BY series_id;
 SQL
 )
@@ -2170,24 +2196,50 @@ raw|1|{"env":"prod","host":"web-1"}|20|3.5'
 check_eq "raw batch emits one packed blob per series" \
   "$(grep '^raw_batch|' <<<"$got")" 'raw_batch|1|36|02000000'
 check_eq "raw frame emits one versioned columnar blob for all non-empty series" \
-  "$(grep -E '^(raw_frame|empty_frame)\|' <<<"$got")" \
-$'raw_frame|60|54524631010000000200000000000000\nempty_frame|0'
+  "$(grep -E '^(raw_frame|raw_frame_limit|empty_frame)\|' <<<"$got")" \
+$'raw_frame|60|54524631010000000200000000000000\nraw_frame_limit|60\nempty_frame|0'
+check_eq "raw frame work limits preserve transaction and rollback visibility" \
+  "$(grep -E '^raw_frame_(tx|rollback)\|' <<<"$got")" \
+$'raw_frame_tx|92\nraw_frame_rollback|60'
 check_eq "packed raw stats expose candidates, decode, bytes, and returned work" \
   "$(grep '^raw_profile|' <<<"$got")" \
-  'raw_profile|3|2|2|1|4|4'
+  'raw_profile|4|3|3|1|6|6'
 check_eq "resolved empty-series catalog is queryable" \
   "$(grep '^catalog|' <<<"$got")" \
 'catalog|cpu|{"env":"prod","host":"web-1"}|1
 catalog|cpu|{"host":"db-1"}|2'
 
+if err=$(sqlite3 "$E34DB" ".load $EXT" \
+  "SELECT length(frame) FROM timeless_raw_frame('em','cpu','{\"host\":{\"re\":\"web-.*\"}}',0,30,1);" 2>&1); then
+  fail "raw frame max_work_points should reject excess candidate work"
+elif [[ "$err" == *"work point limit 1 exceeded (candidate points: 2)"* ]]; then
+  pass "raw frame max_work_points rejects before excess decode"
+else
+  fail "raw frame max_work_points returned the wrong error"
+  printf '%s\n' "$err"
+fi
+
 got=$(sqlite3 "$E34DB" <<SQL
 .load $EXT
 SELECT 'reopen_frame', length(frame), hex(substr(frame,1,16))
   FROM timeless_raw_frame('em','cpu',NULL,0,30);
+SELECT 'reopen_limited_frame', length(frame)
+  FROM timeless_raw_frame('em','cpu',NULL,0,30,3);
 SQL
 )
 check_eq "raw frame survives a new-process reopen" "$got" \
-  'reopen_frame|88|54524631020000000300000000000000'
+  $'reopen_frame|88|54524631020000000300000000000000\nreopen_limited_frame|88'
+
+for invalid_limit in 0 -1 NULL 1.5 "'bad'"; do
+  err=$(sqlite3 "$E34DB" ".load $EXT" \
+    "SELECT length(frame) FROM timeless_raw_frame('em','cpu',NULL,0,30,$invalid_limit);" 2>&1 || true)
+  if [[ "$err" == *"max_work_points"* ]]; then
+    pass "raw frame rejects invalid max_work_points=$invalid_limit"
+  else
+    fail "raw frame accepted or misreported max_work_points=$invalid_limit"
+    printf '%s\n' "$err"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 echo "== section 35: native scalar aggregate TVF =="

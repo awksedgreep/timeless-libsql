@@ -64,7 +64,10 @@ a real completion/durability barrier, not queue admission.
 Mechanical reads execute on the existing SQLite reader pool. The API discovers
 `timeless_latest_frame`, `timeless_raw_frame`, and
 `timeless_window_batches` through `pragma_module_list`; it never infers a
-capability from an extension version. Older extensions retain row-oriented
+capability from an extension version. Bounded PromQL reads additionally
+require the explicit `query_surfaces.*.max_work_points` capability; a module
+with the same name but without that additive contract fails closed. Older
+extensions retain row-oriented
 `timeless_latest` and `timeless_raw` fallbacks. Current `TLF1`, `TRF1`, and
 `TWB1` results are length/bitmap/version validated. Raw and window response
 encoders borrow column offsets from the one returned blob and write final JSON
@@ -124,6 +127,16 @@ points rather than Prometheus 3.13.2's 11,000 intervals (11,001 points).
 Parser-specific diagnostic wording can differ after the common
 parameter/type prefix because the server uses the pinned Rust AST parser;
 status, error type, parameter ownership, and unsupported behavior are stable.
+
+PromQL remains bounded even with authentication disabled. Defaults are 11,000
+grid points per series, 100,000 final result points, 100,000 storage work
+points, a 16 MiB serialized response, and a 30-second deadline. The packed raw
+and window limits are pushed into the extension before payload reads; result
+and response limits are checked during serialization; cancellation is checked
+inside evaluator and raw-fold loops. A deadline returns HTTP `504` with
+`errorType="timeout"`; other execution-limit failures return HTTP `422` with
+`errorType="execution"`. Auth claims may lower their own row, byte, and time
+allowances but cannot raise these owner limits.
 
 The query layer lowers plain selectors
 to `timeless_raw_frame` and performs a linear last-sample sweep over the exact
@@ -188,6 +201,11 @@ Positive environment overrides:
 - `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` (default `10`)
 - `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` (default `300`)
 - `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` (default `3600`)
+- `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` (default `11000`, maximum `11000`)
+- `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` (default `100000`)
+- `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` (default `100000`)
+- `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` (default `16777216`)
+- `TIMELESS_METRICS_PROMQL_DEADLINE_MS` (default `30000`)
 
 ## Ownership and accounting
 

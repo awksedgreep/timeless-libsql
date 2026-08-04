@@ -48,6 +48,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-004`](#sql-prom-004-vector-arithmetic-with-label-matching) | `PQL-O02`, `PQL-O05` | reference | SQL equivalent available for explicit match keys |
 | [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | reference | SQL equivalent available; API still owes PromQL ordering/labels |
 | [`SQL-PROM-006`](#sql-prom-006-range-selector) | `PQL-S06` | current | exact root range-vector storage selection; API shapes the matrix |
+| [`SQL-PROM-007`](#sql-prom-007-bounded-packed-storage-work) | `PQL-S20` | current foundation | exact pre-decode work bounds; API owns language/result/deadline limits |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -156,6 +157,45 @@ are canonical JSON. The Rust API owns parsing, matrix envelopes, value-string
 formatting, limits, and rejection of a root range vector on a range query.
 Direct regression: `tests/cli.sh` section 33 and the metrics API
 `session_four_pins_promql_selector_window_errors_and_reopen` contract.
+
+### SQL-PROM-007: bounded packed storage work
+
+Direct SQLite/libSQL callers can cap the conservative number of stored or
+buffered points inspected by packed raw and window reads:
+
+```sql
+SELECT frame
+FROM timeless_raw_frame(
+  'metrics', :metric, :filter_json,
+  :start, :end, :max_work_points
+);
+
+SELECT series_id, labels, buckets
+FROM timeless_window_batches(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :window, :aggregate,
+  NULL, :max_work_points
+)
+ORDER BY labels, series_id;
+```
+
+All metric timestamps are integer seconds. Bounds are inclusive at the raw
+storage surface; window samples use `(T-window,T]`. `:max_work_points` is a
+positive SQLite INTEGER and is inclusive. The extension checks persisted
+chunk point counts plus current buffer lengths before reading chunk payloads.
+For a packed window it independently checks the conservative input count and
+`matched series × grid points`, so neither decode nor packed output can exceed
+the bound. An excess returns an error and no partial frame/rows. `NULL`, zero,
+negative, and non-integer limits fail; omitting the trailing argument retains
+the unbounded backward-compatible SQL call.
+
+This is the storage foundation, not an SQL reimplementation of PromQL resource
+semantics. The Rust metrics API additionally owns the fixed 11,000-point grid
+ceiling, final result cardinality, serialized response bytes, cancellation,
+deadline/error envelopes, and tighter auth-claim policy. Direct regressions:
+`tests/cli.sh` sections 22, 34, and 45; core buffered/persisted coverage:
+`write_flush_query_recover`; HTTP/reopen coverage:
+`session_two_promql_limits_bound_grid_work_results_response_and_deadline`.
 
 ### SQL-PROM-003: cross-series sum by label
 
