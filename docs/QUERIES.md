@@ -376,6 +376,31 @@ compose the public grids and run an explicit uniqueness preflight; executable
 [`SQL-PROM-014`](QUERY_SQL_EQUIVALENTS.md#sql-prom-014-group_left-and-group_right)
 shows the complete foundation.
 
+## PromQL cross-series sum
+
+The Rust metrics API aggregates every shipped instant-vector expression at
+each evaluation timestamp:
+
+```promql
+sum(http_requests_total)
+sum by (service) (http_requests_total)
+sum without (instance, pod) (http_requests_total)
+```
+
+Without a modifier, all samples form one empty-label group. `by` keeps only
+the named, non-empty labels; a missing grouping label therefore joins the
+empty group. `without` removes its labels and always removes `__name__`.
+Naming `__name__` in `by` explicitly retains it, matching Prometheus. Range
+queries repeat grouping per outer grid timestamp, so sparse inputs do not
+invent samples. `NaN` propagates, like-signed infinities remain infinite, and
+opposite infinities produce `NaN`.
+
+The API evaluates the bounded child once, checks cancellation while grouping,
+and charges every child point to the cumulative intermediate-work limit.
+Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over
+the public grid in executable
+[`SQL-PROM-003`](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label).
+
 ## Scalar aggregate without raw materialization
 
 ```sql

@@ -386,6 +386,7 @@ pub(crate) enum PromPlan {
     String(String),
     Unary(Box<PromPlan>),
     Binary(PromBinaryPlan),
+    Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
     AvgOverTime { selector: Selector, window: i64 },
     AvgOverSubquery(SubqueryPlan),
@@ -399,6 +400,26 @@ enum PromValueType {
     String,
     Vector,
     Matrix,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromAggregateOp {
+    Sum,
+}
+
+#[derive(Clone, Debug, Default)]
+enum PromAggregateGrouping {
+    #[default]
+    All,
+    By(BTreeSet<String>),
+    Without(BTreeSet<String>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromAggregatePlan {
+    op: PromAggregateOp,
+    inner: Box<PromPlan>,
+    grouping: PromAggregateGrouping,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -447,12 +468,7 @@ impl PromVectorMatching {
                 .collect(),
             Self::On(names) => names
                 .iter()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        labels.get(name).cloned().unwrap_or_default(),
-                    )
-                })
+                .map(|name| (name.clone(), labels.get(name).cloned().unwrap_or_default()))
                 .collect(),
             Self::Ignoring(names) => labels
                 .iter()
@@ -531,6 +547,7 @@ impl PromPlan {
             Self::String(_) => PromValueType::String,
             Self::RangeSelector { .. } | Self::Subquery(_) => PromValueType::Matrix,
             Self::Unary(inner) => inner.value_type(),
+            Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
                     && binary.rhs.value_type() == PromValueType::Scalar
@@ -802,6 +819,9 @@ fn lower_promql_expr(
             Ok(PromPlan::Unary(Box::new(inner)))
         }
         promql::Expr::Binary(binary) => lower_promql_binary(binary, lookback, depth + 1),
+        promql::Expr::Aggregate(aggregate) => {
+            lower_promql_aggregate(aggregate, lookback, depth + 1)
+        }
         promql::Expr::Subquery(subquery) => Ok(PromPlan::Subquery(lower_promql_subquery(
             subquery,
             lookback,
@@ -831,6 +851,49 @@ fn lower_promql_expr(
             promql_expression_name(&other)
         )),
     }
+}
+
+fn lower_promql_aggregate(
+    aggregate: promql_parser::parser::AggregateExpr,
+    lookback: i64,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    use promql_parser::parser::token;
+    use promql_parser::parser::LabelModifier;
+
+    let op = match aggregate.op.id() {
+        token::T_SUM => PromAggregateOp::Sum,
+        _ => {
+            return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
+        }
+    };
+    if aggregate.param.is_some() {
+        return Err(format!(
+            "PromQL aggregation {} does not accept a parameter",
+            aggregate.op
+        ));
+    }
+    let grouping = match aggregate.modifier {
+        None => PromAggregateGrouping::All,
+        Some(LabelModifier::Include(labels)) => {
+            PromAggregateGrouping::By(labels.labels.iter().cloned().collect())
+        }
+        Some(LabelModifier::Exclude(labels)) => {
+            PromAggregateGrouping::Without(labels.labels.iter().cloned().collect())
+        }
+    };
+    let inner = lower_promql_expr(*aggregate.expr, lookback, depth)?;
+    if inner.value_type() != PromValueType::Vector {
+        return Err(format!(
+            "PromQL aggregation {} requires an instant vector",
+            aggregate.op
+        ));
+    }
+    Ok(PromPlan::Aggregate(PromAggregatePlan {
+        op,
+        inner: Box::new(inner),
+        grouping,
+    }))
 }
 
 fn lower_promql_binary(
@@ -905,8 +968,7 @@ fn lower_promql_binary(
     let lhs = lower_promql_expr(*binary.lhs, lookback, depth)?;
     let rhs = lower_promql_expr(*binary.rhs, lookback, depth)?;
     if op.is_set()
-        && (lhs.value_type() != PromValueType::Vector
-            || rhs.value_type() != PromValueType::Vector)
+        && (lhs.value_type() != PromValueType::Vector || rhs.value_type() != PromValueType::Vector)
     {
         return Err("PromQL set operators require instant-vector operands".into());
     }
@@ -2323,6 +2385,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::Aggregate(aggregate) => execute_prometheus_aggregate(
+            conn,
+            features,
+            aggregate,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Selector { selector, lookback } => execute_prometheus_selector(
             conn,
             features,
@@ -2438,6 +2513,105 @@ impl IntermediateValue {
             Self::Vector(series) => series.iter().map(|series| series.points.len() as u64).sum(),
         }
     }
+}
+
+impl PromAggregateGrouping {
+    fn output_labels(&self, labels: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        match self {
+            Self::All => BTreeMap::new(),
+            Self::By(names) => labels
+                .iter()
+                .filter(|(name, value)| names.contains(*name) && !value.is_empty())
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            Self::Without(names) => labels
+                .iter()
+                .filter(|(name, value)| {
+                    name.as_str() != "__name__" && !names.contains(*name) && !value.is_empty()
+                })
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_aggregate(
+    conn: &Connection,
+    features: QueryFeatures,
+    aggregate: &PromAggregatePlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let child = execute_prometheus(
+        conn,
+        features,
+        &aggregate.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let frame_bytes = child.frame_bytes;
+    let value = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?;
+    let IntermediateValue::Vector(series) = value else {
+        unreachable!("aggregation child type was checked while lowering")
+    };
+    let series = apply_prometheus_aggregate(aggregate, series, cancelled)?;
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn apply_prometheus_aggregate(
+    aggregate: &PromAggregatePlan,
+    series: Vec<IntermediateSeries>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>> = BTreeMap::new();
+    for series in series {
+        check_cancelled(cancelled)?;
+        let labels = aggregate.grouping.output_labels(&series.labels);
+        let group = groups.entry(labels).or_default();
+        for (timestamp, value) in series.points {
+            check_cancelled(cancelled)?;
+            let current = group.entry(timestamp).or_insert(0.0);
+            match aggregate.op {
+                PromAggregateOp::Sum => *current += value,
+            }
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(labels, points)| IntermediateSeries {
+            labels,
+            points: points.into_iter().collect(),
+        })
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2588,9 +2762,7 @@ fn apply_prometheus_binary(
     if op.is_set() {
         return match (lhs, rhs) {
             (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => Ok(
-                IntermediateValue::Vector(apply_set_vectors(
-                    op, matching, lhs, rhs, cancelled,
-                )?),
+                IntermediateValue::Vector(apply_set_vectors(op, matching, lhs, rhs, cancelled)?),
             ),
             _ => Err("PromQL set operators require instant-vector operands".into()),
         };
@@ -2884,12 +3056,7 @@ fn apply_vector_vectors(
             let mut step_output_labels = BTreeSet::new();
             for (lhs_index, rhs_index, lhs_value, rhs_value) in matches {
                 check_cancelled(cancelled)?;
-                let Some(value) = op.evaluate(
-                    lhs_value,
-                    rhs_value,
-                    lhs_value,
-                    return_bool,
-                ) else {
+                let Some(value) = op.evaluate(lhs_value, rhs_value, lhs_value, return_bool) else {
                     continue;
                 };
                 let (base_labels, one_labels) = match cardinality {
@@ -2919,10 +3086,7 @@ fn apply_vector_vectors(
 
     let output = output
         .into_iter()
-        .map(|(labels, points)| IntermediateSeries {
-            labels,
-            points,
-        })
+        .map(|(labels, points)| IntermediateSeries { labels, points })
         .collect();
     normalize_prometheus_vector(output, cancelled)
 }
@@ -2941,8 +3105,7 @@ fn vector_result_labels(
     }
     match cardinality {
         PromVectorCardinality::OneToOne => matching.project_one_to_one_result(&mut labels),
-        PromVectorCardinality::ManyToOne(include)
-        | PromVectorCardinality::OneToMany(include) => {
+        PromVectorCardinality::ManyToOne(include) | PromVectorCardinality::OneToMany(include) => {
             for name in include {
                 match one_labels.get(name).filter(|value| !value.is_empty()) {
                     Some(value) => {

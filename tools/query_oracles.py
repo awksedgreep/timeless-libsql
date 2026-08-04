@@ -254,6 +254,19 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             [(value, timestamp_ms + 30_000)],
             {"host": "a", "pod": pod, "zone": zone},
         )
+    for host, region, first, second in [
+        ("a", "east", 1.0, 3.0),
+        ("b", "east", 2.0, 4.0),
+        ("c", "west", 5.0, 6.0),
+    ]:
+        write_request += series(
+            "oracle_aggregation",
+            [
+                (first, timestamp_ms + 20_000),
+                (second, timestamp_ms + 30_000),
+            ],
+            {"host": host, "region": region},
+        )
     return snappy_literal(write_request)
 
 

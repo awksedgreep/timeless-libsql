@@ -2328,12 +2328,7 @@ async fn session_four_promql_on_ignoring_match_labels_names_limits_and_reopen() 
         }])
     );
 
-    let ignoring = prom_query(
-        &app,
-        "match_lhs + ignoring(zone) match_rhs",
-        base + 10,
-    )
-    .await;
+    let ignoring = prom_query(&app, "match_lhs + ignoring(zone) match_rhs", base + 10).await;
     assert_eq!(ignoring.0, StatusCode::OK, "{}", ignoring.1);
     assert_eq!(
         ignoring.1["data"]["result"],
@@ -2343,21 +2338,14 @@ async fn session_four_promql_on_ignoring_match_labels_names_limits_and_reopen() 
         }])
     );
 
-    let comparison = prom_query(
-        &app,
-        "match_lhs == on(host) match_lhs",
-        base + 10,
-    )
-    .await;
+    let comparison = prom_query(&app, "match_lhs == on(host) match_lhs", base + 10).await;
     assert_eq!(comparison.0, StatusCode::OK, "{}", comparison.1);
-    assert_eq!(comparison.1["data"]["result"][0]["metric"], serde_json::json!({"host": "a"}));
+    assert_eq!(
+        comparison.1["data"]["result"][0]["metric"],
+        serde_json::json!({"host": "a"})
+    );
 
-    let set = prom_query(
-        &app,
-        "match_lhs and on(host) match_rhs",
-        base + 10,
-    )
-    .await;
+    let set = prom_query(&app, "match_lhs and on(host) match_rhs", base + 10).await;
     assert_eq!(set.0, StatusCode::OK, "{}", set.1);
     assert_eq!(
         set.1["data"]["result"][0]["metric"],
@@ -2372,7 +2360,10 @@ async fn session_four_promql_on_ignoring_match_labels_names_limits_and_reopen() 
     ] {
         let empty_key = prom_query(&app, query, base + 10).await;
         assert_eq!(empty_key.0, StatusCode::OK, "{}", empty_key.1);
-        assert_eq!(empty_key.1["data"]["result"][0]["metric"], serde_json::json!({}));
+        assert_eq!(
+            empty_key.1["data"]["result"][0]["metric"],
+            serde_json::json!({})
+        );
         assert_eq!(empty_key.1["data"]["result"][0]["value"][1], "30");
     }
 
@@ -2666,6 +2657,166 @@ async fn session_four_promql_group_matching_direction_labels_limits_and_reopen()
     )
     .await;
     assert_eq!(recovered.1, group_right.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_sum_groups_labels_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_sum.db");
+    let base = 1_700_500_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = [
+        ("a", "east", 1.0, 3.0),
+        ("b", "east", 2.0, 4.0),
+        ("c", "west", 5.0, 6.0),
+    ]
+    .into_iter()
+    .map(|(host, region, first, second)| {
+        format!(
+            "{{\"metric\":{{\"__name__\":\"aggregate_metric\",\"host\":\"{host}\",\"region\":\"{region}\"}},\"values\":[{first},{second}],\"timestamps\":[{},{}]}}\n",
+            base * 1_000,
+            (base + 10) * 1_000,
+        )
+    })
+    .collect::<String>();
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    let ieee = format!(
+        concat!(
+            "aggregate_ieee{{case=\"nan\",host=\"a\"}} NaN {}\n",
+            "aggregate_ieee{{case=\"nan\",host=\"b\"}} 1 {}\n",
+            "aggregate_ieee{{case=\"positive\",host=\"a\"}} +Inf {}\n",
+            "aggregate_ieee{{case=\"positive\",host=\"b\"}} 1 {}\n",
+            "aggregate_ieee{{case=\"mixed\",host=\"a\"}} +Inf {}\n",
+            "aggregate_ieee{{case=\"mixed\",host=\"b\"}} -Inf {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", ieee.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let by = prom_query(&app, "sum by (region) (aggregate_metric)", base + 10).await;
+    assert_eq!(by.0, StatusCode::OK, "{}", by.1);
+    assert_eq!(
+        by.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base + 10, "7"]},
+            {"metric": {"region": "west"}, "value": [base + 10, "6"]}
+        ])
+    );
+
+    let without = prom_query(
+        &app,
+        "sum without (__name__, host) (aggregate_metric)",
+        base + 10,
+    )
+    .await;
+    assert_eq!(without.0, StatusCode::OK, "{}", without.1);
+    assert_eq!(without.1["data"]["result"], by.1["data"]["result"]);
+
+    let empty = prom_query(&app, "sum(aggregate_metric)", base + 10).await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(
+        empty.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base + 10, "13"]}])
+    );
+
+    let missing = prom_query(&app, "sum by (missing) (aggregate_metric)", base + 10).await;
+    assert_eq!(missing.0, StatusCode::OK, "{}", missing.1);
+    assert_eq!(missing.1["data"]["result"], empty.1["data"]["result"]);
+
+    let named = prom_query(&app, "sum by (__name__) (aggregate_metric)", base + 10).await;
+    assert_eq!(named.0, StatusCode::OK, "{}", named.1);
+    assert_eq!(
+        named.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "aggregate_metric"},
+            "value": [base + 10, "13"]
+        }])
+    );
+
+    let ieee = prom_query(&app, "sum by (case) (aggregate_ieee)", base + 10).await;
+    assert_eq!(ieee.0, StatusCode::OK, "{}", ieee.1);
+    assert_eq!(
+        ieee.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "mixed"}, "value": [base + 10, "NaN"]},
+            {"metric": {"case": "nan"}, "value": [base + 10, "NaN"]},
+            {"metric": {"case": "positive"}, "value": [base + 10, "+Inf"]}
+        ])
+    );
+
+    let range = prom_query_range(
+        &app,
+        "sum by (region) (aggregate_metric)",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "values": [[base, "3"], [base + 10, "7"]]},
+            {"metric": {"region": "west"}, "values": [[base, "5"], [base + 10, "6"]]}
+        ])
+    );
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "sum(aggregate_metric)", base + 10).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("raw batch work point limit 2 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = prom_query(
+        &reopened_app,
+        "sum by (region) (aggregate_metric)",
+        base + 10,
+    )
+    .await;
+    assert_eq!(recovered.1, by.1);
     drop(reopened_app);
     reopened.shutdown().await.unwrap();
 }

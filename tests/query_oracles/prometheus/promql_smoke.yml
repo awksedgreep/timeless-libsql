@@ -46,6 +46,12 @@ tests:
         values: '1 2 3'
       - series: 'query_contract_group_many_rhs{host="a",pod="p2",zone="west"}'
         values: '2 3 4'
+      - series: 'query_contract_aggregation{host="a",region="east"}'
+        values: '1 2 3'
+      - series: 'query_contract_aggregation{host="b",region="east"}'
+        values: '2 3 4'
+      - series: 'query_contract_aggregation{host="c",region="west"}'
+        values: '5 5 6'
     promql_expr_test:
       - expr: 'query_contract_cpu{host="a"}'
         eval_time: 20s
@@ -291,3 +297,27 @@ tests:
             value: 8
           - labels: 'query_contract_group_many_rhs{host="a",pod="p2",team="core",zone="west"}'
             value: 8
+      - expr: 'sum by (region) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 7
+          - labels: '{region="west"}'
+            value: 6
+      - expr: 'sum without (__name__, host) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 7
+          - labels: '{region="west"}'
+            value: 6
+      - expr: 'sum(query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{}'
+            value: 13
+      - expr: 'sum by (__name__) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_aggregation'
+            value: 13

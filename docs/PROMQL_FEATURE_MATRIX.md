@@ -88,7 +88,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O06` | `on(...)` and `ignoring(...)` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-013-on-and-ignoring-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O07` | `group_left` and `group_right` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-014-group_left-and-group_right)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O08` | trigonometric binary `atan2` | missing | no | `SQL` | `API` | P1 |
-| `PQL-O09` | `sum` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label)) | missing | yes | `SQL` | `API` | P0 |
+| `PQL-O09` | `sum` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O10` | `avg` with `by`/`without` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O11` | `min` and `max` with `by`/`without` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O12` | `count` and `group` with `by`/`without` | missing | yes | `SQL` | `API` | P0 |

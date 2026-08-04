@@ -968,9 +968,8 @@ echo "== section 18: Prometheus text ingest =="
 # timestamp get the CURRENT WALL CLOCK in seconds. Fixture covers:
 # HELP/TYPE comments (free), a bare counter (no labels, no ts), a
 # labeled gauge with an explicit ms ts, a histogram-style multi-label
-# line (no ts), one malformed line and one NaN line (each counted as an
-# error, neither fatal — partial success succeeds silently, like a real
-# Prometheus server scrape).
+# line (no ts), one malformed line (counted as an error), and one valid NaN
+# sample. Partial success succeeds silently, like a Prometheus scrape.
 PROMBODY="$TMP/scrape.prom"
 cat > "$PROMBODY" <<'PROM'
 # HELP http_requests_total Total HTTP requests.
@@ -996,8 +995,10 @@ SELECT 'default_sane', COUNT(*) FROM metrics WHERE name != 'node_temp_celsius'
   AND ts BETWEEN 1750000000 AND 4000000000;
 SQL
 )
-# ingested = 3 samples (rowid = count; the 2 bad lines are errors, not
-# samples, and NOT fatal). 'temp' proves the explicit ms ts came out as
+# ingested = 4 samples (rowid = count; the malformed line is an error, not a
+# sample, and NOT fatal). The NaN sample is stored bit-exact but ordinary
+# SQLite REAL projection is NULL; packed public frames preserve its bits.
+# 'temp' proves the explicit ms ts came out as
 # SECONDS (1753000000123 ms → 1753000000 s) and labels round-trip in
 # canonical sorted-JSON. 'bucket' pins one exact multi-label value.
 # 'default_shared' = 1: both no-ts samples got the SAME default (one
@@ -1005,17 +1006,17 @@ SQL
 # SECONDS in a sane range — 1750000000 ≈ mid-2025 < now, and the 4e9
 # upper bound would be violated by a milliseconds default (~1.79e12),
 # so this asserts the unit, not just "recent".
-expected='ingested|3
-total|3
+expected='ingested|4
+total|4
 temp|node_temp_celsius|1753000000|42.5|{"host":"pvm1","sensor":"cpu0"}
 bucket|129389.0|{"code":"200","le":"0.5","method":"GET"}
 default_shared|1
-default_sane|2'
+default_sane|3'
 check_eq "prometheus body: count, ms→s ts, labels, shared seconds default" "$got" "$expected"
 
 # Batch v0 still works THROUGH THE SAME DISPATCH into the same table
 # (regression: section 7's blob starts with 0x01 and must keep taking
-# the batch path, not the text path). 3 more points → 6 total. Flushed
+# the batch path, not the text path). 3 more points → 7 total. Flushed
 # at the end so they survive into the new-process check below (the POC
 # durability contract: unflushed buffers die with the process).
 got=$(sqlite3 "$PROMDB" <<SQL
@@ -1027,7 +1028,7 @@ INSERT INTO metrics(metrics) VALUES ('flush');
 SQL
 )
 expected='batch_rowid|3
-total|6'
+total|7'
 check_eq "batch v0 blob still dispatches to the batch path" "$got" "$expected"
 
 # An all-garbage body parses as prometheus text but yields 0 samples +
@@ -1067,7 +1068,7 @@ fi
 # Nothing from the rejected payloads may have been stored.
 got=$(sqlite3 "$PROMDB" ".load $EXT" \
   "INSERT INTO metrics(metrics) VALUES ('flush'); SELECT COUNT(*) FROM metrics;")
-check_eq "rejected payloads stored nothing" "$got" "6"
+check_eq "rejected payloads stored nothing" "$got" "7"
 
 # ---------------------------------------------------------------------------
 echo "== section 19: plain-table oracle property test (3 seeds) =="

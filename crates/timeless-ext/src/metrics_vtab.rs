@@ -45,10 +45,10 @@
 //! this repo, and matching 'prune:<unix_ts>'. Everything in a
 //! timeless_metrics table is epoch SECONDS.
 //!
-//! Prometheus error semantics (engine contract, mirrored here):
-//! malformed non-comment lines and NaN/±Inf values are COUNTED but do
-//! not abort the body — partial success (some samples + some errors)
-//! succeeds silently, exactly like a Prometheus server scrape. Only a
+//! Prometheus error semantics (engine contract, mirrored here): NaN and
+//! ±Inf are valid float-series values and retain their IEEE bits. Malformed
+//! non-comment lines are COUNTED but do not abort the body — partial success
+//! (some samples + some errors) succeeds silently. Only a
 //! body that yields ZERO samples with ≥1 error is rejected, because
 //! that means the payload wasn't exposition text at all.
 //!
@@ -634,7 +634,7 @@ impl MetricsTab {
     /// contract, not the unit itself.)
     ///
     /// Error semantics (engine contract, documented in module docs):
-    /// malformed lines and NaN/Inf values are counted, not fatal —
+    /// malformed lines are counted, not fatal; NaN/Inf are valid samples —
     /// partial success succeeds silently, matching how a real
     /// Prometheus server treats a scrape. Only "zero samples AND at
     /// least one error" is rejected: that body was not exposition text.

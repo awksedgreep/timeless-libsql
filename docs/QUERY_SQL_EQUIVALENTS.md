@@ -44,7 +44,7 @@ language/value-envelope semantics belong to the Rust API.
 |---|---|---|---|
 | [`SQL-PROM-001`](#sql-prom-001-instant-selector) | `PQL-S01`, `PQL-S02` | current | exact storage selection; API shapes PromQL output |
 | [`SQL-PROM-002`](#sql-prom-002-avg_over_time) | `PQL-S06`, `PQL-R01` | current | exact float-window reduction |
-| [`SQL-PROM-003`](#sql-prom-003-cross-series-sum-by-label) | `PQL-O09` | reference | SQL equivalent available; Rust PromQL row remains missing |
+| [`SQL-PROM-003`](#sql-prom-003-cross-series-sum-by-label) | `PQL-O09` | current foundation | exact bounded cross-series sum; API owns grouping syntax, labels, IEEE strings, limits, and envelopes |
 | [`SQL-PROM-004`](#sql-prom-004-vector-arithmetic-with-label-matching) | `PQL-O02`, `PQL-O05` | current foundation | vector/scalar arithmetic and exact-label joins; API owns language, cardinality, labels, IEEE strings, and envelopes |
 | [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | reference | SQL equivalent available; API still owes PromQL ordering/labels |
 | [`SQL-PROM-006`](#sql-prom-006-range-selector) | `PQL-S06` | current | exact root range-vector storage selection; API shapes the matrix |
@@ -654,10 +654,20 @@ GROUP BY service, ts
 ORDER BY service, ts;
 ```
 
-This uses SQLite JSON and aggregate functions over an already bounded grid.
-It is the SQL execution equivalent, but `PQL-O09` remains missing until the
-Rust API implements PromQL grouping, empty-label, metric-name, NaN, and result
-envelope rules.
+`:metric` is text; `:filter_json` is a JSON matcher object or SQL `NULL`; and
+`:start`, `:end`, `:step`, and `:lookback` use the metrics table's epoch-second
+unit. Grid and lookback bounds retain the public `timeless_grid` contract.
+SQLite groups a missing `service` and JSON null together here, so callers that
+need PromQL's absent-as-empty grouping should normalize with
+`COALESCE(json_extract(labels, '$.service'), '')`. Output is ordered by group
+and timestamp; values remain SQLite numeric values.
+
+This is the exact bounded numeric reduction foundation. The Rust API adds
+`by`/`without` parsing, empty/missing and `__name__` output-label policy,
+portable IEEE strings, millisecond evaluation timestamps, resource limits,
+cancellation, and Prometheus result/error envelopes. The statement executes
+in `tests/cli.sh` section 33; the real-extension/API contract is
+`session_five_promql_sum_groups_labels_limits_and_reopen`.
 
 ### SQL-PROM-004: vector arithmetic with label matching
 

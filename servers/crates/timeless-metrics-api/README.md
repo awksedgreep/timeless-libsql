@@ -42,6 +42,9 @@ matching, with Prometheus output-label and duplicate-cardinality rules.
 Many-to-one `group_left` and one-to-many `group_right` preserve operation
 direction, copy labels from the unique side, and reject both duplicate unique
 sides and non-unique result labelsets.
+Cross-series `sum` supports unmodified, `by(...)`, and `without(...)`
+grouping over every shipped instant-vector expression, including exact empty,
+missing-label, metric-name, sparse-range, and IEEE behavior.
 Selectors and range selectors accept signed
 `offset` plus numeric/`start()`/`end()` `@` modifiers. Selector and shipped
 range-function expressions may be evaluated as bounded subqueries with
@@ -49,7 +52,7 @@ range-function expressions may be evaluated as bounded subqueries with
 subquery timing modifiers. Root subqueries return range vectors only from an
 instant query; `avg_over_time` consumes them as instant vectors. It
 deliberately rejects every other
-function, operator, or aggregation with a
+function, operator, or aggregation not listed in the matrix with a
 Prometheus `bad_data` response. There is no hidden Elixir fallback. The
 release binary requires Phoenix-managed policy authentication by default;
 cluster and product control routes remain in Phoenix. The
@@ -65,7 +68,7 @@ The authoritative support contract is the
 Rust API rows at this revision are listed below for CI; prose in this README
 must not imply a broader language surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-R01 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-R01 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are

@@ -7,8 +7,9 @@
 //! 2. Explicit timestamps > 1e12 (the Prometheus wire unit: epoch
 //!    MILLISECONDS) are normalized to SECONDS (/1000). This is the fact
 //!    that forces the vtab's "default_ts is seconds" unit decision.
-//! 3. Malformed non-comment lines and non-finite values are COUNTED as errors
-//!    but never abort the body — partial success is the contract.
+//! 3. NaN and infinities are valid float-series samples and retain their IEEE
+//!    values; malformed non-comment lines are COUNTED as errors but never
+//!    abort the body — partial success is the contract.
 //! 4. Comments / HELP / TYPE / blank lines are free: neither samples nor
 //!    errors.
 //!
@@ -45,11 +46,8 @@ fn prometheus_ingest_semantics() {
     // default_ts is deterministic here (no wall clock in a unit test).
     let default_ts: i64 = 1_800_000_000;
     let (count, errors) = engine.ingest_prometheus(body, default_ts).unwrap();
-    assert_eq!(count, 2, "counter + gauge ingested; comments are free");
-    assert_eq!(
-        errors, 4,
-        "malformed line + three non-finite lines count once"
-    );
+    assert_eq!(count, 5, "all five valid floats ingest; comments are free");
+    assert_eq!(errors, 1, "only the malformed line counts as an error");
 
     // Rule 1: no-timestamp sample carries default_ts VERBATIM (seconds).
     let sid = engine
@@ -77,6 +75,23 @@ fn prometheus_ingest_semantics() {
         vec![(1_753_000_000, 42.5)],
         "explicit 1753000000123 ms must be stored as 1753000000 s"
     );
+
+    let nan = engine
+        .resolve_cached("bad_metric", &HashMap::new())
+        .unwrap();
+    let nan_rows = engine.query_range_by_id(nan, 0, i64::MAX - 1).unwrap();
+    assert_eq!(nan_rows.len(), 1);
+    assert!(nan_rows[0].1.is_nan());
+    for (name, expected) in [
+        ("positive_inf", f64::INFINITY),
+        ("negative_inf", f64::NEG_INFINITY),
+    ] {
+        let sid = engine.resolve_cached(name, &HashMap::new()).unwrap();
+        assert_eq!(
+            engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap(),
+            vec![(default_ts, expected)]
+        );
+    }
 
     let escaped_body =
         b"escaped_labels{path=\"a\\\"b\",note=\"x\\\\y\"} 7 1800000000000\r\ncrlf_metric 9\r\n";
@@ -110,8 +125,8 @@ fn prometheus_ingest_semantics() {
 
     let info = engine.info();
     assert_eq!(info.prometheus_ingest_batches, 3);
-    assert_eq!(info.prometheus_ingest_points, 4);
-    assert_eq!(info.prometheus_ingest_errors, 6);
+    assert_eq!(info.prometheus_ingest_points, 7);
+    assert_eq!(info.prometheus_ingest_errors, 3);
     assert!(info.prometheus_ingest_total_ns > 0);
 
     engine.shutdown().unwrap();

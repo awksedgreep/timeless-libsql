@@ -362,6 +362,45 @@
         {"metric": {"__name__": "oracle_group_many_rhs", "host": "a", "job": "oracle", "pod": "p1", "team": "core", "zone": "east"}, "value": 8},
         {"metric": {"__name__": "oracle_group_many_rhs", "host": "a", "job": "oracle", "pod": "p2", "team": "core", "zone": "west"}, "value": 8}
       ]
+    },
+    {
+      "id": "PQL-O09-sum-by",
+      "query": "sum by (region) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 7},
+        {"metric": {"region": "west"}, "value": 6}
+      ]
+    },
+    {
+      "id": "PQL-O09-sum-without",
+      "query": "sum without (__name__, host, job) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 7},
+        {"metric": {"region": "west"}, "value": 6}
+      ]
+    },
+    {
+      "id": "PQL-O09-sum-empty-group",
+      "query": "sum(oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [13]
+    },
+    {
+      "id": "PQL-O09-sum-by-missing-label",
+      "query": "sum by (missing) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [13]
+    },
+    {
+      "id": "PQL-O09-sum-by-name-retains-name",
+      "query": "sum by (__name__) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_aggregation"},
+      "expected_values": [13]
     }
   ],
   "operator_error_cases": [

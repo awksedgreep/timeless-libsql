@@ -4601,17 +4601,16 @@ impl AggregateSummary {
 //
 // Mirrors c_src/prometheus_nif.cpp semantics: entries are
 // (name, [(label_key, label_value)], value, timestamp), timestamp 0 when
-// absent, NaN/Inf values rejected, malformed non-comment lines counted
+// absent, IEEE float values preserved, malformed non-comment lines counted
 // as errors. Exposed as two NIFs so parse cost and term-materialization
 // cost can be measured separately.
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Parse a Prometheus sample value. Rejects NaN/Inf — the BEAM cannot
-/// represent non-finite floats.
+/// Parse a Prometheus sample value. Non-finite IEEE values are valid
+/// Prometheus samples and the Rust/libSQL data plane preserves their bits.
 fn parse_prom_value(bytes: &[u8]) -> Option<f64> {
     let s = std::str::from_utf8(bytes).ok()?;
-    let v: f64 = s.parse().ok()?;
-    v.is_finite().then_some(v)
+    s.parse().ok()
 }
 
 /// Parse the inside of a `{key="val",key2="val2"}` label block into `out`.
