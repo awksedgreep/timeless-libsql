@@ -1627,3 +1627,37 @@ range grids, nested transforms, invalid types, limits, shutdown, and cold
 reopen. No new storage finding arose, and no extension signature,
 storage/frame format, batching, compression, index, rollup, retention,
 transaction, or migration behavior changed.
+
+## Session 8 `PQL-F04` square-root, exponential, and logarithm transforms
+
+The checked-in
+[`2026-08-04_session8_pql_f04.json`](evidence/2026-08-04_session8_pql_f04.json)
+was captured from exact extension and server build
+`267082269d8552456913e3f7985b0579c073596c`. The measured `ln` shapes use one
+bounded public packed-raw read and apply the transform in place. They exercise
+the same plan and memory shape as `sqrt`, `exp`, `log2`, and `log10`; the
+larger response reflects non-integral logarithm strings rather than extra
+storage work.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `ln(metric)` | 1 | 148 | 0.417 | 0.637 | 0.753 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `ln(metric)` | 2,048 | 96,662 | 4.744 | 4.965 | 5.119 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The transform adds no scalar child, second storage read, or result copy.
+Candidate chunks, decoded samples, returned raw samples, and packed extension
+payload bytes match the other transform rows. The wide response is 29,042
+bytes larger than the integral-valued clamp fixture because it contains the
+actual logarithm decimals. At 4.965 ms p95, ordinary in-place Rust composition
+remains the correct PromQL boundary; direct SQLite/libSQL users already have
+the standard math functions documented by `SQL-PROM-041`.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 37,600 KiB. No benchmark request required cancellation; the shared
+composed-evaluator cancellation contract pins reader reuse. Pinned oracle and
+real-extension tests cover all five functions, valid and invalid domains,
+NaN, infinities, signed zero, range grids, nested transforms, invalid types,
+limits, shutdown, and cold reopen. SQLite's documented SQL-NULL domain result
+is an API/SQL representation boundary, not a storage defect; no new storage
+finding arose and no extension or storage contract changed.
