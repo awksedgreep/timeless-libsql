@@ -401,6 +401,32 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {"__name__": "oracle_aggregation"},
       "expected_values": [13]
+    },
+    {
+      "id": "PQL-O10-avg-by",
+      "query": "avg by (region) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 3.5},
+        {"metric": {"region": "west"}, "value": 6}
+      ]
+    },
+    {
+      "id": "PQL-O10-avg-compensated",
+      "query": "avg(oracle_avg_precision)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [0.3333333333333333]
+    },
+    {
+      "id": "PQL-O10-avg-ieee",
+      "query": "avg by (case) (oracle_avg_ieee)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "nan"}, "value": "NaN"},
+        {"metric": {"case": "positive"}, "value": "+Inf"},
+        {"metric": {"case": "mixed"}, "value": "NaN"}
+      ]
     }
   ],
   "operator_error_cases": [

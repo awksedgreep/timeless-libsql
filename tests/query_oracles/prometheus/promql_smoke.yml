@@ -52,6 +52,12 @@ tests:
         values: '2 3 4'
       - series: 'query_contract_aggregation{host="c",region="west"}'
         values: '5 5 6'
+      - series: 'query_contract_avg_precision{host="a"}'
+        values: '1e16 1e16 1e16'
+      - series: 'query_contract_avg_precision{host="b"}'
+        values: '1 1 1'
+      - series: 'query_contract_avg_precision{host="c"}'
+        values: '-1e16 -1e16 -1e16'
     promql_expr_test:
       - expr: 'query_contract_cpu{host="a"}'
         eval_time: 20s
@@ -321,3 +327,15 @@ tests:
         exp_samples:
           - labels: 'query_contract_aggregation'
             value: 13
+      - expr: 'avg by (region) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 3.5
+          - labels: '{region="west"}'
+            value: 6
+      - expr: 'avg(query_contract_avg_precision)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{}'
+            value: 0.3333333333333333

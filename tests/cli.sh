@@ -3644,6 +3644,23 @@ cross_sum = db.execute(
 ).fetchall()
 assert cross_sum == [('api', 100, 30.0), ('api', 110, 50.0)]
 
+cross_avg = db.execute(
+    "WITH selected AS ("
+    " SELECT ts,COALESCE(json_extract(labels,'$.service'),'') service,value"
+    " FROM timeless_grid('metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    ") SELECT service,ts,AVG(value) FROM selected"
+    " GROUP BY service,ts ORDER BY service,ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert cross_avg == [('api', 100, 15.0), ('api', 110, 25.0)]
+
 ratio = db.execute(
     "WITH errors AS ("
     " SELECT ts,labels,json_extract(labels,'$.host') host,value"

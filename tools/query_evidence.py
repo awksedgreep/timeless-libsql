@@ -717,6 +717,26 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        avg_narrow = measure(
+            "metrics-avg-by-narrow",
+            lambda: promql('avg by(host) (query_contract_cpu{host="h0000"})'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        avg_wide = measure(
+            "metrics-avg-by-wide",
+            lambda: promql_range(
+                "avg by(service) (query_contract_cpu)", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            8,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -988,6 +1008,8 @@ def metrics_evidence(
                 "group_right_wide": group_right_wide,
                 "sum_by_narrow": sum_narrow,
                 "sum_by_wide": sum_wide,
+                "avg_by_narrow": avg_narrow,
+                "avg_by_wide": avg_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

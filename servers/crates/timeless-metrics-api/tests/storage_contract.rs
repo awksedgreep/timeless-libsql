@@ -2823,6 +2823,123 @@ async fn session_five_promql_sum_groups_labels_limits_and_reopen() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_avg_is_compensated_grouped_and_reopenable() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_avg.db");
+    let base = 1_700_510_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = [
+        ("a", "east", 1.0, 3.0),
+        ("b", "east", 2.0, 4.0),
+        ("c", "west", 5.0, 6.0),
+    ]
+    .into_iter()
+    .map(|(host, region, first, second)| {
+        format!(
+            "{{\"metric\":{{\"__name__\":\"aggregate_avg\",\"host\":\"{host}\",\"region\":\"{region}\"}},\"values\":[{first},{second}],\"timestamps\":[{},{}]}}\n",
+            base * 1_000,
+            (base + 10) * 1_000,
+        )
+    })
+    .collect::<String>();
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    let edge = format!(
+        concat!(
+            "aggregate_avg_precision{{host=\"a\"}} 1e16 {}\n",
+            "aggregate_avg_precision{{host=\"b\"}} 1 {}\n",
+            "aggregate_avg_precision{{host=\"c\"}} -1e16 {}\n",
+            "aggregate_avg_overflow{{host=\"a\"}} 1.7976931348623157e308 {}\n",
+            "aggregate_avg_overflow{{host=\"b\"}} 1.7976931348623157e308 {}\n",
+            "aggregate_avg_ieee{{case=\"nan\",host=\"a\"}} NaN {}\n",
+            "aggregate_avg_ieee{{case=\"nan\",host=\"b\"}} 1 {}\n",
+            "aggregate_avg_ieee{{case=\"positive\",host=\"a\"}} +Inf {}\n",
+            "aggregate_avg_ieee{{case=\"positive\",host=\"b\"}} 1 {}\n",
+            "aggregate_avg_ieee{{case=\"mixed\",host=\"a\"}} +Inf {}\n",
+            "aggregate_avg_ieee{{case=\"mixed\",host=\"b\"}} -Inf {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", edge.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let grouped = prom_query(&app, "avg by (region) (aggregate_avg)", base + 10).await;
+    assert_eq!(grouped.0, StatusCode::OK, "{}", grouped.1);
+    assert_eq!(
+        grouped.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base + 10, "3.5"]},
+            {"metric": {"region": "west"}, "value": [base + 10, "6"]}
+        ])
+    );
+    let all = prom_query(&app, "avg(aggregate_avg)", base + 10).await;
+    assert_eq!(all.0, StatusCode::OK, "{}", all.1);
+    assert_eq!(all.1["data"]["result"][0]["value"][1], "4.333333333333333");
+
+    let precision = prom_query(&app, "avg(aggregate_avg_precision)", base + 10).await;
+    assert_eq!(precision.0, StatusCode::OK, "{}", precision.1);
+    assert_eq!(
+        precision.1["data"]["result"][0]["value"][1],
+        "0.3333333333333333"
+    );
+    let overflow = prom_query(&app, "avg(aggregate_avg_overflow)", base + 10).await;
+    assert_eq!(overflow.0, StatusCode::OK, "{}", overflow.1);
+    assert_eq!(
+        overflow.1["data"]["result"][0]["value"][1]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            .to_bits(),
+        f64::MAX.to_bits()
+    );
+    let ieee = prom_query(&app, "avg by (case) (aggregate_avg_ieee)", base + 10).await;
+    assert_eq!(ieee.0, StatusCode::OK, "{}", ieee.1);
+    assert_eq!(
+        ieee.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "mixed"}, "value": [base + 10, "NaN"]},
+            {"metric": {"case": "nan"}, "value": [base + 10, "NaN"]},
+            {"metric": {"case": "positive"}, "value": [base + 10, "+Inf"]}
+        ])
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(&reopened_app, "avg by (region) (aggregate_avg)", base + 10)
+            .await
+            .1,
+        grouped.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

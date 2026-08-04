@@ -405,6 +405,7 @@ enum PromValueType {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromAggregateOp {
     Sum,
+    Avg,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -863,6 +864,7 @@ fn lower_promql_aggregate(
 
     let op = match aggregate.op.id() {
         token::T_SUM => PromAggregateOp::Sum,
+        token::T_AVG => PromAggregateOp::Avg,
         _ => {
             return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
         }
@@ -2592,16 +2594,21 @@ fn apply_prometheus_aggregate(
     series: Vec<IntermediateSeries>,
     cancelled: &AtomicBool,
 ) -> Result<Vec<IntermediateSeries>, String> {
-    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>> = BTreeMap::new();
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, PromAggregateState>> =
+        BTreeMap::new();
     for series in series {
         check_cancelled(cancelled)?;
         let labels = aggregate.grouping.output_labels(&series.labels);
         let group = groups.entry(labels).or_default();
         for (timestamp, value) in series.points {
             check_cancelled(cancelled)?;
-            let current = group.entry(timestamp).or_insert(0.0);
-            match aggregate.op {
-                PromAggregateOp::Sum => *current += value,
+            match group.entry(timestamp) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(PromAggregateState::new(value));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().add(aggregate.op, value);
+                }
             }
         }
     }
@@ -2609,9 +2616,83 @@ fn apply_prometheus_aggregate(
         .into_iter()
         .map(|(labels, points)| IntermediateSeries {
             labels,
-            points: points.into_iter().collect(),
+            points: points
+                .into_iter()
+                .map(|(timestamp, state)| (timestamp, state.finish(aggregate.op)))
+                .collect(),
         })
         .collect())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PromAggregateState {
+    value: f64,
+    compensation: f64,
+    mean: f64,
+    count: f64,
+    incremental_mean: bool,
+}
+
+impl PromAggregateState {
+    fn new(value: f64) -> Self {
+        Self {
+            value,
+            compensation: 0.0,
+            mean: value,
+            count: 1.0,
+            incremental_mean: false,
+        }
+    }
+
+    fn add(&mut self, op: PromAggregateOp, value: f64) {
+        match op {
+            PromAggregateOp::Sum => {
+                (self.value, self.compensation) =
+                    prometheus_compensated_add(value, self.value, self.compensation);
+            }
+            PromAggregateOp::Avg => {
+                self.count += 1.0;
+                if !self.incremental_mean {
+                    let (sum, compensation) =
+                        prometheus_compensated_add(value, self.value, self.compensation);
+                    if !sum.is_infinite() {
+                        self.value = sum;
+                        self.compensation = compensation;
+                        return;
+                    }
+                    self.incremental_mean = true;
+                    self.mean = self.value / (self.count - 1.0);
+                    self.compensation /= self.count - 1.0;
+                }
+                let previous_weight = (self.count - 1.0) / self.count;
+                (self.mean, self.compensation) = prometheus_compensated_add(
+                    value / self.count,
+                    previous_weight * self.mean,
+                    previous_weight * self.compensation,
+                );
+            }
+        }
+    }
+
+    fn finish(self, op: PromAggregateOp) -> f64 {
+        match op {
+            PromAggregateOp::Sum => self.value + self.compensation,
+            PromAggregateOp::Avg if self.incremental_mean => self.mean + self.compensation,
+            PromAggregateOp::Avg => self.value / self.count + self.compensation / self.count,
+        }
+    }
+}
+
+fn prometheus_compensated_add(increment: f64, sum: f64, compensation: f64) -> (f64, f64) {
+    let total = sum + increment;
+    let compensation = if total.is_infinite() {
+        0.0
+    } else if sum.abs() >= increment.abs() {
+        compensation + ((sum - total) + increment)
+    } else {
+        compensation + ((increment - total) + sum)
+    };
+    (total, compensation)
 }
 
 #[allow(clippy::too_many_arguments)]
