@@ -76,6 +76,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-032`](#sql-prom-032-delta) | `PQL-R15` | current foundation | finite float-gauge difference with Prometheus edge extrapolation and no counter correction; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-PROM-033`](#sql-prom-033-idelta) | `PQL-R16` | current foundation | finite float-gauge last-two-sample difference without extrapolation or time normalization; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-PROM-034`](#sql-prom-034-deriv) | `PQL-R17` | current foundation | finite float-gauge least-squares slope over timestamp-centered public raw rows; API owns compensated/IEEE arithmetic, language, labels, limits, and envelopes |
+| [`SQL-PROM-035`](#sql-prom-035-predict_linear) | `PQL-R18` | current foundation | finite float-gauge least-squares forecast relative to each evaluation timestamp; API owns scalar-expression and compensated/IEEE semantics, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1067,6 +1068,85 @@ and subquery evaluation, value strings, limits, cancellation, and HTTP
 envelopes. No extension-specific regression opcode is justified. Direct
 regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_seven_promql_deriv_matches_centered_compensated_regression`.
+
+### SQL-PROM-035: `predict_linear`
+
+Fit each float-gauge slice in `(T-window,T]` and evaluate the line
+`:horizon` seconds after `T`. Centering samples on the evaluation timestamp is
+essential: selector `offset` and `@` change which samples enter the range, but
+the PromQL forecast origin remains the outer evaluation timestamp.
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    (raw.ts - evaluation.ts) * 1.0 AS x,
+    raw.value AS y
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+), statistics AS (
+  SELECT
+    series_id,
+    labels,
+    ts,
+    COUNT(*) * 1.0 AS n,
+    MIN(y) AS min_y,
+    MAX(y) AS max_y,
+    SUM(x) AS sum_x,
+    SUM(y) AS sum_y,
+    SUM(x * y) AS sum_xy,
+    SUM(x * x) AS sum_x2
+  FROM selected
+  GROUP BY series_id, labels, ts
+), coefficients AS (
+  SELECT
+    *,
+    CASE
+      WHEN min_y = max_y THEN 0.0
+      ELSE (sum_xy - sum_x * sum_y / n)
+           / (sum_x2 - sum_x * sum_x / n)
+    END AS slope
+  FROM statistics
+  WHERE n >= 2
+)
+SELECT
+  labels,
+  ts,
+  slope * :horizon + (sum_y / n - slope * sum_x / n) AS value
+FROM coefficients
+ORDER BY labels, ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, `:window`, and `:horizon` are
+seconds; the first five are integer storage/evaluation values and `:horizon`
+is a SQLite numeric parameter. `:filter_json` is the public matcher JSON
+accepted by `timeless_raw`, or NULL. Grid bounds are inclusive and sample
+windows are exactly `(T-window,T]`. Fewer than two samples emit no row. A
+constant finite series predicts that constant. Canonical label/timestamp
+ordering is deterministic. Distinct values at one directly inserted duplicate
+timestamp make the zero-variance finite recipe return SQL NULL.
+
+This statement is the ordinary-SQL foundation for finite values within
+SQLite's aggregate precision. The Rust API evaluates an arbitrary shipped
+scalar expression for the horizon at each outer step, uses four compensated
+sums, preserves Prometheus NaN/infinity behavior, and owns syntax,
+metric-name removal, modifiers, subqueries, limits, cancellation, and HTTP
+envelopes. It performs one bounded public packed raw read; no forecast-specific
+extension primitive is justified. Direct regression: `tests/cli.sh` section
+45; HTTP/oracle/reopen regression:
+`session_seven_promql_predict_linear_anchors_at_evaluation_time`.
 
 ### SQL-PROM-006: range selector
 

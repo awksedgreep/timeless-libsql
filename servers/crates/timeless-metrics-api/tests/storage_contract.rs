@@ -7114,6 +7114,194 @@ async fn session_seven_promql_deriv_matches_centered_compensated_regression() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_seven_promql_predict_linear_anchors_at_evaluation_time() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_seven_predict_linear.db");
+    let base = 1_700_760_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_predict{{case=\"steady\"}} 100 {}\n",
+            "range_predict{{case=\"steady\"}} 300 {}\n",
+            "range_predict{{case=\"steady\"}} 500 {}\n",
+            "range_predict{{case=\"nonlinear\"}} 100 {}\n",
+            "range_predict{{case=\"nonlinear\"}} 150 {}\n",
+            "range_predict{{case=\"nonlinear\"}} 20 {}\n",
+            "range_predict{{case=\"constant\"}} 7 {}\n",
+            "range_predict{{case=\"constant\"}} 7 {}\n",
+            "range_predict{{case=\"constant\"}} 7 {}\n",
+            "range_predict{{case=\"constant_inf\"}} +Inf {}\n",
+            "range_predict{{case=\"constant_inf\"}} +Inf {}\n",
+            "range_predict{{case=\"singleton\"}} 5 {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+        (base + 50) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let steady = prom_query(
+        &app,
+        "predict_linear(range_predict{case=\"steady\"}[60s], 10)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(steady.0, StatusCode::OK, "{}", steady.1);
+    assert_eq!(
+        steady.1["data"]["result"],
+        serde_json::json!([{"metric": {"case": "steady"}, "value": [base + 60, "700"]}])
+    );
+    for (case, horizon, expected) in [
+        ("steady", "0", "600"),
+        ("steady", "-10", "500"),
+        ("nonlinear", "10", "10"),
+        ("constant", "10", "7"),
+    ] {
+        let response = prom_query(
+            &app,
+            &format!("predict_linear(range_predict{{case=\"{case}\"}}[60s], {horizon})"),
+            base + 60,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+        assert_eq!(response.1["data"]["result"][0]["metric"]["__name__"], Value::Null);
+    }
+    for query in [
+        "predict_linear(range_predict{case=\"steady\"}[60s], 5 + 5)",
+        "predict_linear(range_predict{case=\"steady\"}[60s] offset 10s, 10)",
+        "predict_linear(range_predict{case=\"steady\"}[60s] @ end(), 10)",
+    ] {
+        let response = prom_query(&app, query, base + 60).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1, steady.1, "{query}");
+    }
+    let subquery = prom_query(
+        &app,
+        "predict_linear(range_predict{case=\"steady\"}[40s:10s], 10)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(subquery.1["data"]["result"][0]["value"][1], "600");
+    for (horizon, expected) in [("NaN", "NaN"), ("Inf", "+Inf"), ("-Inf", "-Inf")] {
+        let response = prom_query(
+            &app,
+            &format!(
+                "predict_linear(range_predict{{case=\"steady\"}}[60s], {horizon})"
+            ),
+            base + 60,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{horizon}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+    let constant_inf = prom_query(
+        &app,
+        "predict_linear(range_predict{case=\"constant_inf\"}[60s], 10)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(constant_inf.0, StatusCode::OK, "{}", constant_inf.1);
+    assert_eq!(constant_inf.1["data"]["result"][0]["value"][1], "NaN");
+    let singleton = prom_query(
+        &app,
+        "predict_linear(range_predict{case=\"singleton\"}[60s], 10)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(singleton.0, StatusCode::OK, "{}", singleton.1);
+    assert_eq!(singleton.1["data"]["result"], serde_json::json!([]));
+    let range = prom_query_range(
+        &app,
+        "predict_linear(range_predict{case=\"steady\"}[40s], 10)",
+        base + 50,
+        base + 60,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "steady"},
+            "values": [[base + 50, "600"], [base + 60, "700"]]
+        }])
+    );
+    for query in [
+        "predict_linear(range_predict, 10)",
+        "predict_linear(range_predict[60s])",
+        "predict_linear(range_predict[60s], range_predict)",
+    ] {
+        let invalid = prom_query(&app, query, base + 60).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "predict_linear(range_predict{case=\"steady\"}[60s], 10)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 1 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "predict_linear(range_predict{case=\"steady\"}[60s], 10)",
+            base + 60,
+        )
+        .await
+        .1,
+        steady.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

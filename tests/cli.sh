@@ -4025,6 +4025,44 @@ assert deriv_values == [
     ('{"case":"steady"}', 60, 10.0),
 ]
 
+predict_linear_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,"
+    " (raw.ts-evaluation.ts)*1.0 x,raw.value y"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    "),statistics AS ("
+    " SELECT series_id,labels,ts,COUNT(*)*1.0 n,MIN(y) min_y,MAX(y) max_y,"
+    " SUM(x) sum_x,SUM(y) sum_y,SUM(x*y) sum_xy,SUM(x*x) sum_x2"
+    " FROM selected GROUP BY series_id,labels,ts"
+    "),coefficients AS ("
+    " SELECT *,CASE WHEN min_y=max_y THEN 0.0"
+    " ELSE (sum_xy-sum_x*sum_y/n)/(sum_x2-sum_x*sum_x/n) END slope"
+    " FROM statistics WHERE n>=2"
+    ") SELECT labels,ts,slope*:horizon+(sum_y/n-slope*sum_x/n) value"
+    " FROM coefficients ORDER BY labels,ts"
+)
+predict_linear_values = db.execute(
+    predict_linear_sql,
+    {
+        'metric': 'rate_counter',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+        'horizon': 10.0,
+    },
+).fetchall()
+assert predict_linear_values == [
+    ('{"case":"reset"}', 60, 10.0),
+    ('{"case":"steady"}', 60, 700.0),
+]
+
 minimum = db.execute(
     "SELECT value FROM timeless_window("
     "'metrics','min_window',NULL,30,30,1,20,'min')"

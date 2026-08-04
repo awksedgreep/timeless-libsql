@@ -410,6 +410,7 @@ enum PromRangeOp {
     Delta,
     IDelta,
     Deriv,
+    PredictLinear,
     Last,
 }
 
@@ -431,6 +432,7 @@ impl PromRangeOp {
             Self::Delta => "delta",
             Self::IDelta => "idelta",
             Self::Deriv => "deriv",
+            Self::PredictLinear => "predict_linear",
             Self::Last => "last_over_time",
         }
     }
@@ -452,6 +454,7 @@ impl PromRangeOp {
             | Self::Delta
             | Self::IDelta
             | Self::Deriv
+            | Self::PredictLinear
             | Self::Last => None,
         }
     }
@@ -473,6 +476,7 @@ impl PromRangeOp {
             | Self::Delta
             | Self::IDelta
             | Self::Deriv
+            | Self::PredictLinear
             | Self::Last => None,
         }
     }
@@ -977,6 +981,34 @@ fn lower_promql_expr(
             };
             Ok(PromPlan::RangeReduction(PromRangePlan {
                 op: PromRangeOp::Quantile,
+                input,
+                parameter: Some(Box::new(parameter)),
+            }))
+        }
+        promql::Expr::Call(call) if call.func.name == "predict_linear" => {
+            let [argument, parameter] = call.args.args.as_slice() else {
+                return Err("predict_linear requires a range vector and a scalar horizon".into());
+            };
+            let parameter = lower_promql_expr((**parameter).clone(), lookback, depth + 1)?;
+            if parameter.value_type() != PromValueType::Scalar {
+                return Err("predict_linear requires a scalar horizon".into());
+            }
+            let input = match argument.as_ref() {
+                promql::Expr::MatrixSelector(selector) => {
+                    let window = duration_millis_i64(selector.range, "range")?;
+                    if window == 0 {
+                        return Err("PromQL range duration must be at least 1ms".into());
+                    }
+                    let selector = lower_promql_selector(selector.vs.clone())?;
+                    PromRangeInput::Selector { selector, window }
+                }
+                promql::Expr::Subquery(subquery) => PromRangeInput::Subquery(
+                    lower_promql_subquery(subquery.clone(), lookback, depth + 1)?,
+                ),
+                _ => return Err("predict_linear requires a range vector".into()),
+            };
+            Ok(PromPlan::RangeReduction(PromRangePlan {
+                op: PromRangeOp::PredictLinear,
                 input,
                 parameter: Some(Box::new(parameter)),
             }))
@@ -4255,6 +4287,7 @@ fn execute_prometheus_range_subquery(
                     parameters.get(&outer).copied(),
                     lower,
                     effective,
+                    outer,
                     cancelled,
                 )?;
                 if let Some(value) = value {
@@ -4425,6 +4458,7 @@ fn prometheus_range_reduction(
     parameter: Option<f64>,
     range_start: i64,
     range_end: i64,
+    evaluation_time: i64,
     cancelled: &AtomicBool,
 ) -> Result<Option<f64>, String> {
     if matches!(op, PromRangeOp::Present) {
@@ -4458,6 +4492,12 @@ fn prometheus_range_reduction(
     if matches!(op, PromRangeOp::Deriv) {
         return prometheus_linear_regression(points, points[0].0, cancelled)
             .map(|result| result.map(|(slope, _)| slope));
+    }
+    if matches!(op, PromRangeOp::PredictLinear) {
+        let horizon = parameter
+            .ok_or_else(|| "predict_linear is missing its scalar horizon".to_string())?;
+        return prometheus_linear_regression(points, evaluation_time, cancelled)
+            .map(|result| result.map(|(slope, intercept)| slope * horizon + intercept));
     }
     if matches!(op, PromRangeOp::Quantile) {
         let quantile = parameter
@@ -5175,6 +5215,7 @@ fn execute_prometheus_range_raw(
                             | PromRangeOp::Increase
                             | PromRangeOp::Delta
                             | PromRangeOp::Deriv
+                            | PromRangeOp::PredictLinear
                     ) {
                         let mut values = Vec::with_capacity(hi - lo);
                         for index in lo..hi {
@@ -5187,6 +5228,12 @@ fn execute_prometheus_range_raw(
                         let value = if matches!(op, PromRangeOp::Deriv) {
                             prometheus_linear_regression(&values, values[0].0, cancelled)?
                                 .map(|(slope, _)| slope)
+                        } else if matches!(op, PromRangeOp::PredictLinear) {
+                            let horizon = parameters.get(&t).copied().ok_or_else(|| {
+                                "predict_linear is missing its scalar horizon".to_string()
+                            })?;
+                            prometheus_linear_regression(&values, t, cancelled)?
+                                .map(|(slope, intercept)| slope * horizon + intercept)
                         } else {
                             prometheus_extrapolated_rate(
                                 &values,
@@ -6345,6 +6392,18 @@ mod tests {
                 .unwrap();
             assert_eq!(actual.0, expected);
         }
+
+        let points = [
+            (1_700_760_010_000, 100.0),
+            (1_700_760_030_000, 300.0),
+            (1_700_760_050_000, 500.0),
+        ];
+        let (slope, intercept) =
+            prometheus_linear_regression(&points, 1_700_760_060_000, &cancelled)
+                .unwrap()
+                .unwrap();
+        assert_eq!((slope, intercept), (10.0, 600.0));
+        assert_eq!(slope * 10.0 + intercept, 700.0);
 
         assert_eq!(
             prometheus_linear_regression(&[(50_000, 5.0)], 50_000, &cancelled).unwrap(),

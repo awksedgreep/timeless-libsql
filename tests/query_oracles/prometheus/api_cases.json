@@ -1580,6 +1580,116 @@
       "expected_empty": true
     },
     {
+      "id": "PQL-R18-predict-linear-steady-future",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s], 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [700],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-zero-horizon",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s], 0)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [600],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-negative-horizon",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s], -10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [500],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-nonlinear",
+      "query": "predict_linear(oracle_counter{case=\"reset\"}[60s], 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-constant",
+      "query": "predict_linear(oracle_counter{case=\"constant\"}[60s], 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "constant", "job": "oracle"},
+      "expected_values": [7],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-scalar-expression",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s], 5 + 5)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [700],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-offset-keeps-evaluation-anchor",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s] offset 10s, 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [700],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-at-end-keeps-evaluation-anchor",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s] @ end(), 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [700],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-over-subquery",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[40s:10s], 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [600],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-nan-horizon",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s], NaN)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-positive-infinite-horizon",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s], Inf)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": ["+Inf"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-negative-infinite-horizon",
+      "query": "predict_linear(oracle_counter{case=\"steady\"}[60s], -Inf)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": ["-Inf"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-constant-infinity",
+      "query": "predict_linear(oracle_counter{case=\"constant_inf\"}[60s], 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "constant_inf", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R18-predict-linear-singleton-omitted",
+      "query": "predict_linear(oracle_counter{case=\"singleton\"}[60s], 10)",
+      "evaluation_offset_ms": 60000,
+      "expected_empty": true
+    },
+    {
       "id": "PQL-O14-topk-tie-input-order",
       "query": "topk(1, oracle_rank_tie)",
       "evaluation_offset_ms": 30000,
