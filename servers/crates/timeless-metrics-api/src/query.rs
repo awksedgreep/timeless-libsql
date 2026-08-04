@@ -409,11 +409,13 @@ enum PromFunctionOp {
     ClampMin,
     Cos,
     Cosh,
+    Deg,
     Exp,
     Floor,
     Ln,
     Log2,
     Log10,
+    Rad,
     Round,
     Sgn,
     Sin,
@@ -444,11 +446,13 @@ impl PromFunctionOp {
             Self::ClampMin => Some(prometheus_math_max(parameters[0], value)),
             Self::Cos => Some(value.cos()),
             Self::Cosh => Some(value.cosh()),
+            Self::Deg => Some(value * 180.0 / std::f64::consts::PI),
             Self::Exp => Some(value.exp()),
             Self::Floor => Some(value.floor()),
             Self::Ln => Some(value.ln()),
             Self::Log2 => Some(value.log2()),
             Self::Log10 => Some(value.log10()),
+            Self::Rad => Some(value * std::f64::consts::PI / 180.0),
             Self::Round => {
                 let inverse = 1.0 / parameters.first().copied().unwrap_or(1.0);
                 Some((value * inverse + 0.5).floor() / inverse)
@@ -1091,6 +1095,12 @@ fn lower_promql_expr(
                 parameters: Vec::new(),
             }))
         }
+        promql::Expr::Call(call) if call.func.name == "pi" => {
+            if !call.args.args.is_empty() {
+                return Err("pi does not accept arguments".into());
+            }
+            Ok(PromPlan::Scalar(std::f64::consts::PI))
+        }
         promql::Expr::Call(call)
             if matches!(
                 call.func.name,
@@ -1103,11 +1113,13 @@ fn lower_promql_expr(
                     | "ceil"
                     | "cos"
                     | "cosh"
+                    | "deg"
                     | "exp"
                     | "floor"
                     | "ln"
                     | "log2"
                     | "log10"
+                    | "rad"
                     | "round"
                     | "sgn"
                     | "sin"
@@ -1127,11 +1139,13 @@ fn lower_promql_expr(
                 "ceil" => PromFunctionOp::Ceil,
                 "cos" => PromFunctionOp::Cos,
                 "cosh" => PromFunctionOp::Cosh,
+                "deg" => PromFunctionOp::Deg,
                 "exp" => PromFunctionOp::Exp,
                 "floor" => PromFunctionOp::Floor,
                 "ln" => PromFunctionOp::Ln,
                 "log2" => PromFunctionOp::Log2,
                 "log10" => PromFunctionOp::Log10,
+                "rad" => PromFunctionOp::Rad,
                 "round" => PromFunctionOp::Round,
                 "sgn" => PromFunctionOp::Sgn,
                 "sin" => PromFunctionOp::Sin,

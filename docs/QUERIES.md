@@ -884,6 +884,9 @@ reports as SQL NULL.
 Bounded trigonometric and hyperbolic functions use
 [`SQL-PROM-044`](QUERY_SQL_EQUIVALENTS.md#sql-prom-044-trigonometric-and-hyperbolic-functions)
 with the same honest SQL-NULL versus packed-IEEE boundary.
+Degree/radian conversion and scalar π use
+[`SQL-PROM-045`](QUERY_SQL_EQUIVALENTS.md#sql-prom-045-deg-rad-and-pi),
+including a direct SQL evaluation-time recipe for `pi()`.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

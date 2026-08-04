@@ -3771,6 +3771,26 @@ assert trig_transforms == [
     ('{"case":"zero"}', 100, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0),
 ]
 
+angles = db.execute(
+    "SELECT labels,ts,value*180.0/pi(),value*pi()/180.0"
+    " FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    " WHERE labels=:labels ORDER BY labels,ts",
+    {
+        'metric': 'math_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+        'labels': '{"case":"one"}',
+    },
+).fetchall()
+assert angles == [('{"case":"one"}', 100, 180.0 / math.pi, math.pi / 180.0)]
+assert db.execute("WITH evaluation(ts) AS (SELECT :at) SELECT ts,pi() FROM evaluation", {
+    'at': 100,
+}).fetchall() == [(100, math.pi)]
+
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
     "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "

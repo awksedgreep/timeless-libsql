@@ -86,6 +86,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-042`](#sql-prom-042-sgn) | `PQL-F05` | current foundation | exact bounded sign mapping for every row-visible finite value, infinity, and signed zero; API owns packed NaN, names, limits, and envelopes |
 | [`SQL-PROM-043`](#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions) | `PQL-F06` | current foundation | bounded SQLite inverse math transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
 | [`SQL-PROM-044`](#sql-prom-044-trigonometric-and-hyperbolic-functions) | `PQL-F07` | current foundation | bounded SQLite trigonometric and hyperbolic transforms over valid row-visible domains; API owns packed IEEE/domain results, names, limits, and envelopes |
+| [`SQL-PROM-045`](#sql-prom-045-deg-rad-and-pi) | `PQL-F08` | current foundation | bounded degree/radian conversion plus scalar pi through standard SQLite math; API owns packed NaN, names, types, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1566,6 +1567,45 @@ storage read or decode.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_trig_transforms_pin_ieee_ranges_and_reopen`.
+
+### SQL-PROM-045: `deg`, `rad`, and `pi`
+
+Preserve Prometheus's degree/radian operation order over each bounded row:
+
+```sql
+SELECT labels, ts, value * 180.0 / pi() AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+For `rad(vector)`, project `value * pi() / 180.0`. Bounds, step, and lookback
+use the metric table's configured timestamp unit (integer seconds for the
+default table); grid bounds are inclusive and lookback is open on the left.
+Missing samples remain absent, canonical label JSON is returned, and ordering
+is deterministic.
+
+The scalar `pi()` has no storage input. A direct SQL caller that needs an
+evaluation timestamp can bind it explicitly:
+
+```sql
+WITH evaluation(ts) AS (SELECT :at)
+SELECT ts, pi() AS value
+FROM evaluation;
+```
+
+Use a recursive evaluation CTE for a range grid. The Rust API owns PromQL's
+scalar instant and matrix range envelopes, exact outer timestamps, and
+expression typing. For `deg`/`rad`, it also reads the public bit-exact packed
+frame so stored NaN remains Prometheus `NaN` rather than row-projected SQL
+NULL, removes `__name__`, and enforces limits and cancellation. Standard
+SQLite math already provides every direct-user operation here; no extension
+primitive is justified.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_angle_transforms_and_pi_preserve_types_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

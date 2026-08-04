@@ -149,7 +149,7 @@ bounded frames.
 | `PQL-F05` | `sgn` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-042-sgn)); finite/IEEE values, signed zero, range grids, names, nesting, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F06` | `acos`, `acosh`, `asin`, `asinh`, `atan`, `atanh` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-043-inverse-trigonometric-and-hyperbolic-functions)); domains, endpoint infinities, NaN/signed zero, range grids, names, nesting, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F07` | `cos`, `cosh`, `sin`, `sinh`, `tan`, `tanh` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-044-trigonometric-and-hyperbolic-functions)); finite/IEEE values, infinities, signed zero, range grids, names, nesting, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-F08` | `deg`, `rad`, `pi` | missing | yes | `SQL` | `API` | P0 |
+| `PQL-F08` | `deg`, `rad`, `pi` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-045-deg-rad-and-pi)); conversion order, scalar instant/range types, IEEE values, signed zero, names, nesting, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F09` | `label_replace` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F10` | `label_join` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F11` | `absent` | missing | yes | `CAT`, `SQL` | `API` | P0 |

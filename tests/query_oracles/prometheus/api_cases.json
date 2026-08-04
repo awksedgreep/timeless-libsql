@@ -2331,6 +2331,44 @@
       "expected_metric": {"case": "negative_zero", "job": "oracle"},
       "expected_values": [0],
       "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F08-deg-ieee-values",
+      "query": "deg(oracle_angle{case=~\"negative_zero|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": "-0"},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F08-rad-exact-and-ieee-values",
+      "query": "rad(oracle_angle{case=~\"degrees|nan|positive_inf|negative_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "degrees", "job": "oracle"}, "value": 3.141592653589793},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F08-deg-range-grid-and-name-policy",
+      "query": "deg(oracle_angle{case=\"range\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "range", "job": "oracle"},
+      "expected_values": [0, 180]
+    },
+    {
+      "id": "PQL-F08-nested-angle-transform",
+      "query": "abs(rad(deg(oracle_angle{case=\"negative_zero\"})))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "negative_zero", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
     }
   ],
   "operator_error_cases": [
@@ -2824,6 +2862,29 @@
         "data": {
           "resultType": "matrix",
           "result": [{"metric": {}, "values": [[0, "1"], [0.5, "1"], [1, "1"]]}]
+        }
+      }
+    },
+    {
+      "id": "PQL-F08-pi-instant-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "pi()", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "3.141592653589793"]}
+      }
+    },
+    {
+      "id": "PQL-F08-pi-range-scalar",
+      "endpoint": "/api/v1/query_range",
+      "params": {"query": "pi()", "start": "0", "end": "1", "step": "1"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {
+          "resultType": "matrix",
+          "result": [{"metric": {}, "values": [[0, "3.141592653589793"], [1, "3.141592653589793"]]}]
         }
       }
     }

@@ -8762,6 +8762,153 @@ async fn session_eight_promql_trig_transforms_pin_ieee_ranges_and_reopen() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_angle_transforms_and_pi_preserve_types_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_angles.db");
+    let base = 1_700_870_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "transform_angle{{case=\"range\"}} 0 {}\n",
+            "transform_angle{{case=\"range\"}} 3.141592653589793 {}\n",
+            "transform_angle{{case=\"negative_zero\"}} -0 {}\n",
+            "transform_angle{{case=\"degrees\"}} 180 {}\n",
+            "transform_angle{{case=\"nan\"}} NaN {}\n",
+            "transform_angle{{case=\"positive_inf\"}} +Inf {}\n",
+            "transform_angle{{case=\"negative_inf\"}} -Inf {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (expression, case, expected) in [
+        ("deg(transform_angle{case=\"range\"})", "range", "0"),
+        (
+            "rad(transform_angle{case=\"degrees\"})",
+            "degrees",
+            "3.141592653589793",
+        ),
+        (
+            "deg(transform_angle{case=\"negative_zero\"})",
+            "negative_zero",
+            "-0",
+        ),
+        ("deg(transform_angle{case=\"nan\"})", "nan", "NaN"),
+        (
+            "rad(transform_angle{case=\"positive_inf\"})",
+            "positive_inf",
+            "+Inf",
+        ),
+        (
+            "deg(transform_angle{case=\"negative_inf\"})",
+            "negative_inf",
+            "-Inf",
+        ),
+    ] {
+        let response = prom_query(&app, expression, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{expression}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({"case": case})
+        );
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+
+    let scalar = prom_query(&app, "pi()", base).await;
+    assert_eq!(scalar.0, StatusCode::OK, "{}", scalar.1);
+    assert_eq!(scalar.1["data"]["resultType"], "scalar");
+    assert_eq!(
+        scalar.1["data"]["result"],
+        serde_json::json!([base, "3.141592653589793"])
+    );
+    let scalar_range = prom_query_range(&app, "pi()", base, base + 10, 10).await;
+    assert_eq!(scalar_range.0, StatusCode::OK, "{}", scalar_range.1);
+    assert_eq!(scalar_range.1["data"]["resultType"], "matrix");
+    assert_eq!(
+        scalar_range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base, "3.141592653589793"], [base + 10, "3.141592653589793"]]
+        }])
+    );
+
+    let range = prom_query_range(
+        &app,
+        "deg(transform_angle{case=\"range\"})",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "range"},
+            "values": [[base, "0"], [base + 10, "180"]]
+        }])
+    );
+    let nested = prom_query(
+        &app,
+        "abs(rad(deg(transform_angle{case=\"negative_zero\"})))",
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "0");
+
+    for query in ["deg(1)", "rad(transform_angle[1m])", "pi(1)"] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "deg(transform_angle)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_result = prom_query(&reopened_app, "pi()", base).await;
+    assert_eq!(reopened_result.0, StatusCode::OK, "{}", reopened_result.1);
+    assert_eq!(reopened_result.1["data"]["result"][1], "3.141592653589793");
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()
