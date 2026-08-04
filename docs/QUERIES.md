@@ -214,6 +214,31 @@ selector subquery with the executable, pre-epoch-safe alignment recipe in
 [`SQL-PROM-009`](QUERY_SQL_EQUIVALENTS.md#sql-prom-009-aligned-selector-subquery).
 PromQL syntax and arbitrary AST composition remain in Rust, not the extension.
 
+## PromQL unary minus
+
+Unary minus accepts scalar or instant-vector expressions, including nested
+shipped expressions:
+
+```promql
+-1
+-http_requests_total{job="api"}
+-avg_over_time(http_request_duration_seconds_sum[5m])
+-(-http_requests_total)
+```
+
+Vector samples retain every non-name label and their evaluation timestamps,
+but Prometheus removes `__name__` even for a double negation. Range evaluation
+returns the usual matrix, and scalar/vector `NaN`, `+Inf`, and `-Inf` values use
+the Prometheus string representation. Each composed child point counts toward
+the configured intermediate-work limit; cancellation is checked while
+decoding, transforming, and serializing the bounded result.
+
+Direct SQLite/libSQL users can apply the equivalent ordinary numeric operation
+with
+[`SQL-PROM-010`](QUERY_SQL_EQUIVALENTS.md#sql-prom-010-unary-minus). The SQL
+recipe is the stored-vector foundation, not a claim that SQLite result typing
+or IEEE rendering is a PromQL envelope.
+
 ## Scalar aggregate without raw materialization
 
 ```sql

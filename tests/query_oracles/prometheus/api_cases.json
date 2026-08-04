@@ -127,7 +127,85 @@
       "expected_values": [6]
     }
   ],
+  "operator_cases": [
+    {
+      "id": "PQL-O01-unary-vector-drops-name",
+      "query": "-oracle_temporal",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [-7]
+    },
+    {
+      "id": "PQL-O01-unary-vector-range-grid-drops-name",
+      "query": "-oracle_temporal",
+      "evaluation_offset_ms": 0,
+      "drop_metric_name": true,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [-4, -5, -6, -7]
+    },
+    {
+      "id": "PQL-O01-unary-nested-range-function",
+      "query": "-avg_over_time(oracle_temporal[20s])",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [-6.5]
+    },
+    {
+      "id": "PQL-O01-unary-inside-subquery-function",
+      "query": "avg_over_time((-oracle_temporal)[20s:10s])",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [-6.5]
+    },
+    {
+      "id": "PQL-O01-double-unary-still-drops-name",
+      "query": "-(-oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [7]
+    }
+  ],
   "cases": [
+    {
+      "id": "PQL-O01-unary-scalar",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "-(1)", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "-1"]}
+      }
+    },
+    {
+      "id": "PQL-O01-unary-positive-infinity",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "-(Inf)", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "-Inf"]}
+      }
+    },
+    {
+      "id": "PQL-O01-unary-nan",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "-(NaN)", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "NaN"]}
+      }
+    },
+    {
+      "id": "PQL-O01-unary-negative-infinity",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "-(-Inf)", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "+Inf"]}
+      }
+    },
     {
       "id": "PQL-S06-root-range-vector-instant-type",
       "endpoint": "/api/v1/query",

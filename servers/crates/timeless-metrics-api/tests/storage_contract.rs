@@ -1621,6 +1621,186 @@ async fn session_three_promql_subqueries_align_bound_cancel_and_reopen() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_promql_unary_minus_preserves_types_labels_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four_unary.db");
+    let base = 1_700_400_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        "{{\"metric\":{{\"__name__\":\"unary_metric\",\"host\":\"a\"}},\"values\":[1,-2],\"timestamps\":[{},{}]}}\n",
+        base * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let instant = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=-unary_metric&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(instant.0, StatusCode::OK, "{}", instant.1);
+    assert_eq!(instant.1["data"]["resultType"], "vector");
+    assert_eq!(
+        instant.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a"},
+            "value": [base + 10, "2"]
+        }])
+    );
+
+    let range = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=-unary_metric&start={base}&end={}&step=10",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "-1"], [base + 10, "2"]])
+    );
+
+    let nested = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=-avg_over_time%28unary_metric%5B20s%5D%29&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"][0]["metric"],
+        serde_json::json!({"host": "a"})
+    );
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "0.5");
+
+    let inside_subquery = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=avg_over_time%28%28-unary_metric%29%5B20s%3A10s%5D%29&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(inside_subquery.0, StatusCode::OK, "{}", inside_subquery.1);
+    assert_eq!(
+        inside_subquery.1["data"]["result"][0]["metric"],
+        serde_json::json!({"host": "a"})
+    );
+    assert_eq!(inside_subquery.1["data"]["result"][0]["value"][1], "0.5");
+
+    let double = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=-%28-unary_metric%29&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(double.0, StatusCode::OK, "{}", double.1);
+    assert_eq!(double.1["data"]["result"][0]["value"][1], "-2");
+
+    for (query, expected) in [
+        ("-%281%29", "-1"),
+        ("-%28NaN%29", "NaN"),
+        ("-%28Inf%29", "-Inf"),
+        ("-%28-Inf%29", "+Inf"),
+    ] {
+        let scalar = get_json(
+            &app,
+            &format!("/prometheus/api/v1/query?query={query}&time={base}"),
+        )
+        .await;
+        assert_eq!(scalar.0, StatusCode::OK, "{query}: {}", scalar.1);
+        assert_eq!(scalar.1["data"]["resultType"], "scalar");
+        assert_eq!(scalar.1["data"]["result"][1], expected);
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = get_json(
+        &limited,
+        "/prometheus/api/v1/query_range?query=-%281%29&start=0&end=1&step=1",
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 1 points"));
+
+    for (query, error) in [
+        (
+            "-%28%22text%22%29",
+            "unary expression only allowed on expressions of type scalar or vector",
+        ),
+        (
+            "-%28unary_metric%5B20s%5D%29",
+            "unary expression only allowed on expressions of type scalar or vector",
+        ),
+    ] {
+        let rejected_type = get_json(
+            &app,
+            &format!("/prometheus/api/v1/query?query={query}&time={base}"),
+        )
+        .await;
+        assert_eq!(
+            rejected_type.0,
+            StatusCode::BAD_REQUEST,
+            "{query}: {}",
+            rejected_type.1
+        );
+        assert!(
+            rejected_type.1["error"].as_str().unwrap().contains(error),
+            "{query}: {}",
+            rejected_type.1
+        );
+    }
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = get_json(
+        &reopened_app,
+        &format!(
+            "/prometheus/api/v1/query?query=-unary_metric&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(recovered.1, instant.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

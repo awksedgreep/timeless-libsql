@@ -51,6 +51,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-007`](#sql-prom-007-bounded-packed-storage-work) | `PQL-S20` | current foundation | exact pre-decode work bounds; API owns language/result/deadline limits |
 | [`SQL-PROM-008`](#sql-prom-008-temporal-selector-modifiers) | `PQL-S07`, `PQL-S08` | current foundation | exact shifted/fixed lookup time; API owns parser and outer query context |
 | [`SQL-PROM-009`](#sql-prom-009-aligned-selector-subquery) | `PQL-S09` | current foundation | exact open-left global subquery grid for a stored selector; API owns arbitrary inner expressions and range consumption |
+| [`SQL-PROM-010`](#sql-prom-010-unary-minus) | `PQL-O01` | current foundation | exact numeric negation over a bounded public grid; API owns types, envelopes, metric-name policy, limits, and cancellation |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -313,6 +314,38 @@ millisecond conversion, intermediate/result limits, cancellation, and
 deadline errors. Direct executable regression: `tests/cli.sh` section 45;
 HTTP/oracle/reopen regression:
 `session_three_promql_subqueries_align_bound_cancel_and_reopen`.
+
+### SQL-PROM-010: unary minus
+
+For the vector expression `-metric{...}`, negate values from the ordinary
+bounded selector grid:
+
+```sql
+SELECT labels, ts, -value AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+All timestamp parameters use the virtual table's native unit (integer seconds
+for the default metric table). `:start` and `:end` are inclusive output-grid
+bounds, `:step` and `:lookback` are positive, and `:filter_json` is either
+`NULL` or the documented matcher object. `timeless_grid` returns canonical
+label JSON without a metric-name field, sparse rows when no sample exists in
+the open-left `(T-lookback,T]` window, and deterministic label/timestamp
+ordering. SQLite's unary numeric operator preserves ordinary finite values and
+infinities supported by the host build; portable SQL must not claim
+Prometheus's exact `NaN` string behavior.
+
+This statement is the exact stored-vector arithmetic foundation. The Rust API
+owns PromQL parsing, scalar versus vector types, removal of `__name__`,
+millisecond evaluation, `NaN`/`+Inf`/`-Inf` response strings, nested AST
+composition, intermediate/result/response limits, cancellation, and the
+Prometheus envelope. Direct executable regression: `tests/cli.sh` section 33;
+HTTP/oracle/reopen regression:
+`session_four_promql_unary_minus_preserves_types_labels_limits_and_reopen`.
 
 ### SQL-PROM-003: cross-series sum by label
 

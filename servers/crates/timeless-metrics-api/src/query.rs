@@ -384,11 +384,34 @@ pub(crate) enum ReadRequest {
 pub(crate) enum PromPlan {
     Scalar(f64),
     String(String),
+    Unary(Box<PromPlan>),
     Selector { selector: Selector, lookback: i64 },
     AvgOverTime { selector: Selector, window: i64 },
     AvgOverSubquery(SubqueryPlan),
     RangeSelector { selector: Selector, window: i64 },
     Subquery(SubqueryPlan),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromValueType {
+    Scalar,
+    String,
+    Vector,
+    Matrix,
+}
+
+impl PromPlan {
+    fn value_type(&self) -> PromValueType {
+        match self {
+            Self::Scalar(_) => PromValueType::Scalar,
+            Self::String(_) => PromValueType::String,
+            Self::RangeSelector { .. } | Self::Subquery(_) => PromValueType::Matrix,
+            Self::Unary(inner) => inner.value_type(),
+            Self::Selector { .. } | Self::AvgOverTime { .. } | Self::AvgOverSubquery(_) => {
+                PromValueType::Vector
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -561,11 +584,11 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
     )?;
     let plan = lower_promql(query, lookback)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
-    match plan {
-        PromPlan::RangeSelector { .. } | PromPlan::Subquery(_) => {
+    match plan.value_type() {
+        PromValueType::Matrix => {
             return Err("invalid parameter \"query\": invalid expression type \"range vector\" for range query, must be Scalar or instant Vector".into());
         }
-        PromPlan::String(_) => {
+        PromValueType::String => {
             return Err("invalid parameter \"query\": invalid expression type \"string\" for range query, must be Scalar or instant Vector".into());
         }
         _ => {}
@@ -635,6 +658,16 @@ fn lower_promql_expr(
             Ok(PromPlan::RangeSelector { selector, window })
         }
         promql::Expr::Paren(paren) => lower_promql_expr(*paren.expr, lookback, depth + 1),
+        promql::Expr::Unary(unary) => {
+            let inner = lower_promql_expr(*unary.expr, lookback, depth + 1)?;
+            if !matches!(
+                inner.value_type(),
+                PromValueType::Scalar | PromValueType::Vector
+            ) {
+                return Err("PromQL unary minus requires a scalar or instant vector".into());
+            }
+            Ok(PromPlan::Unary(Box::new(inner)))
+        }
         promql::Expr::Subquery(subquery) => Ok(PromPlan::Subquery(lower_promql_subquery(
             subquery,
             lookback,
@@ -685,7 +718,10 @@ fn lower_promql_subquery(
     let inner = lower_promql_expr(*subquery.expr, lookback, depth)?;
     if !matches!(
         inner,
-        PromPlan::Selector { .. } | PromPlan::AvgOverTime { .. } | PromPlan::AvgOverSubquery(_)
+        PromPlan::Selector { .. }
+            | PromPlan::AvgOverTime { .. }
+            | PromPlan::AvgOverSubquery(_)
+            | PromPlan::Unary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
     }
@@ -2022,6 +2058,19 @@ fn execute_prometheus(
             execute_prometheus_scalar(*value, start, stop, step, instant, limits, cancelled)
         }
         PromPlan::String(value) => execute_prometheus_string(value, start, instant, limits),
+        PromPlan::Unary(inner) => execute_prometheus_unary(
+            conn,
+            features,
+            inner,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Selector { selector, lookback } => execute_prometheus_selector(
             conn,
             features,
@@ -2119,6 +2168,270 @@ fn execute_prometheus(
 struct IntermediateSeries {
     labels: BTreeMap<String, String>,
     points: Vec<(i64, f64)>,
+}
+
+#[derive(Debug)]
+enum IntermediateValue {
+    Scalar(Vec<(i64, f64)>),
+    Vector(Vec<IntermediateSeries>),
+}
+
+impl IntermediateValue {
+    fn points(&self) -> u64 {
+        match self {
+            Self::Scalar(points) => points.len() as u64,
+            Self::Vector(series) => series.iter().map(|series| series.points.len() as u64).sum(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_unary(
+    conn: &Connection,
+    features: QueryFeatures,
+    inner: &PromPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let value_type = inner.value_type();
+    let child = execute_prometheus(
+        conn,
+        features,
+        inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let frame_bytes = child.frame_bytes;
+    let mut value =
+        decode_prometheus_intermediate(&child.body, value_type, instant, limits, cancelled)?;
+    match &mut value {
+        IntermediateValue::Scalar(points) => {
+            for (_, value) in points {
+                check_cancelled(cancelled)?;
+                *value = -*value;
+            }
+        }
+        IntermediateValue::Vector(series) => {
+            for series in series {
+                check_cancelled(cancelled)?;
+                // Prometheus removes the metric name for every unary expression,
+                // including a double negation. Other labels remain unchanged.
+                series.labels.remove("__name__");
+                for (_, value) in &mut series.points {
+                    check_cancelled(cancelled)?;
+                    *value = -*value;
+                }
+            }
+        }
+    }
+    encode_prometheus_intermediate(
+        value,
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn enforce_intermediate_work(points: u64, limits: PromQueryLimits) -> Result<(), String> {
+    if points > limits.max_work_points as u64 {
+        return Err(format!(
+            "query exceeded the maximum intermediate-work limit of {} points",
+            limits.max_work_points
+        ));
+    }
+    Ok(())
+}
+
+fn decode_prometheus_intermediate(
+    body: &[u8],
+    value_type: PromValueType,
+    instant: bool,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<IntermediateValue, String> {
+    match (value_type, instant) {
+        (PromValueType::Scalar, true) => {
+            let document = decode_prometheus_document(body)?;
+            if document["data"]["resultType"] != "scalar" {
+                return Err("PromQL child expression did not produce a scalar".into());
+            }
+            Ok(IntermediateValue::Scalar(vec![decode_prometheus_sample(
+                &document["data"]["result"],
+                "scalar",
+            )?]))
+        }
+        (PromValueType::Scalar, false) => {
+            let mut matrix = decode_prometheus_matrix(body, limits, cancelled)?;
+            if matrix.len() != 1 || !matrix[0].labels.is_empty() {
+                return Err("PromQL scalar range child produced an invalid matrix".into());
+            }
+            Ok(IntermediateValue::Scalar(matrix.remove(0).points))
+        }
+        (PromValueType::Vector, true) => Ok(IntermediateValue::Vector(
+            decode_prometheus_instant_vector(body, limits, cancelled)?,
+        )),
+        (PromValueType::Vector, false) => Ok(IntermediateValue::Vector(decode_prometheus_matrix(
+            body, limits, cancelled,
+        )?)),
+        (PromValueType::String, _) => {
+            Err("PromQL unary minus cannot evaluate a string expression".into())
+        }
+        (PromValueType::Matrix, _) => {
+            Err("PromQL unary minus cannot evaluate a range-vector expression".into())
+        }
+    }
+}
+
+fn decode_prometheus_document(body: &[u8]) -> Result<Value, String> {
+    serde_json::from_slice(body)
+        .map_err(|error| format!("decode bounded PromQL child result: {error}"))
+}
+
+fn decode_prometheus_instant_vector(
+    body: &[u8],
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let document = decode_prometheus_document(body)?;
+    if document["data"]["resultType"] != "vector" {
+        return Err("PromQL child expression did not produce an instant vector".into());
+    }
+    let rows = document["data"]["result"]
+        .as_array()
+        .ok_or_else(|| "PromQL child vector result is not an array".to_string())?;
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        check_cancelled(cancelled)?;
+        if output.len() >= limits.max_work_points {
+            return Err(format!(
+                "query exceeded the maximum intermediate-work limit of {} points",
+                limits.max_work_points
+            ));
+        }
+        let labels = serde_json::from_value::<BTreeMap<String, String>>(row["metric"].clone())
+            .map_err(|error| format!("decode PromQL child labels: {error}"))?;
+        let sample = decode_prometheus_sample(&row["value"], "instant vector")?;
+        output.push(IntermediateSeries {
+            labels,
+            points: vec![sample],
+        });
+    }
+    Ok(output)
+}
+
+fn decode_prometheus_sample(sample: &Value, context: &str) -> Result<(i64, f64), String> {
+    let pair = sample
+        .as_array()
+        .filter(|pair| pair.len() == 2)
+        .ok_or_else(|| format!("PromQL {context} sample is not a timestamp/value pair"))?;
+    let timestamp_text = pair[0].to_string();
+    let timestamp = parse_prom_time(Some(&timestamp_text), 0)
+        .map_err(|error| format!("decode PromQL {context} timestamp: {error}"))?;
+    let value = pair[1]
+        .as_str()
+        .ok_or_else(|| format!("PromQL {context} sample value is not a string"))?;
+    Ok((timestamp, parse_prometheus_value(value)?))
+}
+
+fn encode_prometheus_intermediate(
+    value: IntermediateValue,
+    instant: bool,
+    frame_bytes: usize,
+    intermediate_points: u64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let expected_points = value.points();
+    let mut body = Vec::new();
+    let (series, points) = match value {
+        IntermediateValue::Scalar(points) if instant => {
+            let [sample] = points.as_slice() else {
+                return Err("PromQL scalar child did not produce exactly one sample".into());
+            };
+            body.extend_from_slice(
+                br#"{"status":"success","data":{"resultType":"scalar","result":"#,
+            );
+            enforce_prometheus_output(&body, 0, limits)?;
+            admit_prometheus_point(0, limits)?;
+            write_prometheus_sample(&mut body, sample.0, sample.1)?;
+            body.extend_from_slice(b"}}");
+            (0, 1)
+        }
+        IntermediateValue::Scalar(points) => {
+            body.extend_from_slice(
+                br#"{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":["#,
+            );
+            for (index, (timestamp, value)) in points.iter().enumerate() {
+                check_cancelled(cancelled)?;
+                admit_prometheus_point(index as u64, limits)?;
+                comma(&mut body, index);
+                write_prometheus_sample(&mut body, *timestamp, *value)?;
+                enforce_prometheus_output(&body, index as u64 + 1, limits)?;
+            }
+            body.extend_from_slice(b"]}]}}");
+            (1, points.len() as u64)
+        }
+        IntermediateValue::Vector(series) => {
+            write_prometheus_prefix(&mut body, instant);
+            let mut emitted = 0_u64;
+            let mut points = 0_u64;
+            for item in series {
+                check_cancelled(cancelled)?;
+                if instant && item.points.len() != 1 {
+                    return Err(
+                        "PromQL instant-vector child did not produce exactly one sample per series"
+                            .into(),
+                    );
+                }
+                if item.points.is_empty() {
+                    continue;
+                }
+                comma(&mut body, emitted as usize);
+                write_prometheus_item_prefix(&mut body, None, &item.labels, instant, limits)?;
+                for (index, (timestamp, value)) in item.points.iter().enumerate() {
+                    check_cancelled(cancelled)?;
+                    admit_prometheus_point(points, limits)?;
+                    if !instant {
+                        comma(&mut body, index);
+                    }
+                    write_prometheus_sample(&mut body, *timestamp, *value)?;
+                    points += 1;
+                    enforce_prometheus_output(&body, points, limits)?;
+                }
+                write_prometheus_item_suffix(&mut body, instant);
+                emitted += 1;
+            }
+            write_prometheus_suffix(&mut body);
+            (emitted, points)
+        }
+    };
+    debug_assert_eq!(points, expected_points);
+    enforce_prometheus_output(&body, points, limits)?;
+    Ok(ReadOutput {
+        body,
+        frame_bytes,
+        series,
+        points,
+        intermediate_points,
+        rows: points,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

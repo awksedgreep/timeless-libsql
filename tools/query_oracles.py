@@ -430,6 +430,59 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 failures += 1
             else:
                 print(f"{case['id']}: ok")
+        for case in fixture.get("operator_cases", []):
+            evaluation_ms = sample_timestamp_ms + case["evaluation_offset_ms"]
+            range_case = case.get("range")
+            if range_case:
+                start_ms = sample_timestamp_ms + range_case["start_offset_ms"]
+                end_ms = sample_timestamp_ms + range_case["end_offset_ms"]
+                params = {
+                    "query": case["query"],
+                    "start": str(start_ms / 1_000),
+                    "end": str(end_ms / 1_000),
+                    "step": range_case["step"],
+                }
+                endpoint = "/api/v1/query_range"
+                result_type = "matrix"
+                values = case["expected_values"]
+                timestamps = [
+                    start_ms + index * (end_ms - start_ms) // (len(values) - 1)
+                    for index in range(len(values))
+                ]
+                result = [{
+                    "metric": {"job": "oracle"},
+                    "values": [
+                        [timestamp / 1_000, str(value)]
+                        for timestamp, value in zip(timestamps, values)
+                    ],
+                }]
+            else:
+                params = {
+                    "query": case["query"],
+                    "time": str(evaluation_ms / 1_000),
+                }
+                endpoint = "/api/v1/query"
+                result_type = "vector"
+                result = [{
+                    "metric": {"job": "oracle"},
+                    "value": [evaluation_ms / 1_000, str(case["expected_values"][0])],
+                }]
+            if not case.get("drop_metric_name"):
+                result[0]["metric"]["__name__"] = "oracle_temporal"
+            url = base + endpoint + "?" + urllib.parse.urlencode(params)
+            with urllib.request.urlopen(url, timeout=10) as response:
+                body = json.loads(response.read())
+            valid = (
+                response.status == 200
+                and body.get("status") == "success"
+                and body.get("data", {}).get("resultType") == result_type
+                and body.get("data", {}).get("result") == result
+            )
+            if not valid:
+                print(f"{case['id']}: expected {result!r}; got {body!r}", file=sys.stderr)
+                failures += 1
+            else:
+                print(f"{case['id']}: ok")
         return 1 if failures else 0
     finally:
         subprocess.run(

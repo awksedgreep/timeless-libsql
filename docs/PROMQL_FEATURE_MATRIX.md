@@ -80,7 +80,7 @@ they do not justify a PromQL-aware extension API.
 
 | ID | construct | Rust now | Elixir | foundation | target | priority |
 |---|---|---|---|---|---|---|
-| `PQL-O01` | unary minus | missing | yes | `SQL` | `API` | P0 |
+| `PQL-O01` | unary minus ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-010-unary-minus)) | in progress | yes | `SQL` | `API` | P0 |
 | `PQL-O02` | arithmetic `+ - * / % ^` across scalar/vector pairs ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O03` | comparisons `== != > < >= <=` and `bool` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O04` | set operators `and`, `or`, `unless` | missing | yes | `SQL` | `API` | P0 |

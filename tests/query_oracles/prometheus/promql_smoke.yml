@@ -110,3 +110,23 @@ tests:
         exp_samples:
           - labels: '{host="t"}'
             value: 6
+      - expr: '-query_contract_temporal'
+        eval_time: 60s
+        exp_samples:
+          - labels: '{host="t"}'
+            value: -7
+      - expr: '-avg_over_time(query_contract_temporal[20s])'
+        eval_time: 60s
+        exp_samples:
+          - labels: '{host="t"}'
+            value: -6.5
+      - expr: 'avg_over_time((-query_contract_temporal)[20s:10s])'
+        eval_time: 60s
+        exp_samples:
+          - labels: '{host="t"}'
+            value: -6.5
+      - expr: '-(-query_contract_temporal)'
+        eval_time: 60s
+        exp_samples:
+          - labels: '{host="t"}'
+            value: 7

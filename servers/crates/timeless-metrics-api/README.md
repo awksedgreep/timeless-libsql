@@ -27,7 +27,9 @@ The current PromQL slice supports scalar literals (including `NaN` and
 infinities), string literals, exact-name and nameless instant vector
 selectors, anchored regex/negative/duplicate `__name__` matchers, root range
 selectors on instant queries, and
-`avg_over_time(selector[window])`. Selectors and range selectors accept signed
+`avg_over_time(selector[window])`. Unary minus composes over shipped scalar and
+instant-vector expressions, removes the vector metric name, and preserves
+Prometheus scalar/vector/range result types. Selectors and range selectors accept signed
 `offset` plus numeric/`start()`/`end()` `@` modifiers. Selector and shipped
 range-function expressions may be evaluated as bounded subqueries with
 `[range:resolution]`, including omitted/default resolution, nesting, and
@@ -176,6 +178,12 @@ folds windows while checking cancellation. This composition leaves the
 ordinary selector/window streaming paths and every extension/storage format
 unchanged. Stats report final points and
 `api_promql_intermediate_points` separately.
+
+Unary and other composed AST nodes use the same bounded internal value bridge
+as subquery consumers. Every child result point is charged to
+`max_work_points`; response bytes, final points, deadline, and cancellation
+remain independently enforced. Ordinary selectors and packed windows retain
+their streaming hot paths.
 
 Every read carries a cancellation token. A dropped HTTP future stops host grid
 evaluation between points and installs a scoped SQLite progress handler; the

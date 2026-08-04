@@ -2097,6 +2097,10 @@ SELECT 'bounded_raw', length(frame) > 0
 SELECT 'bounded_window', COUNT(*)
   FROM timeless_window_batches(
     'ck','cpu','{"host":"a"}',0,60,60,60,'avg',NULL,2);
+-- SQL-PROM-010: unary minus over the bounded public selector grid
+SELECT 'unary_minus', labels, ts, -value
+  FROM timeless_grid('ck','cpu','{"host":"a"}',0,60,60,60)
+ ORDER BY labels, ts;
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2136,6 +2140,9 @@ check_eq "SQL-PROM-006 range selector uses exact (T-W,T] bounds" \
 check_eq "SQL-PROM-007 bounds packed raw and window storage work" \
   "$(grep -E '^bounded_(raw|window)\|' <<<"$got")" \
 $'bounded_raw|1\nbounded_window|1'
+check_eq "SQL-PROM-010 negates a bounded public selector grid" \
+  "$(grep '^unary_minus|' <<<"$got")" \
+$'unary_minus|{"host":"a"}|0|-1.0\nunary_minus|{"host":"a"}|60|-10.0'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="
