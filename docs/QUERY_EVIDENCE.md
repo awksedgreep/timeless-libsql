@@ -983,3 +983,31 @@ cancellation of the shared range-reduction executor, shutdown, and cold
 reopen. The direct SQL recipe also checks the stable-zero result. The kernel
 correction changes no extension signature, storage or frame format, batching,
 compression, index, rollup, retention, transaction, or migration behavior.
+
+## Session 6 `PQL-R03` range maximum
+
+The checked-in
+[`2026-08-04_session6_pql_r03.json`](evidence/2026-08-04_session6_pql_r03.json)
+was captured from exact extension and server build
+`f4b010010ecb92cc83b07b93ddffe4807eb8c162`. Both measured shapes use the
+public packed window kernel and expose its complete storage work.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, native `max_over_time(...[5m])` | 1 | 132 | 0.609 | 0.829 | 0.901 | 0 | 1 | 32 | 131 |
+| 512 series × four steps, native `max_over_time(...[5m])` | 2,048 | 67,620 | 3.190 | 3.671 | 5.132 | 0 | 512 | 16,384 | 53,831 |
+
+The wide query produces 2,048 sparse points from exactly 512 candidate chunks
+and 16,384 decoded inputs. No intermediate matrix is allocated on the native
+whole-second path; raw modifier/subsecond and subquery composition retain the
+same ordered maximum semantics under the shared work limit.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,900 KiB. Oracle and real-extension regressions cover open-left
+boundaries, empty windows, leading/later/all-NaN behavior, infinities, both
+signed-zero input orders, subqueries, work limits, cancellation of the shared
+range executor, shutdown, and cold reopen. The executable SQL recipe checks
+the reverse-zero case. No extension signature, storage/frame format, batching,
+compression, index, rollup, retention, transaction, or migration behavior
+changed.

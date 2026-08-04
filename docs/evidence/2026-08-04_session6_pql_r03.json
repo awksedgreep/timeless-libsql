@@ -1,0 +1,2169 @@
+{
+  "captured_at": "2026-08-04T12:30:45.302354+00:00",
+  "extension_build": {
+    "commit": "f4b010010ecb92cc83b07b93ddffe4807eb8c162",
+    "profile": "release",
+    "target": "x86_64-unknown-linux-gnu"
+  },
+  "git_commit": "f4b010010ecb92cc83b07b93ddffe4807eb8c162",
+  "host": {
+    "machine": "x86_64",
+    "processor": "",
+    "release": "7.1.3-arch1-2",
+    "system": "Linux"
+  },
+  "logs": {
+    "build": {
+      "commit": "f4b010010ecb92cc83b07b93ddffe4807eb8c162",
+      "name": "timeless-logs-api",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "0.3.0"
+    },
+    "cancellation": {
+      "contract_test": "HTTP disconnect coverage is added per LogsQL evaluator row"
+    },
+    "fixture": {
+      "logical_entries": 8192,
+      "severities": [
+        "debug",
+        "info",
+        "notice",
+        "warning",
+        "error",
+        "critical",
+        "alert",
+        "emergency"
+      ],
+      "typed_nested_metadata": true
+    },
+    "ingestion": {
+      "admission_ns": 8179147,
+      "completed_entries": 8192,
+      "durability_barrier_ns": 21181540,
+      "queued_entries": 0,
+      "wire_bytes": 1318143
+    },
+    "queries": {
+      "narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 7410157,
+          "min": 5945519,
+          "p50": 6408978,
+          "p95": 7036783,
+          "p99": 7410157
+        },
+        "response_bytes": 174625,
+        "result_cardinality": 1024,
+        "stats_delta": {
+          "api_query_count": 50,
+          "api_query_ns": 256774558,
+          "query_bounded_count": 50,
+          "query_bounded_requested_entries": 500000,
+          "query_candidate_blocks": 50,
+          "query_count": 50,
+          "query_decoded_entries": 204800,
+          "query_matched_entries": 51200,
+          "query_materialize_ns": 221536703,
+          "query_payload_bytes_read": 27349250,
+          "query_returned_entries": 51200,
+          "query_snapshot_ns": 3239277,
+          "query_stable_location_snapshots": 50,
+          "query_total_ns": 224837957,
+          "read_permit_count": 51,
+          "read_permit_hold_ns": 3325055
+        },
+        "warmup": 5
+      },
+      "wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 21110807,
+          "min": 17704108,
+          "p50": 18633858,
+          "p95": 20309260,
+          "p99": 21110807
+        },
+        "response_bytes": 1424639,
+        "result_cardinality": 8192,
+        "stats_delta": {
+          "api_query_count": 50,
+          "api_query_ns": 644913900,
+          "query_bounded_count": 50,
+          "query_bounded_requested_entries": 500000,
+          "query_candidate_blocks": 200,
+          "query_count": 50,
+          "query_decoded_entries": 409600,
+          "query_matched_entries": 409600,
+          "query_materialize_ns": 439522034,
+          "query_payload_bytes_read": 54445950,
+          "query_returned_entries": 409600,
+          "query_snapshot_ns": 3501805,
+          "query_stable_location_snapshots": 50,
+          "query_total_ns": 443115543,
+          "read_permit_count": 51,
+          "read_permit_hold_ns": 3620050
+        },
+        "warmup": 5
+      }
+    },
+    "rss_hwm_kib": 53992,
+    "storage": {
+      "buffered_entries": 0,
+      "compressed_blocks": 0,
+      "database_file_bytes": 4096,
+      "database_shm_bytes": 32768,
+      "database_wal_bytes": 1153632,
+      "disk_size": 1126400,
+      "index_size": 16384,
+      "physical_database_bytes": 1190496,
+      "raw_blocks": 4,
+      "total_bytes": 1088919
+    }
+  },
+  "metrics": {
+    "build": {
+      "commit": "f4b010010ecb92cc83b07b93ddffe4807eb8c162",
+      "name": "timeless-metrics-api",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "0.3.0"
+    },
+    "cancellation": {
+      "cancelled_requests": 0,
+      "contract_test": "session_four_cancels_dropped_promql_requests_and_reuses_the_reader"
+    },
+    "fixture": {
+      "exact_metric_series": 512,
+      "logical_points": 18496,
+      "points_per_series": 32,
+      "selector_metric_names": 64
+    },
+    "ingestion": {
+      "admission_ns": 3536446,
+      "completed_points": 18496,
+      "durability_barrier_ns": 19573592,
+      "failed_points": 0,
+      "queued_points": 0,
+      "wire_bytes": 426156
+    },
+    "limit_fixture_ingestion": {
+      "admission_ns": 6061094,
+      "completed_points_after": 118521,
+      "durability_barrier_ns": 9805994,
+      "failed_points_after": 0,
+      "logical_points": 100025,
+      "points_per_series": 4001,
+      "queued_points_after": 0,
+      "series": 25,
+      "wire_bytes": 2075745
+    },
+    "limits": {
+      "contract_test": "session_two_promql_limits_bound_grid_work_results_response_and_deadline",
+      "deadline_ms": 30000,
+      "default_subquery_step_ms": 15000,
+      "points_per_series": 11000,
+      "response_bytes": 16777216,
+      "result_points": 100000,
+      "work_points": 100000
+    },
+    "queries": {
+      "arithmetic_one_to_one_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 13153183,
+          "min": 9593186,
+          "p50": 10283140,
+          "p95": 11719345,
+          "p99": 13153183
+        },
+        "response_bytes": 67986,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 204800,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26830400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3399300,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 478753292,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 403900,
+          "api_stats_total_ns": 619967,
+          "extension_raw_batch_query_candidate_chunks": 51200,
+          "extension_raw_batch_query_count": 100,
+          "extension_raw_batch_query_decoded_points": 1638400,
+          "extension_raw_batch_query_payload_bytes_read": 5383100,
+          "extension_raw_batch_query_returned_points": 1638400,
+          "extension_raw_batch_query_series_considered": 51200,
+          "extension_raw_batch_query_total_ns": 163684205
+        },
+        "warmup": 5
+      },
+      "arithmetic_vector_scalar_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 972825,
+          "min": 340607,
+          "p50": 569308,
+          "p95": 736967,
+          "p99": 972825
+        },
+        "response_bytes": 132,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 100,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 6600,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 9695844,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 318108,
+          "api_stats_total_ns": 330500,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 758854
+        },
+        "warmup": 5
+      },
+      "at_end_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5138040,
+          "min": 3028731,
+          "p50": 3338738,
+          "p95": 4554721,
+          "p99": 5138040
+        },
+        "response_bytes": 84010,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13005600,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 4200500,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 140885588,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 334254,
+          "api_stats_total_ns": 520836,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 793600,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81691083
+        },
+        "warmup": 5
+      },
+      "at_numeric_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1034991,
+          "min": 359170,
+          "p50": 660598,
+          "p95": 850980,
+          "p99": 1034991
+        },
+        "response_bytes": 164,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 25400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 8200,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 10110253,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 349149,
+          "api_stats_total_ns": 479718,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1500,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 798497
+        },
+        "warmup": 5
+      },
+      "avg_by_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1285230,
+          "min": 334952,
+          "p50": 426280,
+          "p95": 1016641,
+          "p99": 1285230
+        },
+        "response_bytes": 116,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 50,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5800,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 9413445,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 615579,
+          "api_stats_total_ns": 632714,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 865515
+        },
+        "warmup": 5
+      },
+      "avg_by_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 6633990,
+          "min": 3796300,
+          "p50": 4066770,
+          "p95": 6248740,
+          "p99": 6633990
+        },
+        "response_bytes": 297,
+        "result_cardinality": 8,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102400,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 14850,
+          "api_read_result_points": 400,
+          "api_read_result_series": 100,
+          "api_read_total_ns": 186115661,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 479274,
+          "api_stats_total_ns": 544519,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 84806266
+        },
+        "warmup": 5
+      },
+      "bottomk_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5100896,
+          "min": 3871075,
+          "p50": 4267397,
+          "p95": 4816251,
+          "p99": 5100896
+        },
+        "response_bytes": 1346,
+        "result_cardinality": 32,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102600,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 67300,
+          "api_read_result_points": 1600,
+          "api_read_result_series": 400,
+          "api_read_total_ns": 190335885,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 323004,
+          "api_stats_total_ns": 418899,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81183401
+        },
+        "warmup": 5
+      },
+      "comparison_bool_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5641130,
+          "min": 4492974,
+          "p50": 5145376,
+          "p95": 5500401,
+          "p99": 5641130
+        },
+        "response_bytes": 63806,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102600,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3190300,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 224236699,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 404993,
+          "api_stats_total_ns": 505149,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 89189015
+        },
+        "warmup": 5
+      },
+      "comparison_filter_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1074498,
+          "min": 594148,
+          "p50": 768372,
+          "p95": 983039,
+          "p99": 1074498
+        },
+        "response_bytes": 164,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 100,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 8200,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 13364189,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 326255,
+          "api_stats_total_ns": 459353,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 772606
+        },
+        "warmup": 5
+      },
+      "count_by_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 693121,
+          "min": 265283,
+          "p50": 337905,
+          "p95": 582028,
+          "p99": 693121
+        },
+        "response_bytes": 115,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 50,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5750,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 6912990,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 350868,
+          "api_stats_total_ns": 364040,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 711940
+        },
+        "warmup": 5
+      },
+      "count_values_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 920668,
+          "min": 303086,
+          "p50": 485700,
+          "p95": 831214,
+          "p99": 920668
+        },
+        "response_bytes": 113,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 50,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5650,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 10965435,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 325806,
+          "api_stats_total_ns": 335181,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 864233
+        },
+        "warmup": 5
+      },
+      "count_values_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 7107255,
+          "min": 5003766,
+          "p50": 5356258,
+          "p95": 6357805,
+          "p99": 7107255
+        },
+        "response_bytes": 91789,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102400,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 4589450,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 51400,
+          "api_read_total_ns": 243269270,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 797914,
+          "api_stats_total_ns": 870574,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 82831030
+        },
+        "warmup": 5
+      },
+      "duration_range_vector_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 863970,
+          "min": 291661,
+          "p50": 507467,
+          "p95": 790990,
+          "p99": 863970
+        },
+        "response_bytes": 698,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 34900,
+          "api_read_result_points": 1550,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 9692254,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 352100,
+          "api_stats_total_ns": 576466,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 790521
+        },
+        "warmup": 5
+      },
+      "duration_range_vector_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 6003919,
+          "min": 4237088,
+          "p50": 4689109,
+          "p95": 5285172,
+          "p99": 6003919
+        },
+        "response_bytes": 344293,
+        "result_cardinality": 512,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13005600,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 17214650,
+          "api_read_result_points": 793600,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 200479336,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 866161,
+          "api_stats_total_ns": 964018,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 793600,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 83999184
+        },
+        "warmup": 5
+      },
+      "error_64k": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 558191,
+          "min": 229386,
+          "p50": 258707,
+          "p95": 438319,
+          "p99": 558191
+        },
+        "response_bytes": 108,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 376556,
+          "api_stats_total_ns": 390089
+        },
+        "warmup": 5
+      },
+      "error_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 337381,
+          "min": 146986,
+          "p50": 169791,
+          "p95": 321068,
+          "p99": 337381
+        },
+        "response_bytes": 120,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 392834,
+          "api_stats_total_ns": 407588
+        },
+        "warmup": 5
+      },
+      "grid_lookback_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 967837,
+          "min": 312335,
+          "p50": 631246,
+          "p95": 894035,
+          "p99": 967837
+        },
+        "response_bytes": 547,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 3800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 27350,
+          "api_read_result_points": 1050,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 10550369,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 517024,
+          "api_stats_total_ns": 608032,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 150,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 769933
+        },
+        "warmup": 5
+      },
+      "grid_lookback_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5125675,
+          "min": 3711916,
+          "p50": 4106274,
+          "p95": 4582565,
+          "p99": 5125675
+        },
+        "response_bytes": 258433,
+        "result_cardinality": 512,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1536800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 12921650,
+          "api_read_result_points": 537600,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 171151482,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 418922,
+          "api_stats_total_ns": 493014,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 76800,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 75239706
+        },
+        "warmup": 5
+      },
+      "group_by_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5258568,
+          "min": 3667979,
+          "p50": 4235221,
+          "p95": 4828355,
+          "p99": 5258568
+        },
+        "response_bytes": 281,
+        "result_cardinality": 8,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102400,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 14050,
+          "api_read_result_points": 400,
+          "api_read_result_series": 100,
+          "api_read_total_ns": 186455696,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 340130,
+          "api_stats_total_ns": 415619,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81844805
+        },
+        "warmup": 5
+      },
+      "group_left_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1040224,
+          "min": 488511,
+          "p50": 706377,
+          "p95": 976779,
+          "p99": 1040224
+        },
+        "response_bytes": 150,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 150,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 77800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 7500,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 16785643,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 344254,
+          "api_stats_total_ns": 521405,
+          "extension_raw_batch_query_candidate_chunks": 150,
+          "extension_raw_batch_query_count": 100,
+          "extension_raw_batch_query_decoded_points": 4800,
+          "extension_raw_batch_query_payload_bytes_read": 14850,
+          "extension_raw_batch_query_returned_points": 4650,
+          "extension_raw_batch_query_series_considered": 150,
+          "extension_raw_batch_query_total_ns": 1816488
+        },
+        "warmup": 5
+      },
+      "group_right_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 9158077,
+          "min": 5746291,
+          "p50": 6493467,
+          "p95": 8735656,
+          "p99": 9158077
+        },
+        "response_bytes": 78618,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102800,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13468400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3930900,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 301091267,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 381905,
+          "api_stats_total_ns": 400309,
+          "extension_raw_batch_query_candidate_chunks": 25700,
+          "extension_raw_batch_query_count": 100,
+          "extension_raw_batch_query_decoded_points": 822400,
+          "extension_raw_batch_query_payload_bytes_read": 2699850,
+          "extension_raw_batch_query_returned_points": 822400,
+          "extension_raw_batch_query_series_considered": 25700,
+          "extension_raw_batch_query_total_ns": 85227370
+        },
+        "warmup": 5
+      },
+      "matching_on_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1195566,
+          "min": 456072,
+          "p50": 595469,
+          "p95": 834062,
+          "p99": 1195566
+        },
+        "response_bytes": 116,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 100,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 52400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5800,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 15556308,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 340189,
+          "api_stats_total_ns": 454305,
+          "extension_raw_batch_query_candidate_chunks": 100,
+          "extension_raw_batch_query_count": 100,
+          "extension_raw_batch_query_decoded_points": 3200,
+          "extension_raw_batch_query_payload_bytes_read": 13100,
+          "extension_raw_batch_query_returned_points": 3100,
+          "extension_raw_batch_query_series_considered": 100,
+          "extension_raw_batch_query_total_ns": 1525989
+        },
+        "warmup": 5
+      },
+      "matching_on_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 11805613,
+          "min": 9290968,
+          "p50": 9797350,
+          "p95": 10751265,
+          "p99": 11805613
+        },
+        "response_bytes": 59026,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 204800,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26830400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 2951300,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 456377336,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 427891,
+          "api_stats_total_ns": 535607,
+          "extension_raw_batch_query_candidate_chunks": 51200,
+          "extension_raw_batch_query_count": 100,
+          "extension_raw_batch_query_decoded_points": 1638400,
+          "extension_raw_batch_query_payload_bytes_read": 5383100,
+          "extension_raw_batch_query_returned_points": 1638400,
+          "extension_raw_batch_query_series_considered": 51200,
+          "extension_raw_batch_query_total_ns": 164495868
+        },
+        "warmup": 5
+      },
+      "max_by_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5451519,
+          "min": 3849425,
+          "p50": 4253060,
+          "p95": 4866275,
+          "p99": 5451519
+        },
+        "response_bytes": 297,
+        "result_cardinality": 8,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102400,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 14850,
+          "api_read_result_points": 400,
+          "api_read_result_series": 100,
+          "api_read_total_ns": 185804794,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 348368,
+          "api_stats_total_ns": 358182,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 82328437
+        },
+        "warmup": 5
+      },
+      "metric_name_negative_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 3662024,
+          "min": 2960240,
+          "p50": 3256506,
+          "p95": 3588906,
+          "p99": 3662024
+        },
+        "response_bytes": 7937,
+        "result_cardinality": 63,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1650600,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 396850,
+          "api_read_result_points": 3150,
+          "api_read_result_series": 3150,
+          "api_read_total_ns": 140960153,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 368549,
+          "api_stats_total_ns": 441233,
+          "extension_raw_batch_query_candidate_chunks": 3150,
+          "extension_raw_batch_query_count": 3150,
+          "extension_raw_batch_query_decoded_points": 100800,
+          "extension_raw_batch_query_payload_bytes_read": 348700,
+          "extension_raw_batch_query_returned_points": 97650,
+          "extension_raw_batch_query_series_considered": 3150,
+          "extension_raw_batch_query_total_ns": 24802118
+        },
+        "warmup": 5
+      },
+      "metric_name_regex_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1420923,
+          "min": 925055,
+          "p50": 1080434,
+          "p95": 1363981,
+          "p99": 1420923
+        },
+        "response_bytes": 562,
+        "result_cardinality": 4,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 104800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 28100,
+          "api_read_result_points": 200,
+          "api_read_result_series": 200,
+          "api_read_total_ns": 37102358,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 301135,
+          "api_stats_total_ns": 321456,
+          "extension_raw_batch_query_candidate_chunks": 200,
+          "extension_raw_batch_query_count": 200,
+          "extension_raw_batch_query_decoded_points": 6400,
+          "extension_raw_batch_query_payload_bytes_read": 25850,
+          "extension_raw_batch_query_returned_points": 6200,
+          "extension_raw_batch_query_series_considered": 200,
+          "extension_raw_batch_query_total_ns": 2165313
+        },
+        "warmup": 5
+      },
+      "min_by_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 989315,
+          "min": 480043,
+          "p50": 707788,
+          "p95": 936585,
+          "p99": 989315
+        },
+        "response_bytes": 116,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 50,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5800,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 12050305,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 329510,
+          "api_stats_total_ns": 423703,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 1047695
+        },
+        "warmup": 5
+      },
+      "nameless_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1440601,
+          "min": 861897,
+          "p50": 1154945,
+          "p95": 1357658,
+          "p99": 1440601
+        },
+        "response_bytes": 187,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 9350,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 36288561,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 363662,
+          "api_stats_total_ns": 441257,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 868664
+        },
+        "warmup": 5
+      },
+      "nameless_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 3863653,
+          "min": 3060960,
+          "p50": 3303983,
+          "p95": 3662732,
+          "p99": 3863653
+        },
+        "response_bytes": 8062,
+        "result_cardinality": 64,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1676800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 403100,
+          "api_read_result_points": 3200,
+          "api_read_result_series": 3200,
+          "api_read_total_ns": 142878566,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 304968,
+          "api_stats_total_ns": 400927,
+          "extension_raw_batch_query_candidate_chunks": 3200,
+          "extension_raw_batch_query_count": 3200,
+          "extension_raw_batch_query_decoded_points": 102400,
+          "extension_raw_batch_query_payload_bytes_read": 355250,
+          "extension_raw_batch_query_returned_points": 99200,
+          "extension_raw_batch_query_series_considered": 3200,
+          "extension_raw_batch_query_total_ns": 25392274
+        },
+        "warmup": 5
+      },
+      "narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 955178,
+          "min": 480460,
+          "p50": 680827,
+          "p95": 886995,
+          "p99": 955178
+        },
+        "response_bytes": 164,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 8200,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 13488195,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 655386,
+          "api_stats_total_ns": 720539,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 1006912
+        },
+        "warmup": 5
+      },
+      "near_result_limit": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 13619151,
+          "min": 10957661,
+          "p50": 11782933,
+          "p95": 13158544,
+          "p99": 13619151
+        },
+        "response_bytes": 1926899,
+        "result_cardinality": 99840,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 96344950,
+          "api_read_result_points": 4992000,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 517633557,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 523213,
+          "api_stats_total_ns": 678173,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81242159
+        },
+        "warmup": 5
+      },
+      "offset_negative_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 4987877,
+          "min": 3058912,
+          "p50": 3333035,
+          "p95": 3781913,
+          "p99": 4987877
+        },
+        "response_bytes": 84004,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 4200200,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 141497518,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 368742,
+          "api_stats_total_ns": 448273,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81899675
+        },
+        "warmup": 5
+      },
+      "offset_positive_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1153189,
+          "min": 347616,
+          "p50": 715449,
+          "p95": 995250,
+          "p99": 1153189
+        },
+        "response_bytes": 164,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 25400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 8200,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 14086496,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 493558,
+          "api_stats_total_ns": 597737,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1500,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 1186927
+        },
+        "warmup": 5
+      },
+      "quantile_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 810938,
+          "min": 314719,
+          "p50": 385680,
+          "p95": 652811,
+          "p99": 810938
+        },
+        "response_bytes": 102,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 100,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5100,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 8323338,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 299741,
+          "api_stats_total_ns": 309696,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 824620
+        },
+        "warmup": 5
+      },
+      "quantile_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 6383938,
+          "min": 3780619,
+          "p50": 4162916,
+          "p95": 4726159,
+          "p99": 6383938
+        },
+        "response_bytes": 313,
+        "result_cardinality": 8,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102600,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 15650,
+          "api_read_result_points": 400,
+          "api_read_result_series": 100,
+          "api_read_total_ns": 182041226,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 372375,
+          "api_stats_total_ns": 541064,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81941077
+        },
+        "warmup": 5
+      },
+      "range_avg_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1248609,
+          "min": 272320,
+          "p50": 389400,
+          "p95": 701586,
+          "p99": 1248609
+        },
+        "response_bytes": 134,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1250,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 6700,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 6632298,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 298077,
+          "api_stats_total_ns": 310530,
+          "extension_window_batch_query_candidate_chunks": 50,
+          "extension_window_batch_query_count": 50,
+          "extension_window_batch_query_decoded_points": 1600,
+          "extension_window_batch_query_payload_bytes_read": 6550,
+          "extension_window_batch_query_returned_points": 50,
+          "extension_window_batch_query_series_considered": 50,
+          "extension_window_batch_query_total_ns": 844728
+        },
+        "warmup": 5
+      },
+      "range_avg_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 3906054,
+          "min": 2852855,
+          "p50": 3247337,
+          "p95": 3495296,
+          "p99": 3906054
+        },
+        "response_bytes": 70633,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1868800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3531650,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 133149480,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 356648,
+          "api_stats_total_ns": 471716,
+          "extension_window_batch_query_candidate_chunks": 25600,
+          "extension_window_batch_query_count": 50,
+          "extension_window_batch_query_decoded_points": 819200,
+          "extension_window_batch_query_payload_bytes_read": 2691550,
+          "extension_window_batch_query_returned_points": 102400,
+          "extension_window_batch_query_series_considered": 25600,
+          "extension_window_batch_query_total_ns": 87805138
+        },
+        "warmup": 5
+      },
+      "range_max_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 900878,
+          "min": 292217,
+          "p50": 609118,
+          "p95": 829395,
+          "p99": 900878
+        },
+        "response_bytes": 132,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1250,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 6600,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 8911666,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 330135,
+          "api_stats_total_ns": 343466,
+          "extension_window_batch_query_candidate_chunks": 50,
+          "extension_window_batch_query_count": 50,
+          "extension_window_batch_query_decoded_points": 1600,
+          "extension_window_batch_query_payload_bytes_read": 6550,
+          "extension_window_batch_query_returned_points": 50,
+          "extension_window_batch_query_series_considered": 50,
+          "extension_window_batch_query_total_ns": 865620
+        },
+        "warmup": 5
+      },
+      "range_max_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5132221,
+          "min": 2728635,
+          "p50": 3189790,
+          "p95": 3671375,
+          "p99": 5132221
+        },
+        "response_bytes": 67620,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1868800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3381000,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 128950525,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 405820,
+          "api_stats_total_ns": 467882,
+          "extension_window_batch_query_candidate_chunks": 25600,
+          "extension_window_batch_query_count": 50,
+          "extension_window_batch_query_decoded_points": 819200,
+          "extension_window_batch_query_payload_bytes_read": 2691550,
+          "extension_window_batch_query_returned_points": 102400,
+          "extension_window_batch_query_series_considered": 25600,
+          "extension_window_batch_query_total_ns": 84572717
+        },
+        "warmup": 5
+      },
+      "range_min_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 807816,
+          "min": 255240,
+          "p50": 432583,
+          "p95": 751746,
+          "p99": 807816
+        },
+        "response_bytes": 131,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1250,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 6550,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 6674602,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 587908,
+          "api_stats_total_ns": 605676,
+          "extension_window_batch_query_candidate_chunks": 50,
+          "extension_window_batch_query_count": 50,
+          "extension_window_batch_query_decoded_points": 1600,
+          "extension_window_batch_query_payload_bytes_read": 6550,
+          "extension_window_batch_query_returned_points": 50,
+          "extension_window_batch_query_series_considered": 50,
+          "extension_window_batch_query_total_ns": 861083
+        },
+        "warmup": 5
+      },
+      "range_min_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 4740511,
+          "min": 2811817,
+          "p50": 3163509,
+          "p95": 4378636,
+          "p99": 4740511
+        },
+        "response_bytes": 67468,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 1868800,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3373400,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 135066893,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 335660,
+          "api_stats_total_ns": 441293,
+          "extension_window_batch_query_candidate_chunks": 25600,
+          "extension_window_batch_query_count": 50,
+          "extension_window_batch_query_decoded_points": 819200,
+          "extension_window_batch_query_payload_bytes_read": 2691550,
+          "extension_window_batch_query_returned_points": 102400,
+          "extension_window_batch_query_series_considered": 25600,
+          "extension_window_batch_query_total_ns": 90018393
+        },
+        "warmup": 5
+      },
+      "range_vector_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1096026,
+          "min": 310477,
+          "p50": 583308,
+          "p95": 818902,
+          "p99": 1096026
+        },
+        "response_bytes": 681,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 34050,
+          "api_read_result_points": 1500,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 10403880,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 340713,
+          "api_stats_total_ns": 356540,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 766595
+        },
+        "warmup": 5
+      },
+      "range_vector_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 7074207,
+          "min": 4335505,
+          "p50": 4740831,
+          "p95": 6879562,
+          "p99": 7074207
+        },
+        "response_bytes": 334673,
+        "result_cardinality": 512,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13005600,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 16733650,
+          "api_read_result_points": 768000,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 204121353,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 428887,
+          "api_stats_total_ns": 443815,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 793600,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 85521447
+        },
+        "warmup": 5
+      },
+      "result_limit_rejected": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 14109800,
+          "min": 10042784,
+          "p50": 10981051,
+          "p95": 12200479,
+          "p99": 14109800
+        },
+        "response_bytes": 108,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_errors": 50,
+          "api_read_requests": 50,
+          "api_read_total_ns": 511207993,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 386870,
+          "api_stats_total_ns": 559809,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 80642780
+        },
+        "warmup": 5
+      },
+      "scalar_instant": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 754420,
+          "min": 271575,
+          "p50": 358735,
+          "p95": 595014,
+          "p99": 754420
+        },
+        "response_bytes": 79,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3950,
+          "api_read_result_points": 50,
+          "api_read_total_ns": 664673,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 526687,
+          "api_stats_total_ns": 544522
+        },
+        "warmup": 5
+      },
+      "scalar_range_11000": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1593422,
+          "min": 783142,
+          "p50": 1067262,
+          "p95": 1396291,
+          "p99": 1593422
+        },
+        "response_bytes": 209087,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 10454350,
+          "api_read_result_points": 550000,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 21407083,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 469432,
+          "api_stats_total_ns": 651290
+        },
+        "warmup": 5
+      },
+      "set_and_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 716742,
+          "min": 483733,
+          "p50": 585095,
+          "p95": 670417,
+          "p99": 716742
+        },
+        "response_bytes": 164,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 100,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 52400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 8200,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 13259014,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 349110,
+          "api_stats_total_ns": 361202,
+          "extension_raw_batch_query_candidate_chunks": 100,
+          "extension_raw_batch_query_count": 100,
+          "extension_raw_batch_query_decoded_points": 3200,
+          "extension_raw_batch_query_payload_bytes_read": 13100,
+          "extension_raw_batch_query_returned_points": 3100,
+          "extension_raw_batch_query_series_considered": 100,
+          "extension_raw_batch_query_total_ns": 1454165
+        },
+        "warmup": 5
+      },
+      "set_or_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 12786897,
+          "min": 8375130,
+          "p50": 10109276,
+          "p95": 10778056,
+          "p99": 12786897
+        },
+        "response_bytes": 84004,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 204800,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26830400,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 4200200,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 460801645,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 470816,
+          "api_stats_total_ns": 586294,
+          "extension_raw_batch_query_candidate_chunks": 51200,
+          "extension_raw_batch_query_count": 100,
+          "extension_raw_batch_query_decoded_points": 1638400,
+          "extension_raw_batch_query_payload_bytes_read": 5383100,
+          "extension_raw_batch_query_returned_points": 1638400,
+          "extension_raw_batch_query_series_considered": 51200,
+          "extension_raw_batch_query_total_ns": 182034755
+        },
+        "warmup": 5
+      },
+      "stddev_by_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 4819324,
+          "min": 3862191,
+          "p50": 4078195,
+          "p95": 4469075,
+          "p99": 4819324
+        },
+        "response_bytes": 417,
+        "result_cardinality": 8,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102400,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 20850,
+          "api_read_result_points": 400,
+          "api_read_result_series": 100,
+          "api_read_total_ns": 178399297,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 335837,
+          "api_stats_total_ns": 408031,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81126305
+        },
+        "warmup": 5
+      },
+      "stdvar_by_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1092195,
+          "min": 317423,
+          "p50": 451220,
+          "p95": 917560,
+          "p99": 1092195
+        },
+        "response_bytes": 115,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 50,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5750,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 10458024,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 322054,
+          "api_stats_total_ns": 332963,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 791111
+        },
+        "warmup": 5
+      },
+      "string_64k": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 2998372,
+          "min": 1381955,
+          "p50": 1737631,
+          "p95": 2773043,
+          "p99": 2998372
+        },
+        "response_bytes": 65612,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3280600,
+          "api_read_result_points": 50,
+          "api_read_total_ns": 4621613,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 475043,
+          "api_stats_total_ns": 605986
+        },
+        "warmup": 5
+      },
+      "string_instant": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 613358,
+          "min": 171854,
+          "p50": 262793,
+          "p95": 508267,
+          "p99": 613358
+        },
+        "response_bytes": 91,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 4550,
+          "api_read_result_points": 50,
+          "api_read_total_ns": 542287,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 480518,
+          "api_stats_total_ns": 487091
+        },
+        "warmup": 5
+      },
+      "subquery_avg_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 892563,
+          "min": 307884,
+          "p50": 478817,
+          "p95": 743178,
+          "p99": 892563
+        },
+        "response_bytes": 134,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 1500,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 27000,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 6700,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 9473294,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 355256,
+          "api_stats_total_ns": 366140,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1600,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 749704
+        },
+        "warmup": 5
+      },
+      "subquery_avg_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 10594324,
+          "min": 7731060,
+          "p50": 8451071,
+          "p95": 9006664,
+          "p99": 10594324
+        },
+        "response_bytes": 70633,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 819200,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3531650,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 382393949,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 385164,
+          "api_stats_total_ns": 492027,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 78492942
+        },
+        "warmup": 5
+      },
+      "subquery_root_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1021725,
+          "min": 330509,
+          "p50": 501983,
+          "p95": 845049,
+          "p99": 1021725
+        },
+        "response_bytes": 681,
+        "result_cardinality": 30,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 27000,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 34050,
+          "api_read_result_points": 1500,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 10945634,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 352832,
+          "api_stats_total_ns": 431287,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1600,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 830875
+        },
+        "warmup": 5
+      },
+      "subquery_root_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 6293042,
+          "min": 4090205,
+          "p50": 4627449,
+          "p95": 5554038,
+          "p99": 6293042
+        },
+        "response_bytes": 334673,
+        "result_cardinality": 15360,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 16733650,
+          "api_read_result_points": 768000,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 195770328,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 466170,
+          "api_stats_total_ns": 560209,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81505740
+        },
+        "warmup": 5
+      },
+      "sum_by_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 983968,
+          "min": 306713,
+          "p50": 611641,
+          "p95": 846988,
+          "p99": 983968
+        },
+        "response_bytes": 116,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 50,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 5800,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 9337439,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 328334,
+          "api_stats_total_ns": 416143,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 730896
+        },
+        "warmup": 5
+      },
+      "sum_by_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 6279103,
+          "min": 3647680,
+          "p50": 4102386,
+          "p95": 4628934,
+          "p99": 6279103
+        },
+        "response_bytes": 313,
+        "result_cardinality": 8,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102400,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 15650,
+          "api_read_result_points": 400,
+          "api_read_result_series": 100,
+          "api_read_total_ns": 178338772,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 324966,
+          "api_stats_total_ns": 419306,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 80459846
+        },
+        "warmup": 5
+      },
+      "topk_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1066203,
+          "min": 639746,
+          "p50": 807051,
+          "p95": 968619,
+          "p99": 1066203
+        },
+        "response_bytes": 164,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 100,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 8200,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 14198242,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 342603,
+          "api_stats_total_ns": 476958,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 989283
+        },
+        "warmup": 5
+      },
+      "unary_minus_narrow": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1189486,
+          "min": 278656,
+          "p50": 539118,
+          "p95": 1059137,
+          "p99": 1189486
+        },
+        "response_bytes": 133,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_intermediate_points": 50,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 26200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 6650,
+          "api_read_result_points": 50,
+          "api_read_result_series": 50,
+          "api_read_total_ns": 10538237,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 330920,
+          "api_stats_total_ns": 407488,
+          "extension_raw_batch_query_candidate_chunks": 50,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 1600,
+          "extension_raw_batch_query_payload_bytes_read": 6550,
+          "extension_raw_batch_query_returned_points": 1550,
+          "extension_raw_batch_query_series_considered": 50,
+          "extension_raw_batch_query_total_ns": 740707
+        },
+        "warmup": 5
+      },
+      "unary_minus_wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 5259912,
+          "min": 3927191,
+          "p50": 4425625,
+          "p95": 5098080,
+          "p99": 5259912
+        },
+        "response_bytes": 69668,
+        "result_cardinality": 2048,
+        "stats_delta": {
+          "api_promql_intermediate_points": 102400,
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13415200,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 3483400,
+          "api_read_result_points": 102400,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 191055653,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 505939,
+          "api_stats_total_ns": 603275,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 819200,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 81274334
+        },
+        "warmup": 5
+      },
+      "wide": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 3491465,
+          "min": 2736144,
+          "p50": 3083485,
+          "p95": 3404901,
+          "p99": 3491465
+        },
+        "response_bytes": 53497,
+        "result_cardinality": 512,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_frame_bytes": 13005600,
+          "api_read_requests": 50,
+          "api_read_response_bytes": 2674850,
+          "api_read_result_points": 25600,
+          "api_read_result_series": 25600,
+          "api_read_total_ns": 126621346,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 366114,
+          "api_stats_total_ns": 383533,
+          "extension_raw_batch_query_candidate_chunks": 25600,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 819200,
+          "extension_raw_batch_query_payload_bytes_read": 2691550,
+          "extension_raw_batch_query_returned_points": 793600,
+          "extension_raw_batch_query_series_considered": 25600,
+          "extension_raw_batch_query_total_ns": 77572636
+        },
+        "warmup": 5
+      },
+      "work_limit_rejected": {
+        "iterations": 50,
+        "latency_ns": {
+          "max": 1199946,
+          "min": 290705,
+          "p50": 547267,
+          "p95": 935585,
+          "p99": 1199946
+        },
+        "response_bytes": 139,
+        "result_cardinality": 1,
+        "stats_delta": {
+          "api_promql_requests": 50,
+          "api_read_errors": 50,
+          "api_read_requests": 50,
+          "api_read_total_ns": 10887796,
+          "api_stats_count": 1,
+          "api_stats_sqlite_ns": 338865,
+          "api_stats_total_ns": 428957,
+          "extension_raw_batch_query_candidate_chunks": 1250,
+          "extension_raw_batch_query_count": 50,
+          "extension_raw_batch_query_decoded_points": 5001250,
+          "extension_raw_batch_query_series_considered": 1250,
+          "extension_raw_batch_query_total_ns": 163053
+        },
+        "warmup": 5
+      }
+    },
+    "rss_hwm_kib": 36900,
+    "storage": {
+      "buffer_memory_bytes": 0,
+      "bytes_on_disk": 64361,
+      "chunks": 603,
+      "database_file_bytes": 16384,
+      "database_shm_bytes": 32768,
+      "database_wal_bytes": 623536,
+      "physical_database_bytes": 672688,
+      "series": 603,
+      "sqlite_index_bytes": 98304
+    }
+  },
+  "schema_version": 1,
+  "workload": {
+    "iterations": 50,
+    "loopback_http": true,
+    "release_build": true,
+    "single_client": true,
+    "warmup": 5
+  }
+}
