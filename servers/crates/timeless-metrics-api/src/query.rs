@@ -406,6 +406,7 @@ enum PromRangeOp {
     StdVar,
     Rate,
     IRate,
+    Increase,
     Last,
 }
 
@@ -423,6 +424,7 @@ impl PromRangeOp {
             Self::StdVar => "stdvar_over_time",
             Self::Rate => "rate",
             Self::IRate => "irate",
+            Self::Increase => "increase",
             Self::Last => "last_over_time",
         }
     }
@@ -440,6 +442,7 @@ impl PromRangeOp {
             | Self::StdVar
             | Self::Rate
             | Self::IRate
+            | Self::Increase
             | Self::Last => None,
         }
     }
@@ -453,7 +456,12 @@ impl PromRangeOp {
             Self::Count => Some(PromAggregateOp::Count),
             Self::StdDev => Some(PromAggregateOp::StdDev),
             Self::StdVar => Some(PromAggregateOp::StdVar),
-            Self::Present | Self::Quantile | Self::Rate | Self::IRate | Self::Last => None,
+            Self::Present
+            | Self::Quantile
+            | Self::Rate
+            | Self::IRate
+            | Self::Increase
+            | Self::Last => None,
         }
     }
 
@@ -974,6 +982,7 @@ fn lower_promql_expr(
                     | "stdvar_over_time"
                     | "rate"
                     | "irate"
+                    | "increase"
                     | "last_over_time"
             ) =>
         {
@@ -988,6 +997,7 @@ fn lower_promql_expr(
                 "stdvar_over_time" => PromRangeOp::StdVar,
                 "rate" => PromRangeOp::Rate,
                 "irate" => PromRangeOp::IRate,
+                "increase" => PromRangeOp::Increase,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
@@ -4411,6 +4421,9 @@ fn prometheus_range_reduction(
     if matches!(op, PromRangeOp::IRate) {
         return prometheus_instant_delta(points, true, cancelled);
     }
+    if matches!(op, PromRangeOp::Increase) {
+        return prometheus_extrapolated_rate(points, range_start, range_end, true, false, cancelled);
+    }
     if matches!(op, PromRangeOp::Quantile) {
         let quantile = parameter
             .ok_or_else(|| "quantile_over_time is missing its scalar parameter".to_string())?;
@@ -5062,7 +5075,7 @@ fn execute_prometheus_range_raw(
                         let value = prometheus_quantile(quantile, &mut values);
                         check_cancelled(cancelled)?;
                         Some(value)
-                    } else if matches!(op, PromRangeOp::Rate) {
+                    } else if matches!(op, PromRangeOp::Rate | PromRangeOp::Increase) {
                         let mut values = Vec::with_capacity(hi - lo);
                         for index in lo..hi {
                             check_cancelled(cancelled)?;
@@ -5076,7 +5089,7 @@ fn execute_prometheus_range_raw(
                             lower,
                             selection_time,
                             true,
-                            true,
+                            matches!(op, PromRangeOp::Rate),
                             cancelled,
                         )?;
                         check_cancelled(cancelled)?;
@@ -6122,6 +6135,18 @@ mod tests {
         .unwrap()
         .unwrap()
         .is_nan());
+
+        let increase = prometheus_extrapolated_rate(
+            &[(10_000, 100.0), (30_000, 150.0), (50_000, 20.0)],
+            0,
+            60_000,
+            true,
+            false,
+            &cancelled,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(increase, 105.0);
     }
 
     #[test]

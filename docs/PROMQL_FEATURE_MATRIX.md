@@ -68,10 +68,11 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S16` | exact query grid and configurable lookback | shipped | yes | `GRID`, `RAW` | `API` | P0 | Request-scoped `lookback_delta`, the zero/default rule, exact millisecond open-left boundaries, non-aligned ends, and overflow-safe 11,000-point grids apply to every shipped expression. |
 | `PQL-S17` | Prometheus stale-marker semantics | partial | partial | `RAW` | `EXT` | P1 | See `QSF-004`; first decide whether ingest/storage preserves stale markers. The API consumes the resulting contract. |
 | `PQL-S18` | instant vector, range vector, scalar, and string types | shipped | yes | none | `API` | P0 | Exact instant/empty result typing is pinned across all four Prometheus values; range evaluation accepts scalar/vector roots and returns a matrix while string/range-vector roots fail. Prometheus envelopes have no honest SQL equivalent. |
-| `PQL-S19` | deterministic Prometheus error/result envelopes | shipped | yes | none | `API` | P0 | Required range parameters, parameter/type diagnostics, strict unsupported behavior, and GET/POST envelopes are pinned for every shipped node. Each future grammar row must extend this contract; documented stricter resource/input choices remain intentional. |
+| `PQL-S19` | deterministic Prometheus error/result envelopes | shipped | yes | none | `API` | P0 | Required range parameters, parameter/type diagnostics, strict unsupported behavior, and GET/POST data/error envelopes are pinned for every shipped node. Each future grammar row must extend this contract; optional warning/info annotations are tracked separately by `PQL-S23`, and documented stricter resource/input choices remain intentional. |
 | `PQL-S20` | 11,000 points/series, sample, row, response, and deadline limits | shipped | yes | `RAW`, `WINDOW` | `API` | P0 | Configurable hard owner limits cover pre-decode raw/window work, final points, bounded serialization, and deadlines; auth may only tighten them. |
 | `PQL-S21` | cancellation and SQLite reader reuse | shipped | n/a | all | `API` | P0 | Every new evaluator loop must check the same cancellation token. |
 | `PQL-S22` | native histogram sample type | deferred | no | none | `DEFER` | DEFER | See `QSF-003`; classic `_bucket` series remain ordinary floats. |
+| `PQL-S23` | Prometheus `warnings`/`infos` response annotations, including non-counter metric-name lint | missing | no | none | `API` | P1 | See `QSF-050`; preserve exact text, source position, deduplication, and GET/POST instant/range envelope placement without weakening result parity. |
 
 ## Operators and cross-series aggregation
 
@@ -122,7 +123,7 @@ correctness fallback.
 | `PQL-R11` | `stdvar_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-028-stddev_over_time-and-stdvar_over_time)); population Welford state, wide magnitudes, exact Prometheus float strings, IEEE values, boundaries, subqueries, errors, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R12` | `rate` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-029-rate)); float-counter resets, edge extrapolation, zero-point clamp, sparse/two-sample omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R13` | `irate` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-030-irate)); last-two-sample reset substitution, actual-interval normalization, zero-interval/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
-| `PQL-R14` | `increase` | missing | yes | `RAW`, `WINDOW` | `API` | P0 |
+| `PQL-R14` | `increase` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-031-increase)); reset correction, edge extrapolation, zero-point clamp, sparse/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R15` | `delta` | missing | yes | `RAW`, `WINDOW` | `API` | P0 |
 | `PQL-R16` | `idelta` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R17` | `deriv` | missing | yes | `RAW` | `API` | P0 |

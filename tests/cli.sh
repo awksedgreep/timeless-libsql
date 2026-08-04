@@ -3882,6 +3882,24 @@ assert irate_values == [
     ('{"case":"steady"}', 60, 10.0),
 ]
 
+increase_sql = rate_sql.replace(")/:window value", ") value")
+assert increase_sql != rate_sql
+increase_values = db.execute(
+    increase_sql,
+    {
+        'metric': 'rate_counter',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+    },
+).fetchall()
+assert increase_values == [
+    ('{"case":"reset"}', 60, 105.0),
+    ('{"case":"steady"}', 60, 600.0),
+]
+
 minimum = db.execute(
     "SELECT value FROM timeless_window("
     "'metrics','min_window',NULL,30,30,1,20,'min')"

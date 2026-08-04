@@ -180,11 +180,13 @@ explicitly; typed/nested metadata and missing/null/empty remain distinct.
 
 ### Session 11: stable PromQL P1 completion
 
-Rows: `PQL-S17`, `PQL-O08`, and `PQL-R21`.
+Rows: `PQL-S17`, `PQL-S23`, `PQL-O08`, and `PQL-R21`.
 
 Exit: every applicable P1 PromQL row has passed Prometheus. Stale markers
 ship only if ingestion/storage has an explicit preserved contract; otherwise
 `PQL-S17` is deferred with that prerequisite rather than approximated.
+Prometheus warning/info annotations must preserve exact text, source position,
+deduplication, and response-envelope placement.
 
 ### Session 12: LogsQL P1 filters and logic
 
