@@ -1661,3 +1661,33 @@ NaN, infinities, signed zero, range grids, nested transforms, invalid types,
 limits, shutdown, and cold reopen. SQLite's documented SQL-NULL domain result
 is an API/SQL representation boundary, not a storage defect; no new storage
 finding arose and no extension or storage contract changed.
+
+## Session 8 `PQL-F05` sign transform
+
+The checked-in
+[`2026-08-04_session8_pql_f05.json`](evidence/2026-08-04_session8_pql_f05.json)
+was captured from exact extension and server build
+`9ec6e6bbb670b952e8908c5a4c13a233b13c1d92`. Both measured shapes perform one
+bounded public packed-raw read and map each selected float to its unit sign in
+place, preserving NaN and negative zero.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `sgn(metric)` | 1 | 131 | 0.669 | 0.860 | 0.997 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `sgn(metric)` | 2,048 | 63,806 | 4.218 | 4.602 | 4.708 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The transform adds no scalar child, second read, or result copy. Its wide
+storage counters are identical to the other single-vector transforms; the
+smaller response contains only `-1`, `0`, or `1` sample strings. At 4.602 ms
+p95, ordinary Rust composition remains the correct PromQL boundary, while
+direct SQLite/libSQL users have the exact row-visible `CASE` recipe in
+`SQL-PROM-042`.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 37,384 KiB. No benchmark request required cancellation; shared composed-
+evaluator cancellation pins reader reuse. Pinned oracle and real-extension
+tests cover finite values, NaN, infinities, both signed zeros, range grids,
+nested transforms, invalid types, limits, shutdown, and cold reopen. The SQL
+row surface's NaN-to-NULL representation remains the documented API boundary;
+no new storage finding arose and no extension or storage contract changed.
