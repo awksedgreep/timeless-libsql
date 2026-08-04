@@ -213,6 +213,59 @@
       "evaluation_offset_ms": 30000,
       "drop_metric_name": true,
       "expected_values": [14]
+    },
+    {
+      "id": "PQL-O03-vector-scalar-filter-keeps-value-and-name",
+      "query": "oracle_temporal > 5",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-O03-vector-scalar-filter-drops-false",
+      "query": "oracle_temporal < 5",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-O03-vector-scalar-bool-true-drops-name",
+      "query": "oracle_temporal > bool 5",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-O03-vector-scalar-bool-false-drops-name",
+      "query": "oracle_temporal < bool 5",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-O03-scalar-vector-filter-keeps-vector-value-and-name",
+      "query": "5 < oracle_temporal",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-O03-range-filter-is-sparse",
+      "query": "oracle_temporal >= 6",
+      "evaluation_offset_ms": 0,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 30000, "step": "10s"},
+      "expected_offsets_ms": [20000, 30000],
+      "expected_values": [6, 7]
+    },
+    {
+      "id": "PQL-O03-vector-vector-filter-retains-lhs-name",
+      "query": "oracle_temporal == oracle_temporal",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-O03-vector-vector-bool-drops-name",
+      "query": "oracle_temporal == bool oracle_temporal",
+      "evaluation_offset_ms": 30000,
+      "drop_metric_name": true,
+      "expected_values": [1]
     }
   ],
   "operator_error_cases": [
@@ -226,6 +279,36 @@
     }
   ],
   "cases": [
+    {
+      "id": "PQL-O03-scalar-comparison-bool-true",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "1 < bool 2", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "1"]}
+      }
+    },
+    {
+      "id": "PQL-O03-scalar-comparison-bool-false",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "2 < bool 1", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "0"]}
+      }
+    },
+    {
+      "id": "PQL-O03-scalar-nan-not-equal",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "NaN != bool NaN", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "scalar", "result": [2, "1"]}
+      }
+    },
     {
       "id": "PQL-O02-scalar-arithmetic-precedence",
       "endpoint": "/api/v1/query",

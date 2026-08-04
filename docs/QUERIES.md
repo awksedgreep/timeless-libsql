@@ -267,6 +267,29 @@ join—are executable in
 The Rust layer remains responsible for AST precedence, cardinality errors,
 result types, labels, limits, cancellation, and Prometheus envelopes.
 
+## PromQL comparison filters and `bool`
+
+All six float comparisons work across scalar/scalar, either scalar/vector
+direction, and matched vectors:
+
+```promql
+queue_depth > 100
+0 <= temperature_celsius
+errors_total != requests_total
+latency_seconds > bool 0.5
+```
+
+Scalar/scalar comparisons require `bool` and return a scalar `0` or `1`.
+Without `bool`, a vector comparison is a filter: false samples disappear and
+true samples retain the vector's original value and metric name. With `bool`,
+every matched sample becomes `0` or `1` and `__name__` is removed. Vector
+matching, sparse timestamps, duplicate errors, cumulative work, and
+cancellation use the same contracts as arithmetic.
+
+Direct SQL users can express both forms with a public-grid `WHERE` predicate
+or a `CASE`/boolean cast; see executable
+[`SQL-PROM-011`](QUERY_SQL_EQUIVALENTS.md#sql-prom-011-comparison-filter-and-bool).
+
 ## Scalar aggregate without raw materialization
 
 ```sql

@@ -1969,6 +1969,172 @@ async fn session_four_promql_arithmetic_and_one_to_one_match_oracle_and_reopen()
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_promql_comparisons_filter_bool_bound_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four_comparisons.db");
+    let base = 1_700_420_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"comparison_lhs\",\"host\":\"a\",\"zone\":\"east\"}},\"values\":[1,3],\"timestamps\":[{},{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"comparison_lhs\",\"host\":\"b\",\"zone\":\"west\"}},\"values\":[4,2],\"timestamps\":[{},{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"comparison_rhs\",\"host\":\"a\",\"zone\":\"east\"}},\"values\":[2,3],\"timestamps\":[{},{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"comparison_rhs\",\"host\":\"b\",\"zone\":\"west\"}},\"values\":[3,5],\"timestamps\":[{},{}]}}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (query, expected) in [
+        ("1 < bool 2", "1"),
+        ("2 < bool 1", "0"),
+        ("NaN != bool NaN", "1"),
+        ("Inf >= bool Inf", "1"),
+    ] {
+        let scalar = prom_query(&app, query, base).await;
+        assert_eq!(scalar.0, StatusCode::OK, "{query}: {}", scalar.1);
+        assert_eq!(scalar.1["data"]["resultType"], "scalar");
+        assert_eq!(scalar.1["data"]["result"][1], expected, "{query}");
+    }
+
+    let scalar_without_bool = prom_query(&app, "1 < 2", base).await;
+    assert_eq!(scalar_without_bool.0, StatusCode::BAD_REQUEST);
+    assert_eq!(scalar_without_bool.1["errorType"], "bad_data");
+
+    let filtered = prom_query(&app, "comparison_lhs{host=\"a\"} == 3", base + 10).await;
+    assert_eq!(filtered.0, StatusCode::OK, "{}", filtered.1);
+    assert_eq!(
+        filtered.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "comparison_lhs", "host": "a", "zone": "east"},
+            "value": [base + 10, "3"]
+        }])
+    );
+
+    for operator in ["!=", ">", ">="] {
+        let query = format!("comparison_lhs{{host=\"a\"}} {operator} 2");
+        let result = prom_query(&app, &query, base + 10).await;
+        assert_eq!(result.0, StatusCode::OK, "{query}: {}", result.1);
+        assert_eq!(result.1["data"]["result"][0]["value"][1], "3");
+        assert_eq!(
+            result.1["data"]["result"][0]["metric"]["__name__"],
+            "comparison_lhs"
+        );
+    }
+    for operator in ["<", "<="] {
+        let query = format!("comparison_lhs{{host=\"a\"}} {operator} 2");
+        let result = prom_query(&app, &query, base + 10).await;
+        assert_eq!(result.0, StatusCode::OK, "{query}: {}", result.1);
+        assert_eq!(result.1["data"]["result"], serde_json::json!([]));
+    }
+
+    let bool_false = prom_query(&app, "comparison_lhs{host=\"a\"} < bool 3", base + 10).await;
+    assert_eq!(bool_false.0, StatusCode::OK, "{}", bool_false.1);
+    assert_eq!(
+        bool_false.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a", "zone": "east"},
+            "value": [base + 10, "0"]
+        }])
+    );
+
+    let scalar_left = prom_query(&app, "3 <= comparison_lhs{host=\"a\"}", base + 10).await;
+    assert_eq!(scalar_left.0, StatusCode::OK, "{}", scalar_left.1);
+    assert_eq!(scalar_left.1["data"]["result"][0]["value"][1], "3");
+    assert_eq!(
+        scalar_left.1["data"]["result"][0]["metric"]["__name__"],
+        "comparison_lhs"
+    );
+
+    let vector_filter = prom_query(&app, "comparison_lhs == comparison_rhs", base + 10).await;
+    assert_eq!(vector_filter.0, StatusCode::OK, "{}", vector_filter.1);
+    assert_eq!(
+        vector_filter.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "comparison_lhs", "host": "a", "zone": "east"},
+            "value": [base + 10, "3"]
+        }])
+    );
+
+    let vector_bool = prom_query(&app, "comparison_lhs > bool comparison_rhs", base + 10).await;
+    assert_eq!(vector_bool.0, StatusCode::OK, "{}", vector_bool.1);
+    assert_eq!(
+        vector_bool.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a", "zone": "east"}, "value": [base + 10, "0"]},
+            {"metric": {"host": "b", "zone": "west"}, "value": [base + 10, "0"]}
+        ])
+    );
+
+    let sparse = prom_query_range(&app, "comparison_lhs > 2", base, base + 10, 10).await;
+    assert_eq!(sparse.0, StatusCode::OK, "{}", sparse.1);
+    assert_eq!(
+        sparse.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "comparison_lhs", "host": "a", "zone": "east"}, "values": [[base + 10, "3"]]},
+            {"metric": {"__name__": "comparison_lhs", "host": "b", "zone": "west"}, "values": [[base, "4"]]}
+        ])
+    );
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 3,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "comparison_lhs{host=\"a\"} == comparison_rhs{host=\"a\"}",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 3 points"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = prom_query(&reopened_app, "comparison_lhs == comparison_rhs", base + 10).await;
+    assert_eq!(recovered.1, vector_filter.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

@@ -467,10 +467,16 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 endpoint = "/api/v1/query_range"
                 result_type = "matrix"
                 values = case["expected_values"]
-                timestamps = [
-                    start_ms + index * (end_ms - start_ms) // (len(values) - 1)
-                    for index in range(len(values))
-                ]
+                if "expected_offsets_ms" in case:
+                    timestamps = [
+                        sample_timestamp_ms + offset
+                        for offset in case["expected_offsets_ms"]
+                    ]
+                else:
+                    timestamps = [
+                        start_ms + index * (end_ms - start_ms) // (len(values) - 1)
+                        for index in range(len(values))
+                    ]
                 result = [{
                     "metric": {"job": "oracle"},
                     "values": [
@@ -478,6 +484,14 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                         for timestamp, value in zip(timestamps, values)
                     ],
                 }]
+            elif case.get("expected_empty"):
+                params = {
+                    "query": case["query"],
+                    "time": str(evaluation_ms / 1_000),
+                }
+                endpoint = "/api/v1/query"
+                result_type = "vector"
+                result = []
             else:
                 params = {
                     "query": case["query"],
@@ -489,7 +503,7 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                     "metric": {"job": "oracle"},
                     "value": [evaluation_ms / 1_000, str(case["expected_values"][0])],
                 }]
-            if not case.get("drop_metric_name"):
+            if result and not case.get("drop_metric_name"):
                 result[0]["metric"]["__name__"] = "oracle_temporal"
             url = base + endpoint + "?" + urllib.parse.urlencode(params)
             with urllib.request.urlopen(url, timeout=10) as response:

@@ -2119,6 +2119,14 @@ SELECT 'arithmetic', lhs.labels, lhs.ts,
        lhs.value % rhs.value,
        pow(lhs.value, rhs.value)
   FROM lhs JOIN rhs USING(labels, ts);
+-- SQL-PROM-011: comparison filter and bool over the public grid
+SELECT 'comparison_filter', labels, ts, value
+  FROM timeless_grid('ck','cpu','{"host":"a"}',0,60,60,60)
+ WHERE value > 5
+ ORDER BY labels, ts;
+SELECT 'comparison_bool', labels, ts, CAST(value > 5 AS REAL)
+  FROM timeless_grid('ck','cpu','{"host":"a"}',0,60,60,60)
+ ORDER BY labels, ts;
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2164,6 +2172,9 @@ $'unary_minus|{"host":"a"}|0|-1.0\nunary_minus|{"host":"a"}|60|-10.0'
 check_eq "SQL-PROM-004 executes every arithmetic operator with exact-label matching" \
   "$(grep '^arithmetic|' <<<"$got")" \
 'arithmetic|{"host":"a"}|60|10.0|6.0|16.0|4.0|0.0|64.0'
+check_eq "SQL-PROM-011 filters or maps comparisons over a public grid" \
+  "$(grep -E '^comparison_(filter|bool)\|' <<<"$got")" \
+$'comparison_filter|{"host":"a"}|60|10.0\ncomparison_bool|{"host":"a"}|0|0.0\ncomparison_bool|{"host":"a"}|60|1.0'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="

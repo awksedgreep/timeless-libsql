@@ -161,3 +161,29 @@ tests:
         exp_samples:
           - labels: '{host="a",zone="east"}'
             value: 100
+      - expr: 'query_contract_arithmetic_lhs > 11'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_arithmetic_lhs{host="b",zone="west"}'
+            value: 12
+          - labels: 'query_contract_arithmetic_lhs{host="c",zone="north"}'
+            value: 14
+      - expr: 'query_contract_arithmetic_lhs > bool 11'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",zone="east"}'
+            value: 0
+          - labels: '{host="b",zone="west"}'
+            value: 1
+          - labels: '{host="c",zone="north"}'
+            value: 1
+      - expr: 'query_contract_arithmetic_lhs == query_contract_arithmetic_rhs'
+        eval_time: 20s
+        exp_samples: []
+      - expr: 'query_contract_arithmetic_lhs > bool query_contract_arithmetic_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a",zone="east"}'
+            value: 1
+          - labels: '{host="b",zone="west"}'
+            value: 1

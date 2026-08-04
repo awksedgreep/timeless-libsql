@@ -409,17 +409,46 @@ enum PromBinaryOp {
     Divide,
     Modulo,
     Power,
+    Equal,
+    NotEqual,
+    Greater,
+    Less,
+    GreaterOrEqual,
+    LessOrEqual,
 }
 
 impl PromBinaryOp {
-    fn apply(self, lhs: f64, rhs: f64) -> f64 {
+    fn is_arithmetic(self) -> bool {
+        matches!(
+            self,
+            Self::Add | Self::Subtract | Self::Multiply | Self::Divide | Self::Modulo | Self::Power
+        )
+    }
+
+    fn evaluate(self, lhs: f64, rhs: f64, filter_value: f64, return_bool: bool) -> Option<f64> {
         match self {
-            Self::Add => lhs + rhs,
-            Self::Subtract => lhs - rhs,
-            Self::Multiply => lhs * rhs,
-            Self::Divide => lhs / rhs,
-            Self::Modulo => lhs % rhs,
-            Self::Power => lhs.powf(rhs),
+            Self::Add => Some(lhs + rhs),
+            Self::Subtract => Some(lhs - rhs),
+            Self::Multiply => Some(lhs * rhs),
+            Self::Divide => Some(lhs / rhs),
+            Self::Modulo => Some(lhs % rhs),
+            Self::Power => Some(lhs.powf(rhs)),
+            comparison => {
+                let matches = match comparison {
+                    Self::Equal => lhs == rhs,
+                    Self::NotEqual => lhs != rhs,
+                    Self::Greater => lhs > rhs,
+                    Self::Less => lhs < rhs,
+                    Self::GreaterOrEqual => lhs >= rhs,
+                    Self::LessOrEqual => lhs <= rhs,
+                    _ => unreachable!("arithmetic handled above"),
+                };
+                if return_bool {
+                    Some(f64::from(matches))
+                } else {
+                    matches.then_some(filter_value)
+                }
+            }
         }
     }
 }
@@ -429,6 +458,7 @@ pub(crate) struct PromBinaryPlan {
     op: PromBinaryOp,
     lhs: Box<PromPlan>,
     rhs: Box<PromPlan>,
+    return_bool: bool,
 }
 
 impl PromPlan {
@@ -755,13 +785,22 @@ fn lower_promql_binary(
         token::T_DIV => PromBinaryOp::Divide,
         token::T_MOD => PromBinaryOp::Modulo,
         token::T_POW => PromBinaryOp::Power,
+        token::T_EQLC => PromBinaryOp::Equal,
+        token::T_NEQ => PromBinaryOp::NotEqual,
+        token::T_GTR => PromBinaryOp::Greater,
+        token::T_LSS => PromBinaryOp::Less,
+        token::T_GTE => PromBinaryOp::GreaterOrEqual,
+        token::T_LTE => PromBinaryOp::LessOrEqual,
         _ => {
             return Err(format!("unsupported PromQL binary operator {}", binary.op));
         }
     };
+    let return_bool = binary
+        .modifier
+        .as_ref()
+        .is_some_and(|modifier| modifier.return_bool);
     if let Some(modifier) = &binary.modifier {
-        if modifier.return_bool
-            || modifier.matching.is_some()
+        if modifier.matching.is_some()
             || !matches!(modifier.card, VectorMatchCardinality::OneToOne)
             || modifier.fill_values.lhs.is_some()
             || modifier.fill_values.rhs.is_some()
@@ -776,13 +815,23 @@ fn lower_promql_binary(
             operand.value_type(),
             PromValueType::Scalar | PromValueType::Vector
         ) {
-            return Err("PromQL arithmetic requires scalar or instant-vector operands".into());
+            return Err(
+                "PromQL binary expressions require scalar or instant-vector operands".into(),
+            );
         }
+    }
+    if !op.is_arithmetic()
+        && lhs.value_type() == PromValueType::Scalar
+        && rhs.value_type() == PromValueType::Scalar
+        && !return_bool
+    {
+        return Err("comparisons between scalars must use BOOL modifier".into());
     }
     Ok(PromPlan::Binary(PromBinaryPlan {
         op,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
+        return_bool,
     }))
 }
 
@@ -2406,7 +2455,7 @@ fn execute_prometheus_binary(
     let frame_bytes = lhs.frame_bytes.saturating_add(rhs.frame_bytes);
     let lhs = decode_prometheus_intermediate(&lhs.body, lhs_type, instant, limits, cancelled)?;
     let rhs = decode_prometheus_intermediate(&rhs.body, rhs_type, instant, limits, cancelled)?;
-    let value = apply_prometheus_arithmetic(binary.op, lhs, rhs, cancelled)?;
+    let value = apply_prometheus_binary(binary.op, binary.return_bool, lhs, rhs, cancelled)?;
     encode_prometheus_intermediate(
         value,
         instant,
@@ -2417,8 +2466,9 @@ fn execute_prometheus_binary(
     )
 }
 
-fn apply_prometheus_arithmetic(
+fn apply_prometheus_binary(
     op: PromBinaryOp,
+    return_bool: bool,
     lhs: IntermediateValue,
     rhs: IntermediateValue,
     cancelled: &AtomicBool,
@@ -2433,26 +2483,48 @@ fn apply_prometheus_arithmetic(
                 if lhs.0 != rhs.0 {
                     return Err("PromQL scalar operands produced different evaluation grids".into());
                 }
-                lhs.1 = op.apply(lhs.1, rhs.1);
+                let Some(value) = op.evaluate(lhs.1, rhs.1, lhs.1, return_bool) else {
+                    return Err("scalar comparison requires the BOOL modifier".into());
+                };
+                lhs.1 = value;
             }
             Ok(IntermediateValue::Scalar(lhs))
         }
         (IntermediateValue::Vector(vector), IntermediateValue::Scalar(scalar)) => {
             Ok(IntermediateValue::Vector(apply_scalar_to_vector(
-                op, vector, scalar, false, cancelled,
+                op,
+                return_bool,
+                vector,
+                scalar,
+                false,
+                cancelled,
             )?))
         }
-        (IntermediateValue::Scalar(scalar), IntermediateValue::Vector(vector)) => Ok(
-            IntermediateValue::Vector(apply_scalar_to_vector(op, vector, scalar, true, cancelled)?),
-        ),
-        (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => Ok(
-            IntermediateValue::Vector(apply_one_to_one_vectors(op, lhs, rhs, cancelled)?),
-        ),
+        (IntermediateValue::Scalar(scalar), IntermediateValue::Vector(vector)) => {
+            Ok(IntermediateValue::Vector(apply_scalar_to_vector(
+                op,
+                return_bool,
+                vector,
+                scalar,
+                true,
+                cancelled,
+            )?))
+        }
+        (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => {
+            Ok(IntermediateValue::Vector(apply_one_to_one_vectors(
+                op,
+                return_bool,
+                lhs,
+                rhs,
+                cancelled,
+            )?))
+        }
     }
 }
 
 fn apply_scalar_to_vector(
     op: PromBinaryOp,
+    return_bool: bool,
     mut vector: Vec<IntermediateSeries>,
     scalar: Vec<(i64, f64)>,
     scalar_is_lhs: bool,
@@ -2461,7 +2533,9 @@ fn apply_scalar_to_vector(
     let scalar: BTreeMap<_, _> = scalar.into_iter().collect();
     for series in &mut vector {
         check_cancelled(cancelled)?;
-        series.labels.remove("__name__");
+        if op.is_arithmetic() || return_bool {
+            series.labels.remove("__name__");
+        }
         let mut output = Vec::with_capacity(series.points.len());
         for (timestamp, value) in series.points.drain(..) {
             check_cancelled(cancelled)?;
@@ -2469,11 +2543,13 @@ fn apply_scalar_to_vector(
                 continue;
             };
             let value = if scalar_is_lhs {
-                op.apply(*scalar, value)
+                op.evaluate(*scalar, value, value, return_bool)
             } else {
-                op.apply(value, *scalar)
+                op.evaluate(value, *scalar, value, return_bool)
             };
-            output.push((timestamp, value));
+            if let Some(value) = value {
+                output.push((timestamp, value));
+            }
         }
         series.points = output;
     }
@@ -2512,6 +2588,7 @@ fn duplicate_matching_error(key: &[(String, String)]) -> String {
 
 fn apply_one_to_one_vectors(
     op: PromBinaryOp,
+    return_bool: bool,
     lhs: Vec<IntermediateSeries>,
     rhs: Vec<IntermediateSeries>,
     cancelled: &AtomicBool,
@@ -2559,7 +2636,9 @@ fn apply_one_to_one_vectors(
             }
             let (lhs_index, lhs_value) = lhs_group[0];
             let rhs_value = rhs_group[0].1;
-            output_points[lhs_index].push((timestamp, op.apply(lhs_value, rhs_value)));
+            if let Some(value) = op.evaluate(lhs_value, rhs_value, lhs_value, return_bool) {
+                output_points[lhs_index].push((timestamp, value));
+            }
         }
     }
 
@@ -2570,7 +2649,9 @@ fn apply_one_to_one_vectors(
             if points.is_empty() {
                 None
             } else {
-                series.labels.remove("__name__");
+                if op.is_arithmetic() || return_bool {
+                    series.labels.remove("__name__");
+                }
                 series.points = points;
                 Some(series)
             }

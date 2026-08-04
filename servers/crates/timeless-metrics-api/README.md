@@ -32,7 +32,9 @@ compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
 Prometheus scalar/vector/range result types. Vector/vector arithmetic uses
 default one-to-one matching across every non-name label, filters unmatched
-samples, and rejects duplicate match signatures. Selectors and range selectors accept signed
+samples, and rejects duplicate match signatures. All six comparisons support
+Prometheus filter and `bool` behavior: filters retain original vector values
+and names, while `bool` emits `0`/`1` and removes names. Selectors and range selectors accept signed
 `offset` plus numeric/`start()`/`end()` `@` modifiers. Selector and shipped
 range-function expressions may be evaluated as bounded subqueries with
 `[range:resolution]`, including omitted/default resolution, nesting, and

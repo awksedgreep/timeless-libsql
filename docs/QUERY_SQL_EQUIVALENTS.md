@@ -52,6 +52,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-008`](#sql-prom-008-temporal-selector-modifiers) | `PQL-S07`, `PQL-S08` | current foundation | exact shifted/fixed lookup time; API owns parser and outer query context |
 | [`SQL-PROM-009`](#sql-prom-009-aligned-selector-subquery) | `PQL-S09` | current foundation | exact open-left global subquery grid for a stored selector; API owns arbitrary inner expressions and range consumption |
 | [`SQL-PROM-010`](#sql-prom-010-unary-minus) | `PQL-O01` | current foundation | exact numeric negation over a bounded public grid; API owns types, envelopes, metric-name policy, limits, and cancellation |
+| [`SQL-PROM-011`](#sql-prom-011-comparison-filter-and-bool) | `PQL-O03` | current foundation | exact SQLite predicate/CASE over public grids; API owns AST types, name policy, matching, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -346,6 +347,48 @@ composition, intermediate/result/response limits, cancellation, and the
 Prometheus envelope. Direct executable regression: `tests/cli.sh` section 33;
 HTTP/oracle/reopen regression:
 `session_four_promql_unary_minus_preserves_types_labels_limits_and_reopen`.
+
+### SQL-PROM-011: comparison filter and `bool`
+
+For a vector/scalar filter such as `metric > :threshold`, ordinary SQL returns
+the original sample value only when the predicate is true:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+WHERE value > CAST(:threshold AS REAL)
+ORDER BY labels, ts;
+```
+
+The `bool` form retains every selected grid sample and maps the predicate to a
+floating `0` or `1`:
+
+```sql
+SELECT labels, ts,
+       CAST(value > CAST(:threshold AS REAL) AS REAL) AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+Substitute `=`, `!=`, `>`, `<`, `>=`, or `<=` as required (`==` in PromQL is
+SQLite `=`). Timestamp units, inclusive grid bounds, open-left lookback,
+sparse missing samples, canonical labels, and deterministic ordering are the
+same as `SQL-PROM-004`. A vector/vector comparison uses the exact-label public
+grid join from that recipe and moves the predicate into `WHERE` or `CASE`.
+
+The Rust API additionally enforces scalar/scalar `bool`, performs
+per-timestamp PromQL vector matching/cardinality checks, preserves the
+vector's original value and metric name for a filter, removes the metric name
+for `bool`, renders IEEE results, bounds cumulative work, checks cancellation,
+and writes Prometheus envelopes. Direct regression: `tests/cli.sh` section 33;
+HTTP/oracle/reopen regression:
+`session_four_promql_comparisons_filter_bool_bound_and_reopen`.
 
 ### SQL-PROM-003: cross-series sum by label
 
