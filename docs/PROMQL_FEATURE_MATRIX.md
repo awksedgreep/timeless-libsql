@@ -81,10 +81,10 @@ they do not justify a PromQL-aware extension API.
 | ID | construct | Rust now | Elixir | foundation | target | priority |
 |---|---|---|---|---|---|---|
 | `PQL-O01` | unary minus ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-010-unary-minus)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O02` | arithmetic `+ - * / % ^` across scalar/vector pairs ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | in progress | yes | `SQL` | `API` | P0 |
+| `PQL-O02` | arithmetic `+ - * / % ^` across scalar/vector pairs ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O03` | comparisons `== != > < >= <=` and `bool` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O04` | set operators `and`, `or`, `unless` | missing | yes | `SQL` | `API` | P0 |
-| `PQL-O05` | one-to-one vector matching ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | in progress | yes | `SQL` | `API` | P0 |
+| `PQL-O05` | one-to-one vector matching ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O06` | `on(...)` and `ignoring(...)` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O07` | `group_left` and `group_right` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O08` | trigonometric binary `atan2` | missing | no | `SQL` | `API` | P1 |

@@ -491,3 +491,43 @@ executes ordinary SQLite unary arithmetic through the public grid. No
 extension opcode, private table, storage format, batching, compression,
 rollup, retention, transaction, or migration behavior changed; the measured
 host-only cost does not justify an extension primitive.
+
+## Session 4 `PQL-O02`/`PQL-O05` arithmetic and one-to-one result
+
+The checked-in
+[`2026-08-04_session4_pql_o02_o05.json`](evidence/2026-08-04_session4_pql_o02_o05.json)
+was captured from exact extension and server build
+`7c9e8b402aa55946d7917bcc2be675ba0740c2e5`. The narrow shape multiplies one
+exact-host vector by a scalar. The wide shape adds two independently evaluated
+512-series vectors over four timestamps using default one-to-one matching.
+
+| shape | final points | intermediate points/query | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `metric * 2` | 1 | 2 | 132 | 0.383 | 0.848 | 0.982 | 32 |
+| 512 series × four points, `metric + metric` | 2,048 | 4,096 | 67,986 | 8.895 | 9.696 | 10.054 | 32,768 |
+
+The narrow scalar child is generated without storage; the vector performs one
+packed read and its two child values are charged as intermediate work. The
+wide shape performs exactly two packed reads per selected series—one for each
+operand—then matches samples by every non-name label at each evaluation
+timestamp. Across 50 iterations, counters report exactly 51,200 candidate
+chunks, 1,638,400 decoded points, and 204,800 intermediate points. No operand
+is re-read per output timestamp.
+
+The run durably completed all 118,457 fixture points with zero failed or
+queued work. Live SQLite/WAL/SHM storage remained 672,688 bytes and
+whole-process RSS HWM was 35,164 KiB, below both preceding Session 4 and
+Session 3 measurements. The 8.895 ms wide p50 includes two storage decodes,
+two bounded child envelopes, per-step cardinality validation, arithmetic, and
+canonical output. Common-subexpression elimination for the synthetic
+`metric + metric` shape is not generalized without workload evidence.
+
+Prometheus 3.13.2 API and promtool fixtures pin precedence, all six operators,
+both scalar/vector directions, default name-excluding match signatures,
+unmatched filtering, duplicate-signature errors, metric-name removal, range
+grids, and IEEE division/modulo/power results. The real-extension regression
+adds exact ordering, cumulative work rejection, shutdown, and cold reopen.
+Section 33 executes all six SQLite operations using public grids and an
+exact-label join. No extension opcode, private table, storage format,
+batching, compression, rollup, retention, transaction, or migration behavior
+changed.
