@@ -1127,3 +1127,35 @@ cold reopen. The executable SQL recipe maps the existing public count window
 with an ordinary `CAST(value > 0 AS REAL)`. No extension primitive or storage,
 frame, batching, compression, index, rollup, retention, transaction, or
 migration behavior changed, and this row produced no new storage finding.
+
+## Session 6 `PQL-R09` range quantile
+
+The checked-in
+[`2026-08-04_session6_pql_r09.json`](evidence/2026-08-04_session6_pql_r09.json)
+was captured from exact extension and server build
+`a46c666b9795e2ec03e2afd7f9fa12b047b5ed5a`. Both shapes use the public
+packed raw frame because the extension's fixed nearest-rank `pXX` statistic is
+not PromQL's scalar-parameter linear interpolation.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | scalar intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `quantile_over_time(0.95, ...[5m])` | 1 | 148 | 0.363 | 0.608 | 0.693 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `quantile_over_time(0.95, ...[5m])` | 2,048 | 79,073 | 3.428 | 3.819 | 4.065 | 4 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 bounded raw inputs, then
+sorts each series/window in Rust to produce 2,048 results. The only additional
+intermediate materialization is the scalar parameter on the four-point outer
+grid. Sorting is bounded by the existing cumulative work limit and checked for
+cancellation before collection and after interpolation.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 35,812 KiB. Pinned oracle and real-extension regressions cover scalar
+expressions, exact open-left boundaries, subqueries, empty windows, raw-NaN
+rank, infinities, stable signed-zero order, NaN/out-of-range parameters, exact
+arity/type errors, limits, cancellation, shutdown, and cold reopen. The
+finite-value SQL recipe executes through public raw rows. `QSF-045` records the
+corrected shared signed-zero comparator and `QSF-046` records why the native
+nearest-rank kernel is not used. No extension primitive or storage, frame,
+batching, compression, index, rollup, retention, transaction, or migration
+behavior changed.
