@@ -51,3 +51,20 @@ tests:
             value: 55
           - labels: '{host="b",job="api"}'
             value: 5.5
+      - expr: '{__name__=~"query_contract_(memory|queue)",job="api"}'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_memory{host="a",job="api"}'
+            value: 60
+          - labels: 'query_contract_queue{host="b",job="api"}'
+            value: 6
+      - expr: '{__name__!="query_contract_queue",job="api"}'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_memory{host="a",job="api"}'
+            value: 60
+      - expr: '{__name__=~"query_contract_.*",__name__!~"query_contract_queue",job="api"}'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_memory{host="a",job="api"}'
+            value: 60

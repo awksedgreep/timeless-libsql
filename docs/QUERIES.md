@@ -125,7 +125,7 @@ payloads. New blocks carry a collision-free service/operation pair term; if a
 selected legacy block lacks the generation marker, operation discovery falls
 back to exact block-at-a-time decode. Upgrades therefore remain complete.
 
-## PromQL nameless selectors
+## PromQL nameless and multi-name selectors
 
 The Rust metrics API accepts Prometheus selectors that identify series only
 by labels. For example, this instant query selects every metric name whose
@@ -148,6 +148,21 @@ Direct SQL users perform the same two public steps: enumerate candidate
 [`SQL-PROM-001`](QUERY_SQL_EQUIVALENTS.md#sql-prom-001-instant-selector).
 There is intentionally no PromQL parser or special nameless-selector opcode in
 the extension.
+
+`__name__` uses the same anchored matcher rules as labels. Regex and negative
+forms remain API planning rather than extension syntax:
+
+```promql
+{__name__=~"http_.+",job="api"}
+{__name__!="http_debug",job="api"}
+{__name__=~"http_.+",__name__!~"http_internal_.+",job="api"}
+```
+
+Repeated `__name__` matchers are ANDed. A name matcher that can match the empty
+string does not by itself make a nameless selector legal, so
+`{__name__!="missing"}` fails instead of silently selecting nearly everything.
+Catalog rows are tested against every name matcher before any metric payload
+is requested.
 
 ## Scalar aggregate without raw materialization
 

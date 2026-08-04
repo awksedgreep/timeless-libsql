@@ -164,6 +164,10 @@ impl Matcher {
 
     fn matches(&self, labels: &BTreeMap<String, String>) -> bool {
         let actual = labels.get(&self.key).map(String::as_str).unwrap_or("");
+        self.matches_value(actual)
+    }
+
+    fn matches_value(&self, actual: &str) -> bool {
         match self.op {
             MatcherOp::Eq => actual == self.value,
             MatcherOp::NotEq => actual != self.value,
@@ -262,6 +266,7 @@ pub(crate) struct Selector {
 enum MetricSelection {
     Exact(String),
     Regex(Regex),
+    Matchers(Vec<Matcher>),
     All,
 }
 
@@ -528,31 +533,35 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
         if !selector.matchers.or_matchers.is_empty() {
             return Err("PromQL OR matcher groups are not shipped yet".into());
         }
-        let mut metric = selector.name;
+        let metric = selector.name;
+        let mut name_matchers = Vec::new();
         let mut matchers = Vec::with_capacity(selector.matchers.matchers.len());
         for matcher in selector.matchers.matchers {
-            if matcher.name == "__name__" {
-                if metric.is_some() {
-                    return Err("metric name specified twice".into());
-                }
-                if !matches!(matcher.op, promql::MatchOp::Equal) {
-                    return Err("non-exact __name__ matchers are not shipped yet".into());
-                }
-                metric = Some(matcher.value);
-                continue;
-            }
             let op = match matcher.op {
                 promql::MatchOp::Equal => MatcherOp::Eq,
                 promql::MatchOp::NotEqual => MatcherOp::NotEq,
                 promql::MatchOp::Re(_) => MatcherOp::Regex,
                 promql::MatchOp::NotRe(_) => MatcherOp::NotRegex,
             };
+            if matcher.name == "__name__" {
+                if metric.is_some() {
+                    return Err("metric name specified twice".into());
+                }
+                name_matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
+                continue;
+            }
             matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
         }
         Ok(Selector {
-            metric: metric
-                .map(MetricSelection::Exact)
-                .unwrap_or(MetricSelection::All),
+            metric: match (metric, name_matchers.as_slice()) {
+                (Some(metric), []) => MetricSelection::Exact(metric),
+                (None, []) => MetricSelection::All,
+                (None, [matcher]) if matcher.op == MatcherOp::Eq => {
+                    MetricSelection::Exact(matcher.value.clone())
+                }
+                (None, _) => MetricSelection::Matchers(name_matchers),
+                (Some(_), _) => return Err("metric name specified twice".into()),
+            },
             filter: FilterPlan::new(matchers),
         })
     };
@@ -1268,6 +1277,9 @@ fn prometheus_catalogs(
             .map_err(|error| format!("read PromQL catalog metric: {error}"))?;
         let selected_metric = match &selector.metric {
             MetricSelection::Regex(regex) => regex.is_match(&metric),
+            MetricSelection::Matchers(matchers) => matchers
+                .iter()
+                .all(|matcher| matcher.matches_value(&metric)),
             MetricSelection::All => true,
             MetricSelection::Exact(_) => unreachable!("handled before complete scan"),
         };
@@ -2757,6 +2769,9 @@ fn selected_series(
         for metric in metrics {
             let selected = match &selector.metric {
                 MetricSelection::Regex(regex) => regex.is_match(metric),
+                MetricSelection::Matchers(matchers) => {
+                    matchers.iter().all(|matcher| matcher.matches_value(metric))
+                }
                 MetricSelection::All => true,
                 MetricSelection::Exact(_) => unreachable!("handled above"),
             };
@@ -3129,6 +3144,33 @@ mod tests {
         assert_eq!(lookback, 300_000);
 
         let error = lower_promql(r#"{job=~".*"}"#, 300_000).unwrap_err();
+        assert!(error.contains("at least one non-empty matcher"), "{error}");
+    }
+
+    #[test]
+    fn promql_metric_name_matchers_are_anchored_and_anded() {
+        let PromPlan::Selector { selector, .. } = lower_promql(
+            r#"{__name__=~"http_.+",__name__!~"http_internal_.+",job="api"}"#,
+            300_000,
+        )
+        .unwrap() else {
+            panic!("name-matcher selector lowered to the wrong plan")
+        };
+        let MetricSelection::Matchers(matchers) = selector.metric else {
+            panic!("non-exact name matchers did not retain AND composition")
+        };
+        assert_eq!(matchers.len(), 2);
+        assert!(matchers
+            .iter()
+            .all(|matcher| matcher.matches_value("http_requests")));
+        assert!(!matchers
+            .iter()
+            .all(|matcher| matcher.matches_value("http_internal_debug")));
+        assert!(!matchers
+            .iter()
+            .all(|matcher| matcher.matches_value("prefix_http_requests")));
+
+        let error = lower_promql(r#"{__name__!="missing"}"#, 300_000).unwrap_err();
         assert!(error.contains("at least one non-empty matcher"), "{error}");
     }
 

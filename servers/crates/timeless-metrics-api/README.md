@@ -26,7 +26,8 @@ retention commands.
 
 The current PromQL slice supports scalar literals (including `NaN` and
 infinities), string literals, exact-name and nameless instant vector
-selectors, root range selectors on instant queries, and
+selectors, anchored regex/negative/duplicate `__name__` matchers, root range
+selectors on instant queries, and
 `avg_over_time(selector[window])`. It
 deliberately rejects every other
 function, operator, aggregation, subquery, offset, or modifier with a
@@ -142,7 +143,8 @@ byte limit in selected metric/label metadata. A deadline returns HTTP `504` with
 allowances but cannot raise these owner limits.
 
 The query layer catalog-prunes nameless selectors through `timeless_series`,
-then lowers each selected metric name to a bounded `timeless_raw_frame` call
+applies every regex/negative name matcher before payload access, then lowers
+each selected metric name to a bounded `timeless_raw_frame` call
 and performs a linear last-sample sweep over the exact
 five-minute `(T-lookback,T]` window. Whole-second `avg_over_time` lowers to
 `timeless_window_batches`; its raw fallback preserves `(T-window,T]`, grid

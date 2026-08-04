@@ -120,7 +120,9 @@ where possible, and execute this statement once per selected name. That
 catalog/read loop is the honest public SQL composition: SQLite cannot bind a
 table-valued function's hidden metric input from a correlated row on every
 supported extension host. The Rust API keeps the loop bounded and does not
-read unrelated metric payloads.
+read unrelated metric payloads. Regex and negative `__name__` matchers are
+applied to the catalog's `name` column before executing the per-name statement;
+duplicate name predicates use ordinary SQL `AND` composition.
 
 ### SQL-PROM-002: `avg_over_time`
 

@@ -443,6 +443,26 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        metric_name_regex_narrow = measure(
+            "metrics-name-regex-narrow",
+            lambda: promql('{__name__=~"query_selector_metric_000[0-3]"}'),
+            query_json_cardinality,
+            4,
+            stat,
+            iterations,
+            warmup,
+        )
+        metric_name_negative_wide = measure(
+            "metrics-name-negative-wide",
+            lambda: promql(
+                '{__name__!="query_selector_metric_0000",selector_group="wide"}'
+            ),
+            query_json_cardinality,
+            selector_names - 1,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -690,6 +710,8 @@ def metrics_evidence(
                 "wide": wide,
                 "nameless_narrow": nameless_narrow,
                 "nameless_wide": nameless_wide,
+                "metric_name_regex_narrow": metric_name_regex_narrow,
+                "metric_name_negative_wide": metric_name_negative_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

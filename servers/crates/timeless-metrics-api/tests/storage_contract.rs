@@ -1057,6 +1057,122 @@ async fn session_three_promql_nameless_selectors_expand_before_reads_and_reopen(
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_three_promql_metric_name_matchers_prune_before_reads_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_three_name_matchers.db");
+    let base = 1_700_200_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        2,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"name_alpha\",\"job\":\"api\"}},\"values\":[1.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"name_beta\",\"job\":\"api\"}},\"values\":[2.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"name_gamma\",\"job\":\"db\"}},\"values\":[3.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"other_delta\",\"job\":\"api\"}},\"values\":[4.0],\"timestamps\":[{}]}}"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let regex = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7B__name__%3D~%22name_.%2A%22%2Cjob%3D%22api%22%7D&time={base}"
+        ),
+    )
+    .await;
+    assert_eq!(regex.0, StatusCode::OK);
+    assert_eq!(
+        regex.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "name_alpha", "job": "api"}, "value": [base, "1"]},
+            {"metric": {"__name__": "name_beta", "job": "api"}, "value": [base, "2"]}
+        ])
+    );
+
+    let negative = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7B__name__%21%3D%22name_beta%22%2Cjob%3D%22api%22%7D&time={base}"
+        ),
+    )
+    .await;
+    assert_eq!(negative.0, StatusCode::OK);
+    assert_eq!(
+        negative.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "name_alpha", "job": "api"}, "value": [base, "1"]},
+            {"metric": {"__name__": "other_delta", "job": "api"}, "value": [base, "4"]}
+        ])
+    );
+
+    let duplicate = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7B__name__%3D~%22name_.%2A%22%2C__name__%21~%22name_beta%22%2Cjob%3D%22api%22%7D&time={base}"
+        ),
+    )
+    .await;
+    assert_eq!(duplicate.0, StatusCode::OK);
+    assert_eq!(
+        duplicate.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "name_alpha", "job": "api"}, "value": [base, "1"]}
+        ])
+    );
+
+    let all_names = get_json(
+        &app,
+        &format!("/prometheus/api/v1/query?query=%7B__name__%21%3D%22%22%7D&time={base}"),
+    )
+    .await;
+    assert_eq!(all_names.0, StatusCode::OK);
+    assert_eq!(all_names.1["data"]["result"].as_array().unwrap().len(), 4);
+
+    let matches_empty = get_json(
+        &app,
+        &format!("/prometheus/api/v1/query?query=%7B__name__%21%3D%22missing%22%7D&time={base}"),
+    )
+    .await;
+    assert_eq!(matches_empty.0, StatusCode::BAD_REQUEST);
+    assert!(matches_empty.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("at least one non-empty matcher"));
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = get_json(
+        &reopened_app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7B__name__%3D~%22name_.%2A%22%2Cjob%3D%22api%22%7D&time={base}"
+        ),
+    )
+    .await;
+    assert_eq!(recovered.1, regex.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
