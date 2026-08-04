@@ -218,6 +218,25 @@ def error_json_cardinality(body: bytes) -> int:
     return 1
 
 
+def execution_error_json_cardinality(body: bytes) -> int:
+    response = json.loads(body)
+    if set(response) != {"status", "errorType", "error"}:
+        raise RuntimeError(f"invalid execution error envelope: {response}")
+    if response["status"] != "error" or response["errorType"] != "execution":
+        raise RuntimeError(f"unexpected execution error envelope: {response}")
+    return 1
+
+
+def matrix_point_cardinality(body: bytes) -> int:
+    response = json.loads(body)
+    if response.get("status") != "success":
+        raise RuntimeError(f"query failed: {response}")
+    data = response.get("data", {})
+    if data.get("resultType") != "matrix":
+        raise RuntimeError(f"expected matrix result: {response}")
+    return sum(len(series.get("values", [])) for series in data.get("result", []))
+
+
 def ndjson_cardinality(body: bytes) -> int:
     return sum(1 for line in body.splitlines() if line)
 
@@ -312,6 +331,22 @@ def metrics_evidence(
                     raise RuntimeError(f"expected 400 for {path}, got {error.code}: {response[:500]!r}")
                 return response
             raise RuntimeError(f"expected bad_data for {path}")
+
+        def expected_execution(path: str, message: str) -> bytes:
+            request = urllib.request.Request(server.base + path)
+            try:
+                urllib.request.urlopen(request, timeout=30)
+            except urllib.error.HTTPError as error:
+                response = error.read()
+                if error.code != 422:
+                    raise RuntimeError(
+                        f"expected 422 for {path}, got {error.code}: {response[:500]!r}"
+                    )
+                decoded = json.loads(response)
+                if decoded.get("errorType") != "execution" or message not in decoded.get("error", ""):
+                    raise RuntimeError(f"unexpected execution error for {path}: {decoded}")
+                return response
+            raise RuntimeError(f"expected execution error for {path}")
 
         def promql_range(expression: str, start: int, end: int, step: int) -> bytes:
             query = urllib.parse.urlencode(
@@ -466,6 +501,104 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        near_limit_start = at - 194
+        near_result_limit = measure(
+            "metrics-result-limit-near",
+            lambda: promql_range("query_contract_cpu", near_limit_start, at, 1),
+            matrix_point_cardinality,
+            series * 195,
+            stat,
+            iterations,
+            warmup,
+        )
+        over_result_query = urllib.parse.urlencode(
+            {
+                "query": "query_contract_cpu",
+                "start": at - 195,
+                "end": at,
+                "step": 1,
+            }
+        )
+        result_limit_rejected = measure(
+            "metrics-result-limit-rejected",
+            lambda: expected_execution(
+                f"/api/v1/query_range?{over_result_query}",
+                "result-point limit of 100000",
+            ),
+            execution_error_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+
+        limit_series = 25
+        limit_points = 4_001
+        limit_timestamps = [
+            (base_ts + point) * 1_000 for point in range(limit_points)
+        ]
+        limit_lines = []
+        for index in range(limit_series):
+            limit_lines.append(
+                json.dumps(
+                    {
+                        "metric": {
+                            "__name__": "query_limit_work",
+                            "host": f"limit-{index:02d}",
+                        },
+                        "values": [float(index + point) for point in range(limit_points)],
+                        "timestamps": limit_timestamps,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        limit_payload = ("\n".join(limit_lines) + "\n").encode()
+        limit_started = time.perf_counter_ns()
+        status, _, _ = http(
+            server.base, "/api/v1/import", limit_payload, "application/json"
+        )
+        limit_admission_ns = time.perf_counter_ns() - limit_started
+        if status != 204:
+            raise RuntimeError(f"limit fixture import returned {status}")
+        limit_started = time.perf_counter_ns()
+        status, limit_flush_body, _ = http(
+            server.base, "/api/v1/flush", b"", "application/json"
+        )
+        limit_durable_ns = time.perf_counter_ns() - limit_started
+        if status != 200:
+            raise RuntimeError(
+                f"limit fixture flush returned {status}: {limit_flush_body!r}"
+            )
+        after_limit_flush = stat()
+        limit_logical_points = limit_series * limit_points
+        if after_limit_flush["completed_points"] != expected_points + limit_logical_points:
+            raise RuntimeError(
+                f"limit fixture durable watermark mismatch: {after_limit_flush}"
+            )
+        work_query = urllib.parse.urlencode(
+            {
+                "query": "query_limit_work[4001s]",
+                "time": base_ts + limit_points - 1,
+            }
+        )
+        work_limit_rejected = measure(
+            "metrics-work-limit-rejected",
+            lambda: expected_execution(
+                f"/api/v1/query?{work_query}",
+                "work point limit 100000 exceeded",
+            ),
+            execution_error_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        if work_limit_rejected["stats_delta"].get(
+            "raw_batch_query_payload_bytes_read", 0
+        ) != 0:
+            raise RuntimeError(
+                "work-limit rejection read persisted payload bytes before failing"
+            )
         final_stats = stat()
         return {
             "build": identity,
@@ -477,6 +610,17 @@ def metrics_evidence(
                 "completed_points": after_flush["completed_points"],
                 "failed_points": after_flush["failed_points"],
                 "queued_points": after_flush["queued_points"],
+            },
+            "limit_fixture_ingestion": {
+                "series": limit_series,
+                "points_per_series": limit_points,
+                "logical_points": limit_logical_points,
+                "wire_bytes": len(limit_payload),
+                "admission_ns": limit_admission_ns,
+                "durability_barrier_ns": limit_durable_ns,
+                "completed_points_after": after_limit_flush["completed_points"],
+                "failed_points_after": after_limit_flush["failed_points"],
+                "queued_points_after": after_limit_flush["queued_points"],
             },
             "queries": {
                 "narrow": narrow,
@@ -493,6 +637,9 @@ def metrics_evidence(
                 "grid_lookback_wide": grid_lookback_wide,
                 "error_narrow": error_narrow,
                 "error_64k": error_64k,
+                "near_result_limit": near_result_limit,
+                "result_limit_rejected": result_limit_rejected,
+                "work_limit_rejected": work_limit_rejected,
             },
             "storage": {
                 key: final_stats[key]
@@ -509,6 +656,14 @@ def metrics_evidence(
                 )
             },
             "rss_hwm_kib": hwm_kib(server.process.pid),
+            "limits": {
+                "points_per_series": 11_000,
+                "result_points": 100_000,
+                "work_points": 100_000,
+                "response_bytes": 16 * 1024 * 1024,
+                "deadline_ms": 30_000,
+                "contract_test": "session_two_promql_limits_bound_grid_work_results_response_and_deadline",
+            },
             "cancellation": {"cancelled_requests": final_stats["api_read_cancelled"], "contract_test": "session_four_cancels_dropped_promql_requests_and_reuses_the_reader"},
         }
     finally:
