@@ -1014,6 +1014,85 @@ async fn session_two_promql_duration_literals_preserve_milliseconds() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_promql_string_literals_match_prometheus() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two_promql_strings.db");
+    let base = 1_700_000_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+
+    let escaped = get_json(
+        &app,
+        &format!("/api/v1/query?query=%22hello%5Cn%5C%22world%5C%22%22&time={base}.0005"),
+    )
+    .await;
+    assert_eq!(escaped.0, StatusCode::OK, "{}", escaped.1);
+    assert_eq!(escaped.1["data"]["resultType"], "string");
+    assert_eq!(
+        escaped.1["data"]["result"],
+        serde_json::json!([base as f64 + 0.001, "hello\n\"world\""])
+    );
+
+    let raw = get_json(
+        &app,
+        &format!("/api/v1/query?query=%60hello%5Cnworld%60&time={base}"),
+    )
+    .await;
+    assert_eq!(raw.0, StatusCode::OK, "{}", raw.1);
+    assert_eq!(
+        raw.1["data"]["result"],
+        serde_json::json!([base, "hello\\nworld"])
+    );
+
+    let range = get_json(
+        &app,
+        "/api/v1/query_range?query=%22hello%22&start=0&end=1&step=500ms",
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::BAD_REQUEST, "{}", range.1);
+    assert_eq!(
+        range.1["error"],
+        "invalid expression type \"string\" for range query, must be Scalar or instant Vector"
+    );
+
+    let invalid = get_json(
+        &app,
+        &format!("/api/v1/query?query=%22bad%5Cq%22&time={base}"),
+    )
+    .await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
+    assert_eq!(invalid.1["errorType"], "bad_data");
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let response = get_json(
+        &reopened_app,
+        &format!("/api/v1/query?query=%22reopened%22&time={base}"),
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+    assert_eq!(
+        response.1["data"]["result"],
+        serde_json::json!([base, "reopened"])
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

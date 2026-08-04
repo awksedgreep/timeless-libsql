@@ -199,6 +199,16 @@ def scalar_json_cardinality(body: bytes) -> int:
     return 1
 
 
+def string_json_cardinality(body: bytes) -> int:
+    response = json.loads(body)
+    if response.get("status") != "success" or response.get("data", {}).get("resultType") != "string":
+        raise RuntimeError(f"string query failed: {response}")
+    result = response["data"]["result"]
+    if not isinstance(result, list) or len(result) != 2 or not isinstance(result[1], str):
+        raise RuntimeError(f"invalid string result: {response}")
+    return 1
+
+
 def ndjson_cardinality(body: bytes) -> int:
     return sum(1 for line in body.splitlines() if line)
 
@@ -267,6 +277,15 @@ def metrics_evidence(
         def promql(expression: str) -> bytes:
             query = urllib.parse.urlencode({"query": expression, "time": at})
             return http(server.base, f"/api/v1/query?{query}")[1]
+
+        def promql_post(expression: str) -> bytes:
+            body = urllib.parse.urlencode({"query": expression, "time": at}).encode()
+            return http(
+                server.base,
+                "/api/v1/query",
+                body,
+                "application/x-www-form-urlencoded",
+            )[1]
 
         def promql_range(expression: str, start: int, end: int, step: int) -> bytes:
             query = urllib.parse.urlencode(
@@ -347,6 +366,25 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        string_instant = measure(
+            "metrics-string-instant",
+            lambda: promql(r'"contract\nvalue"'),
+            string_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        large_string = '"' + ("x" * 65_536) + '"'
+        string_64k = measure(
+            "metrics-string-64k",
+            lambda: promql_post(large_string),
+            string_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
         final_stats = stat()
         return {
             "build": identity,
@@ -368,6 +406,8 @@ def metrics_evidence(
                 "duration_range_vector_wide": duration_wide,
                 "scalar_instant": scalar_instant,
                 "scalar_range_11000": scalar_range_limit,
+                "string_instant": string_instant,
+                "string_64k": string_64k,
             },
             "storage": {
                 key: final_stats[key]

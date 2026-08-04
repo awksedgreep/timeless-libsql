@@ -293,6 +293,7 @@ pub(crate) enum ReadRequest {
 #[derive(Clone, Debug)]
 pub(crate) enum PromPlan {
     Scalar(f64),
+    String(String),
     Selector {
         metric: String,
         filter: FilterPlan,
@@ -433,11 +434,20 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
         );
     }
     let plan = lower_promql(query)?;
-    if matches!(plan, PromPlan::RangeSelector { .. }) {
-        return Err(
-            "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
-                .into(),
-        );
+    match plan {
+        PromPlan::RangeSelector { .. } => {
+            return Err(
+                "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
+                    .into(),
+            );
+        }
+        PromPlan::String(_) => {
+            return Err(
+                "invalid expression type \"string\" for range query, must be Scalar or instant Vector"
+                    .into(),
+            );
+        }
+        _ => {}
     }
     Ok(ReadRequest::Prometheus {
         plan,
@@ -483,6 +493,7 @@ fn lower_promql(input: &str) -> Result<PromPlan, String> {
     };
     match parsed {
         promql::Expr::NumberLiteral(number) => Ok(PromPlan::Scalar(number.val)),
+        promql::Expr::StringLiteral(string) => Ok(PromPlan::String(string.val)),
         promql::Expr::VectorSelector(selector) => {
             let (metric, filter) = lower_selector(selector)?;
             Ok(PromPlan::Selector {
@@ -1600,6 +1611,7 @@ fn execute_prometheus(
         PromPlan::Scalar(value) => {
             execute_prometheus_scalar(*value, start, stop, step, instant, cancelled)
         }
+        PromPlan::String(value) => execute_prometheus_string(value, start, instant),
         PromPlan::Selector {
             metric,
             filter,
@@ -1644,6 +1656,32 @@ fn execute_prometheus(
             conn, features, metric, filter, stop, *window, cancelled,
         ),
     }
+}
+
+fn execute_prometheus_string(
+    value: &str,
+    timestamp: i64,
+    instant: bool,
+) -> Result<ReadOutput, String> {
+    if !instant {
+        return Err(
+            "invalid expression type \"string\" for range query, must be Scalar or instant Vector"
+                .into(),
+        );
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(br#"{"status":"success","data":{"resultType":"string","result":["#);
+    write_prometheus_timestamp(&mut body, timestamp);
+    body.push(b',');
+    write_json(&mut body, value)?;
+    body.extend_from_slice(b"]}}");
+    Ok(ReadOutput {
+        body,
+        frame_bytes: 0,
+        series: 0,
+        points: 1,
+        rows: 1,
+    })
 }
 
 fn execute_prometheus_scalar(

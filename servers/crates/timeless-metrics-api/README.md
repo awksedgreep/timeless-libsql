@@ -25,7 +25,7 @@ retention commands.
 - Prometheus aliases for instant/range queries and label/series discovery
 
 The current PromQL slice supports scalar literals (including `NaN` and
-infinities), instant vector selectors, root range selectors on instant
+infinities), string literals, instant vector selectors, root range selectors on instant
 queries, and `avg_over_time(selector[window])`. It
 deliberately rejects every other
 function, operator, aggregation, subquery, offset, or modifier with a
@@ -87,6 +87,12 @@ query steps, including compound forms and millisecond components. PromQL's
 request/evaluation clock is millisecond-precise: numeric and RFC3339 request
 times retain milliseconds and response timestamps use exact fractional
 seconds.
+
+String literals use the PromQL parser's double-quoted escape rules and raw
+backtick form. Instant queries return Prometheus's `string` result type with
+the evaluation timestamp; range queries reject strings because upstream range
+evaluation permits only scalar and instant-vector roots. Strings remain
+API-owned values and do not read or mutate extension storage.
 
 Metric storage remains intentionally second-native. Stored samples therefore
 remain aligned to whole seconds even when a subsecond evaluation grid or range

@@ -62,7 +62,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S10` | step-relative ranges such as `[5i]` | missing | yes | `RAW`, `GRID` | `API` | P2 | MetricsQL-compatible extension used by the existing oracle. |
 | `PQL-S11` | scalar literals and IEEE `NaN`/`Inf` behavior | shipped | yes | none | `API` | P0 | Decimal/exponent, hexadecimal, octal, underscored, signed, `NaN`, and `Inf` roots use Prometheus value strings; SQLite cannot portably preserve NaN as an ordinary REAL. |
 | `PQL-S12` | duration literals, including compound and `ms` | shipped | yes | none | `API` | P0 | Scalar literals, range windows, numeric/duration steps, and numeric/RFC3339 evaluation times use Prometheus's millisecond clock; second-native samples keep their public storage format. |
-| `PQL-S13` | string literals and escaping | missing | yes | none | `API` | P0 | Needed by label functions and `count_values`. |
+| `PQL-S13` | string literals and escaping | in progress | yes | none | `API` | P0 | Pin instant string envelopes plus double-quoted and backtick escaping before label functions consume strings. |
 | `PQL-S14` | UTF-8 quoted metric names | missing | no | `CAT`, `RAW` | `API` | P2 | Add only with ingestion/name round-trip fixtures. |
 | `PQL-S15` | line comments | missing | no | none | `API` | P2 | Parser-only, but still requires complete-expression tests. |
 | `PQL-S16` | exact query grid and configurable lookback | partial | yes | `GRID`, `RAW` | `API` | P0 | Grid/lookback works for current selectors; apply to every expression. |
