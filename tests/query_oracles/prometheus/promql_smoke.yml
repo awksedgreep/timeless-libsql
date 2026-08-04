@@ -19,3 +19,8 @@ tests:
         exp_samples:
           - labels: '{host="a"}'
             value: 25
+      - expr: 'avg_over_time(query_contract_cpu{host="a"}[10s500ms])'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a"}'
+            value: 25

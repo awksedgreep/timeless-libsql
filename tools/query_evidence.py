@@ -311,6 +311,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        duration_narrow = measure(
+            "metrics-duration-range-vector-narrow",
+            lambda: promql('query_contract_cpu{host="h0000"}[5m250ms]'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        duration_wide = measure(
+            "metrics-duration-range-vector-wide",
+            lambda: promql("query_contract_cpu[5m250ms]"),
+            query_json_cardinality,
+            series,
+            stat,
+            iterations,
+            warmup,
+        )
         scalar_instant = measure(
             "metrics-scalar-instant",
             lambda: promql("NaN"),
@@ -346,6 +364,8 @@ def metrics_evidence(
                 "wide": wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
+                "duration_range_vector_narrow": duration_narrow,
+                "duration_range_vector_wide": duration_wide,
                 "scalar_instant": scalar_instant,
                 "scalar_range_11000": scalar_range_limit,
             },

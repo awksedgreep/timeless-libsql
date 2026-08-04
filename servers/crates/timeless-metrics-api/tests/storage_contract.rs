@@ -922,6 +922,98 @@ async fn session_two_promql_scalar_literals_match_prometheus() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_promql_duration_literals_preserve_milliseconds() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two_promql_durations.db");
+    let base = 1_700_000_000_i64;
+    let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        "{{\"metric\":{{\"__name__\":\"duration_metric\",\"host\":\"a\"}},\"values\":[10.0,20.0,30.0],\"timestamps\":[{},{},{}]}}\n",
+        base * 1_000,
+        (base + 1) * 1_000,
+        (base + 2) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (query, expected) in [("1m30s", "90"), ("500ms", "0.5")] {
+        let scalar = get_json(
+            &app,
+            &format!("/api/v1/query?query={query}&time={}", base + 1),
+        )
+        .await;
+        assert_eq!(scalar.0, StatusCode::OK, "{query}: {}", scalar.1);
+        assert_eq!(scalar.1["data"]["resultType"], "scalar");
+        assert_eq!(
+            scalar.1["data"]["result"],
+            serde_json::json!([base + 1, expected])
+        );
+    }
+
+    let range_vector = get_json(
+        &app,
+        &format!(
+            "/api/v1/query?query=duration_metric%5B1500ms%5D&time={}",
+            base + 1
+        ),
+    )
+    .await;
+    assert_eq!(range_vector.0, StatusCode::OK, "{}", range_vector.1);
+    assert_eq!(
+        range_vector.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "10"], [base + 1, "20"]])
+    );
+
+    let average = get_json(
+        &app,
+        &format!(
+            "/api/v1/query?query=avg_over_time%28duration_metric%5B1s500ms%5D%29&time={}",
+            base + 1
+        ),
+    )
+    .await;
+    assert_eq!(average.0, StatusCode::OK, "{}", average.1);
+    assert_eq!(
+        average.1["data"]["result"][0]["metric"],
+        serde_json::json!({"host":"a"})
+    );
+    assert_eq!(
+        average.1["data"]["result"][0]["value"],
+        serde_json::json!([base + 1, "15"])
+    );
+
+    let half_second_grid = get_json(
+        &app,
+        &format!(
+            "/api/v1/query_range?query=1&start={base}&end={}&step=500ms",
+            base + 1
+        ),
+    )
+    .await;
+    assert_eq!(half_second_grid.0, StatusCode::OK, "{}", half_second_grid.1);
+    assert_eq!(
+        half_second_grid.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base as f64 + 0.5, "1"], [base + 1, "1"]])
+    );
+
+    for path in [
+        "/api/v1/query?query=duration_metric%5B1m1h%5D&time=2",
+        "/api/v1/query_range?query=1&start=0&end=2&step=1m1h",
+    ] {
+        let error = get_json(&app, path).await;
+        assert_eq!(error.0, StatusCode::BAD_REQUEST, "{path}: {}", error.1);
+        assert_eq!(error.1["errorType"], "bad_data");
+    }
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

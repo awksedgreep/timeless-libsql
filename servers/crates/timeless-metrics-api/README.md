@@ -81,15 +81,30 @@ inclusive timestamp bounds.
 PromQL parsing is storage-independent and uses the exactly locked
 `promql-parser` 0.10.0 AST frontend. That parser's own historical compatibility
 claim is not a Timeless compatibility claim: each AST node remains gated until
-its matrix row passes the pinned Prometheus 3.13.2 oracle. The query layer lowers plain selectors
+its matrix row passes the pinned Prometheus 3.13.2 oracle. Complete upstream
+duration literals are accepted as scalar values, selector windows, and range
+query steps, including compound forms and millisecond components. PromQL's
+request/evaluation clock is millisecond-precise: numeric and RFC3339 request
+times retain milliseconds and response timestamps use exact fractional
+seconds.
+
+Metric storage remains intentionally second-native. Stored samples therefore
+remain aligned to whole seconds even when a subsecond evaluation grid or range
+boundary is requested. Whole-second `avg_over_time` grids use the packed
+extension window path; any subsecond component uses the public packed raw path
+and applies exact `(T-window,T]` boundaries in Rust. This preserves the public
+storage format and Prometheus semantics without presenting a second-native
+extension kernel as millisecond-aware.
+
+The query layer lowers plain selectors
 to `timeless_raw_frame` and performs a linear last-sample sweep over the exact
-300-second `(T-lookback,T]` window. `avg_over_time` lowers directly to
-`timeless_window_batches`, preserving `(T-window,T]`, grid timestamps, and
-Prometheus metric-name removal. A root range selector reads public raw frames,
+five-minute `(T-lookback,T]` window. Whole-second `avg_over_time` lowers to
+`timeless_window_batches`; its raw fallback preserves `(T-window,T]`, grid
+timestamps, and Prometheus metric-name removal. A root range selector reads public raw frames,
 applies the same open-left boundary, and returns a matrix only from an instant
 query; range-query use fails as `bad_data`. The Rust process writes the final vector/matrix response without
-BEAM/NIF or per-series transport. RFC3339 and numeric times, duration/numeric
-steps, duplicate matcher AND semantics, and the 11,000-point resolution limit
+BEAM/NIF or per-series transport. Duplicate matcher AND semantics and the
+11,000-point resolution limit
 match the existing service contract.
 
 Every read carries a cancellation token. A dropped HTTP future stops host grid

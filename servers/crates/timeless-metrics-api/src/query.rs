@@ -400,12 +400,12 @@ pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest,
     let query = params
         .get("query")
         .ok_or_else(|| "missing required parameter: query".to_string())?;
-    let time = parse_prom_time(params.get("time"), now_seconds());
+    let time = parse_prom_time(params.get("time"), now_millis())?;
     Ok(ReadRequest::Prometheus {
         plan: lower_promql(query)?,
         start: time,
         stop: time,
-        step: 1,
+        step: 1_000,
         instant: true,
     })
 }
@@ -415,10 +415,10 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
     let query = params
         .get("query")
         .ok_or_else(|| "missing required parameter: query".to_string())?;
-    let now = now_seconds();
-    let start = parse_prom_time(params.get("start"), now.saturating_sub(3_600));
-    let stop = parse_prom_time(params.get("end"), now);
-    let step = parse_prom_step(params.get("step"), 60);
+    let now = now_millis();
+    let start = parse_prom_time(params.get("start"), now.saturating_sub(3_600_000))?;
+    let stop = parse_prom_time(params.get("end"), now)?;
+    let step = parse_prom_step(params.get("step"), 60_000)?;
     if stop < start {
         return Err("end timestamp must not be before start timestamp".into());
     }
@@ -488,14 +488,14 @@ fn lower_promql(input: &str) -> Result<PromPlan, String> {
             Ok(PromPlan::Selector {
                 metric,
                 filter,
-                lookback: 300,
+                lookback: 300_000,
             })
         }
         promql::Expr::MatrixSelector(selector) => {
-            let window = i64::try_from(selector.range.as_secs())
+            let window = i64::try_from(selector.range.as_millis())
                 .map_err(|_| "PromQL range duration overflow".to_string())?;
-            if window == 0 || selector.range.subsec_millis() != 0 {
-                return Err("subsecond PromQL ranges are not shipped yet".into());
+            if window == 0 {
+                return Err("PromQL range duration must be at least 1ms".into());
             }
             let (metric, filter) = lower_selector(selector.vs)?;
             Ok(PromPlan::RangeSelector {
@@ -511,10 +511,10 @@ fn lower_promql(input: &str) -> Result<PromPlan, String> {
             let promql::Expr::MatrixSelector(selector) = argument.as_ref() else {
                 return Err("avg_over_time requires a range vector".into());
             };
-            let window = i64::try_from(selector.range.as_secs())
+            let window = i64::try_from(selector.range.as_millis())
                 .map_err(|_| "PromQL range duration overflow".to_string())?;
-            if window == 0 || selector.range.subsec_millis() != 0 {
-                return Err("subsecond PromQL ranges are not shipped yet".into());
+            if window == 0 {
+                return Err("PromQL range duration must be at least 1ms".into());
             }
             let (metric, filter) = lower_selector(selector.vs.clone())?;
             Ok(PromPlan::AvgOverTime {
@@ -812,41 +812,34 @@ fn parse_time(value: Option<&str>, default: i64) -> i64 {
     parse_integer(Some(value)).unwrap_or(default)
 }
 
-fn parse_prom_time(value: Option<&str>, default: i64) -> i64 {
+fn parse_prom_time(value: Option<&str>, default: i64) -> Result<i64, String> {
     let Some(value) = value else {
-        return default;
+        return Ok(default);
     };
     if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(value) {
-        return timestamp.timestamp();
+        return Ok(timestamp.timestamp_millis());
     }
-    value
+    let seconds = value
         .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite())
-        .map(|value| value.trunc() as i64)
-        .unwrap_or(default)
+        .map_err(|_| format!("invalid timestamp: {value}"))?;
+    let millis = seconds * 1_000.0;
+    if !millis.is_finite() || millis < i64::MIN as f64 || millis > i64::MAX as f64 {
+        return Err(format!("timestamp out of range: {value}"));
+    }
+    Ok(millis.round() as i64)
 }
 
-fn parse_prom_step(value: Option<&str>, default: i64) -> i64 {
+fn parse_prom_step(value: Option<&str>, default: i64) -> Result<i64, String> {
     let Some(value) = value else {
-        return default;
+        return Ok(default);
     };
-    for (suffix, multiplier) in [("s", 1), ("m", 60), ("h", 3_600), ("d", 86_400)] {
-        if let Some(number) = value.strip_suffix(suffix) {
-            if let Ok(number) = number.parse::<i64>() {
-                if number > 0 {
-                    return number.saturating_mul(multiplier);
-                }
-            }
-            return default;
-        }
+    let duration = promql_parser::util::parse_duration(value)
+        .map_err(|error| format!("invalid step: {error}"))?;
+    let millis = i64::try_from(duration.as_millis()).map_err(|_| "step overflow".to_string())?;
+    if millis <= 0 {
+        return Err("step must be at least 1ms".into());
     }
-    value
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .map(|value| (value.trunc() as i64).max(1))
-        .unwrap_or(default)
+    Ok(millis)
 }
 
 fn parse_duration(value: &str) -> Option<i64> {
@@ -881,6 +874,13 @@ fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -1611,18 +1611,24 @@ fn execute_prometheus(
             metric,
             filter,
             window,
-        } if features.window_batches => execute_prometheus_window(
-            conn,
-            features.table,
-            metric,
-            filter,
-            start,
-            stop,
-            step,
-            *window,
-            instant,
-            cancelled,
-        ),
+        } if features.window_batches
+            && [start, stop, step, *window]
+                .into_iter()
+                .all(|value| value % 1_000 == 0) =>
+        {
+            execute_prometheus_window(
+                conn,
+                features.table,
+                metric,
+                filter,
+                start / 1_000,
+                stop / 1_000,
+                step / 1_000,
+                *window / 1_000,
+                instant,
+                cancelled,
+            )
+        }
         PromPlan::AvgOverTime {
             metric,
             filter,
@@ -1695,7 +1701,14 @@ fn execute_prometheus_range_selector(
 ) -> Result<ReadOutput, String> {
     let lower = evaluation_time.saturating_sub(window);
     let catalog = catalog(conn, features.table, metric, filter)?;
-    let raw = raw_query(conn, features, metric, filter, lower, evaluation_time)?;
+    let raw = raw_query(
+        conn,
+        features,
+        metric,
+        filter,
+        storage_seconds_floor(lower),
+        storage_seconds_floor(evaluation_time),
+    )?;
     let by_id: HashMap<_, _> = raw
         .series
         .iter()
@@ -1715,7 +1728,7 @@ fn execute_prometheus_range_selector(
         let mut item_points = 0_u64;
         for index in 0..series.len() {
             check_cancelled(cancelled)?;
-            let timestamp = series.timestamp(raw.frame.as_deref(), index)?;
+            let timestamp = seconds_to_millis(series.timestamp(raw.frame.as_deref(), index)?);
             if timestamp <= lower || timestamp > evaluation_time {
                 continue;
             }
@@ -1764,8 +1777,8 @@ fn execute_prometheus_selector(
         features,
         metric,
         filter,
-        start.saturating_sub(lookback),
-        stop,
+        storage_seconds_floor(start.saturating_sub(lookback)),
+        storage_seconds_floor(stop),
     )?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -1790,11 +1803,14 @@ fn execute_prometheus_selector(
         let mut t = start;
         loop {
             check_cancelled(cancelled)?;
-            while hi < series.len() && series.timestamp(raw.frame.as_deref(), hi)? <= t {
+            while hi < series.len()
+                && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
+            {
                 hi += 1;
             }
             let lower = t.saturating_sub(lookback);
-            while lo < hi && series.timestamp(raw.frame.as_deref(), lo)? <= lower {
+            while lo < hi && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
+            {
                 lo += 1;
             }
             if hi > lo {
@@ -1884,7 +1900,11 @@ fn execute_prometheus_window(
             if !instant {
                 comma(&mut body, item_points as usize);
             }
-            write_prometheus_sample(&mut body, decoded.timestamp(index), value)?;
+            write_prometheus_sample(
+                &mut body,
+                seconds_to_millis(decoded.timestamp(index)),
+                value,
+            )?;
             item_points += 1;
         }
         if item_points == 0 {
@@ -1924,8 +1944,8 @@ fn execute_prometheus_avg_raw(
         features,
         metric,
         filter,
-        start.saturating_sub(window),
-        stop,
+        storage_seconds_floor(start.saturating_sub(window)),
+        storage_seconds_floor(stop),
     )?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -1950,11 +1970,14 @@ fn execute_prometheus_avg_raw(
         let mut t = start;
         loop {
             check_cancelled(cancelled)?;
-            while hi < series.len() && series.timestamp(raw.frame.as_deref(), hi)? <= t {
+            while hi < series.len()
+                && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
+            {
                 hi += 1;
             }
             let lower = t.saturating_sub(window);
-            while lo < hi && series.timestamp(raw.frame.as_deref(), lo)? <= lower {
+            while lo < hi && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
+            {
                 lo += 1;
             }
             if hi > lo {
@@ -2032,11 +2055,39 @@ fn write_prometheus_item_suffix(output: &mut Vec<u8>, instant: bool) {
 
 fn write_prometheus_sample(output: &mut Vec<u8>, timestamp: i64, value: f64) -> Result<(), String> {
     output.push(b'[');
-    write_json(output, &timestamp)?;
+    write_prometheus_timestamp(output, timestamp);
     output.push(b',');
     write_json(output, &format_prometheus_value(value))?;
     output.push(b']');
     Ok(())
+}
+
+fn write_prometheus_timestamp(output: &mut Vec<u8>, timestamp_ms: i64) {
+    let negative = timestamp_ms < 0;
+    let absolute = i128::from(timestamp_ms).abs();
+    let seconds = absolute / 1_000;
+    let millis = absolute % 1_000;
+    if negative {
+        output.push(b'-');
+    }
+    output.extend_from_slice(seconds.to_string().as_bytes());
+    if millis == 0 {
+        return;
+    }
+    output.push(b'.');
+    let mut fraction = format!("{millis:03}");
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+    output.extend_from_slice(fraction.as_bytes());
+}
+
+fn storage_seconds_floor(timestamp_ms: i64) -> i64 {
+    timestamp_ms.div_euclid(1_000)
+}
+
+fn seconds_to_millis(timestamp: i64) -> i64 {
+    timestamp.saturating_mul(1_000)
 }
 
 fn write_prometheus_suffix(output: &mut Vec<u8>) {
@@ -2641,5 +2692,37 @@ mod tests {
         let last = aggregate_raw(&series, None, 0, 60, Aggregate::Last).unwrap();
         assert!(matches!(first[0].1, BucketValue::Real(1.0)));
         assert!(matches!(last[0].1, BucketValue::Real(3.0)));
+    }
+
+    #[test]
+    fn prometheus_time_and_duration_inputs_use_a_millisecond_clock() {
+        assert_eq!(parse_prom_time(None, 42).unwrap(), 42);
+        assert_eq!(parse_prom_time(Some("2.0005"), 0).unwrap(), 2_001);
+        assert_eq!(
+            parse_prom_time(Some("2023-11-14T22:13:20.125Z"), 0).unwrap(),
+            1_700_000_000_125
+        );
+        assert!(parse_prom_time(Some("not-a-time"), 0).is_err());
+        assert!(parse_prom_time(Some("NaN"), 0).is_err());
+
+        assert_eq!(parse_prom_step(Some("1h30m250ms"), 0).unwrap(), 5_400_250);
+        assert_eq!(parse_prom_step(Some("0.5"), 0).unwrap(), 500);
+        assert!(parse_prom_step(Some("0"), 0).is_err());
+        assert!(parse_prom_step(Some("1m1h"), 0).is_err());
+    }
+
+    #[test]
+    fn prometheus_timestamps_are_exact_seconds_with_optional_milliseconds() {
+        for (timestamp, expected) in [
+            (1_700_000_000_000, "1700000000"),
+            (1_700_000_000_500, "1700000000.5"),
+            (1_700_000_000_125, "1700000000.125"),
+            (-500, "-0.5"),
+            (i64::MIN, "-9223372036854775.808"),
+        ] {
+            let mut output = Vec::new();
+            write_prometheus_timestamp(&mut output, timestamp);
+            assert_eq!(String::from_utf8(output).unwrap(), expected);
+        }
     }
 }
