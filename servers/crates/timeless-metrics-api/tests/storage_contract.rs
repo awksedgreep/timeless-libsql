@@ -6285,7 +6285,12 @@ async fn session_seven_promql_irate_uses_last_two_samples_and_reopens() {
         assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
     }
-    let singleton = prom_query(&app, "irate(range_irate{case=\"singleton\"}[60s])", base + 60).await;
+    let singleton = prom_query(
+        &app,
+        "irate(range_irate{case=\"singleton\"}[60s])",
+        base + 60,
+    )
+    .await;
     assert_eq!(singleton.0, StatusCode::OK, "{}", singleton.1);
     assert_eq!(singleton.1["data"]["result"], serde_json::json!([]));
     let range = prom_query_range(
@@ -6321,7 +6326,12 @@ async fn session_seven_promql_irate_uses_last_two_samples_and_reopens() {
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -6523,7 +6533,12 @@ async fn session_seven_promql_increase_extrapolates_without_rate_normalization()
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -6715,7 +6730,12 @@ async fn session_seven_promql_delta_extrapolates_gauges_without_counter_correcti
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -6798,7 +6818,12 @@ async fn session_seven_promql_idelta_uses_only_the_final_gauge_pair() {
     assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
     assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
 
-    let steady = prom_query(&app, "idelta(range_idelta{case=\"steady\"}[60s])", base + 60).await;
+    let steady = prom_query(
+        &app,
+        "idelta(range_idelta{case=\"steady\"}[60s])",
+        base + 60,
+    )
+    .await;
     assert_eq!(steady.0, StatusCode::OK, "{}", steady.1);
     assert_eq!(
         steady.1["data"]["result"],
@@ -6901,7 +6926,12 @@ async fn session_seven_promql_idelta_uses_only_the_final_gauge_pair() {
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -7000,11 +7030,7 @@ async fn session_seven_promql_deriv_matches_centered_compensated_regression() {
         steady.1["data"]["result"],
         serde_json::json!([{"metric": {"case": "steady"}, "value": [base + 60, "10"]}])
     );
-    for (case, expected) in [
-        ("decrease", "-2"),
-        ("sparse", "10"),
-        ("constant", "0"),
-    ] {
+    for (case, expected) in [("decrease", "-2"), ("sparse", "10"), ("constant", "0")] {
         let response = prom_query(
             &app,
             &format!("deriv(range_deriv{{case=\"{case}\"}}[60s])"),
@@ -7013,7 +7039,10 @@ async fn session_seven_promql_deriv_matches_centered_compensated_regression() {
         .await;
         assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
-        assert_eq!(response.1["data"]["result"][0]["metric"]["__name__"], Value::Null);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"]["__name__"],
+            Value::Null
+        );
     }
     let boundary = prom_query(&app, "deriv(range_deriv{case=\"steady\"}[40s])", base + 50).await;
     assert_eq!(boundary.0, StatusCode::OK, "{}", boundary.1);
@@ -7085,7 +7114,12 @@ async fn session_seven_promql_deriv_matches_centered_compensated_regression() {
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -7187,7 +7221,10 @@ async fn session_seven_promql_predict_linear_anchors_at_evaluation_time() {
         .await;
         assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
-        assert_eq!(response.1["data"]["result"][0]["metric"]["__name__"], Value::Null);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"]["__name__"],
+            Value::Null
+        );
     }
     for query in [
         "predict_linear(range_predict{case=\"steady\"}[60s], 5 + 5)",
@@ -7209,9 +7246,7 @@ async fn session_seven_promql_predict_linear_anchors_at_evaluation_time() {
     for (horizon, expected) in [("NaN", "NaN"), ("Inf", "+Inf"), ("-Inf", "-Inf")] {
         let response = prom_query(
             &app,
-            &format!(
-                "predict_linear(range_predict{{case=\"steady\"}}[60s], {horizon})"
-            ),
+            &format!("predict_linear(range_predict{{case=\"steady\"}}[60s], {horizon})"),
             base + 60,
         )
         .await;
@@ -7273,7 +7308,12 @@ async fn session_seven_promql_predict_linear_anchors_at_evaluation_time() {
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -7364,7 +7404,12 @@ async fn session_seven_promql_changes_counts_float_transitions() {
     assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
     assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
 
-    let steady = prom_query(&app, "changes(range_changes{case=\"steady\"}[60s])", base + 60).await;
+    let steady = prom_query(
+        &app,
+        "changes(range_changes{case=\"steady\"}[60s])",
+        base + 60,
+    )
+    .await;
     assert_eq!(steady.0, StatusCode::OK, "{}", steady.1);
     assert_eq!(
         steady.1["data"]["result"],
@@ -7387,7 +7432,10 @@ async fn session_seven_promql_changes_counts_float_transitions() {
         .await;
         assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
-        assert_eq!(response.1["data"]["result"][0]["metric"]["__name__"], Value::Null);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"]["__name__"],
+            Value::Null
+        );
     }
     let boundary = prom_query(
         &app,
@@ -7446,7 +7494,12 @@ async fn session_seven_promql_changes_counts_float_transitions() {
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -7567,14 +7620,12 @@ async fn session_seven_promql_resets_counts_strict_float_decreases() {
         .await;
         assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
-        assert_eq!(response.1["data"]["result"][0]["metric"]["__name__"], Value::Null);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"]["__name__"],
+            Value::Null
+        );
     }
-    let boundary = prom_query(
-        &app,
-        "resets(range_resets{case=\"reset\"}[40s])",
-        base + 50,
-    )
-    .await;
+    let boundary = prom_query(&app, "resets(range_resets{case=\"reset\"}[40s])", base + 50).await;
     assert_eq!(boundary.0, StatusCode::OK, "{}", boundary.1);
     assert_eq!(boundary.1["data"]["result"][0]["value"][1], "1");
     let offset = prom_query(
@@ -7626,7 +7677,12 @@ async fn session_seven_promql_resets_counts_strict_float_decreases() {
         base + 60,
     )
     .await;
-    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
     assert!(
         rejected.1["error"]
             .as_str()
@@ -7651,6 +7707,137 @@ async fn session_seven_promql_resets_counts_strict_float_decreases() {
         .1,
         reset.1
     );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_abs_transforms_float_vectors_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_abs.db");
+    let base = 1_700_800_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "transform_abs{{case=\"positive\"}} 2 {}\n",
+            "transform_abs{{case=\"negative\"}} -3 {}\n",
+            "transform_abs{{case=\"negative\"}} -4 {}\n",
+            "transform_abs{{case=\"negative_zero\"}} -0 {}\n",
+            "transform_abs{{case=\"nan\"}} NaN {}\n",
+            "transform_abs{{case=\"positive_inf\"}} +Inf {}\n",
+            "transform_abs{{case=\"negative_inf\"}} -Inf {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (case, expected) in [
+        ("positive", "2"),
+        ("negative", "3"),
+        ("negative_zero", "0"),
+        ("nan", "NaN"),
+        ("positive_inf", "+Inf"),
+        ("negative_inf", "+Inf"),
+    ] {
+        let response = prom_query(
+            &app,
+            &format!("abs(transform_abs{{case=\"{case}\"}})"),
+            base,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], "vector");
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({"case": case})
+        );
+        assert_eq!(
+            response.1["data"]["result"][0]["value"],
+            serde_json::json!([base, expected])
+        );
+    }
+
+    let range = prom_query_range(
+        &app,
+        "abs(transform_abs{case=\"negative\"})",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "negative"},
+            "values": [[base, "3"], [base + 10, "4"]]
+        }])
+    );
+
+    let nested = prom_query(
+        &app,
+        "avg_over_time(abs(transform_abs{case=\"negative\"})[20s:10s])",
+        base + 10,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"],
+        serde_json::json!([{"metric": {"case": "negative"}, "value": [base + 10, "3.5"]}])
+    );
+
+    for query in ["abs(1)", "abs(transform_abs[1m])"] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "abs(transform_abs)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("work point limit 1 exceeded"));
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_result =
+        prom_query(&reopened_app, "abs(transform_abs{case=\"negative\"})", base).await;
+    assert_eq!(reopened_result.0, StatusCode::OK, "{}", reopened_result.1);
+    assert_eq!(reopened_result.1["data"]["result"][0]["value"][1], "3");
     drop(reopened_app);
     reopened.shutdown().await.unwrap();
 }

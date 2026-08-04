@@ -142,7 +142,7 @@ bounded frames.
 
 | ID | function/family | Rust now | Elixir | foundation | target | priority |
 |---|---|---|---|---|---|---|
-| `PQL-F01` | `abs` | missing | yes | `SQL` | `API` | P0 |
+| `PQL-F01` | `abs` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-038-abs)); finite and IEEE floats, signed zero, metric-name removal, range grids, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F02` | `ceil`, `floor`, `round` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F03` | `clamp`, `clamp_min`, `clamp_max` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F04` | `sqrt`, `exp`, `ln`, `log2`, `log10` | missing | yes | `SQL` | `API` | P0 |

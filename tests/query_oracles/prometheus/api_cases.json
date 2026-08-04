@@ -1888,6 +1888,27 @@
       "expected_results": [
         {"metric": {"__name__": "oracle_rank_tie", "host": "a", "job": "oracle"}, "value": 5}
       ]
+    },
+    {
+      "id": "PQL-F01-abs-finite-and-ieee-values",
+      "query": "abs(oracle_transform)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "positive", "job": "oracle"}, "value": 2},
+        {"metric": {"case": "negative", "job": "oracle"}, "value": 4},
+        {"metric": {"case": "negative_zero", "job": "oracle"}, "value": 0},
+        {"metric": {"case": "nan", "job": "oracle"}, "value": "NaN"},
+        {"metric": {"case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"case": "negative_inf", "job": "oracle"}, "value": "+Inf"}
+      ]
+    },
+    {
+      "id": "PQL-F01-abs-range-grid-and-name-policy",
+      "query": "abs(oracle_transform{case=\"negative\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"case": "negative", "job": "oracle"},
+      "expected_values": [3, 4]
     }
   ],
   "operator_error_cases": [

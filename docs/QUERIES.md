@@ -859,6 +859,10 @@ public row surface's explicit SQL-NULL representation of stored NaN.
 Strict float-counter decrease `resets` is
 [`SQL-PROM-037`](QUERY_SQL_EQUIVALENTS.md#sql-prom-037-resets); it does not
 relabel the extension's mechanical reset-adjusted increase/rate kernels.
+Bounded instant-vector `abs` is
+[`SQL-PROM-038`](QUERY_SQL_EQUIVALENTS.md#sql-prom-038-abs); ordinary SQLite
+is exact for finite values, infinities, and signed zero, while the Rust API
+retains packed NaN fidelity and PromQL labels, types, limits, and envelopes.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

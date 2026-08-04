@@ -385,12 +385,32 @@ pub(crate) enum PromPlan {
     Scalar(f64),
     String(String),
     Unary(Box<PromPlan>),
+    Function(PromFunctionPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
     RangeReduction(PromRangePlan),
     RangeSelector { selector: Selector, window: i64 },
     Subquery(SubqueryPlan),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromFunctionOp {
+    Abs,
+}
+
+impl PromFunctionOp {
+    fn apply(self, value: f64) -> f64 {
+        match self {
+            Self::Abs => value.abs(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromFunctionPlan {
+    op: PromFunctionOp,
+    inner: Box<PromPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -673,6 +693,7 @@ impl PromPlan {
             Self::String(_) => PromValueType::String,
             Self::RangeSelector { .. } | Self::Subquery(_) => PromValueType::Matrix,
             Self::Unary(inner) => inner.value_type(),
+            Self::Function(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -961,6 +982,19 @@ fn lower_promql_expr(
             lookback,
             depth + 1,
         )?)),
+        promql::Expr::Call(call) if call.func.name == "abs" => {
+            let [argument] = call.args.args.as_slice() else {
+                return Err("abs requires exactly one instant vector".into());
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err("abs requires an instant vector".into());
+            }
+            Ok(PromPlan::Function(PromFunctionPlan {
+                op: PromFunctionOp::Abs,
+                inner: Box::new(inner),
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1308,6 +1342,7 @@ fn lower_promql_subquery(
         PromPlan::Selector { .. }
             | PromPlan::RangeReduction(_)
             | PromPlan::Unary(_)
+            | PromPlan::Function(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -2658,6 +2693,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::Function(function) => execute_prometheus_function(
+            conn,
+            features,
+            function,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -3464,6 +3512,65 @@ fn execute_prometheus_unary(
     }
     encode_prometheus_intermediate(
         value,
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_function(
+    conn: &Connection,
+    features: QueryFeatures,
+    function: &PromFunctionPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let child = execute_prometheus(
+        conn,
+        features,
+        &function.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let frame_bytes = child.frame_bytes;
+    let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("function input type was checked while lowering")
+    };
+    for item in &mut series {
+        check_cancelled(cancelled)?;
+        item.labels.remove("__name__");
+        for (_, value) in &mut item.points {
+            check_cancelled(cancelled)?;
+            *value = function.op.apply(*value);
+        }
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
         instant,
         frame_bytes,
         intermediate_points,
@@ -4489,7 +4596,14 @@ fn prometheus_range_reduction(
         return prometheus_instant_delta(points, false, cancelled);
     }
     if matches!(op, PromRangeOp::Increase) {
-        return prometheus_extrapolated_rate(points, range_start, range_end, true, false, cancelled);
+        return prometheus_extrapolated_rate(
+            points,
+            range_start,
+            range_end,
+            true,
+            false,
+            cancelled,
+        );
     }
     if matches!(op, PromRangeOp::Delta) {
         return prometheus_extrapolated_rate(
@@ -4506,8 +4620,8 @@ fn prometheus_range_reduction(
             .map(|result| result.map(|(slope, _)| slope));
     }
     if matches!(op, PromRangeOp::PredictLinear) {
-        let horizon = parameter
-            .ok_or_else(|| "predict_linear is missing its scalar horizon".to_string())?;
+        let horizon =
+            parameter.ok_or_else(|| "predict_linear is missing its scalar horizon".to_string())?;
         return prometheus_linear_regression(points, evaluation_time, cancelled)
             .map(|result| result.map(|(slope, intercept)| slope * horizon + intercept));
     }
@@ -4648,14 +4762,10 @@ fn prometheus_linear_regression(
         // Prometheus performs this subtraction in signed millisecond space
         // before converting to seconds.
         let x = timestamp.wrapping_sub(intercept_time) as f64 / 1_000.0;
-        (sum_x, compensation_x) =
-            prometheus_compensated_add(x, sum_x, compensation_x);
-        (sum_y, compensation_y) =
-            prometheus_compensated_add(value, sum_y, compensation_y);
-        (sum_xy, compensation_xy) =
-            prometheus_compensated_add(x * value, sum_xy, compensation_xy);
-        (sum_x2, compensation_x2) =
-            prometheus_compensated_add(x * x, sum_x2, compensation_x2);
+        (sum_x, compensation_x) = prometheus_compensated_add(x, sum_x, compensation_x);
+        (sum_y, compensation_y) = prometheus_compensated_add(value, sum_y, compensation_y);
+        (sum_xy, compensation_xy) = prometheus_compensated_add(x * value, sum_xy, compensation_xy);
+        (sum_x2, compensation_x2) = prometheus_compensated_add(x * x, sum_x2, compensation_x2);
     }
 
     if constant_y {
@@ -4679,10 +4789,7 @@ fn prometheus_linear_regression(
     Ok(Some((slope, intercept)))
 }
 
-fn prometheus_changes(
-    points: &[(i64, f64)],
-    cancelled: &AtomicBool,
-) -> Result<f64, String> {
+fn prometheus_changes(points: &[(i64, f64)], cancelled: &AtomicBool) -> Result<f64, String> {
     let mut changes = 0_u64;
     let mut previous = points[0].1;
     for &(_, current) in &points[1..] {
@@ -6411,14 +6518,12 @@ mod tests {
                 expected
             );
         }
-        assert!(prometheus_instant_delta(
-            &[(20_000, f64::NAN), (40_000, 2.0)],
-            true,
-            &cancelled,
-        )
-        .unwrap()
-        .unwrap()
-        .is_nan());
+        assert!(
+            prometheus_instant_delta(&[(20_000, f64::NAN), (40_000, 2.0)], true, &cancelled,)
+                .unwrap()
+                .unwrap()
+                .is_nan()
+        );
 
         assert_eq!(
             prometheus_instant_delta(
@@ -6494,13 +6599,11 @@ mod tests {
         }
 
         cancelled.store(true, Ordering::Relaxed);
-        assert!(prometheus_linear_regression(
-            &[(10_000, 1.0), (20_000, 2.0)],
-            10_000,
-            &cancelled,
-        )
-        .unwrap_err()
-        .contains("cancelled"));
+        assert!(
+            prometheus_linear_regression(&[(10_000, 1.0), (20_000, 2.0)], 10_000, &cancelled,)
+                .unwrap_err()
+                .contains("cancelled")
+        );
     }
 
     #[test]
@@ -6535,10 +6638,7 @@ mod tests {
     fn prometheus_resets_counts_only_strict_float_decreases() {
         let cancelled = AtomicBool::new(false);
         for (points, expected) in [
-            (
-                vec![(10_000, 100.0), (30_000, 150.0), (50_000, 20.0)],
-                1.0,
-            ),
+            (vec![(10_000, 100.0), (30_000, 150.0), (50_000, 20.0)], 1.0),
             (
                 vec![
                     (10_000, 1.0),

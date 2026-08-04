@@ -3550,6 +3550,10 @@ db.executemany(
         ('changes_metric', '{"case":"constant"}', 20, 7.0),
         ('changes_metric', '{"case":"constant"}', 40, 7.0),
         ('changes_metric', '{"case":"singleton"}', 50, 5.0),
+        ('abs_metric', '{"case":"negative"}', 100, -3.0),
+        ('abs_metric', '{"case":"negative_inf"}', 100, -math.inf),
+        ('abs_metric', '{"case":"negative_zero"}', 100, -0.0),
+        ('abs_metric', '{"case":"positive"}', 100, 2.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -3580,6 +3584,28 @@ instant = db.execute(
     },
 ).fetchall()
 assert len(instant) == 2
+
+absolute = db.execute(
+    "SELECT labels,ts,CASE WHEN value=0.0 THEN 0.0 ELSE abs(value) END "
+    "FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback) "
+    "ORDER BY labels,ts",
+    {
+        'metric': 'abs_metric',
+        'filter_json': None,
+        'start': 100,
+        'end': 100,
+        'step': 1,
+        'lookback': 1,
+    },
+).fetchall()
+assert absolute == [
+    ('{"case":"negative"}', 100, 3.0),
+    ('{"case":"negative_inf"}', 100, math.inf),
+    ('{"case":"negative_zero"}', 100, 0.0),
+    ('{"case":"positive"}', 100, 2.0),
+]
+assert math.copysign(1.0, absolute[2][2]) == 1.0
 
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("

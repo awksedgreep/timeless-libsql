@@ -79,6 +79,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-035`](#sql-prom-035-predict_linear) | `PQL-R18` | current foundation | finite float-gauge least-squares forecast relative to each evaluation timestamp; API owns scalar-expression and compensated/IEEE semantics, labels, limits, and envelopes |
 | [`SQL-PROM-036`](#sql-prom-036-changes) | `PQL-R19` | current | exact ordered float-transition count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
 | [`SQL-PROM-037`](#sql-prom-037-resets) | `PQL-R20` | current | exact ordered strict float-decrease count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
+| [`SQL-PROM-038`](#sql-prom-038-abs) | `PQL-F01` | current foundation | exact bounded absolute value for finite floats, infinities, and signed zero; API owns packed-NaN fidelity, language, names, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1291,6 +1292,40 @@ kernels do not expose this count and are not relabeled; ordinary SQL is exact,
 so no reset-count primitive is justified. Direct regression: `tests/cli.sh`
 section 45; HTTP/oracle/reopen regression:
 `session_seven_promql_resets_counts_strict_float_decreases`.
+
+### SQL-PROM-038: `abs`
+
+Apply SQLite's scalar `abs` to every sample selected on a bounded public grid:
+
+```sql
+SELECT labels, ts,
+       CASE WHEN value = 0.0 THEN 0.0 ELSE abs(value) END AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+`:metric` is an exact metric name and `:filter_json` is public matcher JSON or
+NULL. Timestamps, grid bounds, `:step`, and the open-left `:lookback` are in
+the metric table's configured timestamp unit (integer seconds for the default
+table). Canonical label JSON and timestamp ordering are deterministic. The
+statement is exact for every finite float, explicitly converts either signed
+zero to positive zero, and maps either infinity to `+Inf`. The `CASE` is
+required because SQLite's built-in `abs(-0.0)` preserves the negative-zero
+bits rather than producing Prometheus's positive-zero result.
+
+SQLite represents a row-projected stored NaN as SQL NULL, so `abs(value)` also
+returns NULL for that case. The Rust API reads the public bit-exact packed
+frame and preserves Prometheus `NaN`; it also owns PromQL typing, metric-name
+removal, nested expression composition, millisecond timestamps, cumulative
+limits, cancellation, and vector/matrix HTTP envelopes. That remaining API
+work is why this recipe is an honest SQL foundation rather than a claim that
+ordinary row SQL alone provides the complete PromQL function. A specialized
+extension primitive would add no storage pruning or decode benefit. Direct
+regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_abs_transforms_float_vectors_and_reopens`.
 
 ### SQL-PROM-006: range selector
 
