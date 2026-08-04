@@ -92,7 +92,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O10` | `avg` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-015-cross-series-average-by-label)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O11` | `min` and `max` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-016-cross-series-minimum-and-maximum)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O12` | `count` and `group` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-017-cross-series-count-and-group)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O13` | `stddev` and `stdvar` aggregations | missing | yes | `SQL` | `API` | P0 |
+| `PQL-O13` | `stddev` and `stdvar` aggregations ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-018-cross-series-population-variance-and-standard-deviation)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O14` | `topk` and `bottomk` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-005-top-k-per-evaluation-step)) | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O15` | `quantile` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O16` | `count_values` | missing | yes | `SQL` | `API` | P0 |

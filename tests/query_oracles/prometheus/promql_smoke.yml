@@ -367,3 +367,17 @@ tests:
             value: 1
           - labels: '{region="west"}'
             value: 1
+      - expr: 'stdvar by (region) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 0.25
+          - labels: '{region="west"}'
+            value: 0
+      - expr: 'stddev by (region) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 0.5
+          - labels: '{region="west"}'
+            value: 0

@@ -59,6 +59,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-015`](#sql-prom-015-cross-series-average-by-label) | `PQL-O10` | current foundation | bounded cross-series average; API owns compensated arithmetic, grouping syntax, labels, limits, and envelopes |
 | [`SQL-PROM-016`](#sql-prom-016-cross-series-minimum-and-maximum) | `PQL-O11` | current foundation | bounded cross-series extrema; API owns all-NaN behavior, grouping syntax, labels, limits, and envelopes |
 | [`SQL-PROM-017`](#sql-prom-017-cross-series-count-and-group) | `PQL-O12` | current foundation | bounded cross-series row count/presence; API owns grouping syntax, labels, limits, and envelopes |
+| [`SQL-PROM-018`](#sql-prom-018-cross-series-population-variance-and-standard-deviation) | `PQL-O13` | current foundation | bounded population second moment; API owns Welford/IEEE arithmetic, language, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -784,6 +785,55 @@ strings, millisecond timestamps, limits, cancellation, and response/error
 envelopes. This parameterized statement executes in `tests/cli.sh` section
 45; the exact API contract is
 `session_five_promql_count_group_include_all_values_and_reopen`.
+
+### SQL-PROM-018: cross-series population variance and standard deviation
+
+This ordinary-SQL second-moment recipe is the copyable public-grid equivalent
+for finite, well-scaled inputs:
+
+```sql
+WITH selected AS (
+  SELECT
+    ts,
+    COALESCE(json_extract(labels, '$.service'), '') AS service,
+    value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+), moments AS (
+  SELECT
+    service,
+    ts,
+    AVG(value) AS mean,
+    AVG(value * value) AS second_moment
+  FROM selected
+  GROUP BY service, ts
+)
+SELECT
+  json_object('service', service) AS labels,
+  ts,
+  MAX(second_moment - mean * mean, 0.0) AS stdvar_value,
+  SQRT(MAX(second_moment - mean * mean, 0.0)) AS stddev_value
+FROM moments
+ORDER BY service, ts;
+```
+
+Parameters, epoch-second units, inclusive grid bounds, open-left lookback,
+missing-label normalization, and ordering match `SQL-PROM-017`. This computes
+population variance (division by `N`), so a singleton is zero and empty input
+has no row. `MAX(..., 0.0)` removes a small negative caused by ordinary
+floating-point roundoff.
+
+This formula can lose precision through cancellation or overflow while
+squaring. SQLite also exposes stored NaN as SQL NULL. The Rust API therefore
+uses Prometheus 3.13.2's one-pass Welford update over the raw packed float bits
+and returns NaN when any group member is NaN or infinite. It also owns
+`by`/`without`, labels, millisecond timestamps, limits, cancellation, and
+envelopes. The SQL is an honest efficient foundation for normal finite data,
+not a claim of bit-identical adversarial arithmetic. It executes in
+`tests/cli.sh` section 45; the exact API contract is
+`session_five_promql_stddev_stdvar_are_population_grouped_and_reopenable`.
 
 ### SQL-PROM-004: vector arithmetic with label matching
 

@@ -3701,6 +3701,30 @@ assert cross_count_group == [
     ('api', 110, 2, 1),
 ]
 
+cross_dispersion = db.execute(
+    "WITH selected AS ("
+    " SELECT ts,COALESCE(json_extract(labels,'$.service'),'') service,value"
+    " FROM timeless_grid('metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    "), moments AS ("
+    " SELECT service,ts,AVG(value) mean,AVG(value*value) second_moment"
+    " FROM selected GROUP BY service,ts"
+    ") SELECT service,ts,MAX(second_moment-mean*mean,0.0),"
+    " SQRT(MAX(second_moment-mean*mean,0.0)) FROM moments"
+    " ORDER BY service,ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert cross_dispersion == [
+    ('api', 100, 25.0, 5.0),
+    ('api', 110, 25.0, 5.0),
+]
+
 ratio = db.execute(
     "WITH errors AS ("
     " SELECT ts,labels,json_extract(labels,'$.host') host,value"

@@ -407,6 +407,9 @@ infinities, and return `NaN` for an all-NaN group.
 `count` includes every selected sample regardless of its numeric value;
 `group` returns one for every non-empty group. Both accept the same
 `by`/`without` modifiers and produce no output for empty input.
+`stdvar` is the population variance and `stddev` its square root. The API uses
+Prometheus's Welford update, returns zero for a singleton, and returns `NaN`
+when any group member is NaN or infinite.
 
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
@@ -422,6 +425,10 @@ including the ordinary-SQL versus packed-NaN distinction.
 Cross-series count and presence use executable
 [`SQL-PROM-017`](QUERY_SQL_EQUIVALENTS.md#sql-prom-017-cross-series-count-and-group),
 which deliberately uses `COUNT(*)` so IEEE NaN rows are not lost as SQL NULL.
+For finite, well-scaled data,
+[`SQL-PROM-018`](QUERY_SQL_EQUIVALENTS.md#sql-prom-018-cross-series-population-variance-and-standard-deviation)
+provides an executable second-moment recipe and states why the API's Welford
+arithmetic is required for exact edge semantics.
 
 ## Scalar aggregate without raw materialization
 

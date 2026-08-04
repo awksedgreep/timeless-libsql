@@ -410,6 +410,8 @@ enum PromAggregateOp {
     Max,
     Count,
     Group,
+    StdDev,
+    StdVar,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -873,6 +875,8 @@ fn lower_promql_aggregate(
         token::T_MAX => PromAggregateOp::Max,
         token::T_COUNT => PromAggregateOp::Count,
         token::T_GROUP => PromAggregateOp::Group,
+        token::T_STDDEV => PromAggregateOp::StdDev,
+        token::T_STDVAR => PromAggregateOp::StdVar,
         _ => {
             return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
         }
@@ -2612,7 +2616,7 @@ fn apply_prometheus_aggregate(
             check_cancelled(cancelled)?;
             match group.entry(timestamp) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(PromAggregateState::new(value));
+                    entry.insert(PromAggregateState::new(aggregate.op, value));
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     entry.get_mut().add(aggregate.op, value);
@@ -2639,16 +2643,24 @@ struct PromAggregateState {
     mean: f64,
     count: f64,
     incremental_mean: bool,
+    variance: f64,
 }
 
 impl PromAggregateState {
-    fn new(value: f64) -> Self {
+    fn new(op: PromAggregateOp, value: f64) -> Self {
         Self {
             value,
             compensation: 0.0,
             mean: value,
             count: 1.0,
             incremental_mean: false,
+            variance: if matches!(op, PromAggregateOp::StdDev | PromAggregateOp::StdVar)
+                && !value.is_finite()
+            {
+                f64::NAN
+            } else {
+                0.0
+            },
         }
     }
 
@@ -2691,6 +2703,12 @@ impl PromAggregateState {
             }
             PromAggregateOp::Count => self.count += 1.0,
             PromAggregateOp::Group => {}
+            PromAggregateOp::StdDev | PromAggregateOp::StdVar => {
+                self.count += 1.0;
+                let delta = value - self.mean;
+                self.mean += delta / self.count;
+                self.variance += delta * (value - self.mean);
+            }
         }
     }
 
@@ -2702,6 +2720,8 @@ impl PromAggregateState {
             PromAggregateOp::Min | PromAggregateOp::Max => self.value,
             PromAggregateOp::Count => self.count,
             PromAggregateOp::Group => 1.0,
+            PromAggregateOp::StdDev => (self.variance / self.count).sqrt(),
+            PromAggregateOp::StdVar => self.variance / self.count,
         }
     }
 }

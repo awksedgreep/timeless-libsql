@@ -3162,6 +3162,113 @@ async fn session_five_promql_count_group_include_all_values_and_reopen() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_stddev_stdvar_are_population_grouped_and_reopenable() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_stddev_stdvar.db");
+    let base = 1_700_540_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let values = format!(
+        concat!(
+            "aggregate_dispersion{{host=\"a\",region=\"east\"}} 3 {}\n",
+            "aggregate_dispersion{{host=\"b\",region=\"east\"}} 4 {}\n",
+            "aggregate_dispersion{{host=\"c\",region=\"west\"}} 7 {}\n",
+            "aggregate_dispersion{{host=\"n1\",region=\"nan\"}} NaN {}\n",
+            "aggregate_dispersion{{host=\"n2\",region=\"nan\"}} 1 {}\n",
+            "aggregate_dispersion{{host=\"i1\",region=\"inf\"}} +Inf {}\n",
+            "aggregate_dispersion{{host=\"i2\",region=\"inf\"}} +Inf {}\n",
+            "aggregate_dispersion{{host=\"a\",region=\"east\"}} 5 {}\n",
+            "aggregate_dispersion{{host=\"b\",region=\"east\"}} 9 {}\n",
+            "aggregate_dispersion{{host=\"c\",region=\"west\"}} 8 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", values.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let variance = prom_query(&app, "stdvar by (region) (aggregate_dispersion)", base).await;
+    assert_eq!(variance.0, StatusCode::OK, "{}", variance.1);
+    assert_eq!(
+        variance.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base, "0.25"]},
+            {"metric": {"region": "inf"}, "value": [base, "NaN"]},
+            {"metric": {"region": "nan"}, "value": [base, "NaN"]},
+            {"metric": {"region": "west"}, "value": [base, "0"]}
+        ])
+    );
+    let deviation = prom_query(
+        &app,
+        "stddev without (__name__, host) (aggregate_dispersion)",
+        base,
+    )
+    .await;
+    assert_eq!(deviation.0, StatusCode::OK, "{}", deviation.1);
+    assert_eq!(
+        deviation.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base, "0.5"]},
+            {"metric": {"region": "inf"}, "value": [base, "NaN"]},
+            {"metric": {"region": "nan"}, "value": [base, "NaN"]},
+            {"metric": {"region": "west"}, "value": [base, "0"]}
+        ])
+    );
+    let range = prom_query_range(
+        &app,
+        "stdvar by (region) (aggregate_dispersion{region=~\"east|west\"})",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "values": [[base, "0.25"], [base + 10, "4"]]},
+            {"metric": {"region": "west"}, "values": [[base, "0"], [base + 10, "0"]]}
+        ])
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "stddev without (__name__, host) (aggregate_dispersion)",
+            base,
+        )
+        .await
+        .1,
+        deviation.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

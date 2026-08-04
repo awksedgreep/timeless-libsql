@@ -493,6 +493,34 @@
         {"metric": {"case": "positive"}, "value": 2},
         {"metric": {"case": "mixed"}, "value": 2}
       ]
+    },
+    {
+      "id": "PQL-O13-stdvar-by",
+      "query": "stdvar by (region) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 0.25},
+        {"metric": {"region": "west"}, "value": 0}
+      ]
+    },
+    {
+      "id": "PQL-O13-stddev-by",
+      "query": "stddev by (region) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 0.5},
+        {"metric": {"region": "west"}, "value": 0}
+      ]
+    },
+    {
+      "id": "PQL-O13-stdvar-ieee",
+      "query": "stdvar by (case) (oracle_avg_ieee)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "nan"}, "value": "NaN"},
+        {"metric": {"case": "positive"}, "value": "NaN"},
+        {"metric": {"case": "mixed"}, "value": "NaN"}
+      ]
     }
   ],
   "operator_error_cases": [
