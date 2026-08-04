@@ -128,7 +128,7 @@ correctness fallback.
 | `PQL-R16` | `idelta` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-033-idelta)); last-two-sample gauge increases/decreases, zero-interval/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R17` | `deriv` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-034-deriv)); timestamp-centered compensated least-squares slope, constant/IEEE behavior, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R18` | `predict_linear` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-035-predict_linear)); evaluation-time-centered compensated regression, scalar horizons, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
-| `PQL-R19` | `changes` | missing | yes | `RAW` | `API` | P0 |
+| `PQL-R19` | `changes` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-036-changes)); transition counting across finite, NaN, infinity, and signed-zero values, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R20` | `resets` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R21` | `double_exponential_smoothing` | missing | no | `RAW` | `API` | P1 |
 | `PQL-R22` | experimental `mad_over_time` | missing | no | `RAW` | `API` | EXP |

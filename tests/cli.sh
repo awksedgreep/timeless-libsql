@@ -3542,6 +3542,14 @@ db.executemany(
         ('rate_counter', '{"case":"reset"}', 10, 100.0),
         ('rate_counter', '{"case":"reset"}', 30, 150.0),
         ('rate_counter', '{"case":"reset"}', 50, 20.0),
+        ('changes_metric', '{"case":"repeated"}', 10, 1.0),
+        ('changes_metric', '{"case":"repeated"}', 20, 1.0),
+        ('changes_metric', '{"case":"repeated"}', 30, 2.0),
+        ('changes_metric', '{"case":"repeated"}', 40, 2.0),
+        ('changes_metric', '{"case":"repeated"}', 50, 1.0),
+        ('changes_metric', '{"case":"constant"}', 20, 7.0),
+        ('changes_metric', '{"case":"constant"}', 40, 7.0),
+        ('changes_metric', '{"case":"singleton"}', 50, 5.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
     ],
@@ -4061,6 +4069,41 @@ predict_linear_values = db.execute(
 assert predict_linear_values == [
     ('{"case":"reset"}', 60, 10.0),
     ('{"case":"steady"}', 60, 700.0),
+]
+
+changes_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,raw.ts sample_ts,raw.value"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    "),sequenced AS ("
+    " SELECT *,ROW_NUMBER() OVER (PARTITION BY series_id,ts ORDER BY sample_ts)"
+    " sample_number,LAG(value) OVER (PARTITION BY series_id,ts ORDER BY sample_ts)"
+    " previous_value FROM selected"
+    ") SELECT labels,ts,SUM(CASE WHEN sample_number=1 THEN 0"
+    " WHEN (value IS NULL)<>(previous_value IS NULL) THEN 1"
+    " WHEN value!=previous_value THEN 1 ELSE 0 END) value"
+    " FROM sequenced GROUP BY series_id,labels,ts ORDER BY labels,ts"
+)
+changes_values = db.execute(
+    changes_sql,
+    {
+        'metric': 'changes_metric',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+    },
+).fetchall()
+assert changes_values == [
+    ('{"case":"constant"}', 60, 0),
+    ('{"case":"repeated"}', 60, 2),
+    ('{"case":"singleton"}', 60, 0),
 ]
 
 minimum = db.execute(

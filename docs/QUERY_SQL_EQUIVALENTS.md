@@ -77,6 +77,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-033`](#sql-prom-033-idelta) | `PQL-R16` | current foundation | finite float-gauge last-two-sample difference without extrapolation or time normalization; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-PROM-034`](#sql-prom-034-deriv) | `PQL-R17` | current foundation | finite float-gauge least-squares slope over timestamp-centered public raw rows; API owns compensated/IEEE arithmetic, language, labels, limits, and envelopes |
 | [`SQL-PROM-035`](#sql-prom-035-predict_linear) | `PQL-R18` | current foundation | finite float-gauge least-squares forecast relative to each evaluation timestamp; API owns scalar-expression and compensated/IEEE semantics, labels, limits, and envelopes |
+| [`SQL-PROM-036`](#sql-prom-036-changes) | `PQL-R19` | current | exact ordered float-transition count, including row-projected NaN, infinity, signed zero, and singleton semantics; API owns language, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1147,6 +1148,78 @@ envelopes. It performs one bounded public packed raw read; no forecast-specific
 extension primitive is justified. Direct regression: `tests/cli.sh` section
 45; HTTP/oracle/reopen regression:
 `session_seven_promql_predict_linear_anchors_at_evaluation_time`.
+
+### SQL-PROM-036: `changes`
+
+Count adjacent value transitions in every `(T-window,T]` float slice. A
+repeated NaN is unchanged, NaN-to-number or number-to-NaN is one change, and
+SQLite numeric equality correctly treats `+0` and `-0` as equal:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.ts AS sample_ts,
+    raw.value
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+), sequenced AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY series_id, ts ORDER BY sample_ts
+    ) AS sample_number,
+    LAG(value) OVER (
+      PARTITION BY series_id, ts ORDER BY sample_ts
+    ) AS previous_value
+  FROM selected
+)
+SELECT
+  labels,
+  ts,
+  SUM(
+    CASE
+      WHEN sample_number = 1 THEN 0
+      WHEN (value IS NULL) <> (previous_value IS NULL) THEN 1
+      WHEN value != previous_value THEN 1
+      ELSE 0
+    END
+  ) AS value
+FROM sequenced
+GROUP BY series_id, labels, ts
+ORDER BY labels, ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
+seconds. `:filter_json` is the public matcher JSON accepted by `timeless_raw`,
+or NULL. Grid bounds are inclusive; windows are exactly `(T-window,T]`;
+canonical label/timestamp ordering is deterministic. A singleton emits `0`.
+Prometheus normally admits one float sample per series/timestamp; direct
+duplicates require an additional stable tie order.
+
+`timeless_raw` preserves IEEE bits internally and exposes a stored NaN as SQL
+NULL on ordinary SQLite row projection. Metric samples themselves are never
+missing, so the explicit NULL comparison above implements Prometheus's
+repeated-NaN rule without conflating it with absent samples. Infinities compare
+as numeric values and signed zeros compare equal. The Rust API uses the
+bit-exact packed raw surface, scans once without allocating another value
+vector, and owns PromQL syntax, metric-name removal, modifiers, subqueries,
+limits, cancellation, and HTTP envelopes. No transition-specific extension
+primitive is justified. Direct regression: `tests/cli.sh` section 45;
+HTTP/oracle/reopen regression:
+`session_seven_promql_changes_counts_float_transitions`.
 
 ### SQL-PROM-006: range selector
 

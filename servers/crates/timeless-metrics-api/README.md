@@ -36,7 +36,8 @@ selectors on instant queries, and
 `rate(selector[window])`, `irate(selector[window])`, and
 `increase(selector[window])`, plus float-gauge `delta(selector[window])` and
 `idelta(selector[window])`, and timestamp-centered least-squares
-`deriv(selector[window])` and `predict_linear(selector[window], horizon)`.
+`deriv(selector[window])`, `predict_linear(selector[window], horizon)`, and
+ordered float-transition `changes(selector[window])`.
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
@@ -78,7 +79,7 @@ The authoritative support contract is the
 Rust API rows at this revision are listed below for CI; prose in this README
 must not imply a broader language surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are
@@ -188,6 +189,10 @@ on the outer evaluation timestamp and evaluates the line at the scalar horizon
 in seconds. Selector `offset` and `@` affect sample selection without moving
 that forecast origin. The horizon may be any shipped scalar expression and is
 evaluated separately at every outer step; NaN and infinities remain values.
+Every `changes` path counts adjacent float transitions once in sample order.
+Repeated NaNs and either signed-zero order are unchanged; NaN-to-number,
+number-to-NaN, finite changes, and distinct infinities count normally. A
+singleton returns zero, while an empty window emits no series.
 Every `min_over_time` and `max_over_time` path uses ordered-comparison extrema,
 including first-sample signed-zero stability and Prometheus-compatible NaN handling.
 The numeric folds and count include packed whole-second windows plus raw
@@ -250,7 +255,7 @@ uses the bounded packed raw path because its interpolation and IEEE semantics
 do not match the nearest-rank storage kernel. `stddev_over_time` and
 `stdvar_over_time` also use the packed raw path and apply their population fold
 in Rust. `rate`, `irate`, `increase`, `delta`, `idelta`, `deriv`, and
-`predict_linear` use the same bounded packed raw path so the Rust evaluator
+`predict_linear` and `changes` use the same bounded packed raw path so the Rust evaluator
 can apply their distinct counter/gauge semantics. A root range selector reads public raw frames,
 applies the same open-left boundary, and returns a matrix only from an instant
 query; range-query use fails as `bad_data`. The Rust process writes the final vector/matrix response without

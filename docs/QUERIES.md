@@ -853,6 +853,9 @@ foundation.
 Evaluation-time-anchored gauge `predict_linear` is
 [`SQL-PROM-035`](QUERY_SQL_EQUIVALENTS.md#sql-prom-035-predict_linear); its
 `:horizon` is measured in seconds from each outer evaluation timestamp.
+Ordered float-transition `changes` is
+[`SQL-PROM-036`](QUERY_SQL_EQUIVALENTS.md#sql-prom-036-changes), including the
+public row surface's explicit SQL-NULL representation of stored NaN.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.
