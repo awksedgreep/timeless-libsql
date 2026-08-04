@@ -53,6 +53,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-009`](#sql-prom-009-aligned-selector-subquery) | `PQL-S09` | current foundation | exact open-left global subquery grid for a stored selector; API owns arbitrary inner expressions and range consumption |
 | [`SQL-PROM-010`](#sql-prom-010-unary-minus) | `PQL-O01` | current foundation | exact numeric negation over a bounded public grid; API owns types, envelopes, metric-name policy, limits, and cancellation |
 | [`SQL-PROM-011`](#sql-prom-011-comparison-filter-and-bool) | `PQL-O03` | current foundation | exact SQLite predicate/CASE over public grids; API owns AST types, name policy, matching, limits, and envelopes |
+| [`SQL-PROM-012`](#sql-prom-012-set-membership) | `PQL-O04` | current foundation | exact step-local many-to-many membership over public grids; API owns language, names, bounds, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -389,6 +390,84 @@ for `bool`, renders IEEE results, bounds cumulative work, checks cancellation,
 and writes Prometheus envelopes. Direct regression: `tests/cli.sh` section 33;
 HTTP/oracle/reopen regression:
 `session_four_promql_comparisons_filter_bool_bound_and_reopen`.
+
+### SQL-PROM-012: set membership
+
+PromQL set operators compare label signatures independently at every
+evaluation timestamp and ignore sample values while deciding membership. For
+two exact metric selectors, public grids make that operation ordinary SQL:
+
+```sql
+WITH
+lhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+),
+rhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT labels, ts, value
+FROM lhs
+WHERE EXISTS (
+  SELECT 1 FROM rhs
+  WHERE rhs.labels = lhs.labels AND rhs.ts = lhs.ts
+)
+ORDER BY labels, ts;
+```
+
+That is `lhs and rhs`. Change `EXISTS` to `NOT EXISTS` for `unless`. The
+left-preferred union for `or` is:
+
+```sql
+WITH
+lhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+),
+rhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT labels, ts, value FROM lhs
+UNION ALL
+SELECT rhs.labels, rhs.ts, rhs.value
+FROM rhs
+WHERE NOT EXISTS (
+  SELECT 1 FROM lhs
+  WHERE lhs.labels = rhs.labels AND lhs.ts = rhs.ts
+)
+ORDER BY labels, ts;
+```
+
+All time parameters use the metric table's native unit. Grid bounds are
+inclusive, each lookup window is open on the left, absent samples do not
+participate, values may be any SQLite REAL, and canonical label JSON makes
+equality exact and ordering deterministic. Set membership is many-to-many:
+every left series in a matching group survives `and`, every such series is
+removed by `unless`, and `or` keeps all left series while suppressing matching
+right series. For a side containing multiple metric names, `UNION ALL` the
+bounded public grids and carry a literal `name` column so the chosen side's
+name can be projected.
+
+The Rust API owns PromQL parsing, nameless/multi-name planning, per-step
+membership, source metric-name preservation, millisecond timestamps,
+intermediate/result/response limits, cancellation, and Prometheus envelopes.
+Direct executable regression: `tests/cli.sh` section 33; HTTP/oracle/reopen
+regression:
+`session_four_promql_set_operators_are_many_to_many_stepwise_and_reopen`.
 
 ### SQL-PROM-003: cross-series sum by label
 

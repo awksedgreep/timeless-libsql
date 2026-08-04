@@ -290,6 +290,32 @@ Direct SQL users can express both forms with a public-grid `WHERE` predicate
 or a `CASE`/boolean cast; see executable
 [`SQL-PROM-011`](QUERY_SQL_EQUIVALENTS.md#sql-prom-011-comparison-filter-and-bool).
 
+## PromQL set operators
+
+`and`, `or`, and `unless` compare instant vectors by every non-name label at
+each evaluation timestamp. They are true many-to-many membership operations,
+not arithmetic joins:
+
+```promql
+request_errors and requests_total
+request_errors unless maintenance_targets
+primary_measurements or fallback_measurements
+```
+
+`and` retains every matching left sample. `unless` retains every unmatched
+left sample. `or` retains every left sample and adds only right samples whose
+matching signature is absent on the left at that step. The contributing
+sample keeps its value, labels, and metric name. A range query repeats this
+decision independently on every grid point, so a right series can appear only
+at steps where no matching left sample exists.
+
+Both child vectors execute once. Their points count toward the cumulative
+intermediate-work limit, and membership/output loops check cancellation. Set
+operators reject scalar and matrix operands explicitly. Direct SQLite/libSQL
+users can implement the exact membership foundation with `EXISTS`,
+`NOT EXISTS`, and a left-preferred `UNION ALL`; see executable
+[`SQL-PROM-012`](QUERY_SQL_EQUIVALENTS.md#sql-prom-012-set-membership).
+
 ## Scalar aggregate without raw materialization
 
 ```sql

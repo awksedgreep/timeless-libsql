@@ -187,3 +187,33 @@ tests:
             value: 1
           - labels: '{host="b",zone="west"}'
             value: 1
+      - expr: 'query_contract_arithmetic_lhs and query_contract_arithmetic_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_arithmetic_lhs{host="a",zone="east"}'
+            value: 10
+          - labels: 'query_contract_arithmetic_lhs{host="b",zone="west"}'
+            value: 12
+      - expr: 'query_contract_arithmetic_lhs unless query_contract_arithmetic_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_arithmetic_lhs{host="c",zone="north"}'
+            value: 14
+      - expr: 'query_contract_arithmetic_lhs or query_contract_arithmetic_rhs'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_arithmetic_lhs{host="a",zone="east"}'
+            value: 10
+          - labels: 'query_contract_arithmetic_lhs{host="b",zone="west"}'
+            value: 12
+          - labels: 'query_contract_arithmetic_lhs{host="c",zone="north"}'
+            value: 14
+          - labels: 'query_contract_arithmetic_rhs{host="d",zone="south"}'
+            value: 6
+      - expr: 'query_contract_arithmetic_lhs and {__name__=~"query_contract_arithmetic_rhs(_duplicate)?"}'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_arithmetic_lhs{host="a",zone="east"}'
+            value: 10
+          - labels: 'query_contract_arithmetic_lhs{host="b",zone="west"}'
+            value: 12

@@ -266,6 +266,24 @@
       "evaluation_offset_ms": 30000,
       "drop_metric_name": true,
       "expected_values": [1]
+    },
+    {
+      "id": "PQL-O04-and-retains-left-value-name",
+      "query": "oracle_temporal and oracle_lookback",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-O04-unless-filters-matched-left",
+      "query": "oracle_temporal unless oracle_lookback",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-O04-or-prefers-matched-left",
+      "query": "oracle_temporal or oracle_lookback",
+      "evaluation_offset_ms": 30000,
+      "expected_values": [7]
     }
   ],
   "operator_error_cases": [

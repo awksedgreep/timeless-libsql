@@ -2019,6 +2019,12 @@ INSERT INTO ck(name, labels, ts, value) VALUES
   ('requests', '{"host":"a"}', 60, 50.0),
   ('arith_lhs', '{"host":"a"}', 60, 8.0),
   ('arith_rhs', '{"host":"a"}', 60, 2.0),
+  ('set_lhs', '{"host":"a"}', 60, 10.0),
+  ('set_lhs', '{"host":"b"}', 60, 20.0),
+  ('set_lhs', '{"host":"c"}', 60, 30.0),
+  ('set_rhs', '{"host":"a"}', 60, 100.0),
+  ('set_rhs', '{"host":"b"}', 60, 200.0),
+  ('set_rhs', '{"host":"d"}', 60, 400.0),
   ('lat', '{}', 0, 10.0), ('lat', '{}', 10, 11.0), ('lat', '{}', 20, 12.0),
   ('lat', '{}', 30, 13.0), ('lat', '{}', 40, 10.0), ('lat', '{}', 50, 11.0),
   ('lat', '{}', 60, 12.0), ('lat', '{}', 70, 13.0), ('lat', '{}', 80, 10.0),
@@ -2127,6 +2133,36 @@ SELECT 'comparison_filter', labels, ts, value
 SELECT 'comparison_bool', labels, ts, CAST(value > 5 AS REAL)
   FROM timeless_grid('ck','cpu','{"host":"a"}',0,60,60,60)
  ORDER BY labels, ts;
+-- SQL-PROM-012: step-local set membership over public grids
+WITH lhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','set_lhs',NULL,60,60,60,60)
+), rhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','set_rhs',NULL,60,60,60,60)
+)
+SELECT 'set_and',lhs.labels,lhs.ts,lhs.value FROM lhs
+ WHERE EXISTS (SELECT 1 FROM rhs WHERE rhs.labels=lhs.labels AND rhs.ts=lhs.ts)
+ ORDER BY lhs.labels,lhs.ts;
+WITH lhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','set_lhs',NULL,60,60,60,60)
+), rhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','set_rhs',NULL,60,60,60,60)
+)
+SELECT 'set_unless',lhs.labels,lhs.ts,lhs.value FROM lhs
+ WHERE NOT EXISTS (SELECT 1 FROM rhs WHERE rhs.labels=lhs.labels AND rhs.ts=lhs.ts)
+ ORDER BY lhs.labels,lhs.ts;
+WITH lhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','set_lhs',NULL,60,60,60,60)
+), rhs AS (
+  SELECT labels,ts,value FROM timeless_grid('ck','set_rhs',NULL,60,60,60,60)
+)
+SELECT 'set_or',labels,ts,value FROM (
+  SELECT labels,ts,value FROM lhs
+  UNION ALL
+  SELECT rhs.labels,rhs.ts,rhs.value FROM rhs
+   WHERE NOT EXISTS (
+     SELECT 1 FROM lhs WHERE lhs.labels=rhs.labels AND lhs.ts=rhs.ts
+   )
+) ORDER BY labels,ts;
 SQL
 )
 check_eq "pure-SQL reset-corrected increase == F7 kernel (45 over (0,40])" \
@@ -2175,6 +2211,9 @@ check_eq "SQL-PROM-004 executes every arithmetic operator with exact-label match
 check_eq "SQL-PROM-011 filters or maps comparisons over a public grid" \
   "$(grep -E '^comparison_(filter|bool)\|' <<<"$got")" \
 $'comparison_filter|{"host":"a"}|60|10.0\ncomparison_bool|{"host":"a"}|0|0.0\ncomparison_bool|{"host":"a"}|60|1.0'
+check_eq "SQL-PROM-012 executes step-local many-to-many set membership" \
+  "$(grep -E '^set_(and|unless|or)\|' <<<"$got")" \
+$'set_and|{"host":"a"}|60|10.0\nset_and|{"host":"b"}|60|20.0\nset_unless|{"host":"c"}|60|30.0\nset_or|{"host":"a"}|60|10.0\nset_or|{"host":"b"}|60|20.0\nset_or|{"host":"c"}|60|30.0\nset_or|{"host":"d"}|60|400.0'
 
 # ---------------------------------------------------------------------------
 echo "== section 34: embedding waist + resolved-series batch =="

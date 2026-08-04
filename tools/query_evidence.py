@@ -603,6 +603,29 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        set_narrow = measure(
+            "metrics-set-and-narrow",
+            lambda: promql(
+                'query_contract_cpu{host="h0000"} and '
+                'query_contract_cpu{host="h0000"}'
+            ),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        set_wide = measure(
+            "metrics-set-or-wide",
+            lambda: promql_range(
+                "query_contract_cpu or query_contract_cpu", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -866,6 +889,8 @@ def metrics_evidence(
                 "arithmetic_one_to_one_wide": arithmetic_wide,
                 "comparison_filter_narrow": comparison_narrow,
                 "comparison_bool_wide": comparison_wide,
+                "set_and_narrow": set_narrow,
+                "set_or_wide": set_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

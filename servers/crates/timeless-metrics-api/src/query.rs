@@ -415,6 +415,9 @@ enum PromBinaryOp {
     Less,
     GreaterOrEqual,
     LessOrEqual,
+    And,
+    Or,
+    Unless,
 }
 
 impl PromBinaryOp {
@@ -423,6 +426,10 @@ impl PromBinaryOp {
             self,
             Self::Add | Self::Subtract | Self::Multiply | Self::Divide | Self::Modulo | Self::Power
         )
+    }
+
+    fn is_set(self) -> bool {
+        matches!(self, Self::And | Self::Or | Self::Unless)
     }
 
     fn evaluate(self, lhs: f64, rhs: f64, filter_value: f64, return_bool: bool) -> Option<f64> {
@@ -441,6 +448,9 @@ impl PromBinaryOp {
                     Self::Less => lhs < rhs,
                     Self::GreaterOrEqual => lhs >= rhs,
                     Self::LessOrEqual => lhs <= rhs,
+                    Self::And | Self::Or | Self::Unless => {
+                        unreachable!("set operators are evaluated over vectors")
+                    }
                     _ => unreachable!("arithmetic handled above"),
                 };
                 if return_bool {
@@ -791,6 +801,9 @@ fn lower_promql_binary(
         token::T_LSS => PromBinaryOp::Less,
         token::T_GTE => PromBinaryOp::GreaterOrEqual,
         token::T_LTE => PromBinaryOp::LessOrEqual,
+        token::T_LAND => PromBinaryOp::And,
+        token::T_LOR => PromBinaryOp::Or,
+        token::T_LUNLESS => PromBinaryOp::Unless,
         _ => {
             return Err(format!("unsupported PromQL binary operator {}", binary.op));
         }
@@ -800,8 +813,13 @@ fn lower_promql_binary(
         .as_ref()
         .is_some_and(|modifier| modifier.return_bool);
     if let Some(modifier) = &binary.modifier {
+        let expected_cardinality = if op.is_set() {
+            matches!(modifier.card, VectorMatchCardinality::ManyToMany)
+        } else {
+            matches!(modifier.card, VectorMatchCardinality::OneToOne)
+        };
         if modifier.matching.is_some()
-            || !matches!(modifier.card, VectorMatchCardinality::OneToOne)
+            || !expected_cardinality
             || modifier.fill_values.lhs.is_some()
             || modifier.fill_values.rhs.is_some()
         {
@@ -810,6 +828,12 @@ fn lower_promql_binary(
     }
     let lhs = lower_promql_expr(*binary.lhs, lookback, depth)?;
     let rhs = lower_promql_expr(*binary.rhs, lookback, depth)?;
+    if op.is_set()
+        && (lhs.value_type() != PromValueType::Vector
+            || rhs.value_type() != PromValueType::Vector)
+    {
+        return Err("PromQL set operators require instant-vector operands".into());
+    }
     for operand in [&lhs, &rhs] {
         if !matches!(
             operand.value_type(),
@@ -2473,6 +2497,14 @@ fn apply_prometheus_binary(
     rhs: IntermediateValue,
     cancelled: &AtomicBool,
 ) -> Result<IntermediateValue, String> {
+    if op.is_set() {
+        return match (lhs, rhs) {
+            (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => Ok(
+                IntermediateValue::Vector(apply_set_vectors(op, lhs, rhs, cancelled)?),
+            ),
+            _ => Err("PromQL set operators require instant-vector operands".into()),
+        };
+    }
     match (lhs, rhs) {
         (IntermediateValue::Scalar(mut lhs), IntermediateValue::Scalar(rhs)) => {
             if lhs.len() != rhs.len() {
@@ -2520,6 +2552,99 @@ fn apply_prometheus_binary(
             )?))
         }
     }
+}
+
+fn apply_set_vectors(
+    op: PromBinaryOp,
+    lhs: Vec<IntermediateSeries>,
+    rhs: Vec<IntermediateSeries>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    debug_assert!(op.is_set());
+    let lhs_keys: Vec<_> = lhs
+        .iter()
+        .map(|series| default_matching_key(&series.labels))
+        .collect();
+    let rhs_keys: Vec<_> = rhs
+        .iter()
+        .map(|series| default_matching_key(&series.labels))
+        .collect();
+    let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
+    let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
+    let timestamps: BTreeSet<_> = lhs_by_timestamp
+        .keys()
+        .chain(rhs_by_timestamp.keys())
+        .copied()
+        .collect();
+    let mut lhs_output = vec![Vec::new(); lhs.len()];
+    let mut rhs_output = vec![Vec::new(); rhs.len()];
+
+    for timestamp in timestamps {
+        check_cancelled(cancelled)?;
+        let lhs_samples = lhs_by_timestamp
+            .get(&timestamp)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let rhs_samples = rhs_by_timestamp
+            .get(&timestamp)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let lhs_step_keys: BTreeSet<_> = lhs_samples
+            .iter()
+            .map(|(index, _)| &lhs_keys[*index])
+            .collect();
+        let rhs_step_keys: BTreeSet<_> = rhs_samples
+            .iter()
+            .map(|(index, _)| &rhs_keys[*index])
+            .collect();
+
+        match op {
+            PromBinaryOp::And => {
+                for (index, value) in lhs_samples {
+                    check_cancelled(cancelled)?;
+                    if rhs_step_keys.contains(&lhs_keys[*index]) {
+                        lhs_output[*index].push((timestamp, *value));
+                    }
+                }
+            }
+            PromBinaryOp::Unless => {
+                for (index, value) in lhs_samples {
+                    check_cancelled(cancelled)?;
+                    if !rhs_step_keys.contains(&lhs_keys[*index]) {
+                        lhs_output[*index].push((timestamp, *value));
+                    }
+                }
+            }
+            PromBinaryOp::Or => {
+                for (index, value) in lhs_samples {
+                    check_cancelled(cancelled)?;
+                    lhs_output[*index].push((timestamp, *value));
+                }
+                for (index, value) in rhs_samples {
+                    check_cancelled(cancelled)?;
+                    if !lhs_step_keys.contains(&rhs_keys[*index]) {
+                        rhs_output[*index].push((timestamp, *value));
+                    }
+                }
+            }
+            _ => unreachable!("set operator checked above"),
+        }
+    }
+
+    let output = lhs
+        .into_iter()
+        .zip(lhs_output)
+        .chain(rhs.into_iter().zip(rhs_output))
+        .filter_map(|(mut series, points)| {
+            if points.is_empty() {
+                None
+            } else {
+                series.points = points;
+                Some(series)
+            }
+        })
+        .collect();
+    normalize_prometheus_vector(output, cancelled)
 }
 
 fn apply_scalar_to_vector(

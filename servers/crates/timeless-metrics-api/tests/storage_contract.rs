@@ -837,7 +837,7 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
     for path in [
         "/prometheus/api/v1/query_range?start=0&end=10&step=1",
         "/prometheus/api/v1/query_range?query=rate%28prom_cpu%5B1m%5D%29&start=0&end=10&step=1",
-        "/prometheus/api/v1/query_range?query=prom_cpu%2Bother&start=0&end=10&step=1",
+        "/prometheus/api/v1/query_range?query=sum%28prom_cpu%29&start=0&end=10&step=1",
     ] {
         let error = get_json(&app, path).await;
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
@@ -2129,6 +2129,156 @@ async fn session_four_promql_comparisons_filter_bool_bound_and_reopen() {
     let reopened_app = router(reopened.clone());
     let recovered = prom_query(&reopened_app, "comparison_lhs == comparison_rhs", base + 10).await;
     assert_eq!(recovered.1, vector_filter.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_four_promql_set_operators_are_many_to_many_stepwise_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_four_set_operators.db");
+    let base = 1_700_430_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut victoria = String::new();
+    for (metric, host, zone, first, second) in [
+        ("set_lhs", "a", "east", 1.0, 10.0),
+        ("set_lhs", "b", "west", 2.0, 20.0),
+        ("set_lhs", "c", "north", 3.0, 30.0),
+        ("set_lhs_alt", "a", "east", 100.0, 110.0),
+        ("set_rhs", "a", "east", 4.0, 40.0),
+        ("set_rhs", "b", "west", 5.0, 50.0),
+        ("set_rhs_alt", "a", "east", 400.0, 410.0),
+    ] {
+        use std::fmt::Write;
+        writeln!(
+            victoria,
+            "{{\"metric\":{{\"__name__\":\"{metric}\",\"host\":\"{host}\",\"zone\":\"{zone}\"}},\"values\":[{first},{second}],\"timestamps\":[{},{}]}}",
+            base * 1_000,
+            (base + 10) * 1_000,
+        )
+        .unwrap();
+    }
+    use std::fmt::Write;
+    writeln!(
+        victoria,
+        "{{\"metric\":{{\"__name__\":\"set_rhs\",\"host\":\"d\",\"zone\":\"south\"}},\"values\":[60],\"timestamps\":[{}]}}",
+        (base + 10) * 1_000,
+    )
+    .unwrap();
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let and = prom_query(&app, "set_lhs and set_rhs", base + 10).await;
+    assert_eq!(and.0, StatusCode::OK, "{}", and.1);
+    assert_eq!(
+        and.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "set_lhs", "host": "a", "zone": "east"}, "value": [base + 10, "10"]},
+            {"metric": {"__name__": "set_lhs", "host": "b", "zone": "west"}, "value": [base + 10, "20"]}
+        ])
+    );
+
+    let unless = prom_query(&app, "set_lhs unless set_rhs", base + 10).await;
+    assert_eq!(unless.0, StatusCode::OK, "{}", unless.1);
+    assert_eq!(
+        unless.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "set_lhs", "host": "c", "zone": "north"},
+            "value": [base + 10, "30"]
+        }])
+    );
+
+    let or = prom_query(&app, "set_lhs or set_rhs", base + 10).await;
+    assert_eq!(or.0, StatusCode::OK, "{}", or.1);
+    assert_eq!(
+        or.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "set_lhs", "host": "a", "zone": "east"}, "value": [base + 10, "10"]},
+            {"metric": {"__name__": "set_lhs", "host": "b", "zone": "west"}, "value": [base + 10, "20"]},
+            {"metric": {"__name__": "set_lhs", "host": "c", "zone": "north"}, "value": [base + 10, "30"]},
+            {"metric": {"__name__": "set_rhs", "host": "d", "zone": "south"}, "value": [base + 10, "60"]}
+        ])
+    );
+
+    let many = prom_query(
+        &app,
+        "{__name__=~\"set_lhs(_alt)?\"} and {__name__=~\"set_rhs(_alt)?\"}",
+        base + 10,
+    )
+    .await;
+    assert_eq!(many.0, StatusCode::OK, "{}", many.1);
+    assert_eq!(many.1["data"]["result"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        many.1["data"]["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sample| sample["metric"]["__name__"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["set_lhs", "set_lhs", "set_lhs_alt"]
+    );
+
+    let range = prom_query_range(&app, "set_lhs or set_rhs", base, base + 10, 10).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    let rhs_d = range.1["data"]["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|series| series["metric"]["host"] == "d")
+        .unwrap();
+    assert_eq!(rhs_d["metric"]["__name__"], "set_rhs");
+    assert_eq!(rhs_d["values"], serde_json::json!([[base + 10, "60"]]));
+
+    let invalid = prom_query(&app, "1 and set_lhs", base).await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.1["errorType"], "bad_data");
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 3,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "set_lhs{host=\"a\"} and set_rhs{host=\"a\"}",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum intermediate-work limit of 3 points"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = prom_query(&reopened_app, "set_lhs or set_rhs", base + 10).await;
+    assert_eq!(recovered.1, or.1);
     drop(reopened_app);
     reopened.shutdown().await.unwrap();
 }
