@@ -519,6 +519,11 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             [(value, timestamp_ms + offset_ms) for value, offset_ms in points],
             labels,
         )
+    write_request += series(
+        "oracle_absent_window",
+        [(9.0, timestamp_ms + 20_000)],
+        {"case": "boundary", "service": "api"},
+    )
     return snappy_literal(write_request)
 
 

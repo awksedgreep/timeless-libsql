@@ -504,6 +504,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static NON_LOOPBACK_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn future_database_schema_fails_before_migration() {
@@ -555,6 +558,7 @@ mod tests {
 
     #[test]
     fn loopback_is_the_only_tcp_default() {
+        let _guard = NON_LOOPBACK_ENV.lock().unwrap();
         unsafe { std::env::remove_var("TIMELESS_ALLOW_NON_LOOPBACK") };
         assert!(validate_loopback("127.0.0.1:1".parse().unwrap()).is_ok());
         assert!(validate_loopback("[::1]:1".parse().unwrap()).is_ok());
@@ -563,6 +567,7 @@ mod tests {
 
     #[test]
     fn explicit_container_override_allows_non_loopback() {
+        let _guard = NON_LOOPBACK_ENV.lock().unwrap();
         unsafe { std::env::set_var("TIMELESS_ALLOW_NON_LOOPBACK", "1") };
         assert!(validate_loopback("0.0.0.0:1".parse().unwrap()).is_ok());
         unsafe { std::env::remove_var("TIMELESS_ALLOW_NON_LOOPBACK") };

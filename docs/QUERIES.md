@@ -934,6 +934,23 @@ parenthesized) selector become output labels. `__name__`, regex, negative,
 empty, duplicate, and composed-expression matchers do not. NaN is still a
 present sample. The executable public-grid equivalent is
 [`SQL-PROM-047`](QUERY_SQL_EQUIVALENTS.md#sql-prom-047-absent).
+
+Window absence uses the same output-label and sparse-result rules, but tests
+the exact PromQL range interval independently at every outer timestamp:
+
+```promql
+absent_over_time(up{job="api", instance=~"web-.*"}[5m])
+```
+
+Each window is open on the left and closed on the right. Any stored sample,
+including NaN, makes that step present and therefore removes it from the
+result. Direct range selectors derive their unique nonempty equality labels;
+subquery inputs are composed in Rust and derive none. The implementation
+reuses the shipped bounded `present_over_time` plan and then performs the
+step-local absence inversion, so limits and cancellation cover both stages.
+Direct SQLite/libSQL users have the executable public-raw anti-join in
+[`SQL-PROM-048`](QUERY_SQL_EQUIVALENTS.md#sql-prom-048-absent_over_time).
+
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

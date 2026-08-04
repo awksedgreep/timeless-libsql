@@ -1173,6 +1173,31 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        absent_over_time_narrow = measure(
+            "metrics-absent-over-time-missing-narrow",
+            lambda: promql(
+                'absent_over_time(query_contract_cpu{host="missing"}[30s])'
+            ),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        absent_over_time_wide = measure(
+            "metrics-absent-over-time-present-wide",
+            lambda: promql_range(
+                "absent_over_time(query_contract_cpu[30s])",
+                at - 30,
+                at,
+                10,
+            ),
+            matrix_point_cardinality,
+            0,
+            stat,
+            iterations,
+            warmup,
+        )
         arithmetic_narrow = measure(
             "metrics-arithmetic-vector-scalar-narrow",
             lambda: promql('query_contract_cpu{host="h0000"} * 2'),
@@ -1773,6 +1798,8 @@ def metrics_evidence(
                 "label_join_wide": label_join_wide,
                 "absent_narrow": absent_narrow,
                 "absent_wide": absent_wide,
+                "absent_over_time_narrow": absent_over_time_narrow,
+                "absent_over_time_wide": absent_over_time_wide,
                 "arithmetic_vector_scalar_narrow": arithmetic_narrow,
                 "arithmetic_one_to_one_wide": arithmetic_wide,
                 "comparison_filter_narrow": comparison_narrow,

@@ -1334,6 +1334,40 @@ fn lower_promql_expr(
                 labels,
             }))
         }
+        promql::Expr::Call(call) if call.func.name == "absent_over_time" => {
+            let [argument] = call.args.args.as_slice() else {
+                return Err("absent_over_time requires exactly one range vector".into());
+            };
+            let (input, labels) = match argument.as_ref() {
+                promql::Expr::MatrixSelector(selector) => {
+                    let window = duration_millis_i64(selector.range, "range")?;
+                    if window == 0 {
+                        return Err("PromQL range duration must be at least 1ms".into());
+                    }
+                    let selector = lower_promql_selector(selector.vs.clone())?;
+                    let labels = absent_selector_output_labels(&selector);
+                    (PromRangeInput::Selector { selector, window }, labels)
+                }
+                promql::Expr::Subquery(subquery) => (
+                    PromRangeInput::Subquery(lower_promql_subquery(
+                        subquery.clone(),
+                        lookback,
+                        depth + 1,
+                    )?),
+                    BTreeMap::new(),
+                ),
+                _ => return Err("absent_over_time requires a range vector".into()),
+            };
+            let present = PromPlan::RangeReduction(PromRangePlan {
+                op: PromRangeOp::Present,
+                input,
+                parameter: None,
+            });
+            Ok(PromPlan::Absent(PromAbsentPlan {
+                inner: Box::new(present),
+                labels,
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1481,6 +1515,10 @@ fn absent_output_labels(inner: &PromPlan) -> BTreeMap<String, String> {
     let PromPlan::Selector { selector, .. } = inner else {
         return BTreeMap::new();
     };
+    absent_selector_output_labels(selector)
+}
+
+fn absent_selector_output_labels(selector: &Selector) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     let mut seen = HashSet::new();
     for matcher in &selector.filter.matchers {

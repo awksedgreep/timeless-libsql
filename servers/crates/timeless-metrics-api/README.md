@@ -67,6 +67,11 @@ is empty otherwise; range results are sparse. A direct selector derives only
 its unique, nonempty equality labels, excluding `__name__`; composed inputs
 derive no labels. NaN counts as present, and every inspected grid step is
 charged to the cumulative work limit.
+`absent_over_time(range-vector)` applies the same sparse output and label rules
+to each exact open-left, closed-right sample window. It supports direct range
+selectors and subqueries, counts every IEEE sample as present, and charges the
+bounded range evaluation plus every inspected outer step to the cumulative
+work limit.
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves

@@ -3924,6 +3924,48 @@ assert absent_all == [
     ('{"case":"missing"}', 120, 1.0),
 ]
 
+absent_over_time_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "), present AS ("
+    " SELECT DISTINCT evaluation.ts FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    ") SELECT :output_labels_json labels,evaluation.ts,1.0 value"
+    " FROM evaluation LEFT JOIN present USING(ts)"
+    " WHERE present.ts IS NULL ORDER BY evaluation.ts"
+)
+absent_window = db.execute(
+    absent_over_time_sql,
+    {
+        'metric': 'absent_late',
+        'filter_json': '{"case":"late","service":"api"}',
+        'output_labels_json': '{"case":"late","service":"api"}',
+        'start': 100,
+        'end': 120,
+        'step': 10,
+        'window': 10,
+    },
+).fetchall()
+assert absent_window == [
+    ('{"case":"late","service":"api"}', 100, 1.0),
+    ('{"case":"late","service":"api"}', 120, 1.0),
+]
+absent_window_inclusive = db.execute(
+    absent_over_time_sql,
+    {
+        'metric': 'absent_late',
+        'filter_json': '{"case":"late"}',
+        'output_labels_json': '{"case":"late"}',
+        'start': 120,
+        'end': 120,
+        'step': 10,
+        'window': 11,
+    },
+).fetchall()
+assert absent_window_inclusive == []
+
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
     "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "

@@ -153,7 +153,7 @@ bounded frames.
 | `PQL-F09` | `label_replace`; full-match dot-all regex, numbered/named/literal-dollar captures, missing/empty sources, unmatched identity, destination deletion/overwrite, metric names, Prometheus 3 UTF-8 label names, incrementally bounded expansion, range grids, nesting, errors, limits, cancellation, and reopen are pinned | shipped | yes | none | `API` | P0 |
 | `PQL-F10` | `label_join` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-046-label_join)); ordered arbitrary sources, missing/empty/duplicate/zero sources, original-label snapshots, deletion/overwrite, metric names, Prometheus 3 UTF-8 label names, incrementally bounded output, ranges, nesting, errors, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F11` | `absent` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-047-absent)); present/empty vectors, step-local sparse ranges, unique nonempty equality-label derivation, metric/regex/negative/empty/duplicate exclusions, composed inputs, NaN presence, grid work, limits, cancellation, and reopen are pinned | shipped | yes | `CAT`, `SQL` | `API` | P0 |
-| `PQL-F12` | `absent_over_time` | missing | yes | `RAW`, `SQL` | `API` | P0 |
+| `PQL-F12` | `absent_over_time` | in progress | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-F13` | `sort` and `sort_desc` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F14` | experimental `sort_by_label`, `sort_by_label_desc` | missing | no | `SQL` | `API` | EXP |
 | `PQL-F15` | `scalar` and `vector` | missing | yes | `SQL` | `API` | P0 |

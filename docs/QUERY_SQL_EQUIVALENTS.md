@@ -1735,6 +1735,59 @@ error envelopes. No absence-specific extension primitive is warranted.
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_absent_derives_labels_per_step_and_reopens`.
 
+### SQL-PROM-048: `absent_over_time`
+
+Generate the evaluation grid, read the complete bounded raw interval once,
+and retain only steps whose open-left, closed-right window contains no sample
+from any selected series:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+), present AS (
+  SELECT DISTINCT evaluation.ts
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+)
+SELECT :output_labels_json AS labels,
+       evaluation.ts,
+       1.0 AS value
+FROM evaluation
+LEFT JOIN present USING (ts)
+WHERE present.ts IS NULL
+ORDER BY evaluation.ts;
+```
+
+`:start`, `:end`, `:step`, and `:window` use the metric table's configured
+timestamp unit (integer seconds for the default table); `:step` and `:window`
+must be positive. The evaluation bounds are inclusive, while each sample
+window is exactly `(evaluation.ts - :window, evaluation.ts]`. The query tests
+row existence rather than a projected SQL value, so every stored float class,
+including NaN, counts as present. It emits one `1.0` at each absent step and
+deterministically orders those timestamps.
+
+For a direct selector, bind `:output_labels_json` to the canonical object
+containing each unique, nonempty equality matcher except `__name__`; exclude
+regex, negative, empty, and duplicate matcher names. The Rust API derives that
+object, composes subqueries using `{}`, assembles sparse Prometheus vector or
+matrix envelopes, and enforces parser types, cumulative work/response limits,
+cancellation, and error semantics. Direct SQLite/libSQL callers already own
+the bounded selector and can bind the intended labels explicitly. The public
+raw read is complete and efficient enough, so no absence-specific extension
+primitive is justified.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_absent_over_time_pins_windows_subqueries_limits_and_reopen`.
+
 ### SQL-PROM-006: range selector
 
 At instant evaluation timestamp `:at`, return every stored float sample in

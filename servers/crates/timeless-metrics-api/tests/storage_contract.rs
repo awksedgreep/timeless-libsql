@@ -9608,6 +9608,164 @@ async fn session_eight_promql_absent_derives_labels_per_step_and_reopens() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_absent_over_time_pins_windows_subqueries_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_absent_over_time.db");
+    let base = 1_700_910_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "absent_window{{case=\"boundary\",service=\"api\"}} 9 {}\n",
+            "absent_window{{case=\"nan\",service=\"api\"}} NaN {}\n"
+        ),
+        base * 1_000,
+        (base + 20) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let boundary = prom_query(
+        &app,
+        "absent_over_time(absent_window{case=\"boundary\",service=\"api\"}[10s])",
+        base + 10,
+    )
+    .await;
+    assert_eq!(boundary.0, StatusCode::OK, "{}", boundary.1);
+    assert_eq!(
+        boundary.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "boundary", "service": "api"},
+            "value": [base + 10, "1"]
+        }])
+    );
+    let included = prom_query(
+        &app,
+        "absent_over_time(absent_window{case=\"boundary\"}[10001ms])",
+        base + 10,
+    )
+    .await;
+    assert_eq!(included.0, StatusCode::OK, "{}", included.1);
+    assert_eq!(included.1["data"]["result"], serde_json::json!([]));
+
+    let missing = prom_query(
+        &app,
+        "absent_over_time(absent_window{case=\"missing\",service=\"worker\",zone!=\"east\",host=~\"web.*\"}[10s])",
+        base + 20,
+    )
+    .await;
+    assert_eq!(missing.0, StatusCode::OK, "{}", missing.1);
+    assert_eq!(
+        missing.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "missing", "service": "worker"},
+            "value": [base + 20, "1"]
+        }])
+    );
+    let nan_present = prom_query(
+        &app,
+        "absent_over_time(absent_window{case=\"nan\"}[10s])",
+        base + 20,
+    )
+    .await;
+    assert_eq!(nan_present.0, StatusCode::OK, "{}", nan_present.1);
+    assert_eq!(nan_present.1["data"]["result"], serde_json::json!([]));
+
+    let sparse = prom_query_range(
+        &app,
+        "absent_over_time(absent_window{case=\"boundary\"}[10s])",
+        base,
+        base + 30,
+        10,
+    )
+    .await;
+    assert_eq!(sparse.0, StatusCode::OK, "{}", sparse.1);
+    assert_eq!(
+        sparse.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "boundary"},
+            "values": [[base + 10, "1"], [base + 20, "1"], [base + 30, "1"]]
+        }])
+    );
+
+    let subquery = prom_query(
+        &app,
+        "absent_over_time((abs(absent_window{case=\"missing\"}))[20s:10s])",
+        base + 20,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(
+        subquery.1["data"]["result"][0]["metric"],
+        serde_json::json!({})
+    );
+
+    for query in ["absent_over_time(absent_window)", "absent_over_time(1)"] {
+        let invalid = prom_query(&app, query, base + 20).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query_range(
+        &limited,
+        "absent_over_time(absent_window{case=\"missing\"}[10s])",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("intermediate-work limit"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "absent_over_time(absent_window{case=\"missing\",service=\"worker\"}[10s])",
+            base + 20,
+        )
+        .await
+        .1,
+        missing.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

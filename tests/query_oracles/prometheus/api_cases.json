@@ -2610,6 +2610,48 @@
       "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
       "expected_metric": {"case": "nope", "service": "api"},
       "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "PQL-F12-open-left-window-is-absent",
+      "query": "absent_over_time(oracle_absent_window{case=\"boundary\",service=\"api\"}[10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "boundary", "service": "api"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F12-millisecond-window-includes-boundary",
+      "query": "absent_over_time(oracle_absent_window{case=\"boundary\"}[10001ms])",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-F12-label-derivation-exclusions",
+      "query": "absent_over_time(oracle_absent_window{case=\"missing\",service=\"worker\",zone!=\"east\",host=~\"web.*\"}[10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "missing", "service": "worker"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F12-nan-counts-as-present",
+      "query": "absent_over_time(oracle_math{case=\"nan\"}[10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-F12-range-is-step-local-and-sparse",
+      "query": "absent_over_time(oracle_absent_window{case=\"boundary\"}[10s])",
+      "evaluation_offset_ms": 40000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 40000, "step": "10s"},
+      "expected_offsets_ms": [10000, 30000, 40000],
+      "expected_metric": {"case": "boundary"},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "PQL-F12-subquery-composition-has-no-derived-labels",
+      "query": "absent_over_time((abs(oracle_math{case=\"does_not_exist\"}))[20s:10s])",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
     }
   ],
   "operator_error_cases": [
@@ -2716,6 +2758,14 @@
       "status": 400,
       "error_type": "bad_data",
       "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-F12-argument-type-errors",
+      "query": "absent_over_time(oracle_math)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type range vector"
     }
   ],
   "cases": [
