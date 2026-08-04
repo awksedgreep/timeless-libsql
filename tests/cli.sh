@@ -3681,6 +3681,26 @@ assert cross_extrema == [
     ('api', 110, 20.0, 30.0),
 ]
 
+cross_count_group = db.execute(
+    "WITH selected AS ("
+    " SELECT ts,COALESCE(json_extract(labels,'$.service'),'') service"
+    " FROM timeless_grid('metrics',:metric,:filter_json,:start,:end,:step,:lookback)"
+    ") SELECT service,ts,COUNT(*),1 FROM selected"
+    " GROUP BY service,ts ORDER BY service,ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert cross_count_group == [
+    ('api', 100, 2, 1),
+    ('api', 110, 2, 1),
+]
+
 ratio = db.execute(
     "WITH errors AS ("
     " SELECT ts,labels,json_extract(labels,'$.host') host,value"

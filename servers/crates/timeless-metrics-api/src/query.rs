@@ -222,8 +222,8 @@ pub(crate) enum Aggregate {
     Avg,
     Min,
     Max,
-    Sum,
     Count,
+    Sum,
     Last,
     First,
     Rate,
@@ -408,6 +408,8 @@ enum PromAggregateOp {
     Avg,
     Min,
     Max,
+    Count,
+    Group,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -869,6 +871,8 @@ fn lower_promql_aggregate(
         token::T_AVG => PromAggregateOp::Avg,
         token::T_MIN => PromAggregateOp::Min,
         token::T_MAX => PromAggregateOp::Max,
+        token::T_COUNT => PromAggregateOp::Count,
+        token::T_GROUP => PromAggregateOp::Group,
         _ => {
             return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
         }
@@ -2685,6 +2689,8 @@ impl PromAggregateState {
                     self.value = value;
                 }
             }
+            PromAggregateOp::Count => self.count += 1.0,
+            PromAggregateOp::Group => {}
         }
     }
 
@@ -2694,6 +2700,8 @@ impl PromAggregateState {
             PromAggregateOp::Avg if self.incremental_mean => self.mean + self.compensation,
             PromAggregateOp::Avg => self.value / self.count + self.compensation / self.count,
             PromAggregateOp::Min | PromAggregateOp::Max => self.value,
+            PromAggregateOp::Count => self.count,
+            PromAggregateOp::Group => 1.0,
         }
     }
 }

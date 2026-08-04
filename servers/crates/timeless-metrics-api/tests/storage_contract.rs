@@ -3064,6 +3064,104 @@ async fn session_five_promql_min_max_group_ieee_range_and_reopen() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_count_group_include_all_values_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_count_group.db");
+    let base = 1_700_530_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let values = format!(
+        concat!(
+            "aggregate_count_group{{host=\"a\",region=\"east\"}} NaN {}\n",
+            "aggregate_count_group{{host=\"b\",region=\"east\"}} +Inf {}\n",
+            "aggregate_count_group{{host=\"c\",region=\"west\"}} -Inf {}\n",
+            "aggregate_count_group{{host=\"a\",region=\"east\"}} 1 {}\n",
+            "aggregate_count_group{{host=\"b\",region=\"east\"}} 2 {}\n",
+            "aggregate_count_group{{host=\"c\",region=\"west\"}} 3 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", values.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let count = prom_query(&app, "count by (region) (aggregate_count_group)", base).await;
+    assert_eq!(count.0, StatusCode::OK, "{}", count.1);
+    assert_eq!(
+        count.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base, "2"]},
+            {"metric": {"region": "west"}, "value": [base, "1"]}
+        ])
+    );
+    let group = prom_query(
+        &app,
+        "group without (__name__, host) (aggregate_count_group)",
+        base,
+    )
+    .await;
+    assert_eq!(group.0, StatusCode::OK, "{}", group.1);
+    assert_eq!(
+        group.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base, "1"]},
+            {"metric": {"region": "west"}, "value": [base, "1"]}
+        ])
+    );
+    let empty = prom_query(&app, "count(aggregate_count_group)", base).await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(
+        empty.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base, "3"]}])
+    );
+    let range = prom_query_range(
+        &app,
+        "count by (region) (aggregate_count_group)",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "2"], [base + 10, "2"]])
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "group without (__name__, host) (aggregate_count_group)",
+            base,
+        )
+        .await
+        .1,
+        group.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

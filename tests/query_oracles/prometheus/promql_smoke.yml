@@ -353,3 +353,17 @@ tests:
             value: 4
           - labels: '{region="west"}'
             value: 6
+      - expr: 'count by (region) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 2
+          - labels: '{region="west"}'
+            value: 1
+      - expr: 'group without (__name__, host) (query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{region="east"}'
+            value: 1
+          - labels: '{region="west"}'
+            value: 1

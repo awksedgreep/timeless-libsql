@@ -58,6 +58,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-014`](#sql-prom-014-group_left-and-group_right) | `PQL-O07` | current foundation | explicit many/one grid join and label copy; API owns uniqueness failures, name/value direction, limits, and envelopes |
 | [`SQL-PROM-015`](#sql-prom-015-cross-series-average-by-label) | `PQL-O10` | current foundation | bounded cross-series average; API owns compensated arithmetic, grouping syntax, labels, limits, and envelopes |
 | [`SQL-PROM-016`](#sql-prom-016-cross-series-minimum-and-maximum) | `PQL-O11` | current foundation | bounded cross-series extrema; API owns all-NaN behavior, grouping syntax, labels, limits, and envelopes |
+| [`SQL-PROM-017`](#sql-prom-017-cross-series-count-and-group) | `PQL-O12` | current foundation | bounded cross-series row count/presence; API owns grouping syntax, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -743,6 +744,46 @@ exists, and returns `NaN` for an all-NaN group exactly like Prometheus. It also
 owns language, labels, limits, cancellation, and envelopes. The statement is
 executed in `tests/cli.sh` section 45 and the exact API contract is
 `session_five_promql_min_max_group_ieee_range_and_reopen`.
+
+### SQL-PROM-017: cross-series count and group
+
+Count every selected series at each evaluation timestamp and derive PromQL's
+`group` presence value from the same public bounded grid:
+
+```sql
+WITH selected AS (
+  SELECT
+    ts,
+    COALESCE(json_extract(labels, '$.service'), '') AS service
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  json_object('service', service) AS labels,
+  ts,
+  COUNT(*) AS count_value,
+  1 AS group_value
+FROM selected
+GROUP BY service, ts
+ORDER BY service, ts;
+```
+
+`:metric` and `:filter_json` are text and a JSON matcher object (or SQL
+`NULL`); `:start`, `:end`, `:step`, and `:lookback` are epoch seconds. The
+public grid's output bounds are inclusive and its lookback is open-left.
+Missing `service` is normalized to the empty grouping value. `COUNT(*)`
+counts every selected sample, including values whose raw IEEE representation
+is NaN or infinity; unlike `COUNT(value)`, it does not discard a NaN exposed
+to SQLite as NULL. A non-empty group always yields the integer presence value
+one, and an empty input yields no row.
+
+The Rust API supplies `by`/`without`, `__name__` policy, Prometheus float
+strings, millisecond timestamps, limits, cancellation, and response/error
+envelopes. This parameterized statement executes in `tests/cli.sh` section
+45; the exact API contract is
+`session_five_promql_count_group_include_all_values_and_reopen`.
 
 ### SQL-PROM-004: vector arithmetic with label matching
 

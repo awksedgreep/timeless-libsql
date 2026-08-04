@@ -404,6 +404,9 @@ This preserves a finite mean for inputs such as two `f64::MAX` samples while
 retaining Prometheus `NaN` and infinity behavior.
 `min` and `max` ignore NaN when another value exists, retain signed
 infinities, and return `NaN` for an all-NaN group.
+`count` includes every selected sample regardless of its numeric value;
+`group` returns one for every non-empty group. Both accept the same
+`by`/`without` modifiers and produce no output for empty input.
 
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
@@ -416,6 +419,9 @@ the API adds Prometheus's compensated edge arithmetic.
 Direct SQL extrema are in executable
 [`SQL-PROM-016`](QUERY_SQL_EQUIVALENTS.md#sql-prom-016-cross-series-minimum-and-maximum),
 including the ordinary-SQL versus packed-NaN distinction.
+Cross-series count and presence use executable
+[`SQL-PROM-017`](QUERY_SQL_EQUIVALENTS.md#sql-prom-017-cross-series-count-and-group),
+which deliberately uses `COUNT(*)` so IEEE NaN rows are not lost as SQL NULL.
 
 ## Scalar aggregate without raw materialization
 
