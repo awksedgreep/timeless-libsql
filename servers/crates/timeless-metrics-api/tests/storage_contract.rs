@@ -1093,6 +1093,138 @@ async fn session_two_promql_string_literals_match_prometheus() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_promql_grid_and_lookback_match_prometheus() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two_promql_grid.db");
+    let base = 1_700_000_000_i64;
+    let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        "{{\"metric\":{{\"__name__\":\"grid_metric\",\"host\":\"a\"}},\"values\":[10.0],\"timestamps\":[{}]}}\n",
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let default_lookback = get_json(
+        &app,
+        &format!("/api/v1/query?query=grid_metric&time={}", base + 10),
+    )
+    .await;
+    assert_eq!(default_lookback.0, StatusCode::OK, "{}", default_lookback.1);
+    assert_eq!(
+        default_lookback.1["data"]["result"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let excluded = get_json(
+        &app,
+        &format!(
+            "/api/v1/query?query=grid_metric&time={}&lookback_delta=10s",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(excluded.0, StatusCode::OK, "{}", excluded.1);
+    assert_eq!(excluded.1["data"]["result"], serde_json::json!([]));
+
+    let included = get_json(
+        &app,
+        &format!(
+            "/api/v1/query?query=grid_metric&time={}&lookback_delta=10001ms",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(included.0, StatusCode::OK, "{}", included.1);
+    assert_eq!(included.1["data"]["result"].as_array().unwrap().len(), 1);
+
+    let zero_uses_default = get_json(
+        &app,
+        &format!(
+            "/api/v1/query?query=grid_metric&time={}&lookback_delta=0",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(
+        zero_uses_default.0,
+        StatusCode::OK,
+        "{}",
+        zero_uses_default.1
+    );
+    assert_eq!(
+        zero_uses_default.1["data"]["result"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let range = get_json(
+        &app,
+        &format!(
+            "/api/v1/query_range?query=grid_metric&start={base}.5&end={}&step=500ms&lookback_delta=10s",
+            base + 11
+        ),
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base as f64 + 0.5, "10"],
+            [base + 1, "10"],
+            [base as f64 + 1.5, "10"],
+            [base + 2, "10"],
+            [base as f64 + 2.5, "10"],
+            [base + 3, "10"],
+            [base as f64 + 3.5, "10"],
+            [base + 4, "10"],
+            [base as f64 + 4.5, "10"],
+            [base + 5, "10"],
+            [base as f64 + 5.5, "10"],
+            [base + 6, "10"],
+            [base as f64 + 6.5, "10"],
+            [base + 7, "10"],
+            [base as f64 + 7.5, "10"],
+            [base + 8, "10"],
+            [base as f64 + 8.5, "10"],
+            [base + 9, "10"],
+            [base as f64 + 9.5, "10"]
+        ])
+    );
+
+    let scalar_grid = get_json(
+        &app,
+        "/api/v1/query_range?query=1&start=0&end=1.1&step=500ms&lookback_delta=1s",
+    )
+    .await;
+    assert_eq!(scalar_grid.0, StatusCode::OK, "{}", scalar_grid.1);
+    assert_eq!(
+        scalar_grid.1["data"]["result"][0]["values"],
+        serde_json::json!([[0, "1"], [0.5, "1"], [1, "1"]])
+    );
+
+    let invalid = get_json(
+        &app,
+        "/api/v1/query?query=grid_metric&time=2&lookback_delta=1.5s",
+    )
+    .await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
+    assert_eq!(invalid.1["errorType"], "bad_data");
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_four_cancels_dropped_promql_requests_and_reuses_the_reader() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

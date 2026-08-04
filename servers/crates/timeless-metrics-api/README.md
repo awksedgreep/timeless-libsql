@@ -102,6 +102,13 @@ and applies exact `(T-window,T]` boundaries in Rust. This preserves the public
 storage format and Prometheus semantics without presenting a second-native
 extension kernel as millisecond-aware.
 
+Both query endpoints accept Prometheus's request-scoped `lookback_delta`.
+Omission and an explicit zero select the five-minute default; positive numeric
+seconds or compound duration syntax replace it. Selector samples use the exact
+open-left `(T-lookback,T]` boundary at every evaluation point. Range grids
+start exactly at `start`, advance by `step`, and include only points at or
+before `end`; a non-aligned `end` does not create a shortened final step.
+
 The query layer lowers plain selectors
 to `timeless_raw_frame` and performs a linear last-sample sweep over the exact
 five-minute `(T-lookback,T]` window. Whole-second `avg_over_time` lowers to

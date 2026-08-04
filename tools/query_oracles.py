@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -125,6 +126,48 @@ def free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def protobuf_varint(value: int) -> bytes:
+    encoded = bytearray()
+    while value >= 0x80:
+        encoded.append((value & 0x7F) | 0x80)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def protobuf_bytes(field: int, value: bytes) -> bytes:
+    return protobuf_varint((field << 3) | 2) + protobuf_varint(len(value)) + value
+
+
+def snappy_literal(value: bytes) -> bytes:
+    """Encode one raw-Snappy literal without an optional native dependency."""
+    length = len(value)
+    if length == 0:
+        return b"\x00"
+    encoded = bytearray(protobuf_varint(length))
+    adjusted = length - 1
+    if length <= 60:
+        encoded.append(adjusted << 2)
+    else:
+        width = max(1, (adjusted.bit_length() + 7) // 8)
+        encoded.append((59 + width) << 2)
+        encoded.extend(adjusted.to_bytes(width, "little"))
+    encoded.extend(value)
+    return bytes(encoded)
+
+
+def prometheus_remote_write(timestamp_ms: int) -> bytes:
+    def label(name: str, value: str) -> bytes:
+        return protobuf_bytes(1, name.encode()) + protobuf_bytes(2, value.encode())
+
+    sample = bytes([(1 << 3) | 1]) + struct.pack("<d", 7.0)
+    sample += protobuf_varint(2 << 3) + protobuf_varint(timestamp_ms)
+    series = protobuf_bytes(1, label("__name__", "oracle_lookback"))
+    series += protobuf_bytes(1, label("job", "oracle"))
+    series += protobuf_bytes(2, sample)
+    return snappy_literal(protobuf_bytes(1, series))
+
+
 def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
     oracle = manifest["oracles"]["prometheus"]
     fixture_path = next(
@@ -145,6 +188,10 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
         "-p",
         f"127.0.0.1:{port}:9090",
         oracle["image"],
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus",
+        "--web.listen-address=0.0.0.0:9090",
+        "--web.enable-remote-write-receiver",
     ]
     started = subprocess.run(command, text=True, capture_output=True, timeout=180)
     if started.returncode != 0:
@@ -164,6 +211,22 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
             print("prometheus API oracle did not become ready", file=sys.stderr)
             return 1
 
+        sample_timestamp_ms = int(time.time() * 1_000) - 1_000
+        write = urllib.request.Request(
+            base + "/api/v1/write",
+            data=prometheus_remote_write(sample_timestamp_ms),
+            headers={
+                "content-type": "application/x-protobuf",
+                "content-encoding": "snappy",
+                "x-prometheus-remote-write-version": "0.1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(write, timeout=10) as response:
+            if response.status != 204:
+                print(f"prometheus oracle remote write returned {response.status}", file=sys.stderr)
+                return 1
+
         failures = 0
         for case in fixture["cases"]:
             url = base + case["endpoint"] + "?" + urllib.parse.urlencode(case["params"])
@@ -180,6 +243,36 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                     f"got {status} {body!r}",
                     file=sys.stderr,
                 )
+                failures += 1
+            else:
+                print(f"{case['id']}: ok")
+        for case in fixture.get("lookback_cases", []):
+            evaluation_ms = sample_timestamp_ms + case["evaluation_offset_ms"]
+            params = {
+                "query": "oracle_lookback",
+                "time": str(evaluation_ms / 1_000),
+                "lookback_delta": case["lookback_delta"],
+            }
+            url = base + "/api/v1/query?" + urllib.parse.urlencode(params)
+            with urllib.request.urlopen(url, timeout=10) as response:
+                body = json.loads(response.read())
+            result = body.get("data", {}).get("result", [])
+            expected_count = case["expected_result_count"]
+            valid = (
+                response.status == 200
+                and body.get("status") == "success"
+                and body.get("data", {}).get("resultType") == "vector"
+                and len(result) == expected_count
+            )
+            if valid and expected_count == 1:
+                valid = result == [
+                    {
+                        "metric": {"__name__": "oracle_lookback", "job": "oracle"},
+                        "value": [evaluation_ms / 1_000, "7"],
+                    }
+                ]
+            if not valid:
+                print(f"{case['id']}: unexpected response {body!r}", file=sys.stderr)
                 failures += 1
             else:
                 print(f"{case['id']}: ok")

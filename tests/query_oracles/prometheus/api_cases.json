@@ -1,6 +1,26 @@
 {
   "schema_version": 1,
   "oracle": "prometheus-v3.13.2",
+  "lookback_cases": [
+    {
+      "id": "PQL-S16-open-lookback-boundary",
+      "evaluation_offset_ms": 2000,
+      "lookback_delta": "2s",
+      "expected_result_count": 0
+    },
+    {
+      "id": "PQL-S16-millisecond-lookback-inclusion",
+      "evaluation_offset_ms": 2000,
+      "lookback_delta": "2001ms",
+      "expected_result_count": 1
+    },
+    {
+      "id": "PQL-S16-zero-selects-default-lookback",
+      "evaluation_offset_ms": 2000,
+      "lookback_delta": "0",
+      "expected_result_count": 1
+    }
+  ],
   "cases": [
     {
       "id": "PQL-S06-root-range-vector-instant-type",
@@ -162,6 +182,25 @@
         "status": "error",
         "errorType": "bad_data",
         "error": "invalid parameter \"query\": invalid expression type \"string\" for range query, must be Scalar or instant Vector"
+      }
+    },
+    {
+      "id": "PQL-S16-non-aligned-grid-end",
+      "endpoint": "/api/v1/query_range",
+      "params": {
+        "query": "1",
+        "start": "0",
+        "end": "1.1",
+        "step": "500ms",
+        "lookback_delta": "1500ms"
+      },
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {
+          "resultType": "matrix",
+          "result": [{"metric": {}, "values": [[0, "1"], [0.5, "1"], [1, "1"]]}]
+        }
       }
     }
   ]

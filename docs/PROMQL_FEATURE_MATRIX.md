@@ -65,7 +65,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S13` | string literals and escaping | shipped | yes | none | `API` | P0 | Double-quoted escapes and raw backtick strings return the Prometheus instant `string` envelope; range queries reject string roots. |
 | `PQL-S14` | UTF-8 quoted metric names | missing | no | `CAT`, `RAW` | `API` | P2 | Add only with ingestion/name round-trip fixtures. |
 | `PQL-S15` | line comments | missing | no | none | `API` | P2 | Parser-only, but still requires complete-expression tests. |
-| `PQL-S16` | exact query grid and configurable lookback | partial | yes | `GRID`, `RAW` | `API` | P0 | Grid/lookback works for current selectors; apply to every expression. |
+| `PQL-S16` | exact query grid and configurable lookback | in progress | yes | `GRID`, `RAW` | `API` | P0 | Add request-scoped `lookback_delta`, exact millisecond boundary/grid fixtures, and apply one evaluation contract to every shipped expression. |
 | `PQL-S17` | Prometheus stale-marker semantics | partial | partial | `RAW` | `EXT` | P1 | See `QSF-004`; first decide whether ingest/storage preserves stale markers. The API consumes the resulting contract. |
 | `PQL-S18` | instant vector, range vector, scalar, and string types | partial | yes | `SQL` | `API` | P0 | Current Rust plans only produce vectors/matrices. |
 | `PQL-S19` | deterministic Prometheus error/result envelopes | partial | yes | none | `API` | P0 | Extend stable `bad_data` behavior to the whole grammar. |

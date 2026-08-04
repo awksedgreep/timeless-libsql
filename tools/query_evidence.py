@@ -293,6 +293,18 @@ def metrics_evidence(
             )
             return http(server.base, f"/api/v1/query_range?{query}")[1]
 
+        def promql_grid(expression: str) -> bytes:
+            query = urllib.parse.urlencode(
+                {
+                    "query": expression,
+                    "start": at - 10,
+                    "end": at,
+                    "step": "500ms",
+                    "lookback_delta": "10001ms",
+                }
+            )
+            return http(server.base, f"/api/v1/query_range?{query}")[1]
+
         stat = lambda: stats(server.base, "/select/metrics/stats")
         narrow = measure(
             "metrics-narrow",
@@ -385,6 +397,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        grid_lookback_narrow = measure(
+            "metrics-grid-lookback-narrow",
+            lambda: promql_grid('query_contract_cpu{host="h0000"}'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        grid_lookback_wide = measure(
+            "metrics-grid-lookback-wide",
+            lambda: promql_grid("query_contract_cpu"),
+            query_json_cardinality,
+            series,
+            stat,
+            iterations,
+            warmup,
+        )
         final_stats = stat()
         return {
             "build": identity,
@@ -408,6 +438,8 @@ def metrics_evidence(
                 "scalar_range_11000": scalar_range_limit,
                 "string_instant": string_instant,
                 "string_64k": string_64k,
+                "grid_lookback_narrow": grid_lookback_narrow,
+                "grid_lookback_wide": grid_lookback_wide,
             },
             "storage": {
                 key: final_stats[key]

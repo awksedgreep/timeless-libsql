@@ -397,13 +397,14 @@ pub(crate) fn range_request(params: &Params) -> Result<ReadRequest, String> {
 }
 
 pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest, String> {
-    params.ensure_only(&["query", "time"])?;
+    params.ensure_only(&["query", "time", "lookback_delta"])?;
     let query = params
         .get("query")
         .ok_or_else(|| "missing required parameter: query".to_string())?;
     let time = parse_prom_time(params.get("time"), now_millis())?;
+    let lookback = parse_prom_lookback(params.get("lookback_delta"), 300_000)?;
     Ok(ReadRequest::Prometheus {
-        plan: lower_promql(query)?,
+        plan: lower_promql(query, lookback)?,
         start: time,
         stop: time,
         step: 1_000,
@@ -412,7 +413,7 @@ pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest,
 }
 
 pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, String> {
-    params.ensure_only(&["query", "start", "end", "step"])?;
+    params.ensure_only(&["query", "start", "end", "step", "lookback_delta"])?;
     let query = params
         .get("query")
         .ok_or_else(|| "missing required parameter: query".to_string())?;
@@ -420,20 +421,21 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
     let start = parse_prom_time(params.get("start"), now.saturating_sub(3_600_000))?;
     let stop = parse_prom_time(params.get("end"), now)?;
     let step = parse_prom_step(params.get("step"), 60_000)?;
+    let lookback = parse_prom_lookback(params.get("lookback_delta"), 300_000)?;
     if stop < start {
         return Err("end timestamp must not be before start timestamp".into());
     }
     if step <= 0 {
         return Err("step must be positive".into());
     }
-    let grid_points = stop.saturating_sub(start) / step + 1;
+    let grid_points = (i128::from(stop) - i128::from(start)) / i128::from(step) + 1;
     if grid_points > 11_000 {
         return Err(
             "exceeded maximum resolution of 11000 points per timeseries — decrease the query resolution (increase step)"
                 .into(),
         );
     }
-    let plan = lower_promql(query)?;
+    let plan = lower_promql(query, lookback)?;
     match plan {
         PromPlan::RangeSelector { .. } => {
             return Err(
@@ -458,7 +460,7 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
     })
 }
 
-fn lower_promql(input: &str) -> Result<PromPlan, String> {
+fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
     let parsed = promql::parse(input).map_err(|error| format!("PromQL parse error: {error}"))?;
     let lower_selector = |selector: promql::VectorSelector| -> Result<_, String> {
         if selector.offset.is_some() || selector.at.is_some() {
@@ -499,7 +501,7 @@ fn lower_promql(input: &str) -> Result<PromPlan, String> {
             Ok(PromPlan::Selector {
                 metric,
                 filter,
-                lookback: 300_000,
+                lookback,
             })
         }
         promql::Expr::MatrixSelector(selector) => {
@@ -844,13 +846,35 @@ fn parse_prom_step(value: Option<&str>, default: i64) -> Result<i64, String> {
     let Some(value) = value else {
         return Ok(default);
     };
-    let duration = promql_parser::util::parse_duration(value)
-        .map_err(|error| format!("invalid step: {error}"))?;
-    let millis = i64::try_from(duration.as_millis()).map_err(|_| "step overflow".to_string())?;
+    let millis = parse_prom_duration_millis(value, "step")?;
     if millis <= 0 {
         return Err("step must be at least 1ms".into());
     }
     Ok(millis)
+}
+
+fn parse_prom_lookback(value: Option<&str>, default: i64) -> Result<i64, String> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let millis = parse_prom_duration_millis(value, "lookback delta")?;
+    Ok(if millis == 0 { default } else { millis })
+}
+
+fn parse_prom_duration_millis(value: &str, parameter: &str) -> Result<i64, String> {
+    if let Ok(seconds) = value.parse::<f64>() {
+        let millis = seconds * 1_000.0;
+        if !millis.is_finite() || millis < 0.0 || millis > i64::MAX as f64 {
+            return Err(format!("invalid {parameter}: {value}"));
+        }
+        return Ok(millis.round() as i64);
+    }
+    let duration = match promql_parser::util::parse_duration(value) {
+        Ok(duration) => duration,
+        Err(error) if error == "duration must be greater than 0" => return Ok(0),
+        Err(error) => return Err(format!("invalid {parameter}: {error}")),
+    };
+    i64::try_from(duration.as_millis()).map_err(|_| format!("{parameter} overflow"))
 }
 
 fn parse_duration(value: &str) -> Option<i64> {
@@ -2746,7 +2770,15 @@ mod tests {
         assert_eq!(parse_prom_step(Some("1h30m250ms"), 0).unwrap(), 5_400_250);
         assert_eq!(parse_prom_step(Some("0.5"), 0).unwrap(), 500);
         assert!(parse_prom_step(Some("0"), 0).is_err());
+        assert!(parse_prom_step(Some("-1"), 0).is_err());
+        assert!(parse_prom_step(Some("NaN"), 0).is_err());
         assert!(parse_prom_step(Some("1m1h"), 0).is_err());
+
+        assert_eq!(parse_prom_lookback(None, 300_000).unwrap(), 300_000);
+        assert_eq!(parse_prom_lookback(Some("0"), 300_000).unwrap(), 300_000);
+        assert_eq!(parse_prom_lookback(Some("0s"), 300_000).unwrap(), 300_000);
+        assert_eq!(parse_prom_lookback(Some("1501ms"), 300_000).unwrap(), 1_501);
+        assert!(parse_prom_lookback(Some("1.5s"), 300_000).is_err());
     }
 
     #[test]
@@ -2762,5 +2794,15 @@ mod tests {
             write_prometheus_timestamp(&mut output, timestamp);
             assert_eq!(String::from_utf8(output).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn prometheus_grid_size_rejects_extreme_ranges_without_overflow() {
+        let params = Params::parse(
+            Some("query=1&start=-9223372036854775.808&end=9223372036854775.807&step=0.001"),
+            b"",
+        );
+        let error = prometheus_range_request(&params).unwrap_err();
+        assert!(error.contains("maximum resolution"), "{error}");
     }
 }
