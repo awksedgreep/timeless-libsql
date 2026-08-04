@@ -63,6 +63,16 @@ def build_identity(binary: Path) -> dict:
     return json.loads(output)
 
 
+def require_build_identity(binary: Path, expected_commit: str) -> dict:
+    identity = build_identity(binary)
+    if identity.get("commit") != expected_commit:
+        raise RuntimeError(
+            f"{binary.name} build commit {identity.get('commit')!r} does not match "
+            f"evidence source {expected_commit!r}"
+        )
+    return identity
+
+
 def stats(base: str, path: str) -> dict:
     status, body, _ = http(base, path)
     if status != 200:
@@ -193,6 +203,10 @@ def metrics_evidence(
     iterations: int,
     warmup: int,
 ) -> dict:
+    expected_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    identity = require_build_identity(binary, expected_commit)
     server = Server(
         binary,
         extension,
@@ -283,7 +297,7 @@ def metrics_evidence(
         )
         final_stats = stat()
         return {
-            "build": build_identity(binary),
+            "build": identity,
             "fixture": {"series": series, "points_per_series": points, "logical_points": expected_points},
             "ingestion": {
                 "wire_bytes": len(payload),
@@ -329,6 +343,10 @@ def logs_evidence(
     iterations: int,
     warmup: int,
 ) -> dict:
+    expected_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    identity = require_build_identity(binary, expected_commit)
     server = Server(
         binary,
         extension,
@@ -404,7 +422,7 @@ def logs_evidence(
         )
         final_stats = stat()
         return {
-            "build": build_identity(binary),
+            "build": identity,
             "fixture": {"logical_entries": entries, "severities": severities, "typed_nested_metadata": True},
             "ingestion": {
                 "wire_bytes": len(payload),

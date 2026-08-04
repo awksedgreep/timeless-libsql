@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -37,6 +38,18 @@ class QueryEvidenceTests(unittest.TestCase):
         self.assertEqual(query_evidence.ndjson_cardinality(b"{}\n{}\n"), 2)
         with self.assertRaises(RuntimeError):
             query_evidence.query_json_cardinality(b'{"status":"error"}')
+
+    def test_evidence_rejects_a_stale_release_binary_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "identity"
+            binary.write_text(
+                "#!/bin/sh\nprintf '%s\\n' "
+                "'{\"commit\":\"old\",\"name\":\"test\"}'\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            with self.assertRaisesRegex(RuntimeError, "does not match evidence source"):
+                query_evidence.require_build_identity(binary, "new")
 
 
 if __name__ == "__main__":
