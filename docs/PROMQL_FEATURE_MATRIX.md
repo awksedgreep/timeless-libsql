@@ -157,7 +157,7 @@ bounded frames.
 | `PQL-F13` | `sort` and `sort_desc` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-049-sort-and-sort_desc)); ascending/descending instant order, NaN-last IEEE behavior, signed-zero preservation, labels/names, deterministic ties, nested and empty vectors, range-matrix label order, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F14` | experimental `sort_by_label`, `sort_by_label_desc` | missing | no | `SQL` | `API` | EXP |
 | `PQL-F15` | `scalar` and `vector` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-050-scalar-and-vector)); zero/one/multiple per-step cardinality, stored/result NaN, nameless vectors, exact instant/range types, nesting, grid work, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-F16` | `time` and `timestamp` | in progress | yes | `SQL` | `API` | P0 |
+| `PQL-F16` | `time` and `timestamp` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-051-time-and-timestamp)); millisecond evaluation clocks, stored-sample provenance, response timestamps, lookback, `offset`, `@`, composed-sample time, labels/names, IEEE samples, ranges, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-F17` | `minute`, `hour`, `day_of_week`, `day_of_month` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F18` | `day_of_year`, `days_in_month`, `month`, `year` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-F19` | `start`, `end`, `start_timestamp`, `step`, `range` | missing | partial | `SQL` | `API` | P2 |

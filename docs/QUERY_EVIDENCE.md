@@ -2003,3 +2003,41 @@ nameless vectors, nested conversions, type errors, limits, shutdown, and cold
 reopen. No storage, frame, batching, compression, index, rollup, retention,
 transaction, migration, or extension contract changed, and no new query-
 storage finding arose.
+
+## Session 8 `PQL-F16` evaluation and sample time
+
+The checked-in
+[`2026-08-04_session8_pql_f16.json`](evidence/2026-08-04_session8_pql_f16.json)
+was captured from exact extension and server build
+`59dc5d976ac98c283e4935753a8ea2a4e55f423f`. Both measured shapes execute
+`timestamp` directly over a selector, where correctness requires the selected
+stored sample timestamp rather than the outer response timestamp.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, instant `timestamp(metric{host="h0000"})` | 1 | 140 | 0.363 | 0.523 | 0.654 | 1 | 31 | 1 | 32 | 131 |
+| 512 series, instant `timestamp(metric)` | 512 | 40,766 | 3.033 | 3.208 | 3.678 | 512 | 15,872 | 512 | 16,384 | 53,831 |
+
+The direct timestamp plan reuses the normal bounded packed selector scan and
+decodes the chosen raw timestamp in place. It does not perform a second read,
+decode more samples, copy a frame, or change result cardinality. `time()`
+requires no storage read. For composed vector expressions, `timestamp` maps
+the already-bounded result to the outer evaluation clock, matching the oracle
+without pretending the normalized HTTP timestamp retained selector
+provenance. At 3.208 ms wide p95, the public raw waist and Rust planner are the
+correct boundary. Direct SQLite/libSQL users have the executable provenance
+join in `SQL-PROM-051`; no timestamp-specific extension primitive is
+justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 37,580 KiB. No benchmark request required cancellation; focused storage-
+work rejection and the shared dropped-request regression pin limits,
+cancellation, and reader reuse. Pinned oracle and real-extension tests cover
+millisecond evaluation clocks, direct selector provenance through lookback,
+`offset`, and `@`, normalized response timestamps, unary/value/label/sort/
+binary/aggregate/range-function creation time, metric-name removal, labels,
+stored NaN, instant and range results, errors, shutdown, and cold reopen.
+`QSF-056` records the provenance boundary. No storage, frame, batching,
+compression, index, rollup, retention, transaction, migration, or extension
+contract changed.
