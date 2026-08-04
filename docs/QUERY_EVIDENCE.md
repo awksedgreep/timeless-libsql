@@ -683,6 +683,37 @@ one-side uniqueness preflight using public grids. No extension opcode, private
 table, storage format, batching, compression, rollup, retention, transaction,
 or migration behavior changed.
 
+## Session 6 `PQL-R06` last value over time
+
+The checked-in
+[`2026-08-04_session6_pql_r06.json`](evidence/2026-08-04_session6_pql_r06.json)
+was captured from exact extension and server build
+`c119518dc29b85373656046f8fe7fabbc5817e77`. The API uses the public packed
+raw waist; direct SQLite users can select the same last value with
+`timeless_grid`.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `last_over_time(...[5m])` | 1 | 164 | 0.521 | 0.743 | 0.795 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `last_over_time(...[5m])` | 2,048 | 84,004 | 3.225 | 3.499 | 3.507 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide plan deliberately returns all 16,384 bounded inputs to Rust and
+selects 2,048 last values. That is more boundary work than the packed window
+reductions, but measured p95 remains 3.499 ms. A new packed-grid extension
+surface is therefore not justified; the row-oriented public grid already
+serves direct SQL users exactly, while the raw path keeps one packed crossing
+per metric and applies outer timestamps/subqueries in Rust.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,012 KiB. Pinned oracle and real-extension regressions cover
+open-left boundaries, empty windows, exact NaN/infinity/signed-zero selection,
+subqueries, exceptional metric-name retention, work limits, cancellation,
+shutdown, and cold reopen. The executable SQL recipe checks last-value and
+signed-zero fidelity. No extension primitive or storage, frame, batching,
+compression, index, rollup, retention, transaction, or migration behavior
+changed.
+
 ## Session 5 `PQL-O09` cross-series sum
 
 The checked-in
