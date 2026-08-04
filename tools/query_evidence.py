@@ -309,6 +309,22 @@ def metrics_evidence(
                     separators=(",", ":"),
                 )
             )
+        selector_names = 64
+        for index in range(selector_names):
+            lines.append(
+                json.dumps(
+                    {
+                        "metric": {
+                            "__name__": f"query_selector_metric_{index:04d}",
+                            "selector_group": "wide",
+                            "selector_id": f"s{index:04d}",
+                        },
+                        "values": [float(index + point) for point in range(points)],
+                        "timestamps": timestamps,
+                    },
+                    separators=(",", ":"),
+                )
+            )
         payload = ("\n".join(lines) + "\n").encode()
         started = time.perf_counter_ns()
         status, _, _ = http(server.base, "/api/v1/import", payload, "application/json")
@@ -321,7 +337,7 @@ def metrics_evidence(
         if status != 200:
             raise RuntimeError(f"metrics flush returned {status}: {flush_body!r}")
         after_flush = stats(server.base, "/select/metrics/stats")
-        expected_points = series * points
+        expected_points = (series + selector_names) * points
         if after_flush["completed_points"] != expected_points or after_flush["queued_points"] != 0:
             raise RuntimeError(f"metrics durable watermark mismatch: {after_flush}")
 
@@ -405,6 +421,24 @@ def metrics_evidence(
             lambda: promql("query_contract_cpu"),
             query_json_cardinality,
             series,
+            stat,
+            iterations,
+            warmup,
+        )
+        nameless_narrow = measure(
+            "metrics-nameless-narrow",
+            lambda: promql('{selector_id="s0000"}'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        nameless_wide = measure(
+            "metrics-nameless-wide",
+            lambda: promql('{selector_group="wide"}'),
+            query_json_cardinality,
+            selector_names,
             stat,
             iterations,
             warmup,
@@ -626,7 +660,12 @@ def metrics_evidence(
         final_stats = stat()
         return {
             "build": identity,
-            "fixture": {"series": series, "points_per_series": points, "logical_points": expected_points},
+            "fixture": {
+                "exact_metric_series": series,
+                "selector_metric_names": selector_names,
+                "points_per_series": points,
+                "logical_points": expected_points,
+            },
             "ingestion": {
                 "wire_bytes": len(payload),
                 "admission_ns": admission_ns,
@@ -649,6 +688,8 @@ def metrics_evidence(
             "queries": {
                 "narrow": narrow,
                 "wide": wide,
+                "nameless_narrow": nameless_narrow,
+                "nameless_wide": nameless_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

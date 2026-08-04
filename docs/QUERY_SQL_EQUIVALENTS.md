@@ -114,6 +114,14 @@ multi-metric selectors, preserving duplicate matcher AND semantics, and
 formatting the vector response. Direct regression: `tests/cli.sh` sections 22
 and 35.
 
+For a nameless selector, first enumerate distinct `name` values from
+`timeless_series('metrics')`, applying its optional matcher-aware arguments
+where possible, and execute this statement once per selected name. That
+catalog/read loop is the honest public SQL composition: SQLite cannot bind a
+table-valued function's hidden metric input from a correlated row on every
+supported extension host. The Rust API keeps the loop bounded and does not
+read unrelated metric payloads.
+
 ### SQL-PROM-002: `avg_over_time`
 
 Evaluate `avg_over_time(metric{...}[:window])` on the exact range-query grid:

@@ -25,8 +25,9 @@ retention commands.
 - Prometheus aliases for instant/range queries and label/series discovery
 
 The current PromQL slice supports scalar literals (including `NaN` and
-infinities), string literals, instant vector selectors, root range selectors on instant
-queries, and `avg_over_time(selector[window])`. It
+infinities), string literals, exact-name and nameless instant vector
+selectors, root range selectors on instant queries, and
+`avg_over_time(selector[window])`. It
 deliberately rejects every other
 function, operator, aggregation, subquery, offset, or modifier with a
 Prometheus `bad_data` response. There is no hidden Elixir fallback. The
@@ -138,8 +139,9 @@ inside evaluator and raw-fold loops. A deadline returns HTTP `504` with
 `errorType="execution"`. Auth claims may lower their own row, byte, and time
 allowances but cannot raise these owner limits.
 
-The query layer lowers plain selectors
-to `timeless_raw_frame` and performs a linear last-sample sweep over the exact
+The query layer catalog-prunes nameless selectors through `timeless_series`,
+then lowers each selected metric name to a bounded `timeless_raw_frame` call
+and performs a linear last-sample sweep over the exact
 five-minute `(T-lookback,T]` window. Whole-second `avg_over_time` lowers to
 `timeless_window_batches`; its raw fallback preserves `(T-window,T]`, grid
 timestamps, and Prometheus metric-name removal. A root range selector reads public raw frames,

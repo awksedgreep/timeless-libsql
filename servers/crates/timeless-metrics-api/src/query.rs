@@ -312,21 +312,9 @@ pub(crate) enum ReadRequest {
 pub(crate) enum PromPlan {
     Scalar(f64),
     String(String),
-    Selector {
-        metric: String,
-        filter: FilterPlan,
-        lookback: i64,
-    },
-    AvgOverTime {
-        metric: String,
-        filter: FilterPlan,
-        window: i64,
-    },
-    RangeSelector {
-        metric: String,
-        filter: FilterPlan,
-        window: i64,
-    },
+    Selector { selector: Selector, lookback: i64 },
+    AvgOverTime { selector: Selector, window: i64 },
+    RangeSelector { selector: Selector, window: i64 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -561,19 +549,19 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
             };
             matchers.push(Matcher::new(matcher.name, op, matcher.value)?);
         }
-        let metric = metric.ok_or_else(|| "nameless selectors are not shipped yet".to_string())?;
-        Ok((metric, FilterPlan::new(matchers)))
+        Ok(Selector {
+            metric: metric
+                .map(MetricSelection::Exact)
+                .unwrap_or(MetricSelection::All),
+            filter: FilterPlan::new(matchers),
+        })
     };
     match parsed {
         promql::Expr::NumberLiteral(number) => Ok(PromPlan::Scalar(number.val)),
         promql::Expr::StringLiteral(string) => Ok(PromPlan::String(string.val)),
         promql::Expr::VectorSelector(selector) => {
-            let (metric, filter) = lower_selector(selector)?;
-            Ok(PromPlan::Selector {
-                metric,
-                filter,
-                lookback,
-            })
+            let selector = lower_selector(selector)?;
+            Ok(PromPlan::Selector { selector, lookback })
         }
         promql::Expr::MatrixSelector(selector) => {
             let window = i64::try_from(selector.range.as_millis())
@@ -581,12 +569,8 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
             if window == 0 {
                 return Err("PromQL range duration must be at least 1ms".into());
             }
-            let (metric, filter) = lower_selector(selector.vs)?;
-            Ok(PromPlan::RangeSelector {
-                metric,
-                filter,
-                window,
-            })
+            let selector = lower_selector(selector.vs)?;
+            Ok(PromPlan::RangeSelector { selector, window })
         }
         promql::Expr::Call(call) if call.func.name == "avg_over_time" => {
             let [argument] = call.args.args.as_slice() else {
@@ -600,12 +584,8 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
             if window == 0 {
                 return Err("PromQL range duration must be at least 1ms".into());
             }
-            let (metric, filter) = lower_selector(selector.vs.clone())?;
-            Ok(PromPlan::AvgOverTime {
-                metric,
-                filter,
-                window,
-            })
+            let selector = lower_selector(selector.vs.clone())?;
+            Ok(PromPlan::AvgOverTime { selector, window })
         }
         other => Err(format!(
             "unsupported PromQL expression (parsed as {})",
@@ -1028,9 +1008,8 @@ impl QueryFeatures {
             .map_err(|error| format!("read extension query capabilities: {error}"))?;
         let capabilities: serde_json::Value = serde_json::from_str(&capability_document)
             .map_err(|error| format!("decode extension query capabilities: {error}"))?;
-        let has_work_limit = |surface: &str| {
-            capabilities["query_surfaces"][surface]["max_work_points"] == true
-        };
+        let has_work_limit =
+            |surface: &str| capabilities["query_surfaces"][surface]["max_work_points"] == true;
         Ok(Self {
             table,
             latest_frame: modules.contains("timeless_latest_frame"),
@@ -1237,6 +1216,45 @@ fn all_metrics(conn: &Connection, table: MetricsTable) -> Result<Vec<String>, St
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("collect metric discovery: {error}"))?;
     Ok(metrics)
+}
+
+fn prometheus_catalogs(
+    conn: &Connection,
+    table: MetricsTable,
+    selector: &Selector,
+    cancelled: &AtomicBool,
+) -> Result<Vec<(String, Vec<SeriesMeta>)>, String> {
+    let metrics = match &selector.metric {
+        MetricSelection::Exact(metric) => vec![metric.clone()],
+        MetricSelection::Regex(regex) => all_metrics(conn, table)?
+            .into_iter()
+            .filter(|metric| regex.is_match(metric))
+            .collect(),
+        MetricSelection::All => all_metrics(conn, table)?,
+    };
+    let mut selected = Vec::new();
+    for metric in metrics {
+        check_cancelled(cancelled)?;
+        let catalog = catalog(conn, table, &metric, &selector.filter)?;
+        if !catalog.is_empty() {
+            selected.push((metric, catalog));
+        }
+    }
+    Ok(selected)
+}
+
+fn consume_prometheus_work(
+    remaining: &mut usize,
+    work_points: usize,
+    limits: PromQueryLimits,
+) -> Result<(), String> {
+    *remaining = remaining.checked_sub(work_points).ok_or_else(|| {
+        format!(
+            "query exceeded the maximum storage-work limit of {} points",
+            limits.max_work_points
+        )
+    })?;
+    Ok(())
 }
 
 fn decode_labels(value: &str) -> Result<BTreeMap<String, String>, String> {
@@ -1791,28 +1809,25 @@ fn execute_prometheus(
             execute_prometheus_scalar(*value, start, stop, step, instant, limits, cancelled)
         }
         PromPlan::String(value) => execute_prometheus_string(value, start, instant, limits),
-        PromPlan::Selector {
-            metric,
-            filter,
-            lookback,
-        } => execute_prometheus_selector(
-            conn, features, metric, filter, start, stop, step, *lookback, instant, limits, cancelled,
+        PromPlan::Selector { selector, lookback } => execute_prometheus_selector(
+            conn, features, selector, start, stop, step, *lookback, instant, limits, cancelled,
         ),
-        PromPlan::AvgOverTime {
-            metric,
-            filter,
-            window,
-        } if features.window_batches
-            && features.window_batch_work_limit
-            && [start, stop, step, *window]
-                .into_iter()
-                .all(|value| value % 1_000 == 0) =>
+        PromPlan::AvgOverTime { selector, window }
+            if features.window_batches
+                && features.window_batch_work_limit
+                && matches!(selector.metric, MetricSelection::Exact(_))
+                && [start, stop, step, *window]
+                    .into_iter()
+                    .all(|value| value % 1_000 == 0) =>
         {
+            let MetricSelection::Exact(metric) = &selector.metric else {
+                unreachable!("exact metric required by window guard")
+            };
             execute_prometheus_window(
                 conn,
                 features.table,
                 metric,
-                filter,
+                &selector.filter,
                 start / 1_000,
                 stop / 1_000,
                 step / 1_000,
@@ -1822,19 +1837,11 @@ fn execute_prometheus(
                 cancelled,
             )
         }
-        PromPlan::AvgOverTime {
-            metric,
-            filter,
-            window,
-        } => execute_prometheus_avg_raw(
-            conn, features, metric, filter, start, stop, step, *window, instant, limits, cancelled,
+        PromPlan::AvgOverTime { selector, window } => execute_prometheus_avg_raw(
+            conn, features, selector, start, stop, step, *window, instant, limits, cancelled,
         ),
-        PromPlan::RangeSelector {
-            metric,
-            filter,
-            window,
-        } => execute_prometheus_range_selector(
-            conn, features, metric, filter, stop, *window, limits, cancelled,
+        PromPlan::RangeSelector { selector, window } => execute_prometheus_range_selector(
+            conn, features, selector, stop, *window, limits, cancelled,
         ),
     }
 }
@@ -1925,76 +1932,85 @@ fn execute_prometheus_scalar(
 fn execute_prometheus_range_selector(
     conn: &Connection,
     features: QueryFeatures,
-    metric: &str,
-    filter: &FilterPlan,
+    selector: &Selector,
     evaluation_time: i64,
     window: i64,
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let lower = evaluation_time.saturating_sub(window);
-    let catalog = catalog(conn, features.table, metric, filter)?;
-    let raw = raw_query(
-        conn,
-        features,
-        metric,
-        filter,
-        storage_seconds_floor(lower),
-        storage_seconds_floor(evaluation_time),
-        Some(limits.max_work_points),
-    )?;
-    let by_id: HashMap<_, _> = raw
-        .series
-        .iter()
-        .map(|series| (series.id, series))
-        .collect();
+    let catalogs = prometheus_catalogs(conn, features.table, selector, cancelled)?;
     let mut body = br#"{"status":"success","data":{"resultType":"matrix","result":["#.to_vec();
     enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_u64;
     let mut points = 0_u64;
-    for meta in &catalog {
+    let mut frame_bytes = 0_usize;
+    let mut remaining_work = limits.max_work_points;
+    for (metric, catalog) in catalogs {
         check_cancelled(cancelled)?;
-        let Some(series) = by_id.get(&meta.id) else {
-            continue;
-        };
-        let item_start = body.len();
-        comma(&mut body, emitted as usize);
-        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, false, limits)?;
-        enforce_prometheus_output(&body, points, limits)?;
-        let mut item_points = 0_u64;
-        for index in 0..series.len() {
-            check_cancelled(cancelled)?;
-            let timestamp = seconds_to_millis(series.timestamp(raw.frame.as_deref(), index)?);
-            if timestamp <= lower || timestamp > evaluation_time {
-                continue;
-            }
-            admit_prometheus_point(points.saturating_add(item_points), limits)?;
-            comma(&mut body, item_points as usize);
-            write_prometheus_sample(
-                &mut body,
-                timestamp,
-                series.value(raw.frame.as_deref(), index)?,
-            )?;
-            item_points += 1;
-            enforce_prometheus_output(
-                &body,
-                points.saturating_add(item_points),
-                limits,
-            )?;
+        if remaining_work == 0 {
+            return Err(format!(
+                "query exceeded the maximum storage-work limit of {} points",
+                limits.max_work_points
+            ));
         }
-        if item_points == 0 {
-            body.truncate(item_start);
-        } else {
-            write_prometheus_item_suffix(&mut body, false);
-            emitted += 1;
-            points = points.saturating_add(item_points);
+        let raw = raw_query(
+            conn,
+            features,
+            &metric,
+            &selector.filter,
+            storage_seconds_floor(lower),
+            storage_seconds_floor(evaluation_time),
+            Some(remaining_work),
+        )?;
+        let work_points = raw.series.iter().map(RawSeries::len).sum();
+        consume_prometheus_work(&mut remaining_work, work_points, limits)?;
+        frame_bytes = frame_bytes.saturating_add(raw.frame_bytes);
+        let by_id: HashMap<_, _> = raw
+            .series
+            .iter()
+            .map(|series| (series.id, series))
+            .collect();
+        for meta in &catalog {
+            check_cancelled(cancelled)?;
+            let Some(series) = by_id.get(&meta.id) else {
+                continue;
+            };
+            let item_start = body.len();
+            comma(&mut body, emitted as usize);
+            write_prometheus_item_prefix(&mut body, Some(&metric), &meta.labels, false, limits)?;
+            enforce_prometheus_output(&body, points, limits)?;
+            let mut item_points = 0_u64;
+            for index in 0..series.len() {
+                check_cancelled(cancelled)?;
+                let timestamp = seconds_to_millis(series.timestamp(raw.frame.as_deref(), index)?);
+                if timestamp <= lower || timestamp > evaluation_time {
+                    continue;
+                }
+                admit_prometheus_point(points.saturating_add(item_points), limits)?;
+                comma(&mut body, item_points as usize);
+                write_prometheus_sample(
+                    &mut body,
+                    timestamp,
+                    series.value(raw.frame.as_deref(), index)?,
+                )?;
+                item_points += 1;
+                enforce_prometheus_output(&body, points.saturating_add(item_points), limits)?;
+            }
+            if item_points == 0 {
+                body.truncate(item_start);
+            } else {
+                write_prometheus_item_suffix(&mut body, false);
+                emitted += 1;
+                points = points.saturating_add(item_points);
+            }
         }
     }
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
         body,
-        frame_bytes: raw.frame_bytes,
+        frame_bytes,
         series: emitted,
         points,
         rows: points,
@@ -2005,8 +2021,7 @@ fn execute_prometheus_range_selector(
 fn execute_prometheus_selector(
     conn: &Connection,
     features: QueryFeatures,
-    metric: &str,
-    filter: &FilterPlan,
+    selector: &Selector,
     start: i64,
     stop: i64,
     step: i64,
@@ -2015,85 +2030,100 @@ fn execute_prometheus_selector(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, features.table, metric, filter)?;
-    let raw = raw_query(
-        conn,
-        features,
-        metric,
-        filter,
-        storage_seconds_floor(start.saturating_sub(lookback)),
-        storage_seconds_floor(stop),
-        Some(limits.max_work_points),
-    )?;
-    let by_id: HashMap<_, _> = raw
-        .series
-        .iter()
-        .map(|series| (series.id, series))
-        .collect();
+    let catalogs = prometheus_catalogs(conn, features.table, selector, cancelled)?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
     enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_usize;
     let mut points = 0_u64;
-    for meta in &catalog {
+    let mut frame_bytes = 0_usize;
+    let mut remaining_work = limits.max_work_points;
+    for (metric, catalog) in catalogs {
         check_cancelled(cancelled)?;
-        let Some(series) = by_id.get(&meta.id) else {
-            continue;
-        };
-        let item_start = body.len();
-        comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, Some(metric), &meta.labels, instant, limits)?;
-        enforce_prometheus_output(&body, points, limits)?;
-        let mut lo = 0_usize;
-        let mut hi = 0_usize;
-        let mut item_points = 0_u64;
-        let mut t = start;
-        loop {
-            check_cancelled(cancelled)?;
-            while hi < series.len()
-                && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
-            {
-                hi += 1;
-            }
-            let lower = t.saturating_sub(lookback);
-            while lo < hi && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
-            {
-                lo += 1;
-            }
-            if hi > lo {
-                admit_prometheus_point(points.saturating_add(item_points), limits)?;
-                if !instant {
-                    comma(&mut body, item_points as usize);
-                }
-                write_prometheus_sample(&mut body, t, series.value(raw.frame.as_deref(), hi - 1)?)?;
-                item_points += 1;
-                enforce_prometheus_output(
-                    &body,
-                    points.saturating_add(item_points),
-                    limits,
-                )?;
-            }
-            if t >= stop {
-                break;
-            }
-            let Some(next) = t.checked_add(step).filter(|next| *next <= stop) else {
-                break;
-            };
-            t = next;
+        if remaining_work == 0 {
+            return Err(format!(
+                "query exceeded the maximum storage-work limit of {} points",
+                limits.max_work_points
+            ));
         }
-        if item_points == 0 {
-            body.truncate(item_start);
-        } else {
-            write_prometheus_item_suffix(&mut body, instant);
-            emitted += 1;
-            points = points.saturating_add(item_points);
+        let raw = raw_query(
+            conn,
+            features,
+            &metric,
+            &selector.filter,
+            storage_seconds_floor(start.saturating_sub(lookback)),
+            storage_seconds_floor(stop),
+            Some(remaining_work),
+        )?;
+        let work_points = raw.series.iter().map(RawSeries::len).sum();
+        consume_prometheus_work(&mut remaining_work, work_points, limits)?;
+        frame_bytes = frame_bytes.saturating_add(raw.frame_bytes);
+        let by_id: HashMap<_, _> = raw
+            .series
+            .iter()
+            .map(|series| (series.id, series))
+            .collect();
+        for meta in &catalog {
+            check_cancelled(cancelled)?;
+            let Some(series) = by_id.get(&meta.id) else {
+                continue;
+            };
+            let item_start = body.len();
+            comma(&mut body, emitted);
+            write_prometheus_item_prefix(&mut body, Some(&metric), &meta.labels, instant, limits)?;
+            enforce_prometheus_output(&body, points, limits)?;
+            let mut lo = 0_usize;
+            let mut hi = 0_usize;
+            let mut item_points = 0_u64;
+            let mut t = start;
+            loop {
+                check_cancelled(cancelled)?;
+                while hi < series.len()
+                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
+                {
+                    hi += 1;
+                }
+                let lower = t.saturating_sub(lookback);
+                while lo < hi
+                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
+                {
+                    lo += 1;
+                }
+                if hi > lo {
+                    admit_prometheus_point(points.saturating_add(item_points), limits)?;
+                    if !instant {
+                        comma(&mut body, item_points as usize);
+                    }
+                    write_prometheus_sample(
+                        &mut body,
+                        t,
+                        series.value(raw.frame.as_deref(), hi - 1)?,
+                    )?;
+                    item_points += 1;
+                    enforce_prometheus_output(&body, points.saturating_add(item_points), limits)?;
+                }
+                if t >= stop {
+                    break;
+                }
+                let Some(next) = t.checked_add(step).filter(|next| *next <= stop) else {
+                    break;
+                };
+                t = next;
+            }
+            if item_points == 0 {
+                body.truncate(item_start);
+            } else {
+                write_prometheus_item_suffix(&mut body, instant);
+                emitted += 1;
+                points = points.saturating_add(item_points);
+            }
         }
     }
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
         body,
-        frame_bytes: raw.frame_bytes,
+        frame_bytes,
         series: emitted as u64,
         points,
         rows: points,
@@ -2174,11 +2204,7 @@ fn execute_prometheus_window(
                 value,
             )?;
             item_points += 1;
-            enforce_prometheus_output(
-                &body,
-                points.saturating_add(item_points),
-                limits,
-            )?;
+            enforce_prometheus_output(&body, points.saturating_add(item_points), limits)?;
         }
         if item_points == 0 {
             body.truncate(item_start);
@@ -2203,8 +2229,7 @@ fn execute_prometheus_window(
 fn execute_prometheus_avg_raw(
     conn: &Connection,
     features: QueryFeatures,
-    metric: &str,
-    filter: &FilterPlan,
+    selector: &Selector,
     start: i64,
     stop: i64,
     step: i64,
@@ -2213,90 +2238,101 @@ fn execute_prometheus_avg_raw(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, features.table, metric, filter)?;
-    let raw = raw_query(
-        conn,
-        features,
-        metric,
-        filter,
-        storage_seconds_floor(start.saturating_sub(window)),
-        storage_seconds_floor(stop),
-        Some(limits.max_work_points),
-    )?;
-    let by_id: HashMap<_, _> = raw
-        .series
-        .iter()
-        .map(|series| (series.id, series))
-        .collect();
+    let catalogs = prometheus_catalogs(conn, features.table, selector, cancelled)?;
     let mut body = Vec::new();
     write_prometheus_prefix(&mut body, instant);
     enforce_prometheus_output(&body, 0, limits)?;
     let mut emitted = 0_usize;
     let mut points = 0_u64;
-    for meta in &catalog {
+    let mut frame_bytes = 0_usize;
+    let mut remaining_work = limits.max_work_points;
+    for (metric, catalog) in catalogs {
         check_cancelled(cancelled)?;
-        let Some(series) = by_id.get(&meta.id) else {
-            continue;
-        };
-        let item_start = body.len();
-        comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, None, &meta.labels, instant, limits)?;
-        enforce_prometheus_output(&body, points, limits)?;
-        let mut lo = 0_usize;
-        let mut hi = 0_usize;
-        let mut item_points = 0_u64;
-        let mut t = start;
-        loop {
-            check_cancelled(cancelled)?;
-            while hi < series.len()
-                && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
-            {
-                hi += 1;
-            }
-            let lower = t.saturating_sub(window);
-            while lo < hi && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
-            {
-                lo += 1;
-            }
-            if hi > lo {
-                let mut sum = 0.0;
-                for index in lo..hi {
-                    check_cancelled(cancelled)?;
-                    sum += series.value(raw.frame.as_deref(), index)?;
-                }
-                admit_prometheus_point(points.saturating_add(item_points), limits)?;
-                if !instant {
-                    comma(&mut body, item_points as usize);
-                }
-                write_prometheus_sample(&mut body, t, sum / (hi - lo) as f64)?;
-                item_points += 1;
-                enforce_prometheus_output(
-                    &body,
-                    points.saturating_add(item_points),
-                    limits,
-                )?;
-            }
-            if t >= stop {
-                break;
-            }
-            let Some(next) = t.checked_add(step).filter(|next| *next <= stop) else {
-                break;
-            };
-            t = next;
+        if remaining_work == 0 {
+            return Err(format!(
+                "query exceeded the maximum storage-work limit of {} points",
+                limits.max_work_points
+            ));
         }
-        if item_points == 0 {
-            body.truncate(item_start);
-        } else {
-            write_prometheus_item_suffix(&mut body, instant);
-            emitted += 1;
-            points = points.saturating_add(item_points);
+        let raw = raw_query(
+            conn,
+            features,
+            &metric,
+            &selector.filter,
+            storage_seconds_floor(start.saturating_sub(window)),
+            storage_seconds_floor(stop),
+            Some(remaining_work),
+        )?;
+        let work_points = raw.series.iter().map(RawSeries::len).sum();
+        consume_prometheus_work(&mut remaining_work, work_points, limits)?;
+        frame_bytes = frame_bytes.saturating_add(raw.frame_bytes);
+        let by_id: HashMap<_, _> = raw
+            .series
+            .iter()
+            .map(|series| (series.id, series))
+            .collect();
+        for meta in &catalog {
+            check_cancelled(cancelled)?;
+            let Some(series) = by_id.get(&meta.id) else {
+                continue;
+            };
+            let item_start = body.len();
+            comma(&mut body, emitted);
+            write_prometheus_item_prefix(&mut body, None, &meta.labels, instant, limits)?;
+            enforce_prometheus_output(&body, points, limits)?;
+            let mut lo = 0_usize;
+            let mut hi = 0_usize;
+            let mut item_points = 0_u64;
+            let mut t = start;
+            loop {
+                check_cancelled(cancelled)?;
+                while hi < series.len()
+                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), hi)?) <= t
+                {
+                    hi += 1;
+                }
+                let lower = t.saturating_sub(window);
+                while lo < hi
+                    && seconds_to_millis(series.timestamp(raw.frame.as_deref(), lo)?) <= lower
+                {
+                    lo += 1;
+                }
+                if hi > lo {
+                    let mut sum = 0.0;
+                    for index in lo..hi {
+                        check_cancelled(cancelled)?;
+                        sum += series.value(raw.frame.as_deref(), index)?;
+                    }
+                    admit_prometheus_point(points.saturating_add(item_points), limits)?;
+                    if !instant {
+                        comma(&mut body, item_points as usize);
+                    }
+                    write_prometheus_sample(&mut body, t, sum / (hi - lo) as f64)?;
+                    item_points += 1;
+                    enforce_prometheus_output(&body, points.saturating_add(item_points), limits)?;
+                }
+                if t >= stop {
+                    break;
+                }
+                let Some(next) = t.checked_add(step).filter(|next| *next <= stop) else {
+                    break;
+                };
+                t = next;
+            }
+            if item_points == 0 {
+                body.truncate(item_start);
+            } else {
+                write_prometheus_item_suffix(&mut body, instant);
+                emitted += 1;
+                points = points.saturating_add(item_points);
+            }
         }
     }
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
         body,
-        frame_bytes: raw.frame_bytes,
+        frame_bytes,
         series: emitted as u64,
         points,
         rows: points,
@@ -3021,6 +3057,21 @@ mod tests {
         ]);
         assert!(selector.filter.matches(&labels));
         assert!(!selector.filter.matches(&BTreeMap::new()));
+    }
+
+    #[test]
+    fn promql_nameless_selectors_lower_to_catalog_expansion() {
+        let PromPlan::Selector { selector, lookback } =
+            lower_promql(r#"{job="api",region=""}"#, 300_000).unwrap()
+        else {
+            panic!("nameless selector lowered to the wrong plan")
+        };
+        assert!(matches!(selector.metric, MetricSelection::All));
+        assert_eq!(selector.filter.matchers.len(), 2);
+        assert_eq!(lookback, 300_000);
+
+        let error = lower_promql(r#"{job=~".*"}"#, 300_000).unwrap_err();
+        assert!(error.contains("at least one non-empty matcher"), "{error}");
     }
 
     #[test]

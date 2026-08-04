@@ -213,9 +213,7 @@ async fn prometheus_read_route(
             Bytes::from(output.body),
         )
             .into_response(),
-        Ok(Err(error)) => {
-            prometheus_error(StatusCode::UNPROCESSABLE_ENTITY, "execution", error)
-        }
+        Ok(Err(error)) => prometheus_error(StatusCode::UNPROCESSABLE_ENTITY, "execution", error),
     }
 }
 

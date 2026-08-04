@@ -873,6 +873,168 @@ async fn session_four_pins_promql_selector_window_errors_and_reopen() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_three_promql_nameless_selectors_expand_before_reads_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_three_nameless.db");
+    let base = 1_700_100_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        2,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = format!(
+        concat!(
+            "{{\"metric\":{{\"__name__\":\"nameless_alpha\",\"job\":\"api\",\"host\":\"a\"}},",
+            "\"values\":[1.0,2.0],\"timestamps\":[{},{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"nameless_beta\",\"job\":\"api\",\"host\":\"b\"}},",
+            "\"values\":[3.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"nameless_gamma\",\"job\":\"db\"}},",
+            "\"values\":[4.0],\"timestamps\":[{}]}}\n",
+            "{{\"metric\":{{\"__name__\":\"nameless_no_job\",\"host\":\"z\"}},",
+            "\"values\":[5.0],\"timestamps\":[{}]}}"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let instant = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7Bjob%3D%22api%22%7D&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(instant.0, StatusCode::OK);
+    assert_eq!(
+        instant.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "nameless_alpha", "host": "a", "job": "api"},
+                "value": [base + 10, "2"]
+            },
+            {
+                "metric": {"__name__": "nameless_beta", "host": "b", "job": "api"},
+                "value": [base + 10, "3"]
+            }
+        ])
+    );
+
+    let missing_as_empty = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7Bjob%3D%22api%22%2Cregion%3D%22%22%7D&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(missing_as_empty.0, StatusCode::OK);
+    assert_eq!(
+        missing_as_empty.1["data"]["result"],
+        instant.1["data"]["result"]
+    );
+
+    let range = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query_range?query=%7Bjob%3D%22api%22%7D&start={base}&end={}&step=10",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK);
+    assert_eq!(range.1["data"]["result"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base + 10, "2"]])
+    );
+
+    let average = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=avg_over_time%28%7Bjob%3D%22api%22%7D%5B20s%5D%29&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(average.0, StatusCode::OK);
+    assert_eq!(
+        average.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a", "job": "api"}, "value": [base + 10, "1.5"]},
+            {"metric": {"host": "b", "job": "api"}, "value": [base + 10, "3"]}
+        ])
+    );
+
+    let empty_matching_only = get_json(
+        &app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7Bjob%3D~%22.%2A%22%7D&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(empty_matching_only.0, StatusCode::BAD_REQUEST);
+    assert_eq!(empty_matching_only.1["errorType"], "bad_data");
+    assert!(empty_matching_only.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("at least one non-empty matcher"));
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_result_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = get_json(
+        &limited,
+        &format!(
+            "/prometheus/api/v1/query?query=%7Bjob%3D%22api%22%7D&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("maximum result-point limit of 1"));
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let recovered = get_json(
+        &reopened_app,
+        &format!(
+            "/prometheus/api/v1/query?query=%7Bjob%3D%22api%22%7D&time={}",
+            base + 10
+        ),
+    )
+    .await;
+    assert_eq!(recovered.1, instant.1);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
@@ -1530,13 +1692,13 @@ async fn session_two_promql_limits_bound_grid_work_results_response_and_deadline
             ..PromQueryLimits::default()
         },
     );
-    for query in ["limit_metric%5B10s%5D", "avg_over_time%28limit_metric%5B10s%5D%29"] {
+    for query in [
+        "limit_metric%5B10s%5D",
+        "avg_over_time%28limit_metric%5B10s%5D%29",
+    ] {
         let work = get_json(
             &work_app,
-            &format!(
-                "/prometheus/api/v1/query?query={query}&time={}",
-                base + 2
-            ),
+            &format!("/prometheus/api/v1/query?query={query}&time={}", base + 2),
         )
         .await;
         assert_eq!(work.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", work.1);
@@ -1580,9 +1742,7 @@ async fn session_two_promql_limits_bound_grid_work_results_response_and_deadline
         )
         .unwrap();
     }
-    assert_no_content(
-        post_body(&ingest_app, "/api/v1/import", deadline_fixture.as_bytes()).await,
-    );
+    assert_no_content(post_body(&ingest_app, "/api/v1/import", deadline_fixture.as_bytes()).await);
     assert_eq!(
         post_json(&ingest_app, "/api/v1/flush").await.0,
         StatusCode::OK
@@ -1617,7 +1777,14 @@ async fn session_two_promql_limits_bound_grid_work_results_response_and_deadline
     assert_eq!(recovered.0, StatusCode::OK, "{}", recovered.1);
     assert_eq!(recovered.1["data"]["result"][0]["value"][1], "3");
 
-    drop((grid_app, result_app, work_app, response_app, deadline_app, ingest_app));
+    drop((
+        grid_app,
+        result_app,
+        work_app,
+        response_app,
+        deadline_app,
+        ingest_app,
+    ));
     storage.shutdown().await.unwrap();
     drop(storage);
 

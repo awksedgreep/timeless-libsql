@@ -125,6 +125,30 @@ payloads. New blocks carry a collision-free service/operation pair term; if a
 selected legacy block lacks the generation marker, operation discovery falls
 back to exact block-at-a-time decode. Upgrades therefore remain complete.
 
+## PromQL nameless selectors
+
+The Rust metrics API accepts Prometheus selectors that identify series only
+by labels. For example, this instant query selects every metric name whose
+series has `job="api"`:
+
+```text
+GET /prometheus/api/v1/query?query=%7Bjob%3D%22api%22%7D&time=1700100010
+```
+
+The planner first reads metric names and matching series through
+`timeless_series`, without decoding chunks. It then issues one bounded,
+exact-metric `timeless_raw_frame` read for each selected name and composes the
+Prometheus result in Rust. Metric names and canonical labels determine stable
+output order. Label matchers retain anchored-regex and missing-as-empty
+semantics; the upstream-invalid `{job=~".*"}` form fails because every matcher
+can match the empty string.
+
+Direct SQL users perform the same two public steps: enumerate candidate
+`name` values with `timeless_series('metrics')`, then bind each name to
+[`SQL-PROM-001`](QUERY_SQL_EQUIVALENTS.md#sql-prom-001-instant-selector).
+There is intentionally no PromQL parser or special nameless-selector opcode in
+the extension.
+
 ## Scalar aggregate without raw materialization
 
 ```sql
