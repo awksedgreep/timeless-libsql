@@ -1721,3 +1721,33 @@ evaluator cancellation pins reader reuse. Pinned oracle and real-extension
 tests cover all six functions, valid and invalid domains, endpoint
 infinities, NaN, signed zero, range grids, nesting, invalid types, limits,
 shutdown, and cold reopen. No extension or storage contract changed.
+
+## Session 8 `PQL-F07` trigonometric and hyperbolic transforms
+
+The checked-in
+[`2026-08-04_session8_pql_f07.json`](evidence/2026-08-04_session8_pql_f07.json)
+was captured from exact extension and server build
+`0c102531f0b5386404c51cef6d503d6a7612f515`. The measured `sin` shapes use
+one bounded public packed-raw read and apply the transform in place. `cos`,
+`cosh`, `sinh`, `tan`, and `tanh` use the same plan and allocation shape.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `sin(metric)` | 1 | 148 | 0.690 | 1.015 | 1.030 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `sin(metric)` | 2,048 | 99,974 | 5.424 | 7.820 | 8.875 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The transform adds no scalar child, second read, or result copy. `QSF-052`
+tracks the measured transcendental-family tails: storage work is identical to
+neighboring single-vector transforms, while the API computes and serializes
+2,048 nontrivial decimal results. Direct SQLite/libSQL users have the same
+standard valid-domain functions through `SQL-PROM-044`; pushing them into a
+new extension primitive would not avoid the selected-vector decode or final
+response work.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 37,524 KiB. No benchmark request required cancellation; shared composed-
+evaluator cancellation pins reader reuse. Pinned oracle and real-extension
+tests cover all six functions, finite values, trigonometric infinity NaNs,
+hyperbolic infinities, signed zero, range grids, nesting, invalid types,
+limits, shutdown, and cold reopen. No extension or storage contract changed.
