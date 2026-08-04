@@ -619,6 +619,30 @@
         {"metric": {"value": "+Inf"}, "value": 1},
         {"metric": {"value": "NaN"}, "value": 1}
       ]
+    },
+    {
+      "id": "PQL-O16-count-values-utf8-label-name",
+      "query": "count_values(\"value label\", oracle_aggregation{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"value label": "3"}, "value": 1}
+      ]
+    },
+    {
+      "id": "PQL-O14-topk-tie-input-order",
+      "query": "topk(1, oracle_rank_tie)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"__name__": "oracle_rank_tie", "host": "a", "job": "oracle"}, "value": 5}
+      ]
+    },
+    {
+      "id": "PQL-O14-bottomk-tie-input-order",
+      "query": "bottomk(1, oracle_rank_tie)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"__name__": "oracle_rank_tie", "host": "a", "job": "oracle"}, "value": 5}
+      ]
     }
   ],
   "operator_error_cases": [

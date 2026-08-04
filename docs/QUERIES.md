@@ -416,6 +416,9 @@ complete original labels and metric name. Fractional `k` truncates toward
 zero; values below one return no series; NaN and positive overflow are errors.
 Numeric values outrank NaN in both directions, so NaN is returned only when a
 partition has fewer than `k` numeric samples.
+Prometheus does not define which equal-valued series wins a cutoff tie;
+Timeless uses canonical labels as a deterministic tie-break without claiming
+that label choice as cross-engine language behavior.
 `quantile(q, vector)` sorts each group at each evaluation step and linearly
 interpolates rank `q * (N - 1)`. Raw NaN participates at the low end of the
 rank; `q < 0`, `q > 1`, and NaN `q` produce `-Inf`, `+Inf`, and NaN.

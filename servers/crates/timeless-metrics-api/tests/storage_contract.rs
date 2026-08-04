@@ -3298,7 +3298,9 @@ async fn session_five_promql_topk_bottomk_rank_per_step_and_reopen() {
             "aggregate_rank_limit{{host=\"b\"}} 2 {}\n",
             "aggregate_rank_limit{{host=\"c\"}} 3 {}\n",
             "aggregate_rank_limit{{host=\"d\"}} 4 {}\n",
-            "aggregate_rank_limit{{host=\"e\"}} 5 {}\n"
+            "aggregate_rank_limit{{host=\"e\"}} 5 {}\n",
+            "aggregate_rank_tie{{host=\"a\"}} 5 {}\n",
+            "aggregate_rank_tie{{host=\"b\"}} 5 {}\n"
         ),
         base * 1_000,
         base * 1_000,
@@ -3309,6 +3311,8 @@ async fn session_five_promql_topk_bottomk_rank_per_step_and_reopen() {
         (base + 10) * 1_000,
         (base + 10) * 1_000,
         (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
         base * 1_000,
         base * 1_000,
         base * 1_000,
@@ -3362,6 +3366,13 @@ async fn session_five_promql_topk_bottomk_rank_per_step_and_reopen() {
         with_nan.1["data"]["result"][2]["value"][1],
         serde_json::json!("NaN")
     );
+    for operation in ["topk", "bottomk"] {
+        let tied = prom_query(&app, &format!("{operation}(1, aggregate_rank_tie)"), base).await;
+        assert_eq!(tied.0, StatusCode::OK, "{}: {}", operation, tied.1);
+        assert_eq!(tied.1["data"]["result"].as_array().unwrap().len(), 1);
+        assert_eq!(tied.1["data"]["result"][0]["metric"]["host"], "a");
+        assert_eq!(tied.1["data"]["result"][0]["value"][1], "5");
+    }
 
     let range = prom_query_range(
         &app,
@@ -3675,6 +3686,45 @@ async fn session_five_promql_count_values_formats_groups_ranges_and_reopens() {
         .as_str()
         .unwrap()
         .contains("invalid label name"));
+    let utf8 = prom_query(
+        &app,
+        "count_values(\"value label\", aggregate_values{host=\"a\"})",
+        base,
+    )
+    .await;
+    assert_eq!(utf8.0, StatusCode::OK, "{}", utf8.1);
+    assert_eq!(utf8.1["data"]["result"][0]["metric"]["value label"], "1");
+    for query in [
+        "sum(aggregate_values{host=\"missing\"})",
+        "avg(aggregate_values{host=\"missing\"})",
+        "min(aggregate_values{host=\"missing\"})",
+        "max(aggregate_values{host=\"missing\"})",
+        "count(aggregate_values{host=\"missing\"})",
+        "group(aggregate_values{host=\"missing\"})",
+        "stddev(aggregate_values{host=\"missing\"})",
+        "stdvar(aggregate_values{host=\"missing\"})",
+        "topk(1, aggregate_values{host=\"missing\"})",
+        "bottomk(1, aggregate_values{host=\"missing\"})",
+        "quantile(0.5, aggregate_values{host=\"missing\"})",
+        "count_values(\"value\", aggregate_values{host=\"missing\"})",
+    ] {
+        let empty = prom_query(&app, query, base).await;
+        assert_eq!(empty.0, StatusCode::OK, "{}: {}", query, empty.1);
+        assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+    }
+    for query in [
+        "topk(\"wrong\", aggregate_values)",
+        "count_values(1, aggregate_values)",
+    ] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(
+            invalid.0,
+            StatusCode::BAD_REQUEST,
+            "{}: {}",
+            query,
+            invalid.1
+        );
+    }
 
     let range = prom_query_range(
         &app,

@@ -298,6 +298,12 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             [(value, timestamp_ms + 30_000)],
             {"host": host},
         )
+    for host in ("a", "b"):
+        write_request += series(
+            "oracle_rank_tie",
+            [(5.0, timestamp_ms + 30_000)],
+            {"host": host},
+        )
     return snappy_literal(write_request)
 
 
