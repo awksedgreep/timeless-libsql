@@ -1889,3 +1889,43 @@ step-local sparse ranges, unique nonempty equality-label derivation,
 metric-name, regex, negative, empty, duplicate, and composed-expression
 exclusions, NaN presence, type errors, limits, shutdown, and cold reopen. No
 new storage finding arose and no extension or storage contract changed.
+
+## Session 8 `PQL-F12` window absence
+
+The checked-in
+[`2026-08-04_session8_pql_f12.json`](evidence/2026-08-04_session8_pql_f12.json)
+was captured from exact extension and server build
+`4d40628dfd21cc8d2bd7aeb918f12ba8e43c9eb9`. The narrow shape proves that a
+missing exact label value produces one sample without decoding storage. The
+wide shape proves presence across 512 series and four windows, returning an
+empty matrix only after the complete bounded window reduction and absence
+inversion.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | window results/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| missing exact host, instant `absent_over_time(metric{host="missing"}[30s])` | 1 | 117 | 0.602 | 0.853 | 0.988 | 1 | 0 | 0 | 0 | 0 |
+| 512 present series × four steps, `absent_over_time(metric[30s])` | 0 | 63 | 3.833 | 4.118 | 5.595 | 2,052 | 2,048 | 512 | 16,384 | 53,831 |
+
+The exact whole-second selector uses the existing packed public window path
+with `present_over_time` semantics and then performs one step-local inversion
+in Rust. The broad query therefore crosses the extension once, returns 2,048
+mechanical presence results, charges those results plus all four inspected
+outer timestamps, and emits no final samples. Empty output cannot evade work
+accounting. Modified, subsecond, and subquery shapes retain the already-pinned
+public raw fallback. At 4.118 ms wide p95, neither a PromQL parser nor an
+absence-specific primitive belongs in the extension. Direct SQLite/libSQL
+users have the executable public-raw anti-join in `SQL-PROM-048`.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 37,080 KiB. No benchmark request required cancellation; focused
+cumulative-work coverage and the shared dropped-request regression pin
+cancellation and reader reuse. Pinned oracle and real-extension tests cover
+open-left/millisecond boundaries, present and missing windows, sparse range
+steps, unique nonempty equality-label derivation and exclusions, NaN presence,
+direct selectors, subqueries, type errors, limits, shutdown, and cold reopen.
+The full workspace gate also exposed two shared bind-policy tests racing over
+one process environment variable; serializing those mutations preserves their
+existing product contract and pins reliable parallel CI. No storage, frame,
+batching, compression, index, rollup, retention, transaction, migration, or
+extension signature changed, and no new query-storage finding arose.
