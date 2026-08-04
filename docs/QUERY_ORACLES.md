@@ -67,3 +67,22 @@ Normal CI runs the checked-in fixture against the real Timeless extension and
 does not depend on an external service. Updating any pin is its own reviewed
 query session: record upstream release notes, regenerate the affected fixtures,
 run every prior oracle regression, and update the matrices in the same commit.
+
+Validate the machine-readable pins without network access:
+
+```bash
+python3 tools/query_oracles.py validate
+```
+
+When deliberately refreshing oracle evidence, probe the three immutable
+containers and execute the baseline Prometheus fixture:
+
+```bash
+python3 tools/query_oracles.py probe
+python3 tools/query_oracles.py prometheus-smoke
+```
+
+The manifest is
+[`tests/query_oracles/manifest.json`](../tests/query_oracles/manifest.json).
+The smoke fixture pins the currently shipped selector and `avg_over_time`
+semantics; later sessions add row-addressed fixtures before implementation.

@@ -1,0 +1,21 @@
+rule_files: []
+evaluation_interval: 10s
+
+tests:
+  - interval: 10s
+    input_series:
+      - series: 'query_contract_cpu{host="a"}'
+        values: '10 20 30'
+      - series: 'query_contract_cpu{host="b"}'
+        values: '80 _ 100'
+    promql_expr_test:
+      - expr: 'query_contract_cpu{host="a"}'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_cpu{host="a"}'
+            value: 30
+      - expr: 'avg_over_time(query_contract_cpu{host="a"}[20s])'
+        eval_time: 20s
+        exp_samples:
+          - labels: '{host="a"}'
+            value: 25

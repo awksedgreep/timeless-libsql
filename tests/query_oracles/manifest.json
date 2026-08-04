@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "selected_at": "2026-08-04",
+  "oracles": {
+    "prometheus": {
+      "language": "PromQL",
+      "role": "primary",
+      "version": "v3.13.2",
+      "source_commit": "bb5dff00cf8fdfbf5c65e0531aa835fa238a43a2",
+      "image": "docker.io/prom/prometheus@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69",
+      "linux_amd64_digest": "sha256:1147c92841726a6fef55fe6124491d6f85480f8de204f7d420304ca5bbd0a8f7",
+      "version_entrypoint": "/bin/prometheus",
+      "version_args": ["--version"],
+      "version_contains": "3.13.2",
+      "fixtures": [
+        "tests/query_oracles/prometheus/promql_smoke.yml"
+      ]
+    },
+    "victoriametrics": {
+      "language": "MetricsQL",
+      "role": "compatibility",
+      "version": "v1.148.0",
+      "source_commit": "d94a85a4059b22fd238a0d2516bcb3e9bfb54587",
+      "image": "docker.io/victoriametrics/victoria-metrics@sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda",
+      "linux_amd64_digest": "sha256:62f3b30fd73e16cc3a2909e3a2339499f8f8c597c77b851aeaf3a95b0a419001",
+      "version_entrypoint": "/victoria-metrics-prod",
+      "version_args": ["-version"],
+      "version_contains": "v1.148.0",
+      "fixtures": []
+    },
+    "victorialogs": {
+      "language": "LogsQL",
+      "role": "primary",
+      "version": "v1.52.0",
+      "source_commit": "46a54c976fa3d404396050e8a5ee6c5b0320efc5",
+      "image": "docker.io/victoriametrics/victoria-logs@sha256:47b820890d64c4575a2a0a46415dcd8a4fd59a0f1fcd6a377693d7aea639442e",
+      "linux_amd64_digest": "sha256:8f2140dca110705916751b9cdf57c2309555b6f1cf2707be1ee1a774c8c1e1f9",
+      "version_entrypoint": "/victoria-logs-prod",
+      "version_args": ["-version"],
+      "version_contains": "v1.52.0",
+      "fixtures": []
+    }
+  }
+}

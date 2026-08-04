@@ -37,6 +37,13 @@ JSON-line body once, interns its series within the request, and encodes one
 public named-columnar `0x01` batch. Neither path issues per-point SQL or flushes
 at the request boundary.
 
+The authoritative support contract is the
+[PromQL feature matrix](../../../docs/PROMQL_FEATURE_MATRIX.md). The shipped
+Rust API rows at this revision are listed below for CI; prose in this README
+must not imply a broader language surface.
+
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S21 PQL-R01 -->
+
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are
 counted. A 10 MiB body limit is enforced before admission; an oversized body

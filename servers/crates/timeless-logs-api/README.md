@@ -35,6 +35,13 @@ durability. `/api/v1/flush` is the explicit ordered durability barrier.
 - `GET /select/logsql/stats`
 - `GET /api/v1/flush`
 
+The authoritative language contract is the
+[LogsQL feature matrix](../../../docs/LOGSQL_FEATURE_MATRIX.md). The shipped
+Rust API rows at this revision are listed below for CI; native GET parameters
+do not expand this LogsQL claim.
+
+<!-- query-contract-shipped: LQL-F01 LQL-F06 LQL-F07 LQL-P01 LQL-S01 -->
+
 The release binary requires Phoenix-managed policy authentication by default.
 Backup and cluster administration remain in Phoenix; this process deliberately
 contains no generic metrics/traces abstraction.
@@ -174,5 +181,5 @@ high-water.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).
-The pinned Session 1 results are in
-[`2026-08-01_rust_logs_api_session1.md`](../../../timeless_logs/bench/results/2026-08-01_rust_logs_api_session1.md).
+The pinned Session 1 comparison is reproduced in the
+[release-plan baseline table](../../../docs/2026-08-02_rust_telemetry_data_plane_release_plan.md#baseline-validation).

@@ -9,7 +9,9 @@ belongs in a higher-order Timeless library.
 - [LogsQL feature matrix](LOGSQL_FEATURE_MATRIX.md)
 - [SQL equivalents for query-language features](QUERY_SQL_EQUIVALENTS.md)
 - [Query/storage findings](QUERY_STORAGE_FINDINGS.md)
+- [Shipped-row conformance references](QUERY_TEST_REFERENCES.md)
 - [Pinned semantic oracles](QUERY_ORACLES.md)
+- [Query evidence protocol](QUERY_EVIDENCE.md)
 - [Sequential implementation plan](2026-08-04_query_surface_implementation_plan.md)
 - [SQL query cookbook](QUERIES.md)
 

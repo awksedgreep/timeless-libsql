@@ -1,0 +1,26 @@
+name: Query documentation contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "query/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove validator failure cases
+        run: >-
+          python3 -m unittest
+          tests/test_query_contracts.py
+          tests/test_query_oracles.py
+          tests/test_query_evidence.py
+      - name: Validate query matrices and documentation
+        run: |
+          python3 tools/query_contracts.py
+          python3 tools/query_oracles.py validate

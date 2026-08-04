@@ -48,7 +48,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | ID | upstream construct | Rust now | Elixir | foundation | target | priority | notes |
 |---|---|---|---|---|---|---|---|
 | `LQL-F01` | wildcard/no-op `*` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | Must remain bounded by request limits even without a time filter. |
-| `LQL-F02` | relative `_time:5m` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | Query-clock injection is required for deterministic tests. |
+| `LQL-F02` | relative `_time:5m` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | partial | yes | `ROWS` | `API` | P0 | Parsing exists, but `QSF-008` requires an injected query clock and exact real-extension boundary coverage. |
 | `LQL-F03` | absolute/bracket `_time:[start,end)` | missing | yes | `ROWS` | `API` | P0 | Preserve microsecond boundaries and inclusive/exclusive syntax. |
 | `LQL-F04` | `_time:>=...` and `_time:<...` | missing | yes | `ROWS` | `API` | P0 | Restore prior Timeless syntax with strict errors. |
 | `LQL-F05` | arbitrary exact `field:value` filters ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-005-arbitrary-metadata-equality)) | missing | yes | `ROWS` | `API` | P0 | Indexed keys prune; other fields decode exactly. |

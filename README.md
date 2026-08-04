@@ -553,7 +553,9 @@ must be tested before it can be marked shipped:
 - [LogsQL feature matrix](docs/LOGSQL_FEATURE_MATRIX.md)
 - [SQL equivalents for query-language features](docs/QUERY_SQL_EQUIVALENTS.md)
 - [Query/storage findings](docs/QUERY_STORAGE_FINDINGS.md)
+- [Shipped-row conformance references](docs/QUERY_TEST_REFERENCES.md)
 - [Pinned query semantic oracles](docs/QUERY_ORACLES.md)
+- [Query benchmark and evidence protocol](docs/QUERY_EVIDENCE.md)
 - [Sequential query implementation plan](docs/2026-08-04_query_surface_implementation_plan.md)
 
 PromQL and LogsQL parsing/evaluation live in the Rust signal APIs. The

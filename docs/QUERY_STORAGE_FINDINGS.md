@@ -28,7 +28,8 @@ memory, or planner behavior found during feature work.
 
 | ID | date | matrix row | observation | expected behavior | evidence/test | disposition | status |
 |---|---|---|---|---|---|---|---|
-| — | — | — | No post-baseline findings yet. | — | — | — | — |
+| `QSF-008` | 2026-08-04 | `LQL-F02` | Relative LogsQL time is computed from the process wall clock inside parsing; no injected evaluation clock reaches the real-extension HTTP contract. | The request owns one explicit evaluation instant so inclusive/exclusive boundaries and reopen fixtures are deterministic. | `workload_logsql_shapes_parse`; query-contract shipped-row audit | Downgraded to `partial`; Session 10 adds clock injection and a real-extension boundary regression. | open |
+| `QSF-009` | 2026-08-04 | `LQL-F06` | The exact `error` baseline prunes to one error-family block but decodes 4,096 entries to return 1,024 because `error`, `critical`, `alert`, and `emergency` share a physical partition. | Exact severity fidelity is preserved even when the coarse partition needs decode. | `docs/evidence/2026-08-04_query_baseline.json`; `http_uses_the_established_8192_entry_buffer_without_request_flushes` | Accepted storage/write tradeoff. Consider finer severity metadata only after representative workloads prove a material read benefit without harming 8,192-entry batching/compression. | accepted |
 
 Use stable IDs (`QSF-008`, `QSF-009`, ...). Do not delete resolved findings;
 change their status and link the correcting regression.

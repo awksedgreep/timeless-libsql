@@ -352,7 +352,7 @@ JSON-datasource panel away from being an actual PMM screen.
 
 | phase | scope | acceptance |
 |---|---|---|
-| **v1 ✅ (2026-07-27)** | `timeless_health` vtab wrapping the metrics engine; `'sample'` with the v1 inventory; `flush_every`; lifecycle commands | **DONE** — cli.sh section 22 (baseline/delta semantics, stat oracle, cache torture, rollback, prune, loss-window honesty); 29 µs/sample buffered, 2.9 ms durable; 0.23 B/point after compact ([RESULTS.md](../RESULTS.md#dbhealth-timeless_health-v1--2026-07-27)) |
+| **v1 ✅ (2026-07-27)** | `timeless_health` vtab wrapping the metrics engine; `'sample'` with the v1 inventory; `flush_every`; lifecycle commands | **DONE** — [cli.sh](../tests/cli.sh) section 22 (baseline/delta semantics, stat oracle, cache torture, rollback, prune, loss-window honesty); 29 µs/sample buffered, 2.9 ms durable; 0.23 B/point after compact. |
 | **v1.5** | meta-telemetry via new `timeless-core` accessors | buffered-points series proven against a deliberate large buffer + crash |
 | **v2** | `'sample:statements'` (trace chaining, normalizer, cardinality cap), `dbstat` gauges, commit-piggyback flush | overhead benchmark published; host-tracer chaining test; cardinality cap test |
 | **v3** | cross-connection aggregation; ATTACH-ed db sampling; fleet patterns (replication rollup queries) | exploratory — needs design notes of its own |
