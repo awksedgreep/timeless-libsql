@@ -74,6 +74,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-030`](#sql-prom-030-irate) | `PQL-R13` | current foundation | finite float-counter last-two-sample reset substitution and actual-interval rate; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-PROM-031`](#sql-prom-031-increase) | `PQL-R14` | current foundation | finite float-counter reset correction and Prometheus edge extrapolation without per-second normalization; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-PROM-032`](#sql-prom-032-delta) | `PQL-R15` | current foundation | finite float-gauge difference with Prometheus edge extrapolation and no counter correction; API owns language, special values, labels, limits, and envelopes |
+| [`SQL-PROM-033`](#sql-prom-033-idelta) | `PQL-R16` | current foundation | finite float-gauge last-two-sample difference without extrapolation or time normalization; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -914,6 +915,72 @@ strings, limits, cancellation, and HTTP envelopes. Native histograms are not
 stored. Direct regression: `tests/cli.sh` section 45;
 HTTP/oracle/reopen regression:
 `session_seven_promql_delta_extrapolates_gauges_without_counter_correction`.
+
+### SQL-PROM-033: `idelta`
+
+For every `(T-window,T]` float-gauge slice, select its final two samples and
+subtract the earlier value from the later value. Do not extrapolate or divide
+by their timestamp interval:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), ranked AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.ts AS sample_ts,
+    raw.value,
+    ROW_NUMBER() OVER (
+      PARTITION BY raw.series_id, evaluation.ts ORDER BY raw.ts DESC
+    ) AS recency
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+), final_pair AS (
+  SELECT
+    series_id,
+    labels,
+    ts,
+    MAX(CASE WHEN recency = 1 THEN sample_ts END) AS last_ts,
+    MAX(CASE WHEN recency = 1 THEN value END) AS last_value,
+    MAX(CASE WHEN recency = 2 THEN sample_ts END) AS previous_ts,
+    MAX(CASE WHEN recency = 2 THEN value END) AS previous_value
+  FROM ranked
+  WHERE recency <= 2
+  GROUP BY series_id, labels, ts
+)
+SELECT
+  labels,
+  ts,
+  last_value - previous_value AS value
+FROM final_pair
+WHERE previous_ts IS NOT NULL AND last_ts > previous_ts
+ORDER BY labels, ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
+seconds. `:filter_json` is the public matcher JSON accepted by `timeless_raw`,
+or NULL. Output grid bounds are inclusive; sample windows are exactly
+`(T-window,T]`. Fewer than two samples and a final pair with a zero timestamp
+interval emit no row. Canonical label/timestamp ordering is deterministic.
+Prometheus normally admits only one float sample per series/timestamp; callers
+that insert duplicates directly must define an additional stable ordering.
+
+This executable recipe is exact for finite float gauges. The Rust API uses one
+bounded public packed raw read and owns PromQL parsing, metric-name removal,
+modifier and subquery evaluation, NaN/infinity strings, limits, cancellation,
+and HTTP envelopes. Native histograms are not stored. Direct regression:
+`tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_seven_promql_idelta_uses_only_the_final_gauge_pair`.
 
 ### SQL-PROM-006: range selector
 

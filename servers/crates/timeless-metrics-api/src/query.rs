@@ -408,6 +408,7 @@ enum PromRangeOp {
     IRate,
     Increase,
     Delta,
+    IDelta,
     Last,
 }
 
@@ -427,6 +428,7 @@ impl PromRangeOp {
             Self::IRate => "irate",
             Self::Increase => "increase",
             Self::Delta => "delta",
+            Self::IDelta => "idelta",
             Self::Last => "last_over_time",
         }
     }
@@ -446,6 +448,7 @@ impl PromRangeOp {
             | Self::IRate
             | Self::Increase
             | Self::Delta
+            | Self::IDelta
             | Self::Last => None,
         }
     }
@@ -465,6 +468,7 @@ impl PromRangeOp {
             | Self::IRate
             | Self::Increase
             | Self::Delta
+            | Self::IDelta
             | Self::Last => None,
         }
     }
@@ -988,6 +992,7 @@ fn lower_promql_expr(
                     | "irate"
                     | "increase"
                     | "delta"
+                    | "idelta"
                     | "last_over_time"
             ) =>
         {
@@ -1004,6 +1009,7 @@ fn lower_promql_expr(
                 "irate" => PromRangeOp::IRate,
                 "increase" => PromRangeOp::Increase,
                 "delta" => PromRangeOp::Delta,
+                "idelta" => PromRangeOp::IDelta,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
@@ -4427,6 +4433,9 @@ fn prometheus_range_reduction(
     if matches!(op, PromRangeOp::IRate) {
         return prometheus_instant_delta(points, true, cancelled);
     }
+    if matches!(op, PromRangeOp::IDelta) {
+        return prometheus_instant_delta(points, false, cancelled);
+    }
     if matches!(op, PromRangeOp::Increase) {
         return prometheus_extrapolated_rate(points, range_start, range_end, true, false, cancelled);
     }
@@ -5113,7 +5122,7 @@ fn execute_prometheus_range_raw(
                         )?;
                         check_cancelled(cancelled)?;
                         value
-                    } else if matches!(op, PromRangeOp::IRate) {
+                    } else if matches!(op, PromRangeOp::IRate | PromRangeOp::IDelta) {
                         if hi - lo < 2 {
                             None
                         } else {
@@ -5131,7 +5140,11 @@ fn execute_prometheus_range_raw(
                                     series.value(raw.frame.as_deref(), hi - 1)?,
                                 ),
                             ];
-                            prometheus_instant_delta(&values, true, cancelled)?
+                            prometheus_instant_delta(
+                                &values,
+                                matches!(op, PromRangeOp::IRate),
+                                cancelled,
+                            )?
                         }
                     } else if matches!(op, PromRangeOp::Last) {
                         Some(series.value(raw.frame.as_deref(), hi - 1)?)
@@ -6209,6 +6222,16 @@ mod tests {
         .unwrap()
         .unwrap()
         .is_nan());
+
+        assert_eq!(
+            prometheus_instant_delta(
+                &[(10_000, 100.0), (30_000, 150.0), (50_000, 20.0)],
+                false,
+                &cancelled,
+            )
+            .unwrap(),
+            Some(-130.0)
+        );
     }
 
     #[test]

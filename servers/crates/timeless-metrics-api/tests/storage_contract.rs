@@ -6744,6 +6744,192 @@ async fn session_seven_promql_delta_extrapolates_gauges_without_counter_correcti
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_seven_promql_idelta_uses_only_the_final_gauge_pair() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_seven_idelta.db");
+    let base = 1_700_740_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "range_idelta{{case=\"steady\"}} 100 {}\n",
+            "range_idelta{{case=\"steady\"}} 300 {}\n",
+            "range_idelta{{case=\"steady\"}} 500 {}\n",
+            "range_idelta{{case=\"decrease\"}} 100 {}\n",
+            "range_idelta{{case=\"decrease\"}} 150 {}\n",
+            "range_idelta{{case=\"decrease\"}} 20 {}\n",
+            "range_idelta{{case=\"sparse\"}} 100 {}\n",
+            "range_idelta{{case=\"sparse\"}} 200 {}\n",
+            "range_idelta{{case=\"singleton\"}} 5 {}\n",
+            "range_idelta{{case=\"nan\"}} NaN {}\n",
+            "range_idelta{{case=\"nan\"}} 2 {}\n",
+            "range_idelta{{case=\"pos_inf\"}} 1 {}\n",
+            "range_idelta{{case=\"pos_inf\"}} +Inf {}\n",
+            "range_idelta{{case=\"neg_inf\"}} 1 {}\n",
+            "range_idelta{{case=\"neg_inf\"}} -Inf {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 10) * 1_000,
+        (base + 30) * 1_000,
+        (base + 50) * 1_000,
+        (base + 30) * 1_000,
+        (base + 40) * 1_000,
+        (base + 50) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+        (base + 20) * 1_000,
+        (base + 40) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let steady = prom_query(&app, "idelta(range_idelta{case=\"steady\"}[60s])", base + 60).await;
+    assert_eq!(steady.0, StatusCode::OK, "{}", steady.1);
+    assert_eq!(
+        steady.1["data"]["result"],
+        serde_json::json!([{"metric": {"case": "steady"}, "value": [base + 60, "200"]}])
+    );
+    for (case, expected) in [("decrease", "-130"), ("sparse", "100")] {
+        let response = prom_query(
+            &app,
+            &format!("idelta(range_idelta{{case=\"{case}\"}}[60s])"),
+            base + 60,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"],
+            serde_json::json!([{
+                "metric": {"case": case},
+                "value": [base + 60, expected]
+            }])
+        );
+    }
+    let boundary = prom_query(
+        &app,
+        "idelta(range_idelta{case=\"steady\"}[40s])",
+        base + 50,
+    )
+    .await;
+    assert_eq!(boundary.0, StatusCode::OK, "{}", boundary.1);
+    assert_eq!(
+        boundary.1["data"]["result"],
+        serde_json::json!([{"metric": {"case": "steady"}, "value": [base + 50, "200"]}])
+    );
+    let offset = prom_query(
+        &app,
+        "idelta(range_idelta{case=\"steady\"}[40s] offset 10s)",
+        base + 60,
+    )
+    .await;
+    assert_eq!(offset.0, StatusCode::OK, "{}", offset.1);
+    assert_eq!(offset.1, steady.1);
+    let subquery = prom_query(
+        &app,
+        "idelta(range_idelta{case=\"steady\"}[40s:10s])",
+        base + 60,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(
+        subquery.1["data"]["result"][0]["value"],
+        serde_json::json!([base + 60, "0"])
+    );
+    for (case, expected) in [("nan", "NaN"), ("pos_inf", "+Inf"), ("neg_inf", "-Inf")] {
+        let response = prom_query(
+            &app,
+            &format!("idelta(range_idelta{{case=\"{case}\"}}[60s])"),
+            base + 60,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{case}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+    }
+    let singleton = prom_query(
+        &app,
+        "idelta(range_idelta{case=\"singleton\"}[60s])",
+        base + 60,
+    )
+    .await;
+    assert_eq!(singleton.0, StatusCode::OK, "{}", singleton.1);
+    assert_eq!(singleton.1["data"]["result"], serde_json::json!([]));
+    let range = prom_query_range(
+        &app,
+        "idelta(range_idelta{case=\"steady\"}[40s])",
+        base + 50,
+        base + 60,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "steady"},
+            "values": [[base + 50, "200"], [base + 60, "200"]]
+        }])
+    );
+    let invalid = prom_query(&app, "idelta(range_idelta)", base + 60).await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
+    assert_eq!(invalid.1["errorType"], "bad_data");
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "idelta(range_idelta{case=\"steady\"}[60s])",
+        base + 60,
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", rejected.1);
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 1 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "idelta(range_idelta{case=\"steady\"}[60s])",
+            base + 60,
+        )
+        .await
+        .1,
+        steady.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()
