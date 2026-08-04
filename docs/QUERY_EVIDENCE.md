@@ -12,9 +12,10 @@ flush durability barrier, and measures the public query APIs. It never reads a
 private shadow table. Shutdown sends `SIGTERM` and requires the server's normal
 drain to exit successfully.
 
-The baseline workload contains 512 metric series with 32 float points each and
-8,192 logs spanning all eight severities with typed nested metadata. Each
-signal runs one indexed narrow query and one wide query for five warmups and 50
+The current harness retains the 512-series, 32-point metric baseline and adds
+64 one-series metric names for multi-name selector work; its log fixture keeps
+8,192 entries spanning all eight severities with typed nested metadata.
+Each signal runs indexed narrow and wide shapes for five warmups and 50
 recorded single-client iterations. The JSON records:
 
 - admission and durability-barrier time plus completed/failed/queued work;
@@ -307,3 +308,37 @@ No storage, compression, batching, rollup, retention, migration, or packed
 format changed. The two optional hidden limits are additive, old SQL arities
 remain valid, and `timeless_capabilities()` explicitly advertises support so a
 mismatched server/extension pair fails closed.
+
+## Session 3 `PQL-S04` nameless-selector result
+
+The checked-in
+[`2026-08-04_session3_pql_s04.json`](evidence/2026-08-04_session3_pql_s04.json)
+was captured from exact extension and server build
+`81030cf031fe5745ecc3f94495a62c7bf8201b35`. The fixture retains the 512-series
+exact-name workload and adds 64 distinct metric names, one series and 32 points
+per name. The narrow selector returns one name by label; the wide selector
+returns all 64 names.
+
+| shape | result series | response bytes | p50 ms | p95 ms | p99 ms | exact-name packed calls/query | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `{selector_id="s0000"}` | 1 | 187 | 1.086 | 1.320 | 1.437 | 1 | 32 |
+| `{selector_group="wide"}` | 64 | 8,062 | 3.320 | 3.555 | 6.732 | 64 | 2,048 |
+
+The first correct implementation reopened `timeless_series` once per metric
+name. On the identical fixture it measured 2.883/3.145/3.162 ms
+p50/p95/p99 for the narrow shape and 5.926/6.192/9.707 ms for the wide shape.
+A single streaming public-catalog pass reduced p50 by 62.34% and 43.98%
+respectively while preserving exact-name payload pruning. The measured HWM
+rose from 32,612 to 34,496 KiB between runs; that 1,884 KiB difference is kept
+as an honest tradeoff, and catalog rows plus retained metadata are explicitly
+bounded before raw reads.
+
+The final run durably completed 118,457 points across its normal and boundary
+fixtures with zero failed or queued points. Live SQLite/WAL/SHM storage was
+672,688 bytes. Each query used only `timeless_series` and bounded
+`timeless_raw_frame` calls; no shadow table, storage format, batching,
+compression, rollup, retention, transaction, or migration behavior changed.
+The real-extension contract covers instant/range/function use, missing labels,
+invalid empty-matching selectors, result/catalog limits, cancellation, clean
+shutdown, and cold reopen. The pinned Prometheus rule oracle matches exact
+values and labels.

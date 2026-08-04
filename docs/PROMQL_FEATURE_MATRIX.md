@@ -16,9 +16,9 @@ The established Elixir oracle is
 [`TimelessMetrics.PromQL`](https://github.com/awksedgreep/timeless_metrics/blob/main/lib/timeless_metrics/promql.ex)
 plus its `promql_conformance_test.exs` and VictoriaMetrics differential corpus.
 
-The current Rust server supports exact-name instant vector selectors and
-`avg_over_time(selector[window])`. Nothing else should be inferred from native
-`metric=` query parameters or from extension kernels with similar names.
+The current Rust server supports the rows marked `shipped` below. Nothing else
+should be inferred from native `metric=` query parameters or from extension
+kernels with similar names.
 
 ## Legend and foundations
 
@@ -53,7 +53,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S01` | exact metric-name instant selector ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-001-instant-selector)) | shipped | yes | `GRID`, `LATEST`, `RAW` | `API` | P0 | Exact 300-second `(T-lookback,T]` last-sample sweep is implemented. |
 | `PQL-S02` | label matchers `=`, `!=`, `=~`, `!~` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-001-instant-selector)) | shipped | yes | `CAT`, `RAW` | `API` | P0 | Regex is anchored; missing labels compare as the empty string. |
 | `PQL-S03` | duplicate matchers use AND semantics | shipped | yes | `CAT`, `RAW` | `API` | P0 | Keep a regression for duplicates on the same label. |
-| `PQL-S04` | nameless selectors such as `{job="api"}` | in progress | yes | `CAT`, `RAW` | `API` | P0 | Catalog expansion must select metric names before exact-metric public raw reads; `session_three_promql_nameless_selectors_expand_before_reads_and_reopen` pins real-extension behavior. |
+| `PQL-S04` | nameless selectors such as `{job="api"}` | shipped | yes | `CAT`, `RAW` | `API` | P0 | One bounded streaming public-catalog pass groups matching series by name before exact-metric raw reads; missing labels, limits, ordering, range roots/functions, cancellation, and reopen are pinned. |
 | `PQL-S05` | regex/negative `__name__` and multi-metric selection | missing | yes | `CAT`, `RAW` | `API` | P0 | Do not materialize unrelated chunks before catalog filtering. |
 | `PQL-S06` | range selector `[W]` with `(T-W,T]` boundaries ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-006-range-selector)) | shipped | yes | `RAW`, `WINDOW` | `API` | P0 | Instant-query roots return matrices; range-query roots fail as `bad_data`; the left boundary is filtered after the inclusive public raw read. |
 | `PQL-S07` | positive and negative `offset` | missing | yes | `RAW`, `GRID` | `API` | P0 | Planner time shift; no extension feature required. |
