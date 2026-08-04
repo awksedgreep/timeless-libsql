@@ -1854,3 +1854,38 @@ deletion, metric names, Prometheus 3 UTF-8 label names, range grids, nesting,
 errors, limits, shutdown, and cold reopen. No extension signature,
 storage/frame format, batching, compression, index, rollup, retention,
 transaction, or migration contract changed.
+
+## Session 8 `PQL-F11` absence detection
+
+The checked-in
+[`2026-08-04_session8_pql_f11.json`](evidence/2026-08-04_session8_pql_f11.json)
+was captured from exact extension and server build
+`9c912c834c071de8dd90a9b7ca2d61231102ccb8`. The narrow shape selects a
+missing exact label value and returns one immediately derived sample; the wide
+shape proves presence across 512 series and four steps, returning an empty
+matrix only after accounting for the complete bounded child.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| missing exact host, instant `absent(metric{host="missing"})` | 1 | 117 | 0.359 | 0.494 | 0.523 | 1 | 0 | 0 | 0 | 0 |
+| 512 present series × four steps, `absent(metric)` | 0 | 63 | 3.834 | 4.157 | 4.443 | 2,052 | 16,384 | 512 | 16,384 | 53,831 |
+
+The selective missing-label case is resolved by the public catalog before any
+raw chunk query, so it emits one result with zero candidate chunks, decoded
+points, or extension payload bytes. The broad present case performs exactly
+the same one packed read as neighboring wide vector operations, then charges
+2,048 child points plus four inspected outer timestamps even though its final
+cardinality is zero. Empty results therefore cannot evade cumulative work
+limits. At 4.157 ms wide p95, no absence-specific extension primitive is
+justified; direct users have the catalog-aware public-grid anti-join in
+`SQL-PROM-047`.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 36,208 KiB. No benchmark request required cancellation; focused grid-work
+coverage and the shared dropped-request regression pin cancellation and reader
+reuse. Pinned oracle and real-extension tests cover present and absent vectors,
+step-local sparse ranges, unique nonempty equality-label derivation,
+metric-name, regex, negative, empty, duplicate, and composed-expression
+exclusions, NaN presence, type errors, limits, shutdown, and cold reopen. No
+new storage finding arose and no extension or storage contract changed.
