@@ -1018,6 +1018,22 @@ SQLite/libSQL users can use the parameterized UTC `strftime` foundation in
 [`SQL-PROM-052`](QUERY_SQL_EQUIVALENTS.md#sql-prom-052-minute-hour-day_of_week-and-day_of_month),
 with its explicitly documented SQLite calendar-range limitation.
 
+The remaining stable UTC calendar fields use the same optional-vector and
+conversion contract:
+
+```promql
+day_of_year(process_start_time_seconds)
+days_in_month(vector(1709208000))
+month()
+year(process_start_time_seconds)
+```
+
+Day-of-year and month are one-indexed, `days_in_month` follows Gregorian leap
+years, and all four preserve non-name labels while removing the metric name.
+The parameterized direct SQLite/libSQL foundation, including leap-year and
+zero-argument forms, is
+[`SQL-PROM-053`](QUERY_SQL_EQUIVALENTS.md#sql-prom-053-day_of_year-days_in_month-month-and-year).
+
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

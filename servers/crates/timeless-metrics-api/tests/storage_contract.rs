@@ -10372,6 +10372,140 @@ async fn session_eight_promql_calendar_part_one_uses_utc_defaults_and_reopens() 
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_calendar_part_two_pins_leap_years_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_calendar_part_two.db");
+    // 2024-01-02 00:04:05 UTC.
+    let base = 1_704_153_845_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "calendar_two{{case=\"date\",host=\"a\"}} 90061.9 {}\n",
+            "calendar_two{{case=\"leap\",host=\"a\"}} 1709208000 {}\n",
+            "calendar_two{{case=\"multi\",host=\"a\"}} 1 {}\n",
+            "calendar_two{{case=\"multi\",host=\"b\"}} 2 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let expected = [
+        ("day_of_year(calendar_two{case=\"date\"})", "2"),
+        ("day_of_year(calendar_two{case=\"leap\"})", "60"),
+        ("days_in_month(calendar_two{case=\"leap\"})", "29"),
+        ("month(calendar_two{case=\"date\"})", "1"),
+        ("year(calendar_two{case=\"date\"})", "1970"),
+        ("year(vector(-0.1))", "1970"),
+        ("day_of_year(vector(NaN))", "339"),
+        ("days_in_month(vector(+Inf))", "31"),
+        ("month(vector(-Inf))", "12"),
+        ("year(vector(-1e20))", "292277026596"),
+    ];
+    let mut date_response = Value::Null;
+    for (query, value) in expected {
+        let response = prom_query(&app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["value"][1], value,
+            "{query}"
+        );
+        assert!(response.1["data"]["result"][0]["metric"]["__name__"].is_null());
+        if query.starts_with("year(calendar_two{case=\"date\"") {
+            assert_eq!(
+                response.1["data"]["result"][0]["metric"],
+                serde_json::json!({"case": "date", "host": "a"})
+            );
+            date_response = response.1;
+        }
+    }
+
+    for (query, value) in [
+        ("day_of_year()", "2"),
+        ("days_in_month()", "31"),
+        ("month()", "1"),
+        ("year()", "2024"),
+    ] {
+        let response = prom_query(&app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            response.1["data"]["result"][0]["value"][1], value,
+            "{query}"
+        );
+    }
+
+    let range = prom_query_range(
+        &app,
+        "abs(month(calendar_two{case=\"date\"}))",
+        base,
+        base + 10,
+        5,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base + 5, "1"], [base + 10, "1"]])
+    );
+
+    for query in ["year(1)", "month(vector(1), vector(2))"] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "year(calendar_two{case=\"multi\"})", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("work point limit"));
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(&reopened_app, "year(calendar_two{case=\"date\"})", base)
+            .await
+            .1,
+        date_response
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

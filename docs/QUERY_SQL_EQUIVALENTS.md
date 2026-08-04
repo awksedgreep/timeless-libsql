@@ -94,6 +94,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-050`](#sql-prom-050-scalar-and-vector) | `PQL-F15` | current foundation | exact per-step cardinality and nameless-vector composition; API owns packed NaN and result types |
 | [`SQL-PROM-051`](#sql-prom-051-time-and-timestamp) | `PQL-F16` | current foundation | exact evaluation grid and stored timestamps; API owns AST sample provenance and envelopes |
 | [`SQL-PROM-052`](#sql-prom-052-minute-hour-day_of_week-and-day_of_month) | `PQL-F17` | current foundation | UTC extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
+| [`SQL-PROM-053`](#sql-prom-053-day_of_year-days_in_month-month-and-year) | `PQL-F18` | current foundation | UTC calendar extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -2049,6 +2050,64 @@ storage read is justified.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_calendar_part_one_uses_utc_defaults_and_reopens`.
+
+### SQL-PROM-053: `day_of_year`, `days_in_month`, `month`, and `year`
+
+Use the same bounded public grid and integer-second conversion as
+`SQL-PROM-052`, selecting the requested UTC field:
+
+```sql
+WITH selected AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT labels, ts,
+       CASE :part
+         WHEN 'day_of_year' THEN CAST(strftime('%j', CAST(value AS INTEGER), 'unixepoch') AS INTEGER)
+         WHEN 'days_in_month' THEN CAST(strftime('%d', CAST(value AS INTEGER), 'unixepoch', 'start of month', '+1 month', '-1 day') AS INTEGER)
+         WHEN 'month' THEN CAST(strftime('%m', CAST(value AS INTEGER), 'unixepoch') AS INTEGER)
+         WHEN 'year' THEN CAST(strftime('%Y', CAST(value AS INTEGER), 'unixepoch') AS INTEGER)
+       END AS value
+FROM selected
+ORDER BY labels, ts;
+```
+
+`:part` is one of the four names above. Metric values are Unix seconds;
+`:start`, `:end`, `:step`, and `:lookback` remain in the metric table's native
+timestamp unit. Bounds are inclusive, lookback is open-left, fractions
+truncate toward zero, day-of-year and month are one-indexed, and Gregorian
+leap-year rules determine February length. Rows are canonically ordered by
+labels then evaluation timestamp.
+
+For a zero-argument function, evaluate the same operation over the requested
+clock with an empty label set:
+
+```sql
+WITH selected(labels, ts, value) AS (
+  VALUES ('{}', :evaluation_ts, CAST(:evaluation_ts AS INTEGER))
+)
+SELECT labels, ts,
+       CASE :part
+         WHEN 'day_of_year' THEN CAST(strftime('%j', value, 'unixepoch') AS INTEGER)
+         WHEN 'days_in_month' THEN CAST(strftime('%d', value, 'unixepoch', 'start of month', '+1 month', '-1 day') AS INTEGER)
+         WHEN 'month' THEN CAST(strftime('%m', value, 'unixepoch') AS INTEGER)
+         WHEN 'year' THEN CAST(strftime('%Y', value, 'unixepoch') AS INTEGER)
+       END AS value
+FROM selected;
+```
+
+SQLite's date functions still cover only their documented calendar range and
+project stored NaN/out-of-range inputs as NULL. The Rust
+API owns the pinned maximum-second sentinel, packed IEEE fidelity, optional
+argument and AST typing, metric-name removal, millisecond evaluation grids,
+limits, cancellation, and Prometheus envelopes. Existing public results
+already contain every value required, so no extension primitive is justified.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_calendar_part_two_pins_leap_years_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

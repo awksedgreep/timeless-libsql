@@ -3581,6 +3581,7 @@ db.executemany(
         ('label_join_metric', '{"case":"missing","service":"api"}',
          100, 2.0),
         ('calendar_metric', '{"case":"date","host":"web-1"}', 100, 90061.9),
+        ('calendar_leap_metric', '{"case":"leap","host":"web-1"}', 100, 1709208000.0),
         ('absent_late', '{"case":"late","service":"api"}', 110, 7.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
@@ -4914,6 +4915,72 @@ assert calendar_default == {
     'hour': 0,
     'day_of_week': 2,
     'day_of_month': 2,
+}
+
+calendar_part_two_sql = (
+    "WITH selected AS (SELECT labels,ts,value FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback))"
+    " SELECT labels,ts,CASE :part"
+    " WHEN 'day_of_year' THEN CAST(strftime('%j',CAST(value AS INTEGER),'unixepoch') AS INTEGER)"
+    " WHEN 'days_in_month' THEN CAST(strftime('%d',CAST(value AS INTEGER),'unixepoch',"
+    " 'start of month','+1 month','-1 day') AS INTEGER)"
+    " WHEN 'month' THEN CAST(strftime('%m',CAST(value AS INTEGER),'unixepoch') AS INTEGER)"
+    " WHEN 'year' THEN CAST(strftime('%Y',CAST(value AS INTEGER),'unixepoch') AS INTEGER)"
+    " END FROM selected ORDER BY labels,ts"
+)
+calendar_part_two = {}
+for part in ['day_of_year', 'days_in_month', 'month', 'year']:
+    calendar_part_two[part] = db.execute(
+        calendar_part_two_sql,
+        {
+            'metric': 'calendar_metric',
+            'filter_json': None,
+            'start': 100,
+            'end': 100,
+            'step': 1,
+            'lookback': 1,
+            'part': part,
+        },
+    ).fetchone()[2]
+assert calendar_part_two == {
+    'day_of_year': 2,
+    'days_in_month': 31,
+    'month': 1,
+    'year': 1970,
+}
+leap_calendar = {
+    part: db.execute(
+        calendar_part_two_sql,
+        {
+            'metric': 'calendar_leap_metric',
+            'filter_json': None,
+            'start': 100,
+            'end': 100,
+            'step': 1,
+            'lookback': 1,
+            'part': part,
+        },
+    ).fetchone()[2]
+    for part in ['day_of_year', 'days_in_month']
+}
+assert leap_calendar == {'day_of_year': 60, 'days_in_month': 29}
+
+calendar_part_two_default_sql = calendar_part_two_sql.replace(
+    "WITH selected AS (SELECT labels,ts,value FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback))",
+    "WITH selected(labels,ts,value) AS (SELECT '{}',:evaluation_ts,:evaluation_ts)",
+)
+calendar_part_two_default = {}
+for part in ['day_of_year', 'days_in_month', 'month', 'year']:
+    calendar_part_two_default[part] = db.execute(
+        calendar_part_two_default_sql,
+        {'evaluation_ts': 1704153845, 'part': part},
+    ).fetchone()[2]
+assert calendar_part_two_default == {
+    'day_of_year': 2,
+    'days_in_month': 31,
+    'month': 1,
+    'year': 2024,
 }
 
 bounded = db.execute(

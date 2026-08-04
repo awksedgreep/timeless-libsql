@@ -1270,6 +1270,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        calendar_part_two_narrow = measure(
+            "metrics-calendar-year-narrow",
+            lambda: promql('year(query_contract_cpu{host="h0000"})'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        calendar_part_two_wide = measure(
+            "metrics-calendar-day-of-year-wide",
+            lambda: promql("day_of_year(query_contract_cpu)"),
+            query_json_cardinality,
+            series,
+            stat,
+            iterations,
+            warmup,
+        )
         arithmetic_narrow = measure(
             "metrics-arithmetic-vector-scalar-narrow",
             lambda: promql('query_contract_cpu{host="h0000"} * 2'),
@@ -1880,6 +1898,8 @@ def metrics_evidence(
                 "timestamp_wide": timestamp_wide,
                 "calendar_narrow": calendar_narrow,
                 "calendar_wide": calendar_wide,
+                "calendar_part_two_narrow": calendar_part_two_narrow,
+                "calendar_part_two_wide": calendar_part_two_wide,
                 "arithmetic_vector_scalar_narrow": arithmetic_narrow,
                 "arithmetic_one_to_one_wide": arithmetic_wide,
                 "comparison_filter_narrow": comparison_narrow,

@@ -3045,6 +3045,119 @@
       "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
       "expected_metric": {},
       "expected_values": [5, 5, 5]
+    },
+    {
+      "id": "PQL-F18-day-of-year-is-one-indexed",
+      "query": "day_of_year(vector(90061.9))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [2]
+    },
+    {
+      "id": "PQL-F18-leap-day-of-year",
+      "query": "day_of_year(vector(1709208000))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [60]
+    },
+    {
+      "id": "PQL-F18-leap-days-in-month",
+      "query": "days_in_month(vector(1709208000))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [29]
+    },
+    {
+      "id": "PQL-F18-month-is-one-indexed",
+      "query": "month(vector(90061.9))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F18-year-utc",
+      "query": "year(vector(90061.9))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1970]
+    },
+    {
+      "id": "PQL-F18-negative-fraction-truncates-toward-zero",
+      "query": "year(vector(-0.1))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1970]
+    },
+    {
+      "id": "PQL-F18-day-of-year-defaults-to-vector-time",
+      "query": "day_of_year()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "day_of_year"
+    },
+    {
+      "id": "PQL-F18-days-in-month-defaults-to-vector-time",
+      "query": "days_in_month()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "days_in_month"
+    },
+    {
+      "id": "PQL-F18-month-defaults-to-vector-time",
+      "query": "month()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "month"
+    },
+    {
+      "id": "PQL-F18-year-defaults-to-vector-time",
+      "query": "year()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "year"
+    },
+    {
+      "id": "PQL-F18-labels-preserved-name-removed",
+      "query": "year(oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1970]
+    },
+    {
+      "id": "PQL-F18-nan-day-of-year-uses-overflow-sentinel",
+      "query": "day_of_year(vector(NaN))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [339]
+    },
+    {
+      "id": "PQL-F18-infinite-days-in-month-uses-overflow-sentinel",
+      "query": "days_in_month(vector(+Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [31]
+    },
+    {
+      "id": "PQL-F18-negative-infinite-month-uses-overflow-sentinel",
+      "query": "month(vector(-Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [12]
+    },
+    {
+      "id": "PQL-F18-negative-overflow-year-uses-overflow-sentinel",
+      "query": "year(vector(-1e20))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [292277026596]
+    },
+    {
+      "id": "PQL-F18-range-grid-and-nesting",
+      "query": "abs(month(vector(90061.9)))",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {},
+      "expected_values": [1, 1, 1]
     }
   ],
   "operator_error_cases": [
@@ -3211,6 +3324,22 @@
     {
       "id": "PQL-F17-arity-errors",
       "query": "hour(vector(1), vector(2))",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected at most 1 argument"
+    },
+    {
+      "id": "PQL-F18-argument-type-errors",
+      "query": "year(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-F18-arity-errors",
+      "query": "month(vector(1), vector(2))",
       "evaluation_offset_ms": 30000,
       "status": 400,
       "error_type": "bad_data",

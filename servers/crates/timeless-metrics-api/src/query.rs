@@ -572,6 +572,10 @@ enum PromCalendarOp {
     Hour,
     DayOfWeek,
     DayOfMonth,
+    DayOfYear,
+    DaysInMonth,
+    Month,
+    Year,
 }
 
 impl PromCalendarOp {
@@ -593,6 +597,22 @@ impl PromCalendarOp {
             Self::DayOfMonth => {
                 let (_, _, day) = prometheus_utc_civil_date(seconds);
                 day as f64
+            }
+            Self::DayOfYear => {
+                let (year, month, day) = prometheus_utc_civil_date(seconds);
+                prometheus_day_of_year(year, month, day) as f64
+            }
+            Self::DaysInMonth => {
+                let (year, month, _) = prometheus_utc_civil_date(seconds);
+                prometheus_days_in_month(year, month) as f64
+            }
+            Self::Month => {
+                let (_, month, _) = prometheus_utc_civil_date(seconds);
+                month as f64
+            }
+            Self::Year => {
+                let (year, _, _) = prometheus_utc_civil_date(seconds);
+                year as f64
             }
         }
     }
@@ -622,6 +642,27 @@ fn prometheus_utc_civil_date(seconds: i64) -> (i128, u8, u8) {
         year += 1;
     }
     (year, month as u8, day as u8)
+}
+
+fn prometheus_is_leap_year(year: i128) -> bool {
+    year.rem_euclid(4) == 0 && (year.rem_euclid(100) != 0 || year.rem_euclid(400) == 0)
+}
+
+fn prometheus_days_in_month(year: i128, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if prometheus_is_leap_year(year) => 29,
+        2 => 28,
+        _ => unreachable!("civil-date month is always 1 through 12"),
+    }
+}
+
+fn prometheus_day_of_year(year: i128, month: u8, day: u8) -> u16 {
+    const DAYS_BEFORE_MONTH: [u16; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    DAYS_BEFORE_MONTH[usize::from(month - 1)]
+        + u16::from(day)
+        + u16::from(month > 2 && prometheus_is_leap_year(year))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1517,7 +1558,14 @@ fn lower_promql_expr(
         promql::Expr::Call(call)
             if matches!(
                 call.func.name,
-                "minute" | "hour" | "day_of_week" | "day_of_month"
+                "minute"
+                    | "hour"
+                    | "day_of_week"
+                    | "day_of_month"
+                    | "day_of_year"
+                    | "days_in_month"
+                    | "month"
+                    | "year"
             ) =>
         {
             let inner = match call.args.args.as_slice() {
@@ -1544,6 +1592,10 @@ fn lower_promql_expr(
                 "hour" => PromCalendarOp::Hour,
                 "day_of_week" => PromCalendarOp::DayOfWeek,
                 "day_of_month" => PromCalendarOp::DayOfMonth,
+                "day_of_year" => PromCalendarOp::DayOfYear,
+                "days_in_month" => PromCalendarOp::DaysInMonth,
+                "month" => PromCalendarOp::Month,
+                "year" => PromCalendarOp::Year,
                 _ => unreachable!("guarded calendar function"),
             };
             Ok(PromPlan::Calendar(PromCalendarPlan {
@@ -8188,11 +8240,20 @@ mod tests {
         assert_eq!(PromCalendarOp::Hour.apply(-0.1), 0.0);
         assert_eq!(PromCalendarOp::DayOfMonth.apply(i64::MIN as f64), 4.0);
         assert_eq!(PromCalendarOp::DayOfMonth.apply(-1e20), 4.0);
+        assert_eq!(PromCalendarOp::DayOfYear.apply(90_061.9), 2.0);
+        assert_eq!(PromCalendarOp::DayOfYear.apply(1_709_208_000.0), 60.0);
+        assert_eq!(PromCalendarOp::DaysInMonth.apply(1_709_208_000.0), 29.0);
+        assert_eq!(PromCalendarOp::Month.apply(90_061.9), 1.0);
+        assert_eq!(PromCalendarOp::Year.apply(90_061.9), 1970.0);
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(PromCalendarOp::Minute.apply(value), 30.0);
             assert_eq!(PromCalendarOp::Hour.apply(value), 15.0);
             assert_eq!(PromCalendarOp::DayOfWeek.apply(value), 0.0);
             assert_eq!(PromCalendarOp::DayOfMonth.apply(value), 4.0);
+            assert_eq!(PromCalendarOp::DayOfYear.apply(value), 339.0);
+            assert_eq!(PromCalendarOp::DaysInMonth.apply(value), 31.0);
+            assert_eq!(PromCalendarOp::Month.apply(value), 12.0);
+            assert_eq!(PromCalendarOp::Year.apply(value), 292_277_026_596.0);
         }
     }
 }

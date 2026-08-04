@@ -92,6 +92,10 @@ They remove metric names, preserve other labels, truncate in-range finite
 fractional seconds toward zero, and retain Prometheus's pinned non-finite and
 out-of-range conversion behavior. The executable direct-SQL foundation is
 [`SQL-PROM-052`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-prom-052-minute-hour-day_of_week-and-day_of_month).
+`day_of_year`, `days_in_month`, `month`, and `year` share that optional-vector
+UTC contract, with one-indexed fields and Gregorian leap-year handling. Their
+executable direct-SQL foundation is
+[`SQL-PROM-053`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-prom-053-day_of_year-days_in_month-month-and-year).
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
