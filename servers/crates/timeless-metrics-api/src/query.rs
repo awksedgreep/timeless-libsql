@@ -386,6 +386,7 @@ pub(crate) enum PromPlan {
     String(String),
     Unary(Box<PromPlan>),
     Function(PromFunctionPlan),
+    LabelReplace(PromLabelReplacePlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -510,6 +511,15 @@ pub(crate) struct PromFunctionPlan {
     op: PromFunctionOp,
     inner: Box<PromPlan>,
     parameters: Vec<PromPlan>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromLabelReplacePlan {
+    inner: Box<PromPlan>,
+    destination: String,
+    replacement: String,
+    source: String,
+    pattern: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -793,6 +803,7 @@ impl PromPlan {
             Self::RangeSelector { .. } | Self::Subquery(_) => PromValueType::Matrix,
             Self::Unary(inner) => inner.value_type(),
             Self::Function(_) => PromValueType::Vector,
+            Self::LabelReplace(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1237,6 +1248,25 @@ fn lower_promql_expr(
                 parameters,
             }))
         }
+        promql::Expr::Call(call) if call.func.name == "label_replace" => {
+            let [argument, destination, replacement, source, pattern] = call.args.args.as_slice()
+            else {
+                return Err(
+                    "label_replace requires an instant vector and four string arguments".into(),
+                );
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err("label_replace requires an instant vector".into());
+            }
+            Ok(PromPlan::LabelReplace(PromLabelReplacePlan {
+                inner: Box::new(inner),
+                destination: promql_string_argument(destination, "destination label")?,
+                replacement: promql_string_argument(replacement, "replacement")?,
+                source: promql_string_argument(source, "source label")?,
+                pattern: promql_string_argument(pattern, "regular expression")?,
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1367,6 +1397,13 @@ fn lower_promql_expr(
             promql_expression_name(&other)
         )),
     }
+}
+
+fn promql_string_argument(argument: &promql::Expr, name: &str) -> Result<String, String> {
+    let promql::Expr::StringLiteral(value) = argument else {
+        return Err(format!("label_replace {name} must be a string literal"));
+    };
+    Ok(value.val.clone())
 }
 
 fn lower_promql_aggregate(
@@ -1585,6 +1622,7 @@ fn lower_promql_subquery(
             | PromPlan::RangeReduction(_)
             | PromPlan::Unary(_)
             | PromPlan::Function(_)
+            | PromPlan::LabelReplace(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -2948,6 +2986,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::LabelReplace(label_replace) => execute_prometheus_label_replace(
+            conn,
+            features,
+            label_replace,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -3858,6 +3909,81 @@ fn execute_prometheus_function(
         item.points.truncate(write_index);
     }
     series.retain(|item| !item.points.is_empty());
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_label_replace(
+    conn: &Connection,
+    features: QueryFeatures,
+    label_replace: &PromLabelReplacePlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    if label_replace.destination.is_empty() {
+        return Err("invalid destination label name in label_replace(): \"\"".into());
+    }
+    let pattern = Regex::new(&format!("^(?s:{})$", label_replace.pattern))
+        .map_err(|error| format!("invalid regular expression in label_replace(): {}", error))?;
+    let child = execute_prometheus(
+        conn,
+        features,
+        &label_replace.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let frame_bytes = child.frame_bytes;
+    let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("label_replace input type was checked while lowering")
+    };
+    for item in &mut series {
+        check_cancelled(cancelled)?;
+        let source = item
+            .labels
+            .get(&label_replace.source)
+            .cloned()
+            .unwrap_or_default();
+        let Some(captures) = pattern.captures(&source) else {
+            continue;
+        };
+        let mut replacement = String::new();
+        captures.expand(&label_replace.replacement, &mut replacement);
+        if replacement.is_empty() {
+            item.labels.remove(&label_replace.destination);
+        } else {
+            item.labels
+                .insert(label_replace.destination.clone(), replacement);
+        }
+    }
     encode_prometheus_intermediate(
         IntermediateValue::Vector(series),
         instant,

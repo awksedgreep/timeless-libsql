@@ -193,7 +193,8 @@ Three ingest paths, one durability contract (same buffers, same flush):
    hot path.
 3. **Prometheus exposition text**: any non-batch blob is parsed as a raw
    scrape body — malformed/NaN lines are counted, not fatal, exactly like a
-   real Prometheus server scrape:
+   real Prometheus server scrape. Standard label-value `\n`, `\"`, and
+   `\\` escapes are decoded before series identity is resolved:
 
 ```sh
 curl -s target:9100/metrics -o /tmp/scrape.prom && sqlite3 metrics.db \

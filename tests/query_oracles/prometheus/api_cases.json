@@ -2369,6 +2369,91 @@
       "expected_metric": {"case": "negative_zero", "job": "oracle"},
       "expected_values": [0],
       "drop_metric_name": true
+    },
+    {
+      "id": "PQL-F09-numbered-captures-and-overwrite",
+      "query": "label_replace(oracle_label_replace{case=\"capture\"}, \"zone\", \"$2-$1\", \"service\", \"([^:]+):([^:]+)\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "capture", "job": "oracle", "service": "api:west", "zone": "west-api"},
+      "expected_values": [6]
+    },
+    {
+      "id": "PQL-F09-missing-source-matches-empty",
+      "query": "label_replace(oracle_label_replace{case=\"missing\"}, \"zone\", \"missing\", \"service\", \"^$\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "missing", "job": "oracle", "zone": "missing"},
+      "expected_values": [2]
+    },
+    {
+      "id": "PQL-F09-empty-source-matches-empty",
+      "query": "label_replace(oracle_label_replace{case=\"empty\"}, \"zone\", \"empty\", \"service\", \"^$\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "empty", "job": "oracle", "zone": "empty"},
+      "expected_values": [3]
+    },
+    {
+      "id": "PQL-F09-unmatched-series-unchanged",
+      "query": "label_replace(oracle_label_replace{case=\"unmatched\"}, \"zone\", \"$2-$1\", \"service\", \"([^:]+):([^:]+)\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "unmatched", "job": "oracle", "service": "api"},
+      "expected_values": [4]
+    },
+    {
+      "id": "PQL-F09-empty-replacement-deletes-destination",
+      "query": "label_replace(oracle_label_replace{case=\"capture\"}, \"zone\", \"\", \"service\", \".*\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "capture", "job": "oracle", "service": "api:west"},
+      "expected_values": [6]
+    },
+    {
+      "id": "PQL-F09-metric-name-destination",
+      "query": "label_replace(oracle_label_replace{case=\"capture\"}, \"__name__\", \"renamed_$1\", \"case\", \"(.*)\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "renamed_capture", "case": "capture", "job": "oracle", "service": "api:west", "zone": "old"},
+      "expected_values": [6]
+    },
+    {
+      "id": "PQL-F09-metric-name-source",
+      "query": "label_replace(oracle_label_replace{case=\"capture\"}, \"original\", \"${1}_copy\", \"__name__\", \"(.*)\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "capture", "job": "oracle", "original": "oracle_label_replace_copy", "service": "api:west", "zone": "old"},
+      "expected_values": [6]
+    },
+    {
+      "id": "PQL-F09-named-capture",
+      "query": "label_replace(oracle_label_replace{case=\"named\"}, \"region\", \"$region\", \"service\", \"(?P<region>[^-]+)-.*\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "named", "job": "oracle", "region": "west", "service": "west-api"},
+      "expected_values": [5]
+    },
+    {
+      "id": "PQL-F09-dot-all-full-match",
+      "query": "label_replace(oracle_label_replace{case=\"newline\"}, \"region\", \"$1\", \"service\", \"api.(.*)\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "newline", "job": "oracle", "region": "west", "service": "api\nwest"},
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-F09-nested-label-replace",
+      "query": "label_replace(label_replace(oracle_label_replace{case=\"capture\"}, \"node\", \"$1\", \"service\", \"(.*)\"), \"region\", \"$1\", \"node\", \"[^:]+:(.*)\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "capture", "job": "oracle", "node": "api:west", "region": "west", "service": "api:west", "zone": "old"},
+      "expected_values": [6]
+    },
+    {
+      "id": "PQL-F09-utf8-destination-label-name",
+      "query": "label_replace(oracle_label_replace{case=\"capture\"}, \"bad-name\", \"accepted\", \"service\", \".*\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_label_replace", "bad-name": "accepted", "case": "capture", "job": "oracle", "service": "api:west", "zone": "old"},
+      "expected_values": [6]
+    },
+    {
+      "id": "PQL-F09-range-grid-preserves-name",
+      "query": "label_replace(oracle_label_replace{case=\"capture\"}, \"zone\", \"$2-$1\", \"service\", \"([^:]+):([^:]+)\")",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"__name__": "oracle_label_replace", "case": "capture", "job": "oracle", "service": "api:west", "zone": "west-api"},
+      "expected_values": [1, 6]
     }
   ],
   "operator_error_cases": [
@@ -2435,6 +2520,22 @@
       "status": 422,
       "error_type": "execution",
       "error_contains": "grouping labels must ensure unique matches"
+    },
+    {
+      "id": "PQL-F09-invalid-regex-errors",
+      "query": "label_replace(oracle_label_replace, \"zone\", \"x\", \"service\", \"(\")",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "invalid regular expression"
+    },
+    {
+      "id": "PQL-F09-invalid-destination-label-errors",
+      "query": "label_replace(oracle_label_replace, \"\", \"x\", \"service\", \".*\")",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "invalid destination label name"
     }
   ],
   "cases": [

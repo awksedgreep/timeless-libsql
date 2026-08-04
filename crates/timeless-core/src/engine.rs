@@ -1674,6 +1674,9 @@ impl Engine {
         labels: &[(&'a [u8], &'a [u8])],
         sorted: &mut Vec<(&'a str, &'a str)>,
     ) -> EngineResult<i64> {
+        if labels.iter().any(|(_, value)| value.contains(&b'\\')) {
+            return self.resolve_escaped(name, labels);
+        }
         let Some(metric) = std::str::from_utf8(name).ok() else {
             return self.resolve_lossy(name, labels);
         };
@@ -1710,6 +1713,25 @@ impl Engine {
         }
 
         self.resolve_pairs_slow(hash, metric, sorted)
+    }
+
+    /// Prometheus exposition escapes label-value newline, quote, and
+    /// backslash bytes. Keep the allocation-free borrowed fast path for the
+    /// overwhelmingly common unescaped labels, and materialize only samples
+    /// that actually contain an escape.
+    fn resolve_escaped(&self, name: &[u8], labels: &[(&[u8], &[u8])]) -> EngineResult<i64> {
+        let metric = String::from_utf8_lossy(name);
+        let labels: HashMap<String, String> = labels
+            .iter()
+            .map(|&(key, value)| {
+                let value = unescape_prom_label_value(value);
+                (
+                    String::from_utf8_lossy(key).into_owned(),
+                    String::from_utf8_lossy(&value).into_owned(),
+                )
+            })
+            .collect();
+        self.resolve_cached(&metric, &labels)
     }
 
     /// Rare fallback for invalid UTF-8 in names/labels: resolve through
@@ -4804,7 +4826,9 @@ fn parse_prom_value(bytes: &[u8]) -> Option<f64> {
 }
 
 /// Parse the inside of a `{key="val",key2="val2"}` label block into `out`.
-/// Escaped characters in values are kept raw, as the C++ parser does.
+/// The scanner keeps escaped bytes borrowed here. `resolve_entry` decodes the
+/// three Prometheus exposition escapes only on the uncommon escaped-label
+/// path, preserving zero-allocation resolution for ordinary labels.
 fn parse_prom_labels_into<'a>(mut s: &'a [u8], out: &mut Vec<(&'a [u8], &'a [u8])>) {
     loop {
         while let Some((&b, rest)) = s.split_first() {
@@ -4843,6 +4867,32 @@ fn parse_prom_labels_into<'a>(mut s: &'a [u8], out: &mut Vec<(&'a [u8], &'a [u8]
         out.push((key, &s[..i]));
         s = if i < s.len() { &s[i + 1..] } else { &s[i..] };
     }
+}
+
+fn unescape_prom_label_value(value: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] != b'\\' || index + 1 >= value.len() {
+            output.push(value[index]);
+            index += 1;
+            continue;
+        }
+        let escaped = value[index + 1];
+        match escaped {
+            b'n' => output.push(b'\n'),
+            b'\\' | b'"' => output.push(escaped),
+            _ => {
+                // Preserve unknown escapes exactly. Existing partial-success
+                // ingest did not reject them; tightening malformed-line
+                // policy is a separate compatibility decision.
+                output.push(b'\\');
+                output.push(escaped);
+            }
+        }
+        index += 2;
+    }
+    output
 }
 
 /// Parse one exposition line. Labels land in the caller's scratch buffer;

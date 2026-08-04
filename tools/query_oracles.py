@@ -501,6 +501,24 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
             [(value, timestamp_ms + offset_ms) for value, offset_ms in points],
             {"case": case},
         )
+    for case, service, zone, points in [
+        ("capture", "api:west", "old", [(1.0, 20_000), (6.0, 30_000)]),
+        ("missing", None, None, [(2.0, 30_000)]),
+        ("empty", "", None, [(3.0, 30_000)]),
+        ("unmatched", "api", None, [(4.0, 30_000)]),
+        ("named", "west-api", None, [(5.0, 30_000)]),
+        ("newline", "api\nwest", None, [(7.0, 30_000)]),
+    ]:
+        labels = {"case": case}
+        if service is not None:
+            labels["service"] = service
+        if zone is not None:
+            labels["zone"] = zone
+        write_request += series(
+            "oracle_label_replace",
+            [(value, timestamp_ms + offset_ms) for value, offset_ms in points],
+            labels,
+        )
     return snappy_literal(write_request)
 
 

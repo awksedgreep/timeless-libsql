@@ -887,6 +887,24 @@ with the same honest SQL-NULL versus packed-IEEE boundary.
 Degree/radian conversion and scalar π use
 [`SQL-PROM-045`](QUERY_SQL_EQUIVALENTS.md#sql-prom-045-deg-rad-and-pi),
 including a direct SQL evaluation-time recipe for `pi()`.
+PromQL label replacement is API-owned composition over the same bounded
+public results:
+
+```promql
+label_replace(http_requests_total, "region", "$1", "instance", "([^.]+)\\..*")
+```
+
+The regular expression is a full-string, dot-all RE2-family match. Missing
+source labels are read as empty strings; a matching empty replacement removes
+the destination, while a non-match leaves the complete series unchanged.
+Numbered and named captures, `__name__` as source or destination, and
+Prometheus 3's nonempty UTF-8 destination-label scheme are supported. Invalid
+regexes and an empty destination return an `execution` envelope. SQLite's
+public JSON functions can set or remove a known constant label, but ordinary
+SQLite has no portable RE2-compatible capture-and-expand operation. The
+`PQL-F09` matrix foundation is therefore honestly `none`, and the cookbook
+does not claim a general SQL equivalent or add an extension primitive solely
+for language syntax.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

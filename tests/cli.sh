@@ -977,6 +977,7 @@ cat > "$PROMBODY" <<'PROM'
 http_requests_total 1027
 node_temp_celsius{sensor="cpu0",host="pvm1"} 42.5 1753000000123
 http_request_duration_seconds_bucket{le="0.5",method="GET",code="200"} 129389
+escaped_labels{path="a\"b",note="x\\y",line="a\nb"} 7
 this line is definitely not prometheus !!!
 bad_metric NaN
 PROM
@@ -990,12 +991,17 @@ INSERT INTO metrics(metrics) VALUES ('flush');
 SELECT 'total', COUNT(*) FROM metrics;
 SELECT 'temp', name, ts, value, labels FROM metrics WHERE name = 'node_temp_celsius';
 SELECT 'bucket', value, labels FROM metrics WHERE name = 'http_request_duration_seconds_bucket';
+SELECT 'escaped',
+       hex(json_extract(labels, '$.path')),
+       hex(json_extract(labels, '$.note')),
+       hex(json_extract(labels, '$.line'))
+  FROM metrics WHERE name = 'escaped_labels';
 SELECT 'default_shared', COUNT(DISTINCT ts) FROM metrics WHERE name != 'node_temp_celsius';
 SELECT 'default_sane', COUNT(*) FROM metrics WHERE name != 'node_temp_celsius'
   AND ts BETWEEN 1750000000 AND 4000000000;
 SQL
 )
-# ingested = 4 samples (rowid = count; the malformed line is an error, not a
+# ingested = 5 samples (rowid = count; the malformed line is an error, not a
 # sample, and NOT fatal). The NaN sample is stored bit-exact but ordinary
 # SQLite REAL projection is NULL; packed public frames preserve its bits.
 # 'temp' proves the explicit ms ts came out as
@@ -1006,17 +1012,18 @@ SQL
 # SECONDS in a sane range — 1750000000 ≈ mid-2025 < now, and the 4e9
 # upper bound would be violated by a milliseconds default (~1.79e12),
 # so this asserts the unit, not just "recent".
-expected='ingested|4
-total|4
+expected='ingested|5
+total|5
 temp|node_temp_celsius|1753000000|42.5|{"host":"pvm1","sensor":"cpu0"}
 bucket|129389.0|{"code":"200","le":"0.5","method":"GET"}
+escaped|612262|785C79|610A62
 default_shared|1
-default_sane|3'
-check_eq "prometheus body: count, ms→s ts, labels, shared seconds default" "$got" "$expected"
+default_sane|4'
+check_eq "prometheus body: count, ms→s ts, decoded label escapes, shared seconds default" "$got" "$expected"
 
 # Batch v0 still works THROUGH THE SAME DISPATCH into the same table
 # (regression: section 7's blob starts with 0x01 and must keep taking
-# the batch path, not the text path). 3 more points → 7 total. Flushed
+# the batch path, not the text path). 3 more points → 8 total. Flushed
 # at the end so they survive into the new-process check below (the POC
 # durability contract: unflushed buffers die with the process).
 got=$(sqlite3 "$PROMDB" <<SQL
@@ -1028,7 +1035,7 @@ INSERT INTO metrics(metrics) VALUES ('flush');
 SQL
 )
 expected='batch_rowid|3
-total|7'
+total|8'
 check_eq "batch v0 blob still dispatches to the batch path" "$got" "$expected"
 
 # An all-garbage body parses as prometheus text but yields 0 samples +
@@ -1068,7 +1075,7 @@ fi
 # Nothing from the rejected payloads may have been stored.
 got=$(sqlite3 "$PROMDB" ".load $EXT" \
   "INSERT INTO metrics(metrics) VALUES ('flush'); SELECT COUNT(*) FROM metrics;")
-check_eq "rejected payloads stored nothing" "$got" "7"
+check_eq "rejected payloads stored nothing" "$got" "8"
 
 # ---------------------------------------------------------------------------
 echo "== section 19: plain-table oracle property test (3 seeds) =="

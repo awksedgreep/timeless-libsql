@@ -165,8 +165,9 @@ sqlite3 mydata.db \
 ```
 
 Malformed lines are counted and skipped, not fatal — same behavior as a real
-Prometheus server. Run that from cron and you have a metrics pipeline in one
-file.
+Prometheus server. Standard label-value `\n`, `\"`, and `\\` escapes are
+decoded before the `(name, labels)` series identity is resolved. Run that from
+cron and you have a metrics pipeline in one file.
 
 (There is also a high-throughput packed binary format — ~24M points/sec — for
 programs that batch off the hot path; see the Tier 2 spec in

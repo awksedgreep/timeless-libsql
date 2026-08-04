@@ -12,6 +12,8 @@
 //!    abort the body — partial success is the contract.
 //! 4. Comments / HELP / TYPE / blank lines are free: neither samples nor
 //!    errors.
+//! 5. Prometheus label-value `\\n`, `\\\"`, and `\\\\` escapes are decoded
+//!    before series identity is resolved.
 //!
 //! If any of these change, the vtab's Prometheus path (and cli.sh
 //! section 18) breaks — fail here first, with a readable message.
@@ -93,13 +95,13 @@ fn prometheus_ingest_semantics() {
         );
     }
 
-    let escaped_body =
-        b"escaped_labels{path=\"a\\\"b\",note=\"x\\\\y\"} 7 1800000000000\r\ncrlf_metric 9\r\n";
+    let escaped_body = b"escaped_labels{path=\"a\\\"b\",note=\"x\\\\y\",line=\"a\\nb\"} 7 1800000000000\r\ncrlf_metric 9\r\n";
     let (count, errors) = engine.ingest_prometheus(escaped_body, default_ts).unwrap();
     assert_eq!((count, errors), (2, 0));
     let escaped: HashMap<String, String> = [
-        ("path".to_string(), r#"a\"b"#.to_string()),
-        ("note".to_string(), r#"x\\y"#.to_string()),
+        ("path".to_string(), "a\"b".to_string()),
+        ("note".to_string(), r#"x\y"#.to_string()),
+        ("line".to_string(), "a\nb".to_string()),
     ]
     .into_iter()
     .collect();

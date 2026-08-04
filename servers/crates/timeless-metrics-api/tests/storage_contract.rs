@@ -8909,6 +8909,252 @@ async fn session_eight_promql_angle_transforms_and_pi_preserve_types_and_reopen(
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_label_replace_pins_regex_labels_limits_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_label_replace.db");
+    let base = 1_700_880_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "label_replace_metric{{case=\"capture\",service=\"api:west\",zone=\"old\"}} 1 {}\n",
+            "label_replace_metric{{case=\"capture\",service=\"api:west\",zone=\"old\"}} 6 {}\n",
+            "label_replace_metric{{case=\"missing\"}} 2 {}\n",
+            "label_replace_metric{{case=\"empty\",service=\"\"}} 3 {}\n",
+            "label_replace_metric{{case=\"unmatched\",service=\"api\"}} 4 {}\n",
+            "label_replace_metric{{case=\"named\",service=\"west-api\"}} 5 {}\n",
+            "label_replace_metric{{case=\"newline\",service=\"api\\nwest\"}} 7 {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let capture = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"capture\"}, \"zone\", \"$2-$1\", \"service\", \"([^:]+):([^:]+)\")",
+        base,
+    )
+    .await;
+    assert_eq!(capture.0, StatusCode::OK, "{}", capture.1);
+    assert_eq!(
+        capture.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {
+                "__name__": "label_replace_metric",
+                "case": "capture",
+                "service": "api:west",
+                "zone": "west-api"
+            },
+            "value": [base, "1"]
+        }])
+    );
+
+    for (case, source_regex, replacement, expected) in [
+        (
+            "missing",
+            "^$",
+            "missing",
+            serde_json::json!({
+                "__name__": "label_replace_metric", "case": "missing", "zone": "missing"
+            }),
+        ),
+        (
+            "empty",
+            "^$",
+            "empty",
+            serde_json::json!({
+                "__name__": "label_replace_metric", "case": "empty", "service": "", "zone": "empty"
+            }),
+        ),
+        (
+            "unmatched",
+            "([^:]+):([^:]+)",
+            "$2-$1",
+            serde_json::json!({
+                "__name__": "label_replace_metric", "case": "unmatched", "service": "api"
+            }),
+        ),
+    ] {
+        let expression = format!(
+            "label_replace(label_replace_metric{{case=\"{case}\"}}, \"zone\", \"{replacement}\", \"service\", \"{source_regex}\")"
+        );
+        let response = prom_query(&app, &expression, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{expression}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["metric"], expected);
+    }
+
+    let deleted = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"capture\"}, \"zone\", \"\", \"service\", \".*\")",
+        base,
+    )
+    .await;
+    assert_eq!(deleted.0, StatusCode::OK, "{}", deleted.1);
+    assert_eq!(
+        deleted.1["data"]["result"][0]["metric"],
+        serde_json::json!({
+            "__name__": "label_replace_metric", "case": "capture", "service": "api:west"
+        })
+    );
+    let renamed = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"capture\"}, \"__name__\", \"renamed_$1\", \"case\", \"(.*)\")",
+        base,
+    )
+    .await;
+    assert_eq!(renamed.0, StatusCode::OK, "{}", renamed.1);
+    assert_eq!(
+        renamed.1["data"]["result"][0]["metric"]["__name__"],
+        "renamed_capture"
+    );
+    let from_name = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"capture\"}, \"original\", \"${1}_copy\", \"__name__\", \"(.*)\")",
+        base,
+    )
+    .await;
+    assert_eq!(from_name.0, StatusCode::OK, "{}", from_name.1);
+    assert_eq!(
+        from_name.1["data"]["result"][0]["metric"]["original"],
+        "label_replace_metric_copy"
+    );
+    let named = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"named\"}, \"region\", \"$region\", \"service\", \"(?P<region>[^-]+)-.*\")",
+        base,
+    )
+    .await;
+    assert_eq!(named.0, StatusCode::OK, "{}", named.1);
+    assert_eq!(named.1["data"]["result"][0]["metric"]["region"], "west");
+    let dot_all = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"newline\"}, \"region\", \"$1\", \"service\", \"api.(.*)\")",
+        base,
+    )
+    .await;
+    assert_eq!(dot_all.0, StatusCode::OK, "{}", dot_all.1);
+    assert_eq!(dot_all.1["data"]["result"][0]["metric"]["region"], "west");
+    let nested = prom_query(
+        &app,
+        "label_replace(label_replace(label_replace_metric{case=\"capture\"}, \"node\", \"$1\", \"service\", \"(.*)\"), \"region\", \"$1\", \"node\", \"[^:]+:(.*)\")",
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["metric"]["region"], "west");
+    let utf8_name = prom_query(
+        &app,
+        "label_replace(label_replace_metric{case=\"capture\"}, \"bad-name\", \"accepted\", \"service\", \".*\")",
+        base,
+    )
+    .await;
+    assert_eq!(utf8_name.0, StatusCode::OK, "{}", utf8_name.1);
+    assert_eq!(
+        utf8_name.1["data"]["result"][0]["metric"]["bad-name"],
+        "accepted"
+    );
+
+    let range = prom_query_range(
+        &app,
+        "label_replace(label_replace_metric{case=\"capture\"}, \"zone\", \"$2-$1\", \"service\", \"([^:]+):([^:]+)\")",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0],
+        serde_json::json!({
+            "metric": {
+                "__name__": "label_replace_metric",
+                "case": "capture",
+                "service": "api:west",
+                "zone": "west-api"
+            },
+            "values": [[base, "1"], [base + 10, "6"]]
+        })
+    );
+
+    for query in [
+        "label_replace(1, \"zone\", \"x\", \"service\", \".*\")",
+        "label_replace(label_replace_metric[1m], \"zone\", \"x\", \"service\", \".*\")",
+    ] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    for query in [
+        "label_replace(label_replace_metric, \"zone\", \"x\", \"service\", \"(\")",
+        "label_replace(label_replace_metric, \"\", \"x\", \"service\", \".*\")",
+    ] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(
+            invalid.0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}: {}",
+            invalid.1
+        );
+        assert_eq!(invalid.1["errorType"], "execution");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "label_replace(label_replace_metric, \"zone\", \"x\", \"service\", \".*\")",
+        base,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "label_replace(label_replace_metric{case=\"capture\"}, \"zone\", \"$2-$1\", \"service\", \"([^:]+):([^:]+)\")",
+            base,
+        )
+        .await
+        .1,
+        capture.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

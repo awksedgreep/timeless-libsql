@@ -1100,6 +1100,31 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        label_replace_narrow = measure(
+            "metrics-label-replace-narrow",
+            lambda: promql(
+                'label_replace(query_contract_cpu{host="h0000"}, "node", "$1", "host", "(.*)")'
+            ),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        label_replace_wide = measure(
+            "metrics-label-replace-wide",
+            lambda: promql_range(
+                'label_replace(query_contract_cpu, "node", "$1", "host", "(.*)")',
+                at - 30,
+                at,
+                10,
+            ),
+            matrix_point_cardinality,
+            series * 4,
+            stat,
+            iterations,
+            warmup,
+        )
         arithmetic_narrow = measure(
             "metrics-arithmetic-vector-scalar-narrow",
             lambda: promql('query_contract_cpu{host="h0000"} * 2'),
@@ -1694,6 +1719,8 @@ def metrics_evidence(
                 "trig_wide": trig_wide,
                 "angle_narrow": angle_narrow,
                 "angle_wide": angle_wide,
+                "label_replace_narrow": label_replace_narrow,
+                "label_replace_wide": label_replace_wide,
                 "arithmetic_vector_scalar_narrow": arithmetic_narrow,
                 "arithmetic_one_to_one_wide": arithmetic_wide,
                 "comparison_filter_narrow": comparison_narrow,
