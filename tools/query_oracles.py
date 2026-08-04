@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -805,6 +806,25 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 case["expected_scalar"] = (
                     scalar_ms // 1_000 if scalar_ms % 1_000 == 0 else scalar_ms / 1_000
                 )
+            if "expected_calendar_at_evaluation" in case:
+                case = dict(case)
+                at = datetime.fromtimestamp(evaluation_ms / 1_000, tz=timezone.utc)
+                calendar_values = {
+                    "minute": at.minute,
+                    "hour": at.hour,
+                    "day_of_week": (at.weekday() + 1) % 7,
+                    "day_of_month": at.day,
+                    "day_of_year": at.timetuple().tm_yday,
+                    "days_in_month": (
+                        datetime(at.year + (at.month == 12), at.month % 12 + 1, 1, tzinfo=timezone.utc)
+                        - datetime(at.year, at.month, 1, tzinfo=timezone.utc)
+                    ).days,
+                    "month": at.month,
+                    "year": at.year,
+                }
+                case["expected_values"] = [
+                    calendar_values[case["expected_calendar_at_evaluation"]]
+                ]
             range_case = case.get("range")
             if range_case:
                 start_ms = sample_timestamp_ms + range_case["start_offset_ms"]

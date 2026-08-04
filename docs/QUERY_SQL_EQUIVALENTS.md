@@ -89,6 +89,11 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-045`](#sql-prom-045-deg-rad-and-pi) | `PQL-F08` | current foundation | bounded degree/radian conversion plus scalar pi through standard SQLite math; API owns packed NaN, names, types, limits, and envelopes |
 | [`SQL-PROM-046`](#sql-prom-046-label_join) | `PQL-F10` | current foundation | ordered arbitrary-arity label joining over public JSON labels; API owns language parsing, names, limits, cancellation, and envelopes |
 | [`SQL-PROM-047`](#sql-prom-047-absent) | `PQL-F11` | current foundation | exact step-local absence over a bounded public grid; API owns selector-derived labels, AST composition, limits, cancellation, and envelopes |
+| [`SQL-PROM-048`](#sql-prom-048-absent_over_time) | `PQL-F12` | current foundation | exact step-local absence over public raw windows; API owns selector-derived labels and subquery composition |
+| [`SQL-PROM-049`](#sql-prom-049-sort-and-sort_desc) | `PQL-F13` | current foundation | exact row-visible instant ordering; API owns packed NaN fidelity and range response ordering |
+| [`SQL-PROM-050`](#sql-prom-050-scalar-and-vector) | `PQL-F15` | current foundation | exact per-step cardinality and nameless-vector composition; API owns packed NaN and result types |
+| [`SQL-PROM-051`](#sql-prom-051-time-and-timestamp) | `PQL-F16` | current foundation | exact evaluation grid and stored timestamps; API owns AST sample provenance and envelopes |
+| [`SQL-PROM-052`](#sql-prom-052-minute-hour-day_of_week-and-day_of_month) | `PQL-F17` | current foundation | UTC extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -1985,6 +1990,65 @@ SQLite/libSQL users, so no timestamp-specific extension primitive is needed.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_time_timestamp_pin_clock_provenance_and_reopen`.
+
+### SQL-PROM-052: `minute`, `hour`, `day_of_week`, and `day_of_month`
+
+Extract a UTC calendar component from the sample values of a bounded public
+instant grid:
+
+```sql
+WITH selected AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT labels, ts,
+       CASE :part
+         WHEN 'minute' THEN CAST(strftime('%M', CAST(value AS INTEGER), 'unixepoch') AS INTEGER)
+         WHEN 'hour' THEN CAST(strftime('%H', CAST(value AS INTEGER), 'unixepoch') AS INTEGER)
+         WHEN 'day_of_week' THEN CAST(strftime('%w', CAST(value AS INTEGER), 'unixepoch') AS INTEGER)
+         WHEN 'day_of_month' THEN CAST(strftime('%d', CAST(value AS INTEGER), 'unixepoch') AS INTEGER)
+       END AS value
+FROM selected
+ORDER BY labels, ts;
+```
+
+`:start`, `:end`, `:step`, and `:lookback` use the metric table's timestamp
+unit; each selected metric `value` is independently interpreted as Unix
+seconds. `:part` must be one of the four names in the statement. Bounds are
+inclusive and lookback is open-left. The inner integer cast implements
+Prometheus's truncation toward zero for negative and positive fractions;
+SQLite's `%w` already numbers Sunday as zero. Labels exclude the metric name
+on this public table and ordering is canonical label then evaluation timestamp.
+
+The zero-argument form uses the evaluation timestamp itself. For a
+second-native grid it is:
+
+```sql
+SELECT '{}' AS labels, :evaluation_ts AS ts,
+       CASE :part
+         WHEN 'minute' THEN CAST(strftime('%M', CAST(:evaluation_ts AS REAL), 'unixepoch') AS INTEGER)
+         WHEN 'hour' THEN CAST(strftime('%H', CAST(:evaluation_ts AS REAL), 'unixepoch') AS INTEGER)
+         WHEN 'day_of_week' THEN CAST(strftime('%w', CAST(:evaluation_ts AS REAL), 'unixepoch') AS INTEGER)
+         WHEN 'day_of_month' THEN CAST(strftime('%d', CAST(:evaluation_ts AS REAL), 'unixepoch') AS INTEGER)
+       END AS value;
+```
+
+This ordinary SQL is an honest foundation, not a claim of complete PromQL
+semantics. SQLite projects a stored NaN as NULL and its date functions return
+NULL outside their supported calendar range. Prometheus instead truncates
+finite fractional seconds toward zero and maps NaN, both infinities, and
+out-of-range values to its maximum Unix-second calendar
+(`292277026596-12-04 15:30:07 UTC`). The Rust API
+reads packed float bits and implements that full-domain behavior, optional
+argument defaulting, AST types, metric-name removal, exact result envelopes,
+limits, and cancellation. No calendar-specific extension primitive or extra
+storage read is justified.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_calendar_part_one_uses_utc_defaults_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

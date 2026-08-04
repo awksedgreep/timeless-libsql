@@ -86,6 +86,12 @@ storage read.
 lookback, `offset`, and `@`; composed expressions report their newly created
 evaluation timestamps. Response timestamps stay on the outer grid, and
 `timestamp` removes only the metric name.
+`minute`, `hour`, `day_of_week`, and `day_of_month` extract UTC calendar
+components from an optional instant vector, defaulting to `vector(time())`.
+They remove metric names, preserve other labels, truncate in-range finite
+fractional seconds toward zero, and retain Prometheus's pinned non-finite and
+out-of-range conversion behavior. The executable direct-SQL foundation is
+[`SQL-PROM-052`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-prom-052-minute-hour-day_of_week-and-day_of_month).
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves

@@ -1000,6 +1000,24 @@ creates a new sample, `timestamp()` reports that node's evaluation time.
 for a stored NaN. Direct SQLite/libSQL equivalents for both clocks are in
 [`SQL-PROM-051`](QUERY_SQL_EQUIVALENTS.md#sql-prom-051-time-and-timestamp).
 
+UTC calendar extraction accepts an optional instant vector:
+
+```promql
+minute(process_start_time_seconds)
+hour()
+day_of_week(vector(0))
+day_of_month(process_start_time_seconds)
+```
+
+With no argument, each function evaluates `vector(time())`. Finite fractional
+Unix seconds truncate toward zero, Sunday is day zero, metric names are
+removed, and other labels remain. NaN, either infinity, and out-of-range
+values follow the pinned Prometheus maximum-Unix-second conversion rather
+than becoming NaN. Direct
+SQLite/libSQL users can use the parameterized UTC `strftime` foundation in
+[`SQL-PROM-052`](QUERY_SQL_EQUIVALENTS.md#sql-prom-052-minute-hour-day_of_week-and-day_of_month),
+with its explicitly documented SQLite calendar-range limitation.
+
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

@@ -3580,6 +3580,7 @@ db.executemany(
          100, 1.0),
         ('label_join_metric', '{"case":"missing","service":"api"}',
          100, 2.0),
+        ('calendar_metric', '{"case":"date","host":"web-1"}', 100, 90061.9),
         ('absent_late', '{"case":"late","service":"api"}', 110, 7.0),
         ('errors_total', '{"host":"web-1"}', 100, 2.0),
         ('requests_total', '{"host":"web-1"}', 100, 10.0),
@@ -4862,6 +4863,58 @@ bottom = db.execute(
     " ORDER BY ts,value ASC,labels"
 ).fetchall()
 assert [row[2] for row in bottom] == [10.0, 20.0]
+
+calendar_sql = (
+    "WITH selected AS (SELECT labels,ts,value FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:lookback))"
+    " SELECT labels,ts,CASE :part"
+    " WHEN 'minute' THEN CAST(strftime('%M',CAST(value AS INTEGER),'unixepoch') AS INTEGER)"
+    " WHEN 'hour' THEN CAST(strftime('%H',CAST(value AS INTEGER),'unixepoch') AS INTEGER)"
+    " WHEN 'day_of_week' THEN CAST(strftime('%w',CAST(value AS INTEGER),'unixepoch') AS INTEGER)"
+    " WHEN 'day_of_month' THEN CAST(strftime('%d',CAST(value AS INTEGER),'unixepoch') AS INTEGER)"
+    " END FROM selected ORDER BY labels,ts"
+)
+calendar = {}
+for part in ['minute', 'hour', 'day_of_week', 'day_of_month']:
+    calendar[part] = db.execute(
+        calendar_sql,
+        {
+            'metric': 'calendar_metric',
+            'filter_json': None,
+            'start': 100,
+            'end': 100,
+            'step': 1,
+            'lookback': 1,
+            'part': part,
+        },
+    ).fetchone()[2]
+assert calendar == {
+    'minute': 1,
+    'hour': 1,
+    'day_of_week': 5,
+    'day_of_month': 2,
+}
+
+calendar_default_sql = (
+    "SELECT '{}',:evaluation_ts,CASE :part"
+    " WHEN 'minute' THEN CAST(strftime('%M',CAST(:evaluation_ts AS REAL),'unixepoch') AS INTEGER)"
+    " WHEN 'hour' THEN CAST(strftime('%H',CAST(:evaluation_ts AS REAL),'unixepoch') AS INTEGER)"
+    " WHEN 'day_of_week' THEN CAST(strftime('%w',CAST(:evaluation_ts AS REAL),'unixepoch') AS INTEGER)"
+    " WHEN 'day_of_month' THEN CAST(strftime('%d',CAST(:evaluation_ts AS REAL),'unixepoch') AS INTEGER)"
+    " END"
+)
+calendar_default = {}
+for part in ['minute', 'hour', 'day_of_week', 'day_of_month']:
+    calendar_default[part] = db.execute(
+        calendar_default_sql,
+        {'evaluation_ts': 1704153845, 'part': part},
+    ).fetchone()[2]
+assert calendar_default == {
+    'minute': 4,
+    'hour': 0,
+    'day_of_week': 2,
+    'day_of_month': 2,
+}
 
 bounded = db.execute(
     "SELECT ts,level,message,metadata FROM logs"

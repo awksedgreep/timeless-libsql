@@ -393,6 +393,7 @@ pub(crate) enum PromPlan {
     Conversion(PromConversionPlan),
     Time,
     Timestamp(PromTimestampPlan),
+    Calendar(PromCalendarPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -563,6 +564,64 @@ pub(crate) struct PromConversionPlan {
 #[derive(Clone, Debug)]
 pub(crate) struct PromTimestampPlan {
     inner: Box<PromPlan>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromCalendarOp {
+    Minute,
+    Hour,
+    DayOfWeek,
+    DayOfMonth,
+}
+
+impl PromCalendarOp {
+    fn apply(self, value: f64) -> f64 {
+        // Prometheus converts every non-finite or out-of-i64-range input to
+        // the same maximum Unix second before extracting a UTC calendar
+        // component. In-range finite values are truncated toward zero.
+        let seconds = if value.is_finite() && value > i64::MIN as f64 && value < -(i64::MIN as f64)
+        {
+            value as i64
+        } else {
+            i64::MAX
+        };
+        let second_of_day = seconds.rem_euclid(86_400);
+        match self {
+            Self::Minute => ((second_of_day / 60) % 60) as f64,
+            Self::Hour => (second_of_day / 3_600) as f64,
+            Self::DayOfWeek => (seconds.div_euclid(86_400) + 4).rem_euclid(7) as f64,
+            Self::DayOfMonth => {
+                let (_, _, day) = prometheus_utc_civil_date(seconds);
+                day as f64
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromCalendarPlan {
+    inner: Box<PromPlan>,
+    op: PromCalendarOp,
+}
+
+fn prometheus_utc_civil_date(seconds: i64) -> (i128, u8, u8) {
+    // Howard Hinnant's civil-from-days algorithm, evaluated with i128 so the
+    // entire i64 Unix-second domain remains defined (including Prometheus's
+    // non-finite sentinel at i64::MAX).
+    let z = i128::from(seconds.div_euclid(86_400)) + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month as u8, day as u8)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -856,6 +915,7 @@ impl PromPlan {
             },
             Self::Time => PromValueType::Scalar,
             Self::Timestamp(_) => PromValueType::Vector,
+            Self::Calendar(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1454,6 +1514,43 @@ fn lower_promql_expr(
                 inner: Box::new(inner),
             }))
         }
+        promql::Expr::Call(call)
+            if matches!(
+                call.func.name,
+                "minute" | "hour" | "day_of_week" | "day_of_month"
+            ) =>
+        {
+            let inner = match call.args.args.as_slice() {
+                [] => PromPlan::Conversion(PromConversionPlan {
+                    inner: Box::new(PromPlan::Time),
+                    kind: PromConversionKind::Vector,
+                }),
+                [argument] => {
+                    let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+                    if inner.value_type() != PromValueType::Vector {
+                        return Err(format!("{} requires an instant vector", call.func.name));
+                    }
+                    inner
+                }
+                _ => {
+                    return Err(format!(
+                        "{} accepts at most one instant vector",
+                        call.func.name
+                    ));
+                }
+            };
+            let op = match call.func.name {
+                "minute" => PromCalendarOp::Minute,
+                "hour" => PromCalendarOp::Hour,
+                "day_of_week" => PromCalendarOp::DayOfWeek,
+                "day_of_month" => PromCalendarOp::DayOfMonth,
+                _ => unreachable!("guarded calendar function"),
+            };
+            Ok(PromPlan::Calendar(PromCalendarPlan {
+                inner: Box::new(inner),
+                op,
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1841,6 +1938,7 @@ fn lower_promql_subquery(
             | PromPlan::Sort(_)
             | PromPlan::Conversion(_)
             | PromPlan::Timestamp(_)
+            | PromPlan::Calendar(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -3274,6 +3372,19 @@ fn execute_prometheus(
             conn,
             features,
             timestamp,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
+        PromPlan::Calendar(calendar) => execute_prometheus_calendar(
+            conn,
+            features,
+            calendar,
             start,
             stop,
             step,
@@ -4795,6 +4906,65 @@ fn execute_prometheus_timestamp(
         for (evaluation_time, value) in &mut item.points {
             check_cancelled(cancelled)?;
             *value = *evaluation_time as f64 / 1_000.0;
+        }
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_calendar(
+    conn: &Connection,
+    features: QueryFeatures,
+    calendar: &PromCalendarPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let child = execute_prometheus(
+        conn,
+        features,
+        &calendar.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let frame_bytes = child.frame_bytes;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("calendar input type was checked while lowering")
+    };
+    for item in &mut series {
+        check_cancelled(cancelled)?;
+        item.labels.remove("__name__");
+        for (_, value) in &mut item.points {
+            check_cancelled(cancelled)?;
+            *value = calendar.op.apply(*value);
         }
     }
     encode_prometheus_intermediate(
@@ -8004,5 +8174,25 @@ mod tests {
         );
         let error = prometheus_range_request(&params).unwrap_err();
         assert!(error.contains("maximum resolution"), "{error}");
+    }
+
+    #[test]
+    fn prometheus_calendar_components_cover_utc_and_non_finite_sentinel() {
+        assert_eq!(prometheus_utc_civil_date(0), (1970, 1, 1));
+        assert_eq!(prometheus_utc_civil_date(90_061), (1970, 1, 2));
+        assert_eq!(
+            prometheus_utc_civil_date(i64::MAX),
+            (292_277_026_596, 12, 4)
+        );
+        assert_eq!(PromCalendarOp::Minute.apply(90_061.9), 1.0);
+        assert_eq!(PromCalendarOp::Hour.apply(-0.1), 0.0);
+        assert_eq!(PromCalendarOp::DayOfMonth.apply(i64::MIN as f64), 4.0);
+        assert_eq!(PromCalendarOp::DayOfMonth.apply(-1e20), 4.0);
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(PromCalendarOp::Minute.apply(value), 30.0);
+            assert_eq!(PromCalendarOp::Hour.apply(value), 15.0);
+            assert_eq!(PromCalendarOp::DayOfWeek.apply(value), 0.0);
+            assert_eq!(PromCalendarOp::DayOfMonth.apply(value), 4.0);
+        }
     }
 }

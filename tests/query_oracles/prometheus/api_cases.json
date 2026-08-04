@@ -2862,6 +2862,189 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {"case": "nan", "job": "oracle"},
       "expected_value_offsets_ms": [30000]
+    },
+    {
+      "id": "PQL-F17-minute-fractional-utc",
+      "query": "minute(vector(90061.9))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F17-hour-fractional-utc",
+      "query": "hour(vector(90061.9))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-F17-day-of-week-utc-sunday-zero",
+      "query": "day_of_week(vector(90061.9))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [5]
+    },
+    {
+      "id": "PQL-F17-day-of-month-utc",
+      "query": "day_of_month(vector(90061.9))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [2]
+    },
+    {
+      "id": "PQL-F17-negative-fraction-truncates-toward-zero",
+      "query": "hour(vector(-0.1))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-F17-minute-defaults-to-vector-time",
+      "query": "minute()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "minute"
+    },
+    {
+      "id": "PQL-F17-hour-defaults-to-vector-time",
+      "query": "hour()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "hour"
+    },
+    {
+      "id": "PQL-F17-day-of-week-defaults-to-vector-time",
+      "query": "day_of_week()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "day_of_week"
+    },
+    {
+      "id": "PQL-F17-day-of-month-defaults-to-vector-time",
+      "query": "day_of_month()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_calendar_at_evaluation": "day_of_month"
+    },
+    {
+      "id": "PQL-F17-labels-preserved-name-removed",
+      "query": "minute(oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-F17-nan-input-follows-prometheus-int-conversion",
+      "query": "hour(vector(NaN))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [15]
+    },
+    {
+      "id": "PQL-F17-nan-minute-follows-prometheus-int-conversion",
+      "query": "minute(vector(NaN))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [30]
+    },
+    {
+      "id": "PQL-F17-nan-weekday-follows-prometheus-int-conversion",
+      "query": "day_of_week(vector(NaN))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-F17-nan-month-day-follows-prometheus-int-conversion",
+      "query": "day_of_month(vector(NaN))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [4]
+    },
+    {
+      "id": "PQL-F17-infinite-input-follows-prometheus-int-conversion",
+      "query": "day_of_month(vector(+Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [4]
+    },
+    {
+      "id": "PQL-F17-infinite-minute-follows-prometheus-int-conversion",
+      "query": "minute(vector(+Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [30]
+    },
+    {
+      "id": "PQL-F17-infinite-hour-follows-prometheus-int-conversion",
+      "query": "hour(vector(+Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [15]
+    },
+    {
+      "id": "PQL-F17-infinite-weekday-follows-prometheus-int-conversion",
+      "query": "day_of_week(vector(+Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-F17-negative-infinite-minute-follows-prometheus-int-conversion",
+      "query": "minute(vector(-Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [30]
+    },
+    {
+      "id": "PQL-F17-negative-infinite-hour-follows-prometheus-int-conversion",
+      "query": "hour(vector(-Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [15]
+    },
+    {
+      "id": "PQL-F17-negative-infinite-weekday-follows-prometheus-int-conversion",
+      "query": "day_of_week(vector(-Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-F17-negative-infinite-month-day-follows-prometheus-int-conversion",
+      "query": "day_of_month(vector(-Inf))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [4]
+    },
+    {
+      "id": "PQL-F17-positive-overflow-follows-prometheus-int-conversion",
+      "query": "hour(vector(1e20))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [15]
+    },
+    {
+      "id": "PQL-F17-negative-overflow-follows-prometheus-int-conversion",
+      "query": "day_of_month(vector(-1e20))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [4]
+    },
+    {
+      "id": "PQL-F17-minimum-int64-float-uses-overflow-sentinel",
+      "query": "day_of_month(vector(-9223372036854775808))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [4]
+    },
+    {
+      "id": "PQL-F17-range-grid-and-nesting",
+      "query": "abs(day_of_week(vector(90061.9)))",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {},
+      "expected_values": [5, 5, 5]
     }
   ],
   "operator_error_cases": [
@@ -3016,6 +3199,22 @@
       "status": 400,
       "error_type": "bad_data",
       "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-F17-argument-type-errors",
+      "query": "minute(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-F17-arity-errors",
+      "query": "hour(vector(1), vector(2))",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected at most 1 argument"
     }
   ],
   "cases": [
