@@ -1324,3 +1324,37 @@ types, work limits, shutdown, and cold reopen. `QSF-050` records the separately
 scoped Prometheus info-annotation gap. No extension signature, storage/frame
 format, batching, compression, index, rollup, retention, transaction, or
 migration behavior changed.
+
+## Session 7 `PQL-R15` extrapolated float-gauge delta
+
+The checked-in
+[`2026-08-04_session7_pql_r15.json`](evidence/2026-08-04_session7_pql_r15.json)
+was captured from exact extension and server build
+`0f8394e823fb2ddf9c2318ac3c55a89c8473668a`. Both measured shapes use one
+bounded public packed raw read followed by the Rust PromQL gauge-difference
+and edge-extrapolation fold, with no counter reset or zero-point correction.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `delta(...[5m])` | 1 | 148 | 0.477 | 0.816 | 0.882 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `delta(...[5m])` | 2,048 | 91,454 | 4.063 | 4.318 | 4.490 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 bounded raw gauge samples
+and emits 2,048 extrapolated deltas without an intermediate matrix. Its storage
+work and response size are effectively identical to `increase`; the semantic
+distinction is the Rust fold preserving decreases rather than treating them as
+counter resets. The measured shape does not justify a PromQL-specific
+extension primitive, and direct SQLite/libSQL users have the executable
+finite-gauge SQL recipe.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,432 KiB. No benchmark request required cancellation; the shared
+range-executor cancellation regression covers cancellation and reader reuse.
+Pinned oracle and real-extension regressions cover increases, decreases,
+sparse edges, absence of zero clamping, exact open-left boundaries, offset
+output timestamps, subqueries, NaN, both infinities, singleton omission,
+invalid types, work limits, shutdown, and cold reopen. No extension signature,
+storage/frame format, batching, compression, index, rollup, retention,
+transaction, or migration behavior changed, and this row produced no new
+storage finding.
