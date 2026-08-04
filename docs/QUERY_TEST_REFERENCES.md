@@ -17,6 +17,7 @@ real extension when the behavior reaches storage.
 | `PQL-S13` | `servers/crates/timeless-metrics-api/tests/storage_contract.rs` | `session_two_promql_string_literals_match_prometheus` | escaped/raw strings, exact instant/range envelopes, invalid escape, reopen, real extension |
 | `PQL-S16` | `servers/crates/timeless-metrics-api/tests/storage_contract.rs` | `session_two_promql_grid_and_lookback_match_prometheus` | request lookback, zero/default, ms open-left boundary, exact grids, invalid duration, real extension |
 | `PQL-S18` | `servers/crates/timeless-metrics-api/tests/storage_contract.rs` | `session_two_promql_value_types_match_prometheus` | scalar/string/vector/matrix, empty vector/matrix, range type conversion, real extension |
+| `PQL-S19` | `servers/crates/timeless-metrics-api/tests/storage_contract.rs` | `session_two_promql_errors_match_the_documented_contract` | required parameters, exact common oracle diagnostics, strict differences, GET/POST, real extension |
 | `PQL-S21` | `servers/crates/timeless-metrics-api/tests/storage_contract.rs` | `session_four_cancels_dropped_promql_requests_and_reuses_the_reader` | cancellation and reader reuse through real extension |
 | `PQL-R01` | `servers/crates/timeless-metrics-api/tests/storage_contract.rs` | `session_four_pins_promql_selector_window_errors_and_reopen` | real extension window, boundaries, HTTP, reopen |
 | `LQL-F01` | `servers/crates/timeless-logs-api/tests/api_e2e.rs` | `http_uses_the_established_8192_entry_buffer_without_request_flushes` | real extension query path and bounded row result |

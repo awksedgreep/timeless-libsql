@@ -226,3 +226,31 @@ all 16,384 fixture points with zero failed or queued work, and retained the
 suite proves exact `scalar`, `string`, `vector`, and `matrix` envelopes,
 including empty results and range-query type restrictions. No SQL equivalent
 is claimed for an HTTP value envelope.
+
+## Session 2 `PQL-S19` error-envelope result
+
+The checked-in
+[`2026-08-04_session2_pql_s19.json`](evidence/2026-08-04_session2_pql_s19.json)
+was captured from exact build `a293b15517eb4298060a87437886132e921b6218`.
+The narrow shape rejects an invalid range step. The wide shape parses a 64 KiB
+form body and rejects its unknown parameter. Both return one exact three-field
+`bad_data` envelope before reader admission.
+
+| shape | result | response bytes | p50 ms | p95 ms | p99 ms | storage/API reads |
+|---|---:|---:|---:|---:|---:|---:|
+| invalid step | 1 error | 120 | 0.144 | 0.235 | 0.273 | 0 |
+| 64 KiB invalid request | 1 error | 108 | 0.244 | 0.370 | 0.390 | 0 |
+
+The 64 KiB case is a request-parser pressure shape, not a normal query. Neither
+shape allocates a SQLite reader or increments a PromQL execution counter. The
+process reached 20,840 KiB RSS HWM, completed all 16,384 fixture points durably
+with zero failed or queued work, and retained the 525,016-byte live
+SQLite/WAL/SHM footprint.
+
+Pinned Prometheus cases prove the common missing/invalid parameter and reversed
+range messages. The real-extension contract adds exact type errors, strict
+unknown-parameter rejection, unsupported-node rejection, and GET/POST identity.
+Intentional differences for unknown parameters, non-finite evaluation time,
+the 11,000-point ceiling, parser-detail text, and unprefixed native-route
+dispatch are explicit in the server guide and findings log. Future grammar
+rows must extend the same envelope contract before they can ship.
