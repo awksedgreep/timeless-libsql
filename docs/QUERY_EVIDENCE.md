@@ -1097,3 +1097,33 @@ work limits, cancellation of the shared range executor, shutdown, and cold
 reopen. Direct SQL proves the public count form. No extension primitive or
 storage, frame, batching, compression, index, rollup, retention, transaction,
 or migration behavior changed.
+
+## Session 6 `PQL-R08` range presence
+
+The checked-in
+[`2026-08-04_session6_pql_r08.json`](evidence/2026-08-04_session6_pql_r08.json)
+was captured from exact extension and server build
+`de35c3723efab2b2e285670fafe136ff8e706823`. Both measured shapes reuse the
+public packed count window and map each returned non-empty window to `1` in
+the Rust PromQL evaluator.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, native `present_over_time(...[5m])` | 1 | 131 | 0.319 | 0.742 | 0.854 | 0 | 1 | 32 | 131 |
+| 512 series × four steps, native `present_over_time(...[5m])` | 2,048 | 63,806 | 2.946 | 3.109 | 4.217 | 0 | 512 | 16,384 | 53,831 |
+
+The wide request returns exactly 2,048 sparse presence points from 512
+candidate chunks and 16,384 decoded inputs. It materializes no intermediate
+matrix. Subsecond/modifier and subquery paths use the same bounded public raw
+composition and return `1` whenever their exact `(T-window,T]` slice is
+non-empty.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,168 KiB. Pinned oracle and real-extension regressions cover exact
+open-left boundaries, empty omission, subqueries, NaN, infinities, signed
+zero, work limits, cancellation of the shared range executor, shutdown, and
+cold reopen. The executable SQL recipe maps the existing public count window
+with an ordinary `CAST(value > 0 AS REAL)`. No extension primitive or storage,
+frame, batching, compression, index, rollup, retention, transaction, or
+migration behavior changed, and this row produced no new storage finding.
