@@ -1751,3 +1751,34 @@ evaluator cancellation pins reader reuse. Pinned oracle and real-extension
 tests cover all six functions, finite values, trigonometric infinity NaNs,
 hyperbolic infinities, signed zero, range grids, nesting, invalid types,
 limits, shutdown, and cold reopen. No extension or storage contract changed.
+
+## Session 8 `PQL-F08` angle transforms and scalar pi
+
+The checked-in
+[`2026-08-04_session8_pql_f08.json`](evidence/2026-08-04_session8_pql_f08.json)
+was captured from exact extension and server build
+`a3c0d21f980bdb46ee2e0f08b9339499b3bd8487`. The measured `deg` shapes use
+one bounded public packed-raw read and convert each selected float in place;
+`rad` has the same plan and allocation shape, while `pi()` is a storage-free
+scalar evaluated once per outer timestamp.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `deg(metric)` | 1 | 147 | 0.399 | 0.571 | 0.645 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `deg(metric)` | 2,048 | 97,554 | 4.124 | 4.601 | 4.836 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The vector conversion adds no scalar child, second read, or result copy.
+Candidate chunks, decoded and returned samples, and packed extension payload
+bytes are identical to the neighboring single-vector transforms. At 4.601 ms
+p95, ordinary in-place Rust composition remains the correct PromQL boundary;
+direct SQLite/libSQL users already have standard `pi()` arithmetic through
+executable `SQL-PROM-045`, so no extension primitive is justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 36,252 KiB. No benchmark request required cancellation; shared composed-
+evaluator cancellation pins reader reuse. Pinned oracle and real-extension
+tests cover conversion order, scalar instant and range types, finite values,
+NaN, infinities, signed zero, range grids, nesting, invalid types, limits,
+shutdown, and cold reopen. No new storage finding arose, and no extension or
+storage contract changed.
