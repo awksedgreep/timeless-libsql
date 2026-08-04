@@ -4233,6 +4233,38 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         "raw_batch_query_returned_points",
                         Value::Integer(info.raw_batch_query_returned_points as i64),
                     ),
+                    (
+                        "window_batch_query_count",
+                        Value::Integer(info.window_batch_query_count as i64),
+                    ),
+                    (
+                        "window_batch_query_total_ns",
+                        Value::Integer(info.window_batch_query_total_ns as i64),
+                    ),
+                    (
+                        "window_batch_query_series_considered",
+                        Value::Integer(info.window_batch_query_series_considered as i64),
+                    ),
+                    (
+                        "window_batch_query_candidate_chunks",
+                        Value::Integer(info.window_batch_query_candidate_chunks as i64),
+                    ),
+                    (
+                        "window_batch_query_payload_bytes_read",
+                        Value::Integer(info.window_batch_query_payload_bytes_read as i64),
+                    ),
+                    (
+                        "window_batch_query_decoded_points",
+                        Value::Integer(info.window_batch_query_decoded_points as i64),
+                    ),
+                    (
+                        "window_batch_query_buffered_points_considered",
+                        Value::Integer(info.window_batch_query_buffered_points_considered as i64),
+                    ),
+                    (
+                        "window_batch_query_returned_points",
+                        Value::Integer(info.window_batch_query_returned_points as i64),
+                    ),
                 ]);
                 // F3 ladder visibility: the declared tiers (native spec)
                 // and how many rollup chunks exist across them.

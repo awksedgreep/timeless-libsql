@@ -298,9 +298,10 @@ Stats separate units instead of conflating them:
 - `api_promql_intermediate_points` counts materialized evaluator points that
   fed a parent subquery/range-function node and is distinct from returned
   result points;
-- extension `raw_batch_query_*` counters attribute selected series, candidate
-  chunks, payload bytes, fully decoded/buffered points, returned points, and
-  engine time for the same packed read waist used by direct SQLite clients.
+- extension `raw_batch_query_*` and `window_batch_query_*` counters attribute
+  selected series, candidate chunks, payload bytes, fully decoded/buffered
+  points, returned raw/grid points, and engine time for the same packed read
+  waists used by direct SQLite clients.
 
 ## Validation
 

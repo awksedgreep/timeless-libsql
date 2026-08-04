@@ -686,6 +686,18 @@ persisted chunks; decoded points count every point decompressed from those
 chunks, even when bounds later discard it. The counters are observability
 only, reset on process reopen, and are not persisted or transaction state.
 
+Packed window calls expose the parallel cumulative keys
+`window_batch_query_count`, `window_batch_query_total_ns`,
+`window_batch_query_series_considered`,
+`window_batch_query_candidate_chunks`,
+`window_batch_query_payload_bytes_read`,
+`window_batch_query_decoded_points`,
+`window_batch_query_buffered_points_considered`, and
+`window_batch_query_returned_points` through `timeless_stats(:table)`.
+They count the input chunks/points considered by the reduction and the sparse
+grid points produced before optional null fill. Like raw counters, they are
+per-process observability—not durable storage or transaction state.
+
 ## Packed window batches
 
 `timeless_window_batches` accepts the same arguments and returns the same

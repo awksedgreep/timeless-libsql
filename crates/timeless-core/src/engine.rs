@@ -589,6 +589,17 @@ pub struct Engine {
     raw_batch_query_decoded_points: AtomicU64,
     raw_batch_query_buffered_points_considered: AtomicU64,
     raw_batch_query_returned_points: AtomicU64,
+    /// Cumulative profile for the public packed window batch waist. Kept
+    /// separate from raw reads so direct SQL users can attribute reduction
+    /// pruning, decode, and returned-grid work precisely.
+    window_batch_query_count: AtomicU64,
+    window_batch_query_total_ns: AtomicU64,
+    window_batch_query_series_considered: AtomicU64,
+    window_batch_query_candidate_chunks: AtomicU64,
+    window_batch_query_payload_bytes_read: AtomicU64,
+    window_batch_query_decoded_points: AtomicU64,
+    window_batch_query_buffered_points_considered: AtomicU64,
+    window_batch_query_returned_points: AtomicU64,
     /// True while a transaction journal is recording (between txn_begin
     /// and txn_commit/txn_rollback). An atomic so the hot paths can
     /// skip journal work with a single relaxed-ish load when no
@@ -1256,6 +1267,14 @@ impl Engine {
             raw_batch_query_decoded_points: AtomicU64::new(0),
             raw_batch_query_buffered_points_considered: AtomicU64::new(0),
             raw_batch_query_returned_points: AtomicU64::new(0),
+            window_batch_query_count: AtomicU64::new(0),
+            window_batch_query_total_ns: AtomicU64::new(0),
+            window_batch_query_series_considered: AtomicU64::new(0),
+            window_batch_query_candidate_chunks: AtomicU64::new(0),
+            window_batch_query_payload_bytes_read: AtomicU64::new(0),
+            window_batch_query_decoded_points: AtomicU64::new(0),
+            window_batch_query_buffered_points_considered: AtomicU64::new(0),
+            window_batch_query_returned_points: AtomicU64::new(0),
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(None),
@@ -3415,6 +3434,7 @@ impl Engine {
         op: WindowOp,
         max_work_points: Option<u64>,
     ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        let started = Instant::now();
         match op {
             WindowOp::Percentile(q) if !(q > 0.0 && q <= 100.0) => {
                 return Err(format!("percentile must be in (0, 100], got {q}"));
@@ -3426,10 +3446,12 @@ impl Engine {
         }
         let grid_points = Self::validate_window(start, stop, step, window)?;
         if grid_points == 0 {
+            self.record_window_batch_query(started, series_ids.len(), 0, 0, 0, 0, 0);
             return Ok(series_ids.iter().map(|&sid| (sid, Vec::new())).collect());
         }
         let possible_output_points = (series_ids.len() as u64).saturating_mul(grid_points as u64);
         if let Some(limit) = max_work_points.filter(|limit| possible_output_points > *limit) {
+            self.record_window_batch_query(started, series_ids.len(), 0, 0, 0, 0, 0);
             return Err(format!(
                 "window batch work point limit {limit} exceeded (possible output points: {possible_output_points})"
             ));
@@ -3471,6 +3493,15 @@ impl Engine {
         });
         let preflight_work_points = decoded_points.saturating_add(preflight_buffered_points);
         if let Some(limit) = max_work_points.filter(|limit| preflight_work_points > *limit) {
+            self.record_window_batch_query(
+                started,
+                series_ids.len(),
+                locs.len(),
+                0,
+                decoded_points,
+                preflight_buffered_points,
+                0,
+            );
             return Err(format!(
                 "window batch work point limit {limit} exceeded (candidate input points: {preflight_work_points})"
             ));
@@ -3484,9 +3515,15 @@ impl Engine {
             ));
         }
 
+        let payload_bytes = chunk_bytes
+            .iter()
+            .map(|bytes| bytes.ts().len().saturating_add(bytes.val().len()))
+            .sum::<usize>();
+        let candidate_chunks = locs.len();
         let mut payloads = chunk_bytes.into_iter();
         let mut result = Vec::with_capacity(series_ids.len());
         let mut buffered_points_considered = 0_u64;
+        let mut returned_points = 0_u64;
         for (&sid, chunks) in series_ids.iter().zip(matching) {
             let mut samples = Vec::new();
             for meta in chunks {
@@ -3503,6 +3540,15 @@ impl Engine {
                 let observed_work_points =
                     decoded_points.saturating_add(buffered_points_considered);
                 if let Some(limit) = max_work_points.filter(|limit| observed_work_points > *limit) {
+                    self.record_window_batch_query(
+                        started,
+                        series_ids.len(),
+                        candidate_chunks,
+                        payload_bytes,
+                        decoded_points,
+                        buffered_points_considered,
+                        returned_points,
+                    );
                     return Err(format!(
                         "window batch work point limit {limit} exceeded (candidate input points: {observed_work_points})"
                     ));
@@ -3515,13 +3561,57 @@ impl Engine {
                 }
             }
             samples.sort_by_key(|&(timestamp, _)| timestamp);
-            result.push((
-                sid,
-                Self::window_op_walk(&samples, start, stop, step, window, op),
-            ));
+            let points = Self::window_op_walk(&samples, start, stop, step, window, op);
+            returned_points = returned_points.saturating_add(points.len() as u64);
+            result.push((sid, points));
         }
         debug_assert!(payloads.next().is_none());
+        self.record_window_batch_query(
+            started,
+            series_ids.len(),
+            candidate_chunks,
+            payload_bytes,
+            decoded_points,
+            buffered_points_considered,
+            returned_points,
+        );
         Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_window_batch_query(
+        &self,
+        started: Instant,
+        series_considered: usize,
+        candidate_chunks: usize,
+        payload_bytes: usize,
+        decoded_points: u64,
+        buffered_points_considered: u64,
+        returned_points: u64,
+    ) {
+        let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.window_batch_query_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.window_batch_query_total_ns
+            .fetch_add(elapsed, Ordering::Relaxed);
+        self.window_batch_query_series_considered.fetch_add(
+            u64::try_from(series_considered).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.window_batch_query_candidate_chunks.fetch_add(
+            u64::try_from(candidate_chunks).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.window_batch_query_payload_bytes_read.fetch_add(
+            u64::try_from(payload_bytes).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.window_batch_query_decoded_points
+            .fetch_add(decoded_points, Ordering::Relaxed);
+        self.window_batch_query_buffered_points_considered
+            .fetch_add(buffered_points_considered, Ordering::Relaxed);
+        self.window_batch_query_returned_points
+            .fetch_add(returned_points, Ordering::Relaxed);
     }
 
     /// Q2(b), single series, rayon-free — safe from vtab callbacks.
@@ -4520,6 +4610,26 @@ impl Engine {
             raw_batch_query_returned_points: self
                 .raw_batch_query_returned_points
                 .load(Ordering::Relaxed),
+            window_batch_query_count: self.window_batch_query_count.load(Ordering::Relaxed),
+            window_batch_query_total_ns: self.window_batch_query_total_ns.load(Ordering::Relaxed),
+            window_batch_query_series_considered: self
+                .window_batch_query_series_considered
+                .load(Ordering::Relaxed),
+            window_batch_query_candidate_chunks: self
+                .window_batch_query_candidate_chunks
+                .load(Ordering::Relaxed),
+            window_batch_query_payload_bytes_read: self
+                .window_batch_query_payload_bytes_read
+                .load(Ordering::Relaxed),
+            window_batch_query_decoded_points: self
+                .window_batch_query_decoded_points
+                .load(Ordering::Relaxed),
+            window_batch_query_buffered_points_considered: self
+                .window_batch_query_buffered_points_considered
+                .load(Ordering::Relaxed),
+            window_batch_query_returned_points: self
+                .window_batch_query_returned_points
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -4563,6 +4673,14 @@ pub struct EngineInfo {
     pub raw_batch_query_decoded_points: u64,
     pub raw_batch_query_buffered_points_considered: u64,
     pub raw_batch_query_returned_points: u64,
+    pub window_batch_query_count: u64,
+    pub window_batch_query_total_ns: u64,
+    pub window_batch_query_series_considered: u64,
+    pub window_batch_query_candidate_chunks: u64,
+    pub window_batch_query_payload_bytes_read: u64,
+    pub window_batch_query_decoded_points: u64,
+    pub window_batch_query_buffered_points_considered: u64,
+    pub window_batch_query_returned_points: u64,
 }
 
 fn compensated_add(increment: f64, sum: f64, compensation: f64) -> (f64, f64) {

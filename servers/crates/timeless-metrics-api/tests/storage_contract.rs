@@ -4684,6 +4684,14 @@ async fn session_six_promql_avg_over_time_is_compensated_ieee_bounded_and_reopen
         "{}",
         rejected.1
     );
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.extension_window_batch_query_count, 5);
+    assert_eq!(stats.extension_window_batch_query_series_considered, 7);
+    assert_eq!(stats.extension_window_batch_query_candidate_chunks, 6);
+    assert_eq!(stats.extension_window_batch_query_decoded_points, 14);
+    assert_eq!(stats.extension_window_batch_query_returned_points, 5);
+    assert!(stats.extension_window_batch_query_payload_bytes_read > 0);
+    assert!(stats.extension_window_batch_query_total_ns > 0);
 
     drop((limited, app));
     storage.shutdown().await.unwrap();

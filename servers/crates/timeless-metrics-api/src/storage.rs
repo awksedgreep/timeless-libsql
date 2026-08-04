@@ -164,6 +164,14 @@ pub struct StorageStats {
     pub extension_raw_batch_query_decoded_points: i64,
     pub extension_raw_batch_query_buffered_points_considered: i64,
     pub extension_raw_batch_query_returned_points: i64,
+    pub extension_window_batch_query_count: i64,
+    pub extension_window_batch_query_total_ns: i64,
+    pub extension_window_batch_query_series_considered: i64,
+    pub extension_window_batch_query_candidate_chunks: i64,
+    pub extension_window_batch_query_payload_bytes_read: i64,
+    pub extension_window_batch_query_decoded_points: i64,
+    pub extension_window_batch_query_buffered_points_considered: i64,
+    pub extension_window_batch_query_returned_points: i64,
     pub last_error: Option<String>,
 }
 
@@ -1415,6 +1423,22 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
             "raw_batch_query_buffered_points_considered",
         ),
         extension_raw_batch_query_returned_points: integer("raw_batch_query_returned_points"),
+        extension_window_batch_query_count: integer("window_batch_query_count"),
+        extension_window_batch_query_total_ns: integer("window_batch_query_total_ns"),
+        extension_window_batch_query_series_considered: integer(
+            "window_batch_query_series_considered",
+        ),
+        extension_window_batch_query_candidate_chunks: integer(
+            "window_batch_query_candidate_chunks",
+        ),
+        extension_window_batch_query_payload_bytes_read: integer(
+            "window_batch_query_payload_bytes_read",
+        ),
+        extension_window_batch_query_decoded_points: integer("window_batch_query_decoded_points"),
+        extension_window_batch_query_buffered_points_considered: integer(
+            "window_batch_query_buffered_points_considered",
+        ),
+        extension_window_batch_query_returned_points: integer("window_batch_query_returned_points"),
         ..StorageStats::default()
     })
 }

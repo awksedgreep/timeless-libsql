@@ -1286,6 +1286,15 @@ SELECT 'batch_dense', labels, hex(buckets)
   ORDER BY labels;
 SELECT 'batch_limited', COUNT(*)
   FROM timeless_window_batches('m', 'cpu', NULL, 100, 140, 20, 30, 'sum', NULL, 6);
+SELECT 'window_stats',
+  (SELECT value FROM timeless_stats('m') WHERE key='window_batch_query_count'),
+  (SELECT value FROM timeless_stats('m') WHERE key='window_batch_query_series_considered'),
+  (SELECT value FROM timeless_stats('m') WHERE key='window_batch_query_candidate_chunks'),
+  (SELECT value FROM timeless_stats('m') WHERE key='window_batch_query_decoded_points'),
+  (SELECT value FROM timeless_stats('m') WHERE key='window_batch_query_buffered_points_considered'),
+  (SELECT value FROM timeless_stats('m') WHERE key='window_batch_query_returned_points'),
+  (SELECT value > 0 FROM timeless_stats('m') WHERE key='window_batch_query_payload_bytes_read'),
+  (SELECT value > 0 FROM timeless_stats('m') WHERE key='window_batch_query_total_ns');
 
 .print -- label filter + metric isolation
 SELECT 'filtered', labels, ts, value
@@ -1318,6 +1327,8 @@ check_eq "packed dense window blobs mark empty grid points in the validity bitma
 batch_dense|{"host":"b"}|5457423103000000640000000000000078000000000000008C0000000000000006000000000000000000000000000025400000000000403440'
 check_eq "packed window max_work_points is inclusive" \
   "$(grep '^batch_limited|' <<<"$got")" 'batch_limited|2'
+check_eq "packed window stats expose series, chunks, decode, buffer, result, bytes, and time" \
+  "$(grep '^window_stats|' <<<"$got")" 'window_stats|3|6|6|15|3|15|1|1'
 check_eq "label filter restricts to host b" \
   "$(grep '^filtered|' <<<"$got")" \
 'filtered|{"host":"b"}|110|10.5
