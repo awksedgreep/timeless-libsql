@@ -406,6 +406,10 @@ SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
                                            -- sorted distinct label values —
                                            -- the dropdown-population query
 
+-- Packed metric reads expose cumulative candidate/decode/byte/return work:
+SELECT key, value FROM timeless_stats('metrics')
+ WHERE key LIKE 'raw_batch_query_%' ORDER BY key;
+
 -- Optional discovery filters use the same matcher JSON and are applied
 -- before unrelated catalog rows cross SQLite:
 SELECT labels FROM timeless_series('metrics', 'cpu_usage',

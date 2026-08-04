@@ -171,7 +171,10 @@ Stats separate units instead of conflating them:
 - mechanical/PromQL read request counts by shape, current/cancelled reads,
   total socket-to-result time, errors,
   packed frame bytes, response bytes, returned series, and returned points are
-  cumulative and do not require `timeless_stats` work on the query hot path.
+  cumulative and do not require `timeless_stats` work on the query hot path;
+- extension `raw_batch_query_*` counters attribute selected series, candidate
+  chunks, payload bytes, fully decoded/buffered points, returned points, and
+  engine time for the same packed read waist used by direct SQLite clients.
 
 ## Validation
 

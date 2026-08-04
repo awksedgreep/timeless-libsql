@@ -578,6 +578,17 @@ pub struct Engine {
     prometheus_ingest_points: AtomicU64,
     prometheus_ingest_errors: AtomicU64,
     prometheus_ingest_total_ns: AtomicU64,
+    /// Cumulative profile for the public packed/raw batch read waist. These
+    /// counters make pruning and decode cost observable to every SQLite host,
+    /// not only to the signal server wrapping the returned frame.
+    raw_batch_query_count: AtomicU64,
+    raw_batch_query_total_ns: AtomicU64,
+    raw_batch_query_series_considered: AtomicU64,
+    raw_batch_query_candidate_chunks: AtomicU64,
+    raw_batch_query_payload_bytes_read: AtomicU64,
+    raw_batch_query_decoded_points: AtomicU64,
+    raw_batch_query_buffered_points_considered: AtomicU64,
+    raw_batch_query_returned_points: AtomicU64,
     /// True while a transaction journal is recording (between txn_begin
     /// and txn_commit/txn_rollback). An atomic so the hot paths can
     /// skip journal work with a single relaxed-ish load when no
@@ -1237,6 +1248,14 @@ impl Engine {
             prometheus_ingest_points: AtomicU64::new(0),
             prometheus_ingest_errors: AtomicU64::new(0),
             prometheus_ingest_total_ns: AtomicU64::new(0),
+            raw_batch_query_count: AtomicU64::new(0),
+            raw_batch_query_total_ns: AtomicU64::new(0),
+            raw_batch_query_series_considered: AtomicU64::new(0),
+            raw_batch_query_candidate_chunks: AtomicU64::new(0),
+            raw_batch_query_payload_bytes_read: AtomicU64::new(0),
+            raw_batch_query_decoded_points: AtomicU64::new(0),
+            raw_batch_query_buffered_points_considered: AtomicU64::new(0),
+            raw_batch_query_returned_points: AtomicU64::new(0),
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(None),
@@ -2327,7 +2346,9 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        let started = Instant::now();
         if t_start > t_end {
+            self.record_raw_batch_query(started, series_ids.len(), 0, 0, 0, 0, 0);
             return Ok(series_ids.iter().map(|&sid| (sid, Vec::new())).collect());
         }
 
@@ -2351,6 +2372,11 @@ impl Engine {
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
             .collect();
+        let decoded_points = matching
+            .iter()
+            .flat_map(|chunks| chunks.iter())
+            .map(|meta| u64::from(meta.point_count))
+            .sum::<u64>();
         let chunk_bytes = self.store.read_chunks(&locs)?;
         if chunk_bytes.len() != locs.len() {
             return Err(format!(
@@ -2360,8 +2386,15 @@ impl Engine {
             ));
         }
 
+        let payload_bytes = chunk_bytes
+            .iter()
+            .map(|bytes| bytes.ts().len().saturating_add(bytes.val().len()))
+            .sum::<usize>();
+        let candidate_chunks = locs.len();
         let mut payloads = chunk_bytes.into_iter();
         let mut result = Vec::with_capacity(series_ids.len());
+        let mut buffered_points_considered = 0_u64;
+        let mut returned_points = 0_u64;
         for (&series_id, chunks) in series_ids.iter().zip(matching) {
             let mut points = Vec::new();
             for meta in chunks {
@@ -2373,6 +2406,8 @@ impl Engine {
 
             let pk = PartitionKey { series_id };
             if let Some(buffer) = self.partitions.get(&pk) {
+                buffered_points_considered =
+                    buffered_points_considered.saturating_add(buffer.timestamps.len() as u64);
                 for index in 0..buffer.timestamps.len() {
                     let timestamp = buffer.timestamps[index];
                     if timestamp >= t_start && timestamp <= t_end {
@@ -2381,10 +2416,55 @@ impl Engine {
                 }
             }
             points.sort_by_key(|&(timestamp, _)| timestamp);
+            returned_points = returned_points.saturating_add(points.len() as u64);
             result.push((series_id, points));
         }
         debug_assert!(payloads.next().is_none());
+        self.record_raw_batch_query(
+            started,
+            series_ids.len(),
+            candidate_chunks,
+            payload_bytes,
+            decoded_points,
+            buffered_points_considered,
+            returned_points,
+        );
         Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_raw_batch_query(
+        &self,
+        started: Instant,
+        series_considered: usize,
+        candidate_chunks: usize,
+        payload_bytes: usize,
+        decoded_points: u64,
+        buffered_points_considered: u64,
+        returned_points: u64,
+    ) {
+        let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.raw_batch_query_count.fetch_add(1, Ordering::Relaxed);
+        self.raw_batch_query_total_ns
+            .fetch_add(elapsed, Ordering::Relaxed);
+        self.raw_batch_query_series_considered.fetch_add(
+            u64::try_from(series_considered).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.raw_batch_query_candidate_chunks.fetch_add(
+            u64::try_from(candidate_chunks).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.raw_batch_query_payload_bytes_read.fetch_add(
+            u64::try_from(payload_bytes).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.raw_batch_query_decoded_points
+            .fetch_add(decoded_points, Ordering::Relaxed);
+        self.raw_batch_query_buffered_points_considered
+            .fetch_add(buffered_points_considered, Ordering::Relaxed);
+        self.raw_batch_query_returned_points
+            .fetch_add(returned_points, Ordering::Relaxed);
     }
 
     fn query_range_by_id_inner(
@@ -4243,6 +4323,26 @@ impl Engine {
             prometheus_ingest_points: self.prometheus_ingest_points.load(Ordering::Relaxed),
             prometheus_ingest_errors: self.prometheus_ingest_errors.load(Ordering::Relaxed),
             prometheus_ingest_total_ns: self.prometheus_ingest_total_ns.load(Ordering::Relaxed),
+            raw_batch_query_count: self.raw_batch_query_count.load(Ordering::Relaxed),
+            raw_batch_query_total_ns: self.raw_batch_query_total_ns.load(Ordering::Relaxed),
+            raw_batch_query_series_considered: self
+                .raw_batch_query_series_considered
+                .load(Ordering::Relaxed),
+            raw_batch_query_candidate_chunks: self
+                .raw_batch_query_candidate_chunks
+                .load(Ordering::Relaxed),
+            raw_batch_query_payload_bytes_read: self
+                .raw_batch_query_payload_bytes_read
+                .load(Ordering::Relaxed),
+            raw_batch_query_decoded_points: self
+                .raw_batch_query_decoded_points
+                .load(Ordering::Relaxed),
+            raw_batch_query_buffered_points_considered: self
+                .raw_batch_query_buffered_points_considered
+                .load(Ordering::Relaxed),
+            raw_batch_query_returned_points: self
+                .raw_batch_query_returned_points
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -4278,6 +4378,14 @@ pub struct EngineInfo {
     pub prometheus_ingest_points: u64,
     pub prometheus_ingest_errors: u64,
     pub prometheus_ingest_total_ns: u64,
+    pub raw_batch_query_count: u64,
+    pub raw_batch_query_total_ns: u64,
+    pub raw_batch_query_series_considered: u64,
+    pub raw_batch_query_candidate_chunks: u64,
+    pub raw_batch_query_payload_bytes_read: u64,
+    pub raw_batch_query_decoded_points: u64,
+    pub raw_batch_query_buffered_points_considered: u64,
+    pub raw_batch_query_returned_points: u64,
 }
 
 /// F7 window operations (FEATURE_PLAN.md "The SQL query tier") — the

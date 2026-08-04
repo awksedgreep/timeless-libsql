@@ -2150,6 +2150,14 @@ SELECT 'raw_frame', length(frame), hex(substr(frame,1,16))
   FROM timeless_raw_frame('em','cpu','{"host":{"re":"web-.*"}}',0,30);
 SELECT 'empty_frame', COUNT(*)
   FROM timeless_raw_frame('em','cpu','{"host":"missing"}',0,30);
+SELECT 'raw_profile',
+       MAX(CASE WHEN key='raw_batch_query_count' THEN value END),
+       MAX(CASE WHEN key='raw_batch_query_series_considered' THEN value END),
+       MAX(CASE WHEN key='raw_batch_query_candidate_chunks' THEN value END),
+       MAX(CASE WHEN key='raw_batch_query_payload_bytes_read' THEN value > 0 END),
+       MAX(CASE WHEN key='raw_batch_query_decoded_points' THEN value END),
+       MAX(CASE WHEN key='raw_batch_query_returned_points' THEN value END)
+  FROM timeless_stats('em');
 SELECT 'catalog', name, labels, series_id FROM timeless_series('em') ORDER BY series_id;
 SQL
 )
@@ -2164,6 +2172,9 @@ check_eq "raw batch emits one packed blob per series" \
 check_eq "raw frame emits one versioned columnar blob for all non-empty series" \
   "$(grep -E '^(raw_frame|empty_frame)\|' <<<"$got")" \
 $'raw_frame|60|54524631010000000200000000000000\nempty_frame|0'
+check_eq "packed raw stats expose candidates, decode, bytes, and returned work" \
+  "$(grep '^raw_profile|' <<<"$got")" \
+  'raw_profile|3|2|2|1|4|4'
 check_eq "resolved empty-series catalog is queryable" \
   "$(grep '^catalog|' <<<"$got")" \
 'catalog|cpu|{"env":"prod","host":"web-1"}|1

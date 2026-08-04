@@ -338,6 +338,17 @@ The row-oriented `timeless_raw` and one-row-per-series
 `timeless_raw_batches` interfaces remain available. `TRF1` is additive and
 changes neither shadow-table storage nor replication-visible formats.
 
+Every packed raw/batch call increments public, per-process
+`timeless_stats(:table)` rows named `raw_batch_query_count`,
+`raw_batch_query_total_ns`, `raw_batch_query_series_considered`,
+`raw_batch_query_candidate_chunks`, `raw_batch_query_payload_bytes_read`,
+`raw_batch_query_decoded_points`,
+`raw_batch_query_buffered_points_considered`, and
+`raw_batch_query_returned_points`. Candidate chunks are timestamp-pruned
+persisted chunks; decoded points count every point decompressed from those
+chunks, even when bounds later discard it. The counters are observability
+only, reset on process reopen, and are not persisted or transaction state.
+
 ## Packed window batches
 
 `timeless_window_batches` accepts the same arguments and returns the same
