@@ -342,3 +342,31 @@ The real-extension contract covers instant/range/function use, missing labels,
 invalid empty-matching selectors, result/catalog limits, cancellation, clean
 shutdown, and cold reopen. The pinned Prometheus rule oracle matches exact
 values and labels.
+
+## Session 3 `PQL-S05` metric-name matcher result
+
+The checked-in
+[`2026-08-04_session3_pql_s05.json`](evidence/2026-08-04_session3_pql_s05.json)
+was captured from exact extension and server build
+`4fcebd42c10fd17897d013841cc4ba5782311036` on the same 576-series,
+18,432-point selector fixture. The narrow anchored regex selects four metric
+names. The wide negative matcher excludes one of the 64 selector names while
+an ordinary label matcher excludes the unrelated 512-series metric.
+
+| shape | result series | response bytes | p50 ms | p95 ms | p99 ms | exact-name packed calls/query | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `{__name__=~"query_selector_metric_000[0-3]"}` | 4 | 562 | 1.223 | 1.760 | 1.888 | 4 | 128 |
+| `{__name__!="query_selector_metric_0000",selector_group="wide"}` | 63 | 7,937 | 3.335 | 3.687 | 5.023 | 63 | 2,016 |
+
+The counters prove catalog-first payload pruning: the regex shape considers
+and decodes exactly four chunks, while the negative shape considers 63—not all
+601 fixture chunks. The public catalog still crosses once per query, so name
+matcher complexity adds no extension opcode or private-table dependency.
+
+The final run durably completed 118,457 normal and boundary points with zero
+failed or queued work, used 672,688 live SQLite/WAL/SHM bytes, and reached
+34,416 KiB RSS HWM. Real-extension and pinned Prometheus regressions cover
+anchoring, negative equality/regex, repeated-name AND semantics, empty-name
+legality, deterministic labels/values, clean shutdown, and cold reopen. No
+storage format, batching, compression, rollup, retention, transaction, or
+migration behavior changed.
