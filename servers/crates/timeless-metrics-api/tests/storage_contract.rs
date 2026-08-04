@@ -10054,6 +10054,184 @@ async fn session_eight_promql_scalar_vector_convert_types_cardinality_and_reopen
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_time_timestamp_pin_clock_provenance_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_time_timestamp.db");
+    let base = 1_700_940_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "timestamp_metric{{case=\"direct\",host=\"a\"}} 7 {}\n",
+            "timestamp_metric{{case=\"direct\",host=\"a\"}} 8 {}\n",
+            "timestamp_metric{{case=\"direct\",host=\"a\"}} NaN {}\n",
+            "timestamp_metric{{case=\"multi\",host=\"a\"}} 1 {}\n",
+            "timestamp_metric{{case=\"multi\",host=\"b\"}} 2 {}\n"
+        ),
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 20) * 1_000,
+        (base + 20) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let clock = prom_query(&app, "time()", base + 15).await;
+    assert_eq!(clock.0, StatusCode::OK, "{}", clock.1);
+    assert_eq!(
+        clock.1,
+        serde_json::json!({
+            "status": "success",
+            "data": {"resultType": "scalar", "result": [base + 15, (base + 15).to_string()]}
+        })
+    );
+
+    let direct = prom_query(
+        &app,
+        "timestamp(timestamp_metric{case=\"direct\"})",
+        base + 15,
+    )
+    .await;
+    assert_eq!(direct.0, StatusCode::OK, "{}", direct.1);
+    assert_eq!(
+        direct.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"case": "direct", "host": "a"},
+            "value": [base + 15, (base + 10).to_string()]
+        }])
+    );
+    let offset = prom_query(
+        &app,
+        "timestamp(timestamp_metric{case=\"direct\"} offset 10s)",
+        base + 20,
+    )
+    .await;
+    assert_eq!(offset.0, StatusCode::OK, "{}", offset.1);
+    assert_eq!(
+        offset.1["data"]["result"][0]["value"][1],
+        (base + 10).to_string()
+    );
+    let anchored = prom_query(
+        &app,
+        &format!(
+            "timestamp(timestamp_metric{{case=\"direct\"}} @ {})",
+            base + 10
+        ),
+        base + 20,
+    )
+    .await;
+    assert_eq!(anchored.0, StatusCode::OK, "{}", anchored.1);
+    assert_eq!(
+        anchored.1["data"]["result"][0]["value"][1],
+        (base + 10).to_string()
+    );
+
+    let composed = prom_query(
+        &app,
+        "timestamp(abs(timestamp_metric{case=\"direct\"}))",
+        base + 15,
+    )
+    .await;
+    assert_eq!(composed.0, StatusCode::OK, "{}", composed.1);
+    assert_eq!(
+        composed.1["data"]["result"][0]["value"][1],
+        (base + 15).to_string()
+    );
+    assert!(composed.1["data"]["result"][0]["metric"]["__name__"].is_null());
+    let aggregated = prom_query(
+        &app,
+        "timestamp(sum(timestamp_metric{case=\"multi\"}))",
+        base + 20,
+    )
+    .await;
+    assert_eq!(aggregated.0, StatusCode::OK, "{}", aggregated.1);
+    assert_eq!(
+        aggregated.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "value": [base + 20, (base + 20).to_string()]
+        }])
+    );
+
+    let range = prom_query_range(
+        &app,
+        "timestamp(timestamp_metric{case=\"direct\"})",
+        base + 5,
+        base + 20,
+        5,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base + 5, base.to_string()],
+            [base + 10, (base + 10).to_string()],
+            [base + 15, (base + 10).to_string()],
+            [base + 20, (base + 20).to_string()]
+        ])
+    );
+
+    for query in ["time(1)", "timestamp(1)"] {
+        let invalid = prom_query(&app, query, base + 20).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "timestamp(timestamp_metric{case=\"multi\"})",
+        base + 20,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("work point limit"));
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "timestamp(timestamp_metric{case=\"direct\"})",
+            base + 15,
+        )
+        .await
+        .1,
+        direct.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

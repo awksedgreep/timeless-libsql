@@ -81,6 +81,11 @@ step's value order to complete series.
 multiple samples; `vector(scalar)` emits one nameless series. Both preserve
 their exact Prometheus instant/range result types and compose without a second
 storage read.
+`time()` follows the millisecond evaluation grid in Unix seconds.
+`timestamp(direct-selector)` exposes selected stored-sample provenance through
+lookback, `offset`, and `@`; composed expressions report their newly created
+evaluation timestamps. Response timestamps stay on the outer grid, and
+`timestamp` removes only the metric name.
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves

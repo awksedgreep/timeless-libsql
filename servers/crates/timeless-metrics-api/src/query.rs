@@ -391,6 +391,8 @@ pub(crate) enum PromPlan {
     Absent(PromAbsentPlan),
     Sort(PromSortPlan),
     Conversion(PromConversionPlan),
+    Time,
+    Timestamp(PromTimestampPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -556,6 +558,11 @@ enum PromConversionKind {
 pub(crate) struct PromConversionPlan {
     inner: Box<PromPlan>,
     kind: PromConversionKind,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromTimestampPlan {
+    inner: Box<PromPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -847,6 +854,8 @@ impl PromPlan {
                 PromConversionKind::Scalar => PromValueType::Scalar,
                 PromConversionKind::Vector => PromValueType::Vector,
             },
+            Self::Time => PromValueType::Scalar,
+            Self::Timestamp(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1427,6 +1436,24 @@ fn lower_promql_expr(
                 kind,
             }))
         }
+        promql::Expr::Call(call) if call.func.name == "time" => {
+            if !call.args.args.is_empty() {
+                return Err("time does not accept arguments".into());
+            }
+            Ok(PromPlan::Time)
+        }
+        promql::Expr::Call(call) if call.func.name == "timestamp" => {
+            let [argument] = call.args.args.as_slice() else {
+                return Err("timestamp requires exactly one instant vector".into());
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err("timestamp requires an instant vector".into());
+            }
+            Ok(PromPlan::Timestamp(PromTimestampPlan {
+                inner: Box::new(inner),
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1813,6 +1840,7 @@ fn lower_promql_subquery(
             | PromPlan::Absent(_)
             | PromPlan::Sort(_)
             | PromPlan::Conversion(_)
+            | PromPlan::Timestamp(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -3241,6 +3269,20 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::Time => execute_prometheus_time(start, stop, step, instant, limits, cancelled),
+        PromPlan::Timestamp(timestamp) => execute_prometheus_timestamp(
+            conn,
+            features,
+            timestamp,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -4646,6 +4688,117 @@ fn execute_prometheus_conversion(
     };
     encode_prometheus_intermediate(
         value,
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn execute_prometheus_time(
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let mut points = Vec::new();
+    let mut timestamp = start;
+    loop {
+        check_cancelled(cancelled)?;
+        points.push((timestamp, timestamp as f64 / 1_000.0));
+        if timestamp >= stop {
+            break;
+        }
+        let Some(next) = timestamp.checked_add(step).filter(|next| *next <= stop) else {
+            break;
+        };
+        timestamp = next;
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Scalar(points),
+        instant,
+        0,
+        0,
+        limits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_timestamp(
+    conn: &Connection,
+    features: QueryFeatures,
+    timestamp: &PromTimestampPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    if let PromPlan::Selector { selector, lookback } = timestamp.inner.as_ref() {
+        let mut output = execute_prometheus_selector_value(
+            conn,
+            features,
+            selector,
+            start,
+            stop,
+            step,
+            *lookback,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+            true,
+        )?;
+        output.intermediate_points = output.points;
+        enforce_intermediate_work(output.intermediate_points, limits)?;
+        return Ok(output);
+    }
+
+    check_cancelled(cancelled)?;
+    let child = execute_prometheus(
+        conn,
+        features,
+        &timestamp.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let frame_bytes = child.frame_bytes;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("timestamp input type was checked while lowering")
+    };
+    for item in &mut series {
+        check_cancelled(cancelled)?;
+        item.labels.remove("__name__");
+        for (evaluation_time, value) in &mut item.points {
+            check_cancelled(cancelled)?;
+            *value = *evaluation_time as f64 / 1_000.0;
+        }
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
         instant,
         frame_bytes,
         intermediate_points,
@@ -6117,6 +6270,39 @@ fn execute_prometheus_selector(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
+    execute_prometheus_selector_value(
+        conn,
+        features,
+        selector,
+        start,
+        stop,
+        step,
+        lookback,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_selector_value(
+    conn: &Connection,
+    features: QueryFeatures,
+    selector: &Selector,
+    start: i64,
+    stop: i64,
+    step: i64,
+    lookback: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+    source_timestamp: bool,
+) -> Result<ReadOutput, String> {
     let selection_start = selector
         .timing
         .selection_time(start, query_start, query_end)?;
@@ -6165,7 +6351,13 @@ fn execute_prometheus_selector(
             };
             let item_start = body.len();
             comma(&mut body, emitted);
-            write_prometheus_item_prefix(&mut body, Some(&metric), &meta.labels, instant, limits)?;
+            write_prometheus_item_prefix(
+                &mut body,
+                (!source_timestamp).then_some(metric.as_str()),
+                &meta.labels,
+                instant,
+                limits,
+            )?;
             enforce_prometheus_output(&body, points, limits)?;
             let mut lo = 0_usize;
             let mut hi = 0_usize;
@@ -6187,15 +6379,17 @@ fn execute_prometheus_selector(
                     lo += 1;
                 }
                 if hi > lo {
+                    let selected = hi - 1;
                     admit_prometheus_point(points.saturating_add(item_points), limits)?;
                     if !instant {
                         comma(&mut body, item_points as usize);
                     }
-                    write_prometheus_sample(
-                        &mut body,
-                        t,
-                        series.value(raw.frame.as_deref(), hi - 1)?,
-                    )?;
+                    let value = if source_timestamp {
+                        series.timestamp(raw.frame.as_deref(), selected)? as f64
+                    } else {
+                        series.value(raw.frame.as_deref(), selected)?
+                    };
+                    write_prometheus_sample(&mut body, t, value)?;
                     item_points += 1;
                     enforce_prometheus_output(&body, points.saturating_add(item_points), limits)?;
                 }

@@ -2762,6 +2762,106 @@
       "query": "scalar(abs(vector(-2)))",
       "evaluation_offset_ms": 30000,
       "expected_scalar": 2
+    },
+    {
+      "id": "PQL-F16-time-instant-evaluation-clock",
+      "query": "time()",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar_offset_ms": 30000
+    },
+    {
+      "id": "PQL-F16-time-subsecond-range-grid",
+      "query": "time()",
+      "evaluation_offset_ms": 21000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 21000, "step": "500ms"},
+      "expected_metric": {},
+      "expected_value_offsets_ms": [20000, 20500, 21000]
+    },
+    {
+      "id": "PQL-F16-timestamp-direct-selector-uses-source-sample",
+      "query": "timestamp(oracle_temporal)",
+      "evaluation_offset_ms": 25000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [20000]
+    },
+    {
+      "id": "PQL-F16-timestamp-offset-uses-source-sample",
+      "query": "timestamp(oracle_temporal offset 10s)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [20000]
+    },
+    {
+      "id": "PQL-F16-timestamp-at-uses-anchored-sample",
+      "query": "timestamp(oracle_temporal @ {at})",
+      "at_offset_ms": 20000,
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [20000]
+    },
+    {
+      "id": "PQL-F16-timestamp-value-transform-uses-evaluation-time",
+      "query": "timestamp(abs(oracle_temporal))",
+      "evaluation_offset_ms": 25000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [25000]
+    },
+    {
+      "id": "PQL-F16-timestamp-unary-uses-evaluation-time",
+      "query": "timestamp(-oracle_temporal)",
+      "evaluation_offset_ms": 25000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [25000]
+    },
+    {
+      "id": "PQL-F16-timestamp-label-function-uses-evaluation-time",
+      "query": "timestamp(label_join(oracle_temporal, \"node\", \"/\", \"job\"))",
+      "evaluation_offset_ms": 25000,
+      "expected_metric": {"job": "oracle", "node": "oracle"},
+      "expected_value_offsets_ms": [25000]
+    },
+    {
+      "id": "PQL-F16-timestamp-sort-uses-evaluation-time",
+      "query": "timestamp(sort(oracle_temporal))",
+      "evaluation_offset_ms": 25000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [25000]
+    },
+    {
+      "id": "PQL-F16-timestamp-binary-uses-evaluation-time",
+      "query": "timestamp(oracle_temporal + 0)",
+      "evaluation_offset_ms": 25000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [25000]
+    },
+    {
+      "id": "PQL-F16-timestamp-aggregation-uses-evaluation-time",
+      "query": "timestamp(sum(oracle_aggregation))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_value_offsets_ms": [30000]
+    },
+    {
+      "id": "PQL-F16-timestamp-range-selector-provenance",
+      "query": "timestamp(oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 25000, "end_offset_ms": 30000, "step": "5s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [20000, 30000]
+    },
+    {
+      "id": "PQL-F16-timestamp-range-function-uses-evaluation-time",
+      "query": "timestamp(avg_over_time(oracle_temporal[20s]))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [30000]
+    },
+    {
+      "id": "PQL-F16-timestamp-nan-sample-keeps-source-time",
+      "query": "timestamp(oracle_math{case=\"nan\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "nan", "job": "oracle"},
+      "expected_value_offsets_ms": [30000]
     }
   ],
   "operator_error_cases": [
@@ -2900,6 +3000,22 @@
       "status": 400,
       "error_type": "bad_data",
       "error_contains": "expected type scalar"
+    },
+    {
+      "id": "PQL-F16-time-arity-errors",
+      "query": "time(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected 0 argument"
+    },
+    {
+      "id": "PQL-F16-timestamp-argument-type-errors",
+      "query": "timestamp(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
     }
   ],
   "cases": [

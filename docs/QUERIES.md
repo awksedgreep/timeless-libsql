@@ -983,6 +983,23 @@ distinct scalar/vector instant and range envelopes. Direct SQLite/libSQL users
 can use the executable per-step cardinality and nameless-vector statements in
 [`SQL-PROM-050`](QUERY_SQL_EQUIVALENTS.md#sql-prom-050-scalar-and-vector).
 
+Evaluation and sample time are distinct PromQL values:
+
+```promql
+time()
+timestamp(up{job="api"})
+```
+
+`time()` is the current evaluation timestamp in Unix seconds and retains
+subsecond range-grid precision. `timestamp(direct_selector)` returns the
+selected stored sample timestamp as its value while the response sample stays
+on the outer evaluation grid; `offset` and `@` alter selection without moving
+that response grid. Once a unary, function, binary, aggregation, or range node
+creates a new sample, `timestamp()` reports that node's evaluation time.
+`timestamp` removes the metric name and preserves all other labels, including
+for a stored NaN. Direct SQLite/libSQL equivalents for both clocks are in
+[`SQL-PROM-051`](QUERY_SQL_EQUIVALENTS.md#sql-prom-051-time-and-timestamp).
+
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

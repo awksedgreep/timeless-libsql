@@ -4051,6 +4051,45 @@ vector_scalar = db.execute(
 ).fetchall()
 assert vector_scalar == [('{}', 100, 5.0), ('{}', 110, 5.0)]
 
+time_values = db.execute(
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    ") SELECT ts,CAST(ts AS REAL) value FROM evaluation ORDER BY ts",
+    {'start': 100, 'end': 110, 'step': 5},
+).fetchall()
+assert time_values == [(100, 100.0), (105, 105.0), (110, 110.0)]
+timestamp_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "), samples AS (SELECT labels,ts FROM timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:lookback,:end)"
+    "), candidates AS ("
+    " SELECT samples.labels,evaluation.ts response_ts,samples.ts sample_ts,"
+    " ROW_NUMBER() OVER (PARTITION BY samples.labels,evaluation.ts"
+    " ORDER BY samples.ts DESC) rank"
+    " FROM evaluation JOIN samples"
+    " ON samples.ts<=evaluation.ts AND samples.ts>evaluation.ts-:lookback"
+    ") SELECT labels,response_ts,CAST(sample_ts AS REAL) value"
+    " FROM candidates WHERE rank=1 ORDER BY labels,response_ts"
+)
+timestamp_values = db.execute(
+    timestamp_sql,
+    {
+        'metric': 'absent_late',
+        'filter_json': '{"case":"late"}',
+        'start': 100,
+        'end': 120,
+        'step': 10,
+        'lookback': 20,
+    },
+).fetchall()
+assert timestamp_values == [
+    ('{"case":"late","service":"api"}', 110, 110.0),
+    ('{"case":"late","service":"api"}', 120, 110.0),
+]
+
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
     "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "

@@ -1905,6 +1905,87 @@ results and need no extension primitive.
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_scalar_vector_convert_types_cardinality_and_reopen`.
 
+### SQL-PROM-051: `time` and `timestamp`
+
+`time()` is the evaluation clock expressed as Unix seconds. For a default
+second-native metric table, generate it directly from the requested grid:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+)
+SELECT ts, CAST(ts AS REAL) AS value
+FROM evaluation
+ORDER BY ts;
+```
+
+`:start`, `:end`, and `:step` are inclusive integer seconds here. The Rust API
+uses a millisecond evaluation clock and divides by `1000.0`, preserving
+fractional-second range steps and Prometheus scalar versus range-matrix
+envelopes.
+
+For `timestamp(direct_selector)`, retain the latest selected stored sample in
+each open-left lookback window, emit its storage timestamp as the value, and
+keep the outer evaluation timestamp as the response timestamp:
+
+```sql
+WITH RECURSIVE evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+), samples AS (
+  SELECT labels, ts
+  FROM timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :lookback, :end
+  )
+), candidates AS (
+  SELECT samples.labels,
+         evaluation.ts AS response_ts,
+         samples.ts AS sample_ts,
+         ROW_NUMBER() OVER (
+           PARTITION BY samples.labels, evaluation.ts
+           ORDER BY samples.ts DESC
+         ) AS rank
+  FROM evaluation
+  JOIN samples
+    ON samples.ts <= evaluation.ts
+   AND samples.ts > evaluation.ts - :lookback
+)
+SELECT labels,
+       response_ts AS ts,
+       CAST(sample_ts AS REAL) AS value
+FROM candidates
+WHERE rank = 1
+ORDER BY labels, response_ts;
+```
+
+All parameters use the table's configured timestamp unit (integer seconds for
+the default table). Labels exclude `__name__`, as required by `timestamp`.
+Duplicate values at the same latest timestamp have the same timestamp result,
+so their internal tie order is immaterial. Direct callers implement `offset`
+or a fixed `@` anchor by shifting or replacing the selection-side evaluation
+timestamp while retaining `response_ts`.
+
+Prometheus distinguishes direct selector provenance from newly composed
+samples. A direct selector—including `offset` and `@`—reports the selected
+stored sample timestamp. Unary, value/label/sort functions, binary operators,
+aggregations, and range functions create samples at the outer evaluation time;
+`timestamp` over those expressions therefore returns that evaluation time.
+The Rust AST owns that distinction, parser types, composition, exact output
+timestamps and float strings, limits, cancellation, and response envelopes.
+The public raw scan already exposes every storage timestamp needed by direct
+SQLite/libSQL users, so no timestamp-specific extension primitive is needed.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_time_timestamp_pin_clock_provenance_and_reopen`.
+
 ### SQL-PROM-006: range selector
 
 At instant evaluation timestamp `:at`, return every stored float sample in

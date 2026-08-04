@@ -787,6 +787,24 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 print(f"{case['id']}: ok")
         for case in fixture.get("operator_cases", []):
             evaluation_ms = sample_timestamp_ms + case["evaluation_offset_ms"]
+            if "at_offset_ms" in case:
+                case = dict(case)
+                at_ms = sample_timestamp_ms + case["at_offset_ms"]
+                case["query"] = case["query"].format(at=str(at_ms / 1_000))
+            if "expected_value_offsets_ms" in case:
+                case = dict(case)
+                case["expected_values"] = [
+                    (sample_timestamp_ms + offset) // 1_000
+                    if (sample_timestamp_ms + offset) % 1_000 == 0
+                    else (sample_timestamp_ms + offset) / 1_000
+                    for offset in case["expected_value_offsets_ms"]
+                ]
+            if "expected_scalar_offset_ms" in case:
+                case = dict(case)
+                scalar_ms = sample_timestamp_ms + case["expected_scalar_offset_ms"]
+                case["expected_scalar"] = (
+                    scalar_ms // 1_000 if scalar_ms % 1_000 == 0 else scalar_ms / 1_000
+                )
             range_case = case.get("range")
             if range_case:
                 start_ms = sample_timestamp_ms + range_case["start_offset_ms"]

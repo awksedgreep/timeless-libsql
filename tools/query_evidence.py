@@ -1234,6 +1234,24 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        timestamp_narrow = measure(
+            "metrics-timestamp-narrow",
+            lambda: promql('timestamp(query_contract_cpu{host="h0000"})'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        timestamp_wide = measure(
+            "metrics-timestamp-wide",
+            lambda: promql("timestamp(query_contract_cpu)"),
+            query_json_cardinality,
+            series,
+            stat,
+            iterations,
+            warmup,
+        )
         arithmetic_narrow = measure(
             "metrics-arithmetic-vector-scalar-narrow",
             lambda: promql('query_contract_cpu{host="h0000"} * 2'),
@@ -1840,6 +1858,8 @@ def metrics_evidence(
                 "sort_wide": sort_wide,
                 "conversion_narrow": conversion_narrow,
                 "conversion_wide": conversion_wide,
+                "timestamp_narrow": timestamp_narrow,
+                "timestamp_wide": timestamp_wide,
                 "arithmetic_vector_scalar_narrow": arithmetic_narrow,
                 "arithmetic_one_to_one_wide": arithmetic_wide,
                 "comparison_filter_narrow": comparison_narrow,
