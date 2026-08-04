@@ -197,6 +197,7 @@ min_over_time(http_requests_total[30m:30s])
 max_over_time(http_requests_total[30m:30s])
 sum_over_time(http_requests_total[30m:30s])
 count_over_time(http_requests_total[30m:30s])
+last_over_time(http_requests_total[30m:30s])
 avg_over_time(http_requests_total[30m:])
 avg_over_time(http_requests_total[30m:30s] @ end() offset 5m)
 avg_over_time(avg_over_time(http_requests_total[5m:30s])[30m:1m])
@@ -732,6 +733,8 @@ ordered extremum, replace a leading NaN with the first numeric sample, retain
 NaN for an all-NaN window, and preserve the first of equal signed zeros. These
 are general direct-SQL reductions; PromQL parsing, label/name
 policy, timestamps, limits, and envelopes remain in the Rust metrics API.
+`last_over_time` maps to the existing `timeless_grid` last-sample kernel and
+retains exact IEEE bits; pinned Prometheus also retains its metric name.
 
 The `buckets` blob is versioned and little-endian:
 

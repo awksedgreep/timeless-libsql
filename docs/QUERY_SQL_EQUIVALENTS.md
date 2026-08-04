@@ -66,6 +66,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-022`](#sql-prom-022-max_over_time) | `PQL-R03` | current | exact float-window maximum |
 | [`SQL-PROM-023`](#sql-prom-023-sum_over_time) | `PQL-R04` | current | compensated float-window sum |
 | [`SQL-PROM-024`](#sql-prom-024-count_over_time) | `PQL-R05` | current | exact float-sample window count |
+| [`SQL-PROM-025`](#sql-prom-025-last_over_time) | `PQL-R06` | current | exact last stored float in each window |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -273,6 +274,34 @@ limits, cancellation, string formatting, and result envelopes. Native
 histograms are not stored. Direct regression: `tests/cli.sh` sections 22 and
 45; HTTP/oracle/reopen regression:
 `session_six_promql_count_over_time_includes_ieee_limits_and_reopen`.
+
+### SQL-PROM-025: `last_over_time`
+
+Evaluate `last_over_time(metric{...}[:window])` on an exact range-query grid:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :window
+)
+ORDER BY labels, ts;
+```
+
+Metric timestamps and all bound parameters are integer seconds. Set
+`:start = :end` for an instant evaluation. `timeless_grid` selects the last
+stored float in `(T-window,T]`; empty windows emit no row. Values—including
+NaN, infinities, and signed zero—are returned unchanged. Duplicate timestamps
+follow the extension's stable engine order; direct users that admit duplicates
+must treat that order as part of their ingest contract because Prometheus
+storage normally has one sample per series/timestamp. The Rust API owns
+PromQL parsing, multi-metric expansion, outer timestamps, subquery composition,
+limits, cancellation, IEEE response strings, and envelopes. Unlike most
+PromQL range functions, pinned Prometheus `last_over_time` preserves the input
+metric name; direct SQL already returns `:metric` separately from canonical
+labels. Native histograms are not stored. Direct regression: `tests/cli.sh`
+section 45; HTTP/oracle/reopen regression:
+`session_six_promql_last_over_time_preserves_name_ieee_limits_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

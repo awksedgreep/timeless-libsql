@@ -400,6 +400,7 @@ enum PromRangeOp {
     Max,
     Sum,
     Count,
+    Last,
 }
 
 impl PromRangeOp {
@@ -410,27 +411,34 @@ impl PromRangeOp {
             Self::Max => "max_over_time",
             Self::Sum => "sum_over_time",
             Self::Count => "count_over_time",
+            Self::Last => "last_over_time",
         }
     }
 
-    fn native_name(self) -> &'static str {
+    fn native_name(self) -> Option<&'static str> {
         match self {
-            Self::Avg => "avg",
-            Self::Min => "min",
-            Self::Max => "max",
-            Self::Sum => "sum",
-            Self::Count => "count",
+            Self::Avg => Some("avg"),
+            Self::Min => Some("min"),
+            Self::Max => Some("max"),
+            Self::Sum => Some("sum"),
+            Self::Count => Some("count"),
+            Self::Last => None,
         }
     }
 
-    fn aggregate_op(self) -> PromAggregateOp {
+    fn aggregate_op(self) -> Option<PromAggregateOp> {
         match self {
-            Self::Avg => PromAggregateOp::Avg,
-            Self::Min => PromAggregateOp::Min,
-            Self::Max => PromAggregateOp::Max,
-            Self::Sum => PromAggregateOp::Sum,
-            Self::Count => PromAggregateOp::Count,
+            Self::Avg => Some(PromAggregateOp::Avg),
+            Self::Min => Some(PromAggregateOp::Min),
+            Self::Max => Some(PromAggregateOp::Max),
+            Self::Sum => Some(PromAggregateOp::Sum),
+            Self::Count => Some(PromAggregateOp::Count),
+            Self::Last => None,
         }
+    }
+
+    fn retains_metric_name(self) -> bool {
+        matches!(self, Self::Last)
     }
 }
 
@@ -898,6 +906,7 @@ fn lower_promql_expr(
                     | "max_over_time"
                     | "sum_over_time"
                     | "count_over_time"
+                    | "last_over_time"
             ) =>
         {
             let op = match call.func.name {
@@ -906,6 +915,7 @@ fn lower_promql_expr(
                 "max_over_time" => PromRangeOp::Max,
                 "sum_over_time" => PromRangeOp::Sum,
                 "count_over_time" => PromRangeOp::Count,
+                "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
             let [argument] = call.args.args.as_slice() else {
@@ -2543,6 +2553,7 @@ fn execute_prometheus(
             PromRangeInput::Selector { selector, window }
                 if features.window_batches
                     && features.window_batch_work_limit
+                    && range.op.native_name().is_some()
                     && matches!(selector.metric, MetricSelection::Exact(_))
                     && selector.timing.is_default()
                     && [start, stop, step, *window]
@@ -4036,7 +4047,9 @@ fn execute_prometheus_range_subquery(
 
     for mut series in intermediate {
         check_cancelled(cancelled)?;
-        series.labels.remove("__name__");
+        if !op.retains_metric_name() {
+            series.labels.remove("__name__");
+        }
         let item_start = body.len();
         comma(&mut body, emitted);
         write_prometheus_item_prefix(&mut body, None, &series.labels, instant, limits)?;
@@ -4223,7 +4236,12 @@ fn prometheus_range_reduction(
     op: PromRangeOp,
     cancelled: &AtomicBool,
 ) -> Result<f64, String> {
-    let aggregate = op.aggregate_op();
+    if matches!(op, PromRangeOp::Last) {
+        return Ok(points[points.len() - 1].1);
+    }
+    let aggregate = op
+        .aggregate_op()
+        .expect("non-positional range reduction has an aggregate state");
     let mut reduction = PromAggregateState::new(aggregate, points[0].1);
     for &(_, value) in &points[1..] {
         check_cancelled(cancelled)?;
@@ -4583,6 +4601,9 @@ fn execute_prometheus_window(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
+    let native_op = op
+        .native_name()
+        .ok_or_else(|| format!("{} has no public window kernel", op.name()))?;
     let max_work_points = i64::try_from(limits.max_work_points)
         .map_err(|_| "PromQL max_work_points exceeds SQLite INTEGER range".to_string())?;
     let mut stmt = conn
@@ -4602,7 +4623,7 @@ fn execute_prometheus_window(
                 stop,
                 step,
                 window,
-                op.native_name(),
+                native_op,
                 max_work_points
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
@@ -4730,7 +4751,13 @@ fn execute_prometheus_range_raw(
             };
             let item_start = body.len();
             comma(&mut body, emitted);
-            write_prometheus_item_prefix(&mut body, None, &meta.labels, instant, limits)?;
+            write_prometheus_item_prefix(
+                &mut body,
+                op.retains_metric_name().then_some(metric.as_str()),
+                &meta.labels,
+                instant,
+                limits,
+            )?;
             enforce_prometheus_output(&body, points, limits)?;
             let mut lo = 0_usize;
             let mut hi = 0_usize;
@@ -4752,14 +4779,22 @@ fn execute_prometheus_range_raw(
                     lo += 1;
                 }
                 if hi > lo {
-                    let aggregate = op.aggregate_op();
-                    let mut reduction =
-                        PromAggregateState::new(aggregate, series.value(raw.frame.as_deref(), lo)?);
-                    for index in lo + 1..hi {
-                        check_cancelled(cancelled)?;
-                        reduction.add(aggregate, series.value(raw.frame.as_deref(), index)?);
-                    }
-                    let value = reduction.finish(aggregate);
+                    let value = if matches!(op, PromRangeOp::Last) {
+                        series.value(raw.frame.as_deref(), hi - 1)?
+                    } else {
+                        let aggregate = op
+                            .aggregate_op()
+                            .expect("non-positional range reduction has an aggregate state");
+                        let mut reduction = PromAggregateState::new(
+                            aggregate,
+                            series.value(raw.frame.as_deref(), lo)?,
+                        );
+                        for index in lo + 1..hi {
+                            check_cancelled(cancelled)?;
+                            reduction.add(aggregate, series.value(raw.frame.as_deref(), index)?);
+                        }
+                        reduction.finish(aggregate)
+                    };
                     admit_prometheus_point(points.saturating_add(item_points), limits)?;
                     if !instant {
                         comma(&mut body, item_points as usize);

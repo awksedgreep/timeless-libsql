@@ -3710,6 +3710,16 @@ reverse_zero = db.execute(
     "'metrics','max_zero',NULL,30,30,1,20,'max')"
 ).fetchone()[0]
 assert reverse_zero == 0.0 and math.copysign(1.0, reverse_zero) == -1.0
+last_value = db.execute(
+    "SELECT value FROM timeless_grid("
+    "'metrics','min_window',NULL,30,30,1,20)"
+).fetchone()[0]
+assert last_value == 4.0
+last_zero = db.execute(
+    "SELECT value FROM timeless_grid("
+    "'metrics','min_zero',NULL,30,30,1,20)"
+).fetchone()[0]
+assert last_zero == 0.0 and math.copysign(1.0, last_zero) == -1.0
 
 cross_sum = db.execute(
     "WITH selected AS ("

@@ -29,7 +29,7 @@ selectors, anchored regex/negative/duplicate `__name__` matchers, root range
 selectors on instant queries, and
 `avg_over_time(selector[window])`, `min_over_time(selector[window])`, and
 `max_over_time(selector[window])`, `sum_over_time(selector[window])`, and
-`count_over_time(selector[window])`.
+`count_over_time(selector[window])`, plus `last_over_time(selector[window])`.
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
@@ -138,12 +138,16 @@ Every `sum_over_time` path uses compensated addition while retaining IEEE
 overflow and NaN behavior.
 Every `count_over_time` path includes all stored float samples, including
 non-finite values.
+Every `last_over_time` path preserves the selected sample's IEEE bits and,
+unlike the neighboring range reductions, retains the input metric name.
 Every `min_over_time` and `max_over_time` path uses ordered-comparison extrema,
 including first-sample signed-zero stability and Prometheus-compatible NaN handling.
-All include packed whole-second windows, raw modifier/subsecond fallbacks,
-and materialized subqueries; valid `NaN` and infinities remain values rather
-than frame errors. All paths remove `__name__`, omit empty windows, enforce
-cumulative work/output/deadline limits, and remain cancellation-aware.
+The numeric folds and count include packed whole-second windows plus raw
+modifier/subsecond fallbacks; `last_over_time` uses the existing packed raw
+waist. All support materialized subqueries, and valid `NaN` and infinities
+remain values rather than frame errors. All except `last_over_time` remove
+`__name__`; every path omits empty windows, enforces cumulative
+work/output/deadline limits, and remains cancellation-aware.
 
 Both query endpoints accept Prometheus's request-scoped `lookback_delta`.
 Omission and an explicit zero select the five-minute default; positive numeric
