@@ -1,0 +1,377 @@
+# SQL equivalents for query-language features
+
+This cookbook shows how a direct SQLite/libSQL user can execute the storage
+and composition work behind PromQL and LogsQL query vectors. It accompanies
+the [PromQL](PROMQL_FEATURE_MATRIX.md) and
+[LogsQL](LOGSQL_FEATURE_MATRIX.md) matrices.
+
+An `SQL` foundation in a matrix is not complete documentation until this file
+contains an executable, parameterized statement for it. If no honest SQL
+equivalent exists, the row must target `API`, `EXT`, `LIB`, or `DEFER` instead
+of hand-waving at SQL.
+
+## Contract for every recipe
+
+Each recipe must:
+
+1. use only public virtual tables, TVFs, scalar functions, and ordinary
+   SQLite/libSQL features—never shadow tables;
+2. include required table setup and named parameter units;
+3. state whether it is semantically exact, an execution foundation whose API
+   still owes language/result shaping, or an intentionally different SQL
+   operation;
+4. state ordering, bounds, missing-value, and type behavior;
+5. name its matrix row IDs and its executable regression in `tests/cli.sh` or
+   an extension-backed server contract; and
+6. show `EXPLAIN QUERY PLAN` or measured counters when a claim depends on
+   pushdown rather than ordinary row filtering.
+
+The Rust API still owns Prometheus/Victoria HTTP envelopes, language errors,
+lookback/staleness policy, output label/name rules, pipeline semantics,
+resource limits, and cancellation. SQL recipes let embedded users reach the
+same stored data and mechanical reductions without running that API.
+
+## Recipe index
+
+| recipe | matrix rows | state | semantic class |
+|---|---|---|---|
+| [`SQL-PROM-001`](#sql-prom-001-instant-selector) | `PQL-S01`, `PQL-S02` | current | exact storage selection; API shapes PromQL output |
+| [`SQL-PROM-002`](#sql-prom-002-avg_over_time) | `PQL-S06`, `PQL-R01` | current | exact float-window reduction |
+| [`SQL-PROM-003`](#sql-prom-003-cross-series-sum-by-label) | `PQL-O09` | reference | SQL equivalent available; Rust PromQL row remains missing |
+| [`SQL-PROM-004`](#sql-prom-004-vector-arithmetic-with-label-matching) | `PQL-O02`, `PQL-O05` | reference | SQL equivalent available for explicit match keys |
+| [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | reference | SQL equivalent available; API still owes PromQL ordering/labels |
+| [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
+| [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
+| [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
+| [`SQL-LOG-004`](#sql-log-004-distinct-field-values) | `LQL-P04`, `LQL-S03`, `LQL-S04` | current foundation | bounded lexical values; aggregate syntax remains API work |
+| [`SQL-LOG-005`](#sql-log-005-arbitrary-metadata-equality) | `LQL-F05` | reference | correct decoded fallback for a non-indexed field |
+| [`SQL-LOG-006`](#sql-log-006-counts-by-field-and-time-bucket) | `LQL-P09`, `LQL-S05`, `LQL-S08` | current foundation | storage bucket vector or ordinary SQL grouping |
+
+`current` means the public SQL surface exists now. `reference` means the SQL
+is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
+still correctly marked `missing`.
+
+## Setup and parameter conventions
+
+Examples assume the extension has been loaded and these tables exist:
+
+```sql
+CREATE VIRTUAL TABLE metrics USING timeless_metrics;
+CREATE VIRTUAL TABLE logs USING timeless_logs(
+  index_keys='service,host,path,status'
+);
+```
+
+Metric timestamps, steps, windows, and lookback values are seconds. The
+general-purpose `timeless_logs` table uses epoch milliseconds. Release signal
+servers may create a table with a different declared timestamp capability;
+direct users must bind times in the table's reported native unit.
+
+Named parameters use SQLite notation (`:metric`, `:start`, and so on). Bind
+numbers as integers/reals rather than interpolating query text.
+
+## PromQL foundations and equivalents
+
+### SQL-PROM-001: instant selector
+
+At evaluation timestamp `:at`, return the newest sample in
+`(:at - :lookback, :at]` for each matching series:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :at, :at,
+  1, :lookback
+)
+ORDER BY labels;
+```
+
+`:filter_json` uses a plain string for equality and an operator object for
+the other matcher forms:
+
+```json
+{
+  "host": {"re": "web-.*"},
+  "env": {"neq": "dev"},
+  "zone": {"nre": "test-.+"},
+  "service": "api"
+}
+```
+
+Regexes are fully anchored and an absent label is compared as the empty
+string. The Rust API remains responsible for parsing PromQL, expanding
+multi-metric selectors, preserving duplicate matcher AND semantics, and
+formatting the vector response. Direct regression: `tests/cli.sh` sections 22
+and 35.
+
+### SQL-PROM-002: `avg_over_time`
+
+Evaluate `avg_over_time(metric{...}[:window])` on the exact range-query grid:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_window(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :window,
+  'avg'
+)
+ORDER BY labels, ts;
+```
+
+The window is `(T-window,T]`, matching PromQL range boundaries. Set
+`:start = :end` for an instant evaluation. This recipe is exact for stored
+float samples; native histogram samples are not stored. Direct regression:
+`tests/cli.sh` sections 22, 33, and 35.
+
+### SQL-PROM-003: cross-series sum by label
+
+Equivalent mechanical reduction for `sum by (service) (metric)`:
+
+```sql
+WITH selected AS (
+  SELECT
+    ts,
+    json_extract(labels, '$.service') AS service,
+    value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  json_object('service', service) AS labels,
+  ts,
+  SUM(value) AS value
+FROM selected
+GROUP BY service, ts
+ORDER BY service, ts;
+```
+
+This uses SQLite JSON and aggregate functions over an already bounded grid.
+It is the SQL execution equivalent, but `PQL-O09` remains missing until the
+Rust API implements PromQL grouping, empty-label, metric-name, NaN, and result
+envelope rules.
+
+### SQL-PROM-004: vector arithmetic with label matching
+
+Equivalent mechanical reduction for `errors / on(host) requests`:
+
+```sql
+WITH
+errors AS (
+  SELECT ts, labels, json_extract(labels, '$.host') AS host, value
+  FROM timeless_grid(
+    'metrics', 'errors_total', :error_filter,
+    :start, :end, :step, :lookback
+  )
+),
+requests AS (
+  SELECT ts, labels, json_extract(labels, '$.host') AS host, value
+  FROM timeless_grid(
+    'metrics', 'requests_total', :request_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT e.labels, e.ts, e.value / r.value AS value
+FROM errors AS e
+JOIN requests AS r
+  ON r.ts = e.ts AND r.host = e.host
+ORDER BY e.labels, e.ts;
+```
+
+Ordinary joins are the intended direct-user surface. The Rust API still owes
+cardinality checks, `ignoring`, `group_left/right`, label propagation,
+division special values, and PromQL metric-name rules. A related executable
+join is in `tests/cli.sh` section 33.
+
+### SQL-PROM-005: top-k per evaluation step
+
+```sql
+WITH selected AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+),
+ranked AS (
+  SELECT *, ROW_NUMBER() OVER (
+    PARTITION BY ts ORDER BY value DESC, labels
+  ) AS rank
+  FROM selected
+)
+SELECT labels, ts, value
+FROM ranked
+WHERE rank <= :k
+ORDER BY ts, value DESC, labels;
+```
+
+The stable tie-breakers make direct SQL deterministic. PromQL's instant/range
+ordering rules remain API behavior. A related cookbook regression is in
+`tests/cli.sh` section 33.
+
+## LogsQL foundations and equivalents
+
+### SQL-LOG-001: bounded filter, sort, and pagination
+
+Use the virtual table's declared index-key columns for posting-list pruning:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND level = :level
+  AND service = :service
+ORDER BY ts DESC
+LIMIT :limit OFFSET :offset;
+```
+
+For `_time:5m`, bind `:start_ms = :now_ms - 300000` and
+`:end_ms = :now_ms`. Passing `:now_ms` makes evaluation deterministic. Exact
+`ORDER BY ts ASC|DESC LIMIT/OFFSET` is consumed by the virtual table when the
+remaining predicates allow it. Confirm with:
+
+```sql
+EXPLAIN QUERY PLAN
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms AND ts <= :end_ms
+  AND level = :level AND service = :service
+ORDER BY ts DESC
+LIMIT :limit OFFSET :offset;
+```
+
+`service` is fast only when declared in `index_keys`. Other declared keys use
+the same shape.
+
+### SQL-LOG-002: message substring
+
+Use the hidden exact engine predicate to filter before rows cross SQLite:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND message_contains = :needle
+ORDER BY ts DESC
+LIMIT :limit OFFSET :offset;
+```
+
+This is Timeless's case-insensitive literal substring operation. It is not by
+itself VictoriaLogs word, phrase, prefix, or regexp semantics. The matrix
+keeps those rows separate.
+
+### SQL-LOG-003: exact count
+
+Return one scalar without materializing matching log rows:
+
+```sql
+SELECT n
+FROM timeless_log_count(
+  'logs',
+  :filter_json,
+  :message_contains,
+  :start_ms,
+  :end_ms
+);
+```
+
+Example `:filter_json`:
+
+```json
+{"level":"error","service":"api","status":"500"}
+```
+
+Only the table name is required; other arguments may be `NULL`. Fully covered
+blocks can answer from metadata, while boundary and content predicates decode
+as needed. Direct regression: `tests/cli.sh` section 43.
+
+### SQL-LOG-004: distinct field values
+
+Return bounded distinct values in lexical order:
+
+```sql
+SELECT value
+FROM timeless_log_values(
+  'logs',
+  :field,
+  :filter_json,
+  :message_contains,
+  :start_ms,
+  :end_ms,
+  :max_values
+)
+ORDER BY value;
+```
+
+The default cap is 1,000 and the hard cap is 100,000. This is the direct SQL
+foundation for field discovery and distinct-value query work. Extension-backed
+coverage lives in the Rust logs server storage contract; add a CLI recipe
+regression before marking the corresponding LogsQL rows shipped.
+
+### SQL-LOG-005: arbitrary metadata equality
+
+When a key was not declared in `index_keys`, filter the returned typed JSON
+with SQLite JSON functions:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND json_extract(metadata, '$.deployment.region') = :region
+ORDER BY ts DESC
+LIMIT :limit OFFSET :offset;
+```
+
+This is correct but requires decoding candidate rows. If measurements show a
+stable, selective key is common, create a new table with that key declared in
+`index_keys`; do not read or mutate shadow tables.
+
+### SQL-LOG-006: counts by field and time bucket
+
+For a declared indexed field, use the storage-aware bucket vector:
+
+```sql
+SELECT bucket_ts, group_key, n
+FROM timeless_log_buckets(
+  'logs', :group_key, :filter_json,
+  :start_ms, :end_ms, :step_ms
+)
+ORDER BY bucket_ts, group_key;
+```
+
+The buckets are forward `[T,T+step)` intervals aligned to `:start_ms`; this is
+not a PromQL-style trailing window. For arbitrary decoded numeric metadata,
+ordinary SQL remains available:
+
+```sql
+SELECT
+  ((ts - :start_ms) / :step_ms) * :step_ms + :start_ms AS bucket_ts,
+  COUNT(*) AS n,
+  AVG(CAST(json_extract(metadata, '$.duration_ms') AS REAL)) AS avg_duration
+FROM logs
+WHERE ts >= :start_ms AND ts <= :end_ms
+GROUP BY bucket_ts
+ORDER BY bucket_ts;
+```
+
+The second form is deliberately decode-heavy. Measurements determine whether
+a future typed storage-aware aggregate earns a new `EXT` row.
+
+## Adding the next recipe
+
+When a matrix row uses `SQL` as its target or foundation:
+
+1. add its stable row ID to the recipe index;
+2. include an executable statement and setup;
+3. describe exact and non-equivalent language behavior;
+4. add the statement to `tests/cli.sh` with hand-verified output; and
+5. link the recipe from the matrix row before changing its status to
+   `shipped`.
+
+If the statement needs a private shadow table, application callback, or
+undocumented decoder, it is not a valid SQL equivalent.

@@ -73,6 +73,9 @@
 # Section 39 pins the cross-connection transaction visibility gate: an
 # intra-transaction flush must report a retryable busy conflict to another
 # connection, never expose an index location whose shadow row is invisible.
+# Section 45 executes the public statements documented in
+# docs/QUERY_SQL_EQUIVALENTS.md so the direct SQLite/libSQL recipes cannot
+# silently drift from the extension.
 # Section 40 makes durable metrics series IDs first-class read constraints on
 # the base vtab and every per-series query TVF, including parameterized joins.
 # Section 41 independently decodes TAF1/TLF1 aggregate/latest result frames and
@@ -3258,6 +3261,189 @@ PY
 check_eq "traces expose bounded streaming reads and native discovery" \
   "$got" \
 $'catalog|api,worker|GET /items\nbounded|10,9|5|2\nstream|3|3|0'
+
+# ---------------------------------------------------------------------------
+echo "== section 45: documented query-language SQL equivalents =="
+SQL_EQ_DB="$TMP/query_sql_equivalents.db"
+got=$(python3 - "$EXT" "$SQL_EQ_DB" <<'PY'
+import sqlite3
+import sys
+
+extension, database = sys.argv[1:]
+db = sqlite3.connect(database)
+db.enable_load_extension(True)
+db.load_extension(extension)
+db.enable_load_extension(False)
+db.execute("CREATE VIRTUAL TABLE metrics USING timeless_metrics")
+db.execute(
+    "CREATE VIRTUAL TABLE logs USING "
+    "timeless_logs(index_keys='service,host,path,status')"
+)
+db.executemany(
+    "INSERT INTO metrics(name,labels,ts,value) VALUES(?,?,?,?)",
+    [
+        ('cpu', '{"host":"web-1","service":"api"}', 100, 10.0),
+        ('cpu', '{"host":"web-2","service":"api"}', 100, 20.0),
+        ('cpu', '{"host":"web-1","service":"api"}', 110, 30.0),
+        ('errors_total', '{"host":"web-1"}', 100, 2.0),
+        ('requests_total', '{"host":"web-1"}', 100, 10.0),
+    ],
+)
+db.execute("INSERT INTO metrics(metrics) VALUES ('flush')")
+db.executemany(
+    "INSERT INTO logs(ts,level,message,metadata) VALUES(?,?,?,?)",
+    [
+        (1000, 'error', 'request timeout',
+         '{"service":"api","host":"web-1","deployment":'
+         '{"region":"us-east"},"duration_ms":12}'),
+        (2000, 'info', 'request ok',
+         '{"service":"api","host":"web-2","deployment":'
+         '{"region":"us-west"},"duration_ms":4}'),
+    ],
+)
+db.execute("INSERT INTO logs(logs) VALUES ('flush')")
+db.commit()
+
+instant = db.execute(
+    "SELECT labels,ts,value FROM timeless_grid("
+    "'metrics',:metric,:filter_json,:at,:at,1,:lookback) ORDER BY labels",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'at': 110,
+        'lookback': 20,
+    },
+).fetchall()
+assert len(instant) == 2
+
+window = db.execute(
+    "SELECT labels,ts,value FROM timeless_window("
+    "'metrics',:metric,:filter_json,:start,:end,:step,:window,'avg') "
+    "ORDER BY labels,ts",
+    {
+        'metric': 'cpu',
+        'filter_json': None,
+        'start': 100,
+        'end': 110,
+        'step': 10,
+        'window': 20,
+    },
+).fetchall()
+assert len(window) == 4
+
+cross_sum = db.execute(
+    "WITH selected AS ("
+    " SELECT ts,json_extract(labels,'$.service') service,value"
+    " FROM timeless_grid('metrics','cpu',NULL,100,110,10,20)"
+    ") SELECT service,ts,SUM(value) FROM selected"
+    " GROUP BY service,ts ORDER BY service,ts"
+).fetchall()
+assert cross_sum == [('api', 100, 30.0), ('api', 110, 50.0)]
+
+ratio = db.execute(
+    "WITH errors AS ("
+    " SELECT ts,labels,json_extract(labels,'$.host') host,value"
+    " FROM timeless_grid('metrics','errors_total',NULL,100,100,1,20)"
+    "), requests AS ("
+    " SELECT ts,labels,json_extract(labels,'$.host') host,value"
+    " FROM timeless_grid('metrics','requests_total',NULL,100,100,1,20)"
+    ") SELECT e.value/r.value FROM errors e JOIN requests r"
+    " ON r.ts=e.ts AND r.host=e.host"
+).fetchone()[0]
+assert ratio == 0.2
+
+top = db.execute(
+    "WITH selected AS ("
+    " SELECT labels,ts,value"
+    " FROM timeless_grid('metrics','cpu',NULL,100,110,10,20)"
+    "), ranked AS ("
+    " SELECT *,ROW_NUMBER() OVER ("
+    "  PARTITION BY ts ORDER BY value DESC,labels) rank FROM selected"
+    ") SELECT labels,ts,value FROM ranked WHERE rank<=1"
+    " ORDER BY ts,value DESC,labels"
+).fetchall()
+assert [row[2] for row in top] == [20.0, 30.0]
+
+bounded = db.execute(
+    "SELECT ts,level,message,metadata FROM logs"
+    " WHERE ts>=:start_ms AND ts<=:end_ms"
+    " AND level=:level AND service=:service"
+    " ORDER BY ts DESC LIMIT :limit OFFSET :offset",
+    {
+        'start_ms': 1000,
+        'end_ms': 2000,
+        'level': 'error',
+        'service': 'api',
+        'limit': 10,
+        'offset': 0,
+    },
+).fetchall()
+assert len(bounded) == 1 and bounded[0][0] == 1000
+
+substring = db.execute(
+    "SELECT ts FROM logs WHERE message_contains=:needle ORDER BY ts DESC",
+    {'needle': 'TIMEOUT'},
+).fetchall()
+assert substring == [(1000,)]
+
+count = db.execute(
+    "SELECT n FROM timeless_log_count("
+    "'logs',:filter_json,:message_contains,:start_ms,:end_ms)",
+    {
+        'filter_json': '{"level":"error","service":"api"}',
+        'message_contains': None,
+        'start_ms': 1000,
+        'end_ms': 2000,
+    },
+).fetchone()[0]
+assert count == 1
+
+values = db.execute(
+    "SELECT value FROM timeless_log_values("
+    "'logs',:field,:filter_json,:message_contains,:start_ms,:end_ms,"
+    ":max_values) ORDER BY value",
+    {
+        'field': 'host',
+        'filter_json': None,
+        'message_contains': None,
+        'start_ms': 1000,
+        'end_ms': 2000,
+        'max_values': 100,
+    },
+).fetchall()
+assert values == [('web-1',), ('web-2',)]
+
+metadata = db.execute(
+    "SELECT ts FROM logs"
+    " WHERE json_extract(metadata,'$.deployment.region')=:region",
+    {'region': 'us-east'},
+).fetchall()
+assert metadata == [(1000,)]
+
+buckets = db.execute(
+    "SELECT bucket_ts,group_key,n FROM timeless_log_buckets("
+    "'logs',:group_key,:filter_json,:start_ms,:end_ms,:step_ms)"
+    " ORDER BY bucket_ts,group_key",
+    {
+        'group_key': 'level',
+        'filter_json': None,
+        'start_ms': 1000,
+        'end_ms': 2000,
+        'step_ms': 1000,
+    },
+).fetchall()
+assert sum(row[2] for row in buckets) == 2
+
+print(f"prom|{len(instant)}|{len(window)}|{len(top)}|{ratio:.1f}")
+print(f"logs|{len(bounded)}|{len(substring)}|{count}|{len(values)}|"
+      f"{len(metadata)}|{sum(row[2] for row in buckets)}")
+db.close()
+PY
+) || { fail "section 45 SQL equivalents driver crashed"; got=""; }
+
+check_eq "documented SQL equivalents execute through the public extension" \
+  "$got" \
+$'prom|2|4|2|0.2\nlogs|1|1|1|2|1|2'
 
 # ---------------------------------------------------------------------------
 echo

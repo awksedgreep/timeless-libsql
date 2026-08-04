@@ -1,0 +1,34 @@
+# Query and storage findings
+
+This append-only log records storage behavior discovered while implementing
+the [PromQL](PROMQL_FEATURE_MATRIX.md) and
+[LogsQL](LOGSQL_FEATURE_MATRIX.md) feature maps. It is not a substitute for a
+regression test. Every resolved finding links to the test and the public
+documentation that now pins the behavior.
+
+## Baseline constraints
+
+These are known constraints at the 2026-08-04 `a72634e` baseline. They are not
+new defects, but query work must not accidentally obscure them.
+
+| ID | behavior | consequence |
+|---|---|---|
+| `QSF-001` | Metric window kernels use `(T-window,T]`. | This matches PromQL range-vector boundaries, but callers must still implement lookback, staleness, counter extrapolation, and output-label rules. |
+| `QSF-002` | `timeless_window(..., 'rate'|'increase')` is a storage kernel, not a complete PromQL evaluator. | The Rust API must apply PromQL reset, extrapolation, carry-in, sparse-series, and name-retention semantics rather than relabeling the native result as PromQL. |
+| `QSF-003` | Metric storage contains float samples and timestamps but no native-histogram sample type. | Classic `_bucket` histograms are queryable as float series. Native-histogram-only operators and functions remain deferred until a typed storage design exists. |
+| `QSF-004` | Stored metrics do not currently preserve an explicit Prometheus stale-marker contract. | Five-minute lookback can be implemented, but exact stale-marker parity needs a storage/ingest decision and must not be claimed implicitly. |
+| `QSF-005` | Logs retain typed nested metadata, while the term index intentionally covers only selected low-cardinality keys. | Arbitrary metadata predicates are correct through bounded decode, but only indexed keys can promise posting-list pruning. Measurements decide whether another key earns indexing. |
+| `QSF-006` | Message substring filtering and many metadata transformations require block decode. | The API can implement them correctly now; an extension index or new block metadata is justified only by measured workloads. |
+| `QSF-007` | Timeless logs do not currently assign VictoriaLogs-compatible `_stream_id` identities. | Ordinary field filters fit now. `_stream_id`, stream-context, and stream-specific optimizations are deferred pending an explicit stream model. |
+
+## Findings
+
+Add one entry for every unexpected correctness, performance, durability,
+memory, or planner behavior found during feature work.
+
+| ID | date | matrix row | observation | expected behavior | evidence/test | disposition | status |
+|---|---|---|---|---|---|---|---|
+| — | — | — | No post-baseline findings yet. | — | — | — | — |
+
+Use stable IDs (`QSF-008`, `QSF-009`, ...). Do not delete resolved findings;
+change their status and link the correcting regression.

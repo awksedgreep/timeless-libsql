@@ -541,6 +541,27 @@ SELECT bucket_ts, service, spans, errors, dur_sum, dur_min, dur_max
 (2.4x — duration math requires decoding every span, so this one is
 decode-bound).
 
+## Query language roadmaps
+
+The SQL primitives above are the storage/query foundation, not an implicit
+claim of complete PromQL or LogsQL compatibility. The living feature maps say
+exactly what is implemented, where each missing construct belongs, and what
+must be tested before it can be marked shipped:
+
+- [Query feature ownership and workflow](docs/QUERY_FEATURES.md)
+- [PromQL feature matrix](docs/PROMQL_FEATURE_MATRIX.md)
+- [LogsQL feature matrix](docs/LOGSQL_FEATURE_MATRIX.md)
+- [SQL equivalents for query-language features](docs/QUERY_SQL_EQUIVALENTS.md)
+- [Query/storage findings](docs/QUERY_STORAGE_FINDINGS.md)
+- [Pinned query semantic oracles](docs/QUERY_ORACLES.md)
+- [Sequential query implementation plan](docs/2026-08-04_query_surface_implementation_plan.md)
+
+PromQL and LogsQL parsing/evaluation live in the Rust signal APIs. The
+extension exposes general SQLite/libSQL primitives and receives a new query
+vector only when measurements prove that storage-aware pushdown materially
+avoids reads, decode, copies, or row crossings. Saved queries, subscriptions,
+rules, dashboards, and control-plane state remain higher-order library work.
+
 ## How it works
 
 ```mermaid

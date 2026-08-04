@@ -1,5 +1,14 @@
 # The query cookbook
 
+This cookbook documents the public SQL foundation. Language compatibility and
+planned query vectors are tracked separately in the
+[query feature maps](QUERY_FEATURES.md), including the
+[PromQL](PROMQL_FEATURE_MATRIX.md) and
+[LogsQL](LOGSQL_FEATURE_MATRIX.md) matrices. A similarly named SQL kernel is
+not by itself a claim of complete language semantics. Copyable statements
+mapped back to individual language rows are in
+[SQL equivalents for query-language features](QUERY_SQL_EQUIVALENTS.md).
+
 Recipes for the query surface: the raw vtabs, the kernel TVFs
 (`timeless_aggregate`, `timeless_aggregate_frame`, `timeless_latest`,
 `timeless_latest_frame`, `timeless_grid`, `timeless_window`,
