@@ -370,3 +370,34 @@ anchoring, negative equality/regex, repeated-name AND semantics, empty-name
 legality, deterministic labels/values, clean shutdown, and cold reopen. No
 storage format, batching, compression, rollup, retention, transaction, or
 migration behavior changed.
+
+## Session 3 `PQL-S07`/`PQL-S08` temporal-modifier result
+
+The checked-in
+[`2026-08-04_session3_pql_s07_s08.json`](evidence/2026-08-04_session3_pql_s07_s08.json)
+was captured from exact extension and server build
+`efa0511a39ad4392ab5db2ebb1c9274cf3e24717`. Narrow shapes select one of the
+512 exact-name series. Wide shapes return four outer-grid values for all 512
+series while shifting or freezing lookup time.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|
+| exact host, `offset 20s` | 1 | 164 | 0.374 | 0.490 | 0.512 | 32 |
+| 512 series × 4, `offset -20s` | 2,048 | 84,004 | 3.341 | 3.595 | 3.946 | 16,384 |
+| exact host, numeric `@` | 1 | 164 | 0.735 | 1.020 | 1.257 | 32 |
+| 512 series × 4, `@ end()` | 2,048 | 84,010 | 3.280 | 3.504 | 4.388 | 16,384 |
+
+All four shapes perform one bounded packed call per exact metric selection,
+not one call per outer step. The fixed-`@` wide query reads 15,872 in-lookback
+points from the same 16,384 decoded fixture points and reuses the chosen value
+across four output timestamps. The offset grid similarly reuses one read.
+
+The run durably completed 118,457 normal and boundary points with zero failed
+or queued work, used 672,688 live SQLite/WAL/SHM bytes, and reached 33,344 KiB
+RSS HWM. Pinned Prometheus API cases prove positive/negative offset, numeric
+anchor-before-offset ordering, outer range timestamps, and range `start()` /
+`end()` behavior. The rule oracle and real-extension contract add window
+functions, root range-vector timestamps, millisecond/pre-epoch conversion,
+limits, cancellation, shutdown, and reopen. Section 45 executes both direct
+SQL forms. No extension opcode, storage format, batching, compression, rollup,
+retention, transaction, or migration behavior changed.
