@@ -46,7 +46,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-002`](#sql-prom-002-avg_over_time) | `PQL-S06`, `PQL-R01` | current | exact float-window reduction |
 | [`SQL-PROM-003`](#sql-prom-003-cross-series-sum-by-label) | `PQL-O09` | current foundation | exact bounded cross-series sum; API owns grouping syntax, labels, IEEE strings, limits, and envelopes |
 | [`SQL-PROM-004`](#sql-prom-004-vector-arithmetic-with-label-matching) | `PQL-O02`, `PQL-O05` | current foundation | vector/scalar arithmetic and exact-label joins; API owns language, cardinality, labels, IEEE strings, and envelopes |
-| [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | reference | SQL equivalent available; API still owes PromQL ordering/labels |
+| [`SQL-PROM-005`](#sql-prom-005-top-k-per-evaluation-step) | `PQL-O14` | current foundation | per-step top/bottom ranking; API owns language, grouping modifiers, original labels, parameter errors, limits, and envelopes |
 | [`SQL-PROM-006`](#sql-prom-006-range-selector) | `PQL-S06` | current | exact root range-vector storage selection; API shapes the matrix |
 | [`SQL-PROM-007`](#sql-prom-007-bounded-packed-storage-work) | `PQL-S20` | current foundation | exact pre-decode work bounds; API owns language/result/deadline limits |
 | [`SQL-PROM-008`](#sql-prom-008-temporal-selector-modifiers) | `PQL-S07`, `PQL-S08` | current foundation | exact shifted/fixed lookup time; API owns parser and outer query context |
@@ -898,6 +898,8 @@ six-operation public-grid join executes in `tests/cli.sh` section 33.
 
 ### SQL-PROM-005: top-k per evaluation step
 
+For `topk(:k, metric)`, rank every bounded evaluation timestamp independently:
+
 ```sql
 WITH selected AS (
   SELECT labels, ts, value
@@ -918,9 +920,24 @@ WHERE rank <= :k
 ORDER BY ts, value DESC, labels;
 ```
 
-The stable tie-breakers make direct SQL deterministic. PromQL's instant/range
-ordering rules remain API behavior. A related cookbook regression is in
-`tests/cli.sh` section 33.
+`:metric` and `:filter_json` are text and a matcher object (or SQL `NULL`);
+`:start`, `:end`, `:step`, and `:lookback` are epoch seconds; and `:k` is a
+non-negative integer. Grid bounds are inclusive and lookback is open-left.
+Each timestamp is ranked separately. Labels are the original canonical JSON,
+not the grouping labels. The label tie-breaker makes direct SQL deterministic.
+For `bottomk`, change `DESC` to `ASC` in both `ORDER BY` clauses.
+
+To emulate `by (service)`, add
+`COALESCE(json_extract(labels, '$.service'), '') AS service` to `selected` and
+partition by `service, ts`; a `without` modifier requires projecting a
+canonical JSON object with the excluded labels removed. The Rust API owns
+that general label projection, scalar parameter expressions and per-step
+integer truncation, NaN/overflow errors, Prometheus's rule that NaN ranks
+after numeric values for both directions, within-group instant rank ordering
+(group order is unspecified), sparse range
+series assembly, limits, cancellation, and envelopes. This statement executes
+in `tests/cli.sh` section 45; the exact API contract is
+`session_five_promql_topk_bottomk_rank_per_step_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

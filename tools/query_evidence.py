@@ -797,6 +797,26 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        topk_narrow = measure(
+            "metrics-topk-narrow",
+            lambda: promql('topk(1, query_contract_cpu{host="h0000"})'),
+            query_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        bottomk_wide = measure(
+            "metrics-bottomk-wide",
+            lambda: promql_range(
+                "bottomk by(service) (4, query_contract_cpu)", at - 30, at, 10
+            ),
+            matrix_point_cardinality,
+            32,
+            stat,
+            iterations,
+            warmup,
+        )
         range_narrow = measure(
             "metrics-range-vector-narrow",
             lambda: promql('query_contract_cpu{host="h0000"}[5m]'),
@@ -1076,6 +1096,8 @@ def metrics_evidence(
                 "group_by_wide": group_wide,
                 "stdvar_by_narrow": stdvar_narrow,
                 "stddev_by_wide": stddev_wide,
+                "topk_narrow": topk_narrow,
+                "bottomk_wide": bottomk_wide,
                 "range_vector_narrow": range_narrow,
                 "range_vector_wide": range_wide,
                 "duration_range_vector_narrow": duration_narrow,

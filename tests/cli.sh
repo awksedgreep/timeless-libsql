@@ -3749,6 +3749,18 @@ top = db.execute(
 ).fetchall()
 assert [row[2] for row in top] == [20.0, 30.0]
 
+bottom = db.execute(
+    "WITH selected AS ("
+    " SELECT labels,ts,value"
+    " FROM timeless_grid('metrics','cpu',NULL,100,110,10,20)"
+    "), ranked AS ("
+    " SELECT *,ROW_NUMBER() OVER ("
+    "  PARTITION BY ts ORDER BY value ASC,labels) rank FROM selected"
+    ") SELECT labels,ts,value FROM ranked WHERE rank<=1"
+    " ORDER BY ts,value ASC,labels"
+).fetchall()
+assert [row[2] for row in bottom] == [10.0, 20.0]
+
 bounded = db.execute(
     "SELECT ts,level,message,metadata FROM logs"
     " WHERE ts>=:start_ms AND ts<=:end_ms"

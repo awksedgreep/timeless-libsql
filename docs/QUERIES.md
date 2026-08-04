@@ -410,6 +410,12 @@ infinities, and return `NaN` for an all-NaN group.
 `stdvar` is the population variance and `stddev` its square root. The API uses
 Prometheus's Welford update, returns zero for a singleton, and returns `NaN`
 when any group member is NaN or infinite.
+`topk` and `bottomk` evaluate their scalar parameter and rank independently at
+every timestamp and grouping partition while retaining each selected series'
+complete original labels and metric name. Fractional `k` truncates toward
+zero; values below one return no series; NaN and positive overflow are errors.
+Numeric values outrank NaN in both directions, so NaN is returned only when a
+partition has fewer than `k` numeric samples.
 
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
@@ -429,6 +435,8 @@ For finite, well-scaled data,
 [`SQL-PROM-018`](QUERY_SQL_EQUIVALENTS.md#sql-prom-018-cross-series-population-variance-and-standard-deviation)
 provides an executable second-moment recipe and states why the API's Welford
 arithmetic is required for exact edge semantics.
+Step-local ranking is executable as ordinary window-function SQL in
+[`SQL-PROM-005`](QUERY_SQL_EQUIVALENTS.md#sql-prom-005-top-k-per-evaluation-step).
 
 ## Scalar aggregate without raw materialization
 

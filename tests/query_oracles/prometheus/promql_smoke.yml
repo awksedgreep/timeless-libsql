@@ -381,3 +381,17 @@ tests:
             value: 0.5
           - labels: '{region="west"}'
             value: 0
+      - expr: 'topk(2, query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_aggregation{host="c",region="west"}'
+            value: 6
+          - labels: 'query_contract_aggregation{host="b",region="east"}'
+            value: 4
+      - expr: 'bottomk by (region) (1, query_contract_aggregation)'
+        eval_time: 20s
+        exp_samples:
+          - labels: 'query_contract_aggregation{host="a",region="east"}'
+            value: 3
+          - labels: 'query_contract_aggregation{host="c",region="west"}'
+            value: 6

@@ -2922,7 +2922,6 @@ async fn session_five_promql_avg_is_compensated_grouped_and_reopenable() {
             {"metric": {"case": "positive"}, "value": [base + 10, "+Inf"]}
         ])
     );
-
     drop(app);
     storage.shutdown().await.unwrap();
     drop(storage);
@@ -3262,6 +3261,163 @@ async fn session_five_promql_stddev_stdvar_are_population_grouped_and_reopenable
         .await
         .1,
         deviation.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_topk_bottomk_rank_per_step_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_topk_bottomk.db");
+    let base = 1_700_550_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let values = format!(
+        concat!(
+            "aggregate_rank{{host=\"a\",region=\"east\"}} 10 {}\n",
+            "aggregate_rank{{host=\"b\",region=\"east\"}} 9 {}\n",
+            "aggregate_rank{{host=\"c\",region=\"east\"}} NaN {}\n",
+            "aggregate_rank{{host=\"d\",region=\"west\"}} 8 {}\n",
+            "aggregate_rank{{host=\"e\",region=\"west\"}} 7 {}\n",
+            "aggregate_rank{{host=\"a\",region=\"east\"}} 1 {}\n",
+            "aggregate_rank{{host=\"b\",region=\"east\"}} 20 {}\n",
+            "aggregate_rank{{host=\"d\",region=\"west\"}} 30 {}\n",
+            "aggregate_rank{{host=\"e\",region=\"west\"}} 2 {}\n",
+            "aggregate_rank_limit{{host=\"a\"}} 1 {}\n",
+            "aggregate_rank_limit{{host=\"b\"}} 2 {}\n",
+            "aggregate_rank_limit{{host=\"c\"}} 3 {}\n",
+            "aggregate_rank_limit{{host=\"d\"}} 4 {}\n",
+            "aggregate_rank_limit{{host=\"e\"}} 5 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", values.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let top = prom_query(&app, "topk by (region) (1 + 1, aggregate_rank)", base).await;
+    assert_eq!(top.0, StatusCode::OK, "{}", top.1);
+    assert_eq!(
+        top.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "aggregate_rank", "host": "a", "region": "east"}, "value": [base, "10"]},
+            {"metric": {"__name__": "aggregate_rank", "host": "b", "region": "east"}, "value": [base, "9"]},
+            {"metric": {"__name__": "aggregate_rank", "host": "d", "region": "west"}, "value": [base, "8"]},
+            {"metric": {"__name__": "aggregate_rank", "host": "e", "region": "west"}, "value": [base, "7"]}
+        ])
+    );
+    let bottom = prom_query(&app, "bottomk by (region) (1, aggregate_rank)", base).await;
+    assert_eq!(bottom.0, StatusCode::OK, "{}", bottom.1);
+    assert_eq!(
+        bottom.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "aggregate_rank", "host": "b", "region": "east"}, "value": [base, "9"]},
+            {"metric": {"__name__": "aggregate_rank", "host": "e", "region": "west"}, "value": [base, "7"]}
+        ])
+    );
+    assert_eq!(
+        prom_query(&app, "topk(0, aggregate_rank)", base).await.1["data"]["result"],
+        serde_json::json!([])
+    );
+    let nan = prom_query(&app, "topk(NaN, aggregate_rank)", base).await;
+    assert_eq!(nan.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", nan.1);
+    assert!(nan.1["error"].as_str().unwrap().contains("NaN"));
+    let overflow = prom_query(&app, "topk(+Inf, aggregate_rank)", base).await;
+    assert_eq!(
+        overflow.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        overflow.1
+    );
+    assert!(overflow.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("Scalar value +Inf overflows int64"));
+    let with_nan = prom_query(&app, "topk by (region) (3, aggregate_rank)", base).await;
+    assert_eq!(with_nan.0, StatusCode::OK, "{}", with_nan.1);
+    assert_eq!(
+        with_nan.1["data"]["result"][2]["value"][1],
+        serde_json::json!("NaN")
+    );
+
+    let range = prom_query_range(
+        &app,
+        "topk by (region) (1, aggregate_rank)",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "aggregate_rank", "host": "a", "region": "east"}, "values": [[base, "10"]]},
+            {"metric": {"__name__": "aggregate_rank", "host": "b", "region": "east"}, "values": [[base + 10, "20"]]},
+            {"metric": {"__name__": "aggregate_rank", "host": "d", "region": "west"}, "values": [[base, "8"], [base + 10, "30"]]}
+        ])
+    );
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 5,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "topk(1, aggregate_rank_limit)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("maximum intermediate-work limit of 5 points"),
+        "{}",
+        rejected.1
+    );
+
+    drop(limited);
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "bottomk by (region) (1, aggregate_rank)",
+            base
+        )
+        .await
+        .1,
+        bottom.1
     );
     drop(reopened_app);
     reopened.shutdown().await.unwrap();

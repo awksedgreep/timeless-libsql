@@ -412,6 +412,8 @@ enum PromAggregateOp {
     Group,
     StdDev,
     StdVar,
+    TopK,
+    BottomK,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -426,6 +428,7 @@ enum PromAggregateGrouping {
 pub(crate) struct PromAggregatePlan {
     op: PromAggregateOp,
     inner: Box<PromPlan>,
+    param: Option<Box<PromPlan>>,
     grouping: PromAggregateGrouping,
 }
 
@@ -877,16 +880,38 @@ fn lower_promql_aggregate(
         token::T_GROUP => PromAggregateOp::Group,
         token::T_STDDEV => PromAggregateOp::StdDev,
         token::T_STDVAR => PromAggregateOp::StdVar,
+        token::T_TOPK => PromAggregateOp::TopK,
+        token::T_BOTTOMK => PromAggregateOp::BottomK,
         _ => {
             return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
         }
     };
-    if aggregate.param.is_some() {
-        return Err(format!(
-            "PromQL aggregation {} does not accept a parameter",
-            aggregate.op
-        ));
-    }
+    let requires_param = matches!(op, PromAggregateOp::TopK | PromAggregateOp::BottomK);
+    let param = match (requires_param, aggregate.param) {
+        (true, Some(param)) => {
+            let param = lower_promql_expr(*param, lookback, depth)?;
+            if param.value_type() != PromValueType::Scalar {
+                return Err(format!(
+                    "PromQL aggregation {} requires a scalar parameter",
+                    aggregate.op
+                ));
+            }
+            Some(Box::new(param))
+        }
+        (true, None) => {
+            return Err(format!(
+                "PromQL aggregation {} requires a scalar parameter",
+                aggregate.op
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(format!(
+                "PromQL aggregation {} does not accept a parameter",
+                aggregate.op
+            ));
+        }
+        (false, None) => None,
+    };
     let grouping = match aggregate.modifier {
         None => PromAggregateGrouping::All,
         Some(LabelModifier::Include(labels)) => {
@@ -906,6 +931,7 @@ fn lower_promql_aggregate(
     Ok(PromPlan::Aggregate(PromAggregatePlan {
         op,
         inner: Box::new(inner),
+        param,
         grouping,
     }))
 }
@@ -2519,6 +2545,8 @@ enum IntermediateValue {
 
 type PromMatchingKey = Vec<(String, String)>;
 type PromStepGroups<'a> = BTreeMap<&'a PromMatchingKey, Vec<(usize, f64)>>;
+type PromRankGroupKey = (BTreeMap<String, String>, i64);
+type PromRankCandidates<'a> = BTreeMap<PromRankGroupKey, Vec<(&'a BTreeMap<String, String>, f64)>>;
 
 impl IntermediateValue {
     fn points(&self) -> u64 {
@@ -2577,9 +2605,8 @@ fn execute_prometheus_aggregate(
         limits,
         cancelled,
     )?;
-    let intermediate_points = child.intermediate_points.saturating_add(child.points);
-    enforce_intermediate_work(intermediate_points, limits)?;
-    let frame_bytes = child.frame_bytes;
+    let mut intermediate_points = child.intermediate_points.saturating_add(child.points);
+    let mut frame_bytes = child.frame_bytes;
     let value = decode_prometheus_intermediate(
         &child.body,
         PromValueType::Vector,
@@ -2590,7 +2617,51 @@ fn execute_prometheus_aggregate(
     let IntermediateValue::Vector(series) = value else {
         unreachable!("aggregation child type was checked while lowering")
     };
-    let series = apply_prometheus_aggregate(aggregate, series, cancelled)?;
+    let params = if let Some(param) = &aggregate.param {
+        check_cancelled(cancelled)?;
+        let output = execute_prometheus(
+            conn,
+            features,
+            param,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        )?;
+        intermediate_points = intermediate_points
+            .saturating_add(output.intermediate_points)
+            .saturating_add(output.points);
+        frame_bytes = frame_bytes.saturating_add(output.frame_bytes);
+        let IntermediateValue::Scalar(points) = decode_prometheus_intermediate(
+            &output.body,
+            PromValueType::Scalar,
+            instant,
+            limits,
+            cancelled,
+        )?
+        else {
+            unreachable!("aggregation parameter type was checked while lowering")
+        };
+        Some(points)
+    } else {
+        None
+    };
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let series = if aggregate.op.is_ranked() {
+        apply_prometheus_ranked(
+            aggregate,
+            series,
+            params.as_deref().unwrap_or_default(),
+            instant,
+            cancelled,
+        )?
+    } else {
+        apply_prometheus_aggregate(aggregate, series, cancelled)?
+    };
     encode_prometheus_intermediate(
         IntermediateValue::Vector(series),
         instant,
@@ -2599,6 +2670,110 @@ fn execute_prometheus_aggregate(
         limits,
         cancelled,
     )
+}
+
+impl PromAggregateOp {
+    fn is_ranked(self) -> bool {
+        matches!(self, Self::TopK | Self::BottomK)
+    }
+}
+
+fn apply_prometheus_ranked(
+    aggregate: &PromAggregatePlan,
+    series: Vec<IntermediateSeries>,
+    params: &[(i64, f64)],
+    instant: bool,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    if params.iter().any(|(_, value)| value.is_nan()) {
+        return Err("Parameter value is NaN".into());
+    }
+    let max_param = params
+        .iter()
+        .map(|(_, value)| *value)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if max_param < 1.0 {
+        return Ok(Vec::new());
+    }
+    let min_param = params
+        .iter()
+        .map(|(_, value)| *value)
+        .fold(f64::INFINITY, f64::min);
+    if min_param <= i64::MIN as f64 {
+        return Err(format!(
+            "Scalar value {} underflows int64",
+            format_prometheus_value(min_param)
+        ));
+    }
+    if max_param >= i64::MAX as f64 {
+        return Err(format!(
+            "Scalar value {} overflows int64",
+            format_prometheus_value(max_param)
+        ));
+    }
+    let params: BTreeMap<i64, f64> = params.iter().copied().collect();
+    let mut groups: PromRankCandidates<'_> = BTreeMap::new();
+    for item in &series {
+        check_cancelled(cancelled)?;
+        let group_labels = aggregate.grouping.output_labels(&item.labels);
+        for (timestamp, value) in &item.points {
+            check_cancelled(cancelled)?;
+            groups
+                .entry((group_labels.clone(), *timestamp))
+                .or_default()
+                .push((&item.labels, *value));
+        }
+    }
+
+    let mut selected = Vec::new();
+    for ((_group, timestamp), mut values) in groups {
+        check_cancelled(cancelled)?;
+        let Some(param) = params.get(&timestamp) else {
+            continue;
+        };
+        let k = (*param as i64).max(0) as usize;
+        if k == 0 {
+            continue;
+        }
+        values.sort_by(|(left_labels, left), (right_labels, right)| {
+            prometheus_rank_order(aggregate.op, *left, *right)
+                .then_with(|| left_labels.cmp(right_labels))
+        });
+        selected.extend(
+            values
+                .into_iter()
+                .take(k)
+                .map(|(labels, value)| (labels.clone(), timestamp, value)),
+        );
+    }
+
+    if instant {
+        return Ok(selected
+            .into_iter()
+            .map(|(labels, timestamp, value)| IntermediateSeries {
+                labels,
+                points: vec![(timestamp, value)],
+            })
+            .collect());
+    }
+    let mut output: BTreeMap<BTreeMap<String, String>, Vec<(i64, f64)>> = BTreeMap::new();
+    for (labels, timestamp, value) in selected {
+        output.entry(labels).or_default().push((timestamp, value));
+    }
+    Ok(output
+        .into_iter()
+        .map(|(labels, points)| IntermediateSeries { labels, points })
+        .collect())
+}
+
+fn prometheus_rank_order(op: PromAggregateOp, left: f64, right: f64) -> std::cmp::Ordering {
+    match (left.is_nan(), right.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) if op == PromAggregateOp::TopK => right.total_cmp(&left),
+        (false, false) => left.total_cmp(&right),
+    }
 }
 
 fn apply_prometheus_aggregate(
@@ -2709,6 +2884,9 @@ impl PromAggregateState {
                 self.mean += delta / self.count;
                 self.variance += delta * (value - self.mean);
             }
+            PromAggregateOp::TopK | PromAggregateOp::BottomK => {
+                unreachable!("ranking aggregations do not use reduction state")
+            }
         }
     }
 
@@ -2722,6 +2900,9 @@ impl PromAggregateState {
             PromAggregateOp::Group => 1.0,
             PromAggregateOp::StdDev => (self.variance / self.count).sqrt(),
             PromAggregateOp::StdVar => self.variance / self.count,
+            PromAggregateOp::TopK | PromAggregateOp::BottomK => {
+                unreachable!("ranking aggregations do not use reduction state")
+            }
         }
     }
 }

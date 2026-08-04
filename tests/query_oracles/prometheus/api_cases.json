@@ -521,9 +521,61 @@
         {"metric": {"case": "positive"}, "value": "NaN"},
         {"metric": {"case": "mixed"}, "value": "NaN"}
       ]
+    },
+    {
+      "id": "PQL-O14-topk-global",
+      "query": "topk(1 + 1, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"__name__": "oracle_aggregation", "host": "c", "job": "oracle", "region": "west"}, "value": 6},
+        {"metric": {"__name__": "oracle_aggregation", "host": "b", "job": "oracle", "region": "east"}, "value": 4}
+      ]
+    },
+    {
+      "id": "PQL-O14-bottomk-by",
+      "query": "bottomk by (region) (1, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"__name__": "oracle_aggregation", "host": "a", "job": "oracle", "region": "east"}, "value": 3},
+        {"metric": {"__name__": "oracle_aggregation", "host": "c", "job": "oracle", "region": "west"}, "value": 6}
+      ]
+    },
+    {
+      "id": "PQL-O14-topk-ieee",
+      "query": "topk by (case) (1, oracle_avg_ieee)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"__name__": "oracle_avg_ieee", "case": "nan", "host": "b", "job": "oracle"}, "value": 1},
+        {"metric": {"__name__": "oracle_avg_ieee", "case": "positive", "host": "a", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"__name__": "oracle_avg_ieee", "case": "mixed", "host": "a", "job": "oracle"}, "value": "+Inf"}
+      ]
+    },
+    {
+      "id": "PQL-O14-topk-range-step-local",
+      "query": "topk(1, oracle_aggregation)",
+      "evaluation_offset_ms": 0,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"__name__": "oracle_aggregation", "host": "c", "job": "oracle", "region": "west"},
+      "expected_values": [5, 6]
     }
   ],
   "operator_error_cases": [
+    {
+      "id": "PQL-O14-topk-nan-parameter-errors",
+      "query": "topk(NaN, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "Parameter value is NaN"
+    },
+    {
+      "id": "PQL-O14-topk-overflow-parameter-errors",
+      "query": "topk(+Inf, oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "overflows int64"
+    },
     {
       "id": "PQL-O05-duplicate-default-signature-errors",
       "query": "oracle_arithmetic_lhs + {__name__=~\"oracle_arithmetic_rhs(_duplicate)?\"}",
