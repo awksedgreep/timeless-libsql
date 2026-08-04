@@ -69,7 +69,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-025`](#sql-prom-025-last_over_time) | `PQL-R06` | current | exact last stored float in each window |
 | [`SQL-PROM-026`](#sql-prom-026-present_over_time) | `PQL-R08` | current | exact non-empty float-window presence |
 | [`SQL-PROM-027`](#sql-prom-027-quantile_over_time) | `PQL-R09` | current foundation | exact finite-value linear interpolation per float window; API owns raw IEEE edge semantics |
-| [`SQL-PROM-028`](#sql-prom-028-stddev_over_time) | `PQL-R10` | current foundation | finite-value population Welford deviation per float window; API owns raw IEEE edge semantics |
+| [`SQL-PROM-028`](#sql-prom-028-stddev_over_time-and-stdvar_over_time) | `PQL-R10`, `PQL-R11` | current foundation | finite-value population Welford deviation or variance per float window; API owns raw IEEE edge semantics |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -413,7 +413,7 @@ foundation rather than an IEEE-parity claim. Direct regression:
 `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_six_promql_quantile_over_time_interpolates_ieee_and_reopens`.
 
-### SQL-PROM-028: `stddev_over_time`
+### SQL-PROM-028: `stddev_over_time` and `stdvar_over_time`
 
 For finite samples, apply Welford's population second-moment update to every
 series and evaluation window through a recursive CTE:
@@ -479,15 +479,19 @@ evaluation(ts) AS (
    AND next.ts = moments.ts
    AND next.sample_number = moments.sample_number + 1
 )
-SELECT labels, ts, SQRT(m2 / n) AS value
+SELECT
+  labels,
+  ts,
+  CASE WHEN :variance_only THEN m2 / n ELSE SQRT(m2 / n) END AS value
 FROM moments
 WHERE sample_number = sample_count
 ORDER BY labels, ts;
 ```
 
 Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
-seconds. Output grid bounds are inclusive and sample windows are exactly
-`(T-window,T]`. A singleton returns `0.0`; an empty window emits no row.
+seconds. Bind `:variance_only` to true for `stdvar_over_time` or false for
+`stddev_over_time`. Output grid bounds are inclusive and sample windows are
+exactly `(T-window,T]`. A singleton returns `0.0`; an empty window emits no row.
 Canonical labels/timestamp ordering is deterministic. Samples with duplicate
 timestamps require a caller-defined ingest order, as Prometheus normally
 admits only one sample per series/timestamp.
@@ -499,7 +503,8 @@ infinity, signed-zero, metric-name removal, millisecond outer timestamps,
 subqueries, limits, cancellation, and Prometheus envelopes. Native histogram
 samples are not stored. Direct regression: `tests/cli.sh` section 45;
 HTTP/oracle/reopen regression:
-`session_six_promql_stddev_over_time_is_population_ieee_and_reopenable`.
+`session_six_promql_stddev_over_time_is_population_ieee_and_reopenable` and
+`session_six_promql_stdvar_over_time_is_population_ieee_and_reopenable`.
 
 ### SQL-PROM-006: range selector
 

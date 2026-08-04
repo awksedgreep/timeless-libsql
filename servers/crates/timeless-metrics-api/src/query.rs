@@ -403,6 +403,7 @@ enum PromRangeOp {
     Present,
     Quantile,
     StdDev,
+    StdVar,
     Last,
 }
 
@@ -417,6 +418,7 @@ impl PromRangeOp {
             Self::Present => "present_over_time",
             Self::Quantile => "quantile_over_time",
             Self::StdDev => "stddev_over_time",
+            Self::StdVar => "stdvar_over_time",
             Self::Last => "last_over_time",
         }
     }
@@ -429,7 +431,7 @@ impl PromRangeOp {
             Self::Sum => Some("sum"),
             Self::Count => Some("count"),
             Self::Present => Some("count"),
-            Self::Quantile | Self::StdDev | Self::Last => None,
+            Self::Quantile | Self::StdDev | Self::StdVar | Self::Last => None,
         }
     }
 
@@ -441,6 +443,7 @@ impl PromRangeOp {
             Self::Sum => Some(PromAggregateOp::Sum),
             Self::Count => Some(PromAggregateOp::Count),
             Self::StdDev => Some(PromAggregateOp::StdDev),
+            Self::StdVar => Some(PromAggregateOp::StdVar),
             Self::Present | Self::Quantile | Self::Last => None,
         }
     }
@@ -959,6 +962,7 @@ fn lower_promql_expr(
                     | "count_over_time"
                     | "present_over_time"
                     | "stddev_over_time"
+                    | "stdvar_over_time"
                     | "last_over_time"
             ) =>
         {
@@ -970,6 +974,7 @@ fn lower_promql_expr(
                 "count_over_time" => PromRangeOp::Count,
                 "present_over_time" => PromRangeOp::Present,
                 "stddev_over_time" => PromRangeOp::StdDev,
+                "stdvar_over_time" => PromRangeOp::StdVar,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
@@ -4003,7 +4008,7 @@ fn encode_prometheus_intermediate(
             );
             enforce_prometheus_output(&body, 0, limits)?;
             admit_prometheus_point(0, limits)?;
-            write_prometheus_sample(&mut body, sample.0, sample.1)?;
+            write_prometheus_scalar_sample(&mut body, sample.0, sample.1)?;
             body.extend_from_slice(b"}}");
             (0, 1)
         }
@@ -4481,7 +4486,7 @@ fn execute_prometheus_scalar(
         body.extend_from_slice(br#"{"status":"success","data":{"resultType":"scalar","result":"#);
         enforce_prometheus_output(&body, points, limits)?;
         admit_prometheus_point(points, limits)?;
-        write_prometheus_sample(&mut body, start, value)?;
+        write_prometheus_scalar_sample(&mut body, start, value)?;
         body.extend_from_slice(b"}}");
         points = 1;
         enforce_prometheus_output(&body, points, limits)?;
@@ -5081,6 +5086,19 @@ fn write_prometheus_sample(output: &mut Vec<u8>, timestamp: i64, value: f64) -> 
     Ok(())
 }
 
+fn write_prometheus_scalar_sample(
+    output: &mut Vec<u8>,
+    timestamp: i64,
+    value: f64,
+) -> Result<(), String> {
+    output.push(b'[');
+    write_prometheus_timestamp(output, timestamp);
+    output.push(b',');
+    write_json(output, &format_prometheus_label_value(value))?;
+    output.push(b']');
+    Ok(())
+}
+
 fn write_prometheus_timestamp(output: &mut Vec<u8>, timestamp_ms: i64) {
     let negative = timestamp_ms < 0;
     let absolute = i128::from(timestamp_ms).abs();
@@ -5123,7 +5141,18 @@ fn format_prometheus_value(value: f64) -> String {
     if value == f64::NEG_INFINITY {
         return "-Inf".into();
     }
-    value.to_string()
+    let absolute = value.abs();
+    if absolute != 0.0 && !(1e-6..1e21).contains(&absolute) {
+        let rendered = format!("{value:e}");
+        let (mantissa, exponent) = rendered
+            .split_once('e')
+            .expect("Rust scientific float formatting includes an exponent");
+        let exponent: i32 = exponent
+            .parse()
+            .expect("Rust scientific float formatting emits a decimal exponent");
+        return format!("{mantissa}e{exponent:+03}");
+    }
+    format_prometheus_label_value(value)
 }
 
 enum BucketValue {
@@ -5901,6 +5930,28 @@ mod tests {
         // which normalizes this exact q=0 result just as Prometheus does.
         assert_eq!(low.to_bits(), 0.0_f64.to_bits());
         assert_eq!(high.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn prometheus_samples_match_the_pinned_json_float_thresholds() {
+        for (value, expected) in [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (1e-6, "0.000001"),
+            (1e-7, "1e-07"),
+            (999_999.0, "999999"),
+            (1_000_000.0, "1000000"),
+            (1e20, "100000000000000000000"),
+            (1e21, "1e+21"),
+            (6.666_666_666_666_666e31, "6.666666666666666e+31"),
+        ] {
+            assert_eq!(format_prometheus_value(value), expected, "{value}");
+        }
+
+        assert_eq!(
+            format_prometheus_label_value(1e23),
+            "100000000000000000000000"
+        );
     }
 
     #[test]

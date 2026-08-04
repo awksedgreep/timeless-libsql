@@ -3736,7 +3736,7 @@ window_quantile = db.execute(
     },
 ).fetchall()
 assert window_quantile == [('{}', 30, 3.5)]
-window_stddev = db.execute(
+window_dispersion_sql = (
     "WITH RECURSIVE evaluation(ts) AS ("
     " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
     " WHERE ts+:step<=:end"
@@ -3759,18 +3759,27 @@ window_stddev = db.execute(
     " +(next.value-moments.mean)/(moments.n+1.0)))"
     " FROM moments JOIN selected next ON next.series_id=moments.series_id"
     " AND next.ts=moments.ts AND next.sample_number=moments.sample_number+1"
-    ") SELECT labels,ts,SQRT(m2/n) FROM moments"
-    " WHERE sample_number=sample_count ORDER BY labels,ts",
-    {
-        'metric': 'min_window',
-        'filter_json': None,
-        'start': 30,
-        'end': 30,
-        'step': 1,
-        'window': 20,
-    },
+    ") SELECT labels,ts,CASE WHEN :variance_only THEN m2/n ELSE SQRT(m2/n) END"
+    " FROM moments WHERE sample_number=sample_count ORDER BY labels,ts"
+)
+dispersion_params = {
+    'metric': 'min_window',
+    'filter_json': None,
+    'start': 30,
+    'end': 30,
+    'step': 1,
+    'window': 20,
+}
+window_stddev = db.execute(
+    window_dispersion_sql,
+    {**dispersion_params, 'variance_only': False},
 ).fetchall()
 assert window_stddev == [('{}', 30, 0.5)]
+window_stdvar = db.execute(
+    window_dispersion_sql,
+    {**dispersion_params, 'variance_only': True},
+).fetchall()
+assert window_stdvar == [('{}', 30, 0.25)]
 
 minimum = db.execute(
     "SELECT value FROM timeless_window("
