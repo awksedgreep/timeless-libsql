@@ -1223,3 +1223,37 @@ rows. `QSF-047` records Prometheus's distinct scalar versus vector/matrix float
 formatting and `QSF-048` records the corrected pre-existing ranking fixture.
 No extension primitive or storage, frame, batching, compression, index,
 rollup, retention, transaction, or migration behavior changed.
+
+## Session 7 `PQL-R12` float-counter rate
+
+The checked-in
+[`2026-08-04_session7_pql_r12.json`](evidence/2026-08-04_session7_pql_r12.json)
+was captured from exact extension and server build
+`e0c615308cb7cd22ccd897746b00f19e6dac5b35`. Both measured shapes use one
+bounded public packed raw read followed by the Rust PromQL counter-reset and
+edge-extrapolation fold; the extension's mechanical `rate` kernel is not
+relabeled as PromQL.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `rate(...[5m])` | 1 | 133 | 0.371 | 0.476 | 0.543 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `rate(...[5m])` | 2,048 | 68,956 | 3.520 | 3.957 | 5.648 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 bounded raw counter
+samples and emits 2,048 per-second rates without an intermediate matrix. The
+fold is linear in each window and checks cancellation while collecting and
+reset-correcting samples. Its measured work and allocation shape does not
+justify a PromQL-specific extension primitive; direct SQLite/libSQL users have
+the executable finite-counter SQL recipe instead.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 35,836 KiB. No benchmark request required cancellation; the shared
+range-executor cancellation regression covers cancellation and reader reuse.
+Pinned oracle and real-extension regressions cover ordinary counters, resets,
+sparse edges, zero-point clamping, exact open-left boundaries, offset output
+timestamps, subqueries, NaN, singleton omission, invalid types, work limits,
+shutdown, and cold reopen. `QSF-049` records the correction of stale
+unsupported-function error fixtures. No extension signature, storage/frame
+format, batching, compression, index, rollup, retention, transaction, or
+migration behavior changed.
