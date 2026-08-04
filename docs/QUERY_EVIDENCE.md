@@ -1818,3 +1818,39 @@ upstream label-name scheme and honest lack of a complete SQL foundation;
 allocation-only path. No extension signature, storage/frame format, batching,
 compression, index, rollup, retention, transaction, or migration contract
 changed.
+
+## Session 8 `PQL-F10` label joining
+
+The checked-in
+[`2026-08-04_session8_pql_f10.json`](evidence/2026-08-04_session8_pql_f10.json)
+was captured from exact extension and server build
+`6f4bce7092d3fe7aa33b041d1c12dd0014ab344b`. Both shapes perform one bounded
+public packed-raw read, decode the selected vector once, and join two ordered
+source positions in place; the second source is deliberately missing and
+therefore contributes an empty string.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `label_join(metric, "node", "/", "host", "rack")` | 1 | 180 | 0.448 | 0.597 | 0.662 | 1 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, same join | 2,048 | 92,196 | 4.233 | 4.417 | 4.730 | 2,048 | 16,384 | 512 | 16,384 | 53,831 |
+
+The label operation adds no second storage read, point amplification, or
+result copy. Candidate chunks, decoded and returned samples, and packed
+extension payload bytes exactly match neighboring one-vector transforms; the
+response grows only by the expected repeated `node` label. At 4.417 ms wide
+p95, ordinary bounded Rust composition remains the correct language boundary.
+Direct SQLite/libSQL users have the arbitrary-arity public-JSON statement in
+`SQL-PROM-046`, so no label-specific extension primitive is justified.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage was 672,688 bytes and whole-process RSS HWM
+was 37,100 KiB. No benchmark request required cancellation; focused work and
+response-limit regressions pin rejection and reader reuse. `QSF-055` records
+the incremental byte budget that now prevents repeated sources or captures
+from accumulating beyond `max_response_bytes` before rejection. Pinned oracle
+and real-extension tests cover arbitrary ordered arity, missing, explicit-
+empty, duplicate, and zero sources, original-label snapshots, overwrite and
+deletion, metric names, Prometheus 3 UTF-8 label names, range grids, nesting,
+errors, limits, shutdown, and cold reopen. No extension signature,
+storage/frame format, batching, compression, index, rollup, retention,
+transaction, or migration contract changed.
