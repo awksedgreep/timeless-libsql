@@ -90,6 +90,20 @@ impl Params {
         }
     }
 
+    fn ensure_prometheus_only(&self, allowed: &[&str]) -> Result<(), String> {
+        let unknown = self
+            .pairs
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .find(|key| !allowed.contains(key));
+        match unknown {
+            Some(key) => Err(format!(
+                "invalid parameter \"{key}\": unsupported query parameter"
+            )),
+            None => Ok(()),
+        }
+    }
+
     fn label_matchers(&self, extended: bool) -> Result<Vec<Matcher>, String> {
         let mut labels = BTreeMap::new();
         for (key, value) in &self.pairs {
@@ -397,14 +411,20 @@ pub(crate) fn range_request(params: &Params) -> Result<ReadRequest, String> {
 }
 
 pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest, String> {
-    params.ensure_only(&["query", "time", "lookback_delta"])?;
-    let query = params
-        .get("query")
-        .ok_or_else(|| "missing required parameter: query".to_string())?;
-    let time = parse_prom_time(params.get("time"), now_millis())?;
-    let lookback = parse_prom_lookback(params.get("lookback_delta"), 300_000)?;
+    params.ensure_prometheus_only(&["query", "time", "lookback_delta"])?;
+    let query = params.get("query").unwrap_or("");
+    let time = match params.get("time") {
+        Some(value) => parse_prom_time(Some(value), 0).map_err(|_| {
+            format!(
+                "invalid parameter \"time\": invalid time value for 'time': cannot parse \"{value}\" to a valid timestamp"
+            )
+        })?,
+        None => now_millis(),
+    };
+    let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
     Ok(ReadRequest::Prometheus {
-        plan: lower_promql(query, lookback)?,
+        plan: lower_promql(query, lookback)
+            .map_err(|error| format!("invalid parameter \"query\": {error}"))?,
         start: time,
         stop: time,
         step: 1_000,
@@ -413,17 +433,25 @@ pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest,
 }
 
 pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, String> {
-    params.ensure_only(&["query", "start", "end", "step", "lookback_delta"])?;
-    let query = params
-        .get("query")
-        .ok_or_else(|| "missing required parameter: query".to_string())?;
-    let now = now_millis();
-    let start = parse_prom_time(params.get("start"), now.saturating_sub(3_600_000))?;
-    let stop = parse_prom_time(params.get("end"), now)?;
-    let step = parse_prom_step(params.get("step"), 60_000)?;
-    let lookback = parse_prom_lookback(params.get("lookback_delta"), 300_000)?;
+    params.ensure_prometheus_only(&["query", "start", "end", "step", "lookback_delta"])?;
+    let query = params.get("query").unwrap_or("");
+    let start_input = params.get("start").unwrap_or("");
+    let start = parse_prom_time(Some(start_input), 0).map_err(|_| {
+        format!("invalid parameter \"start\": cannot parse \"{start_input}\" to a valid timestamp")
+    })?;
+    let stop_input = params.get("end").unwrap_or("");
+    let stop = parse_prom_time(Some(stop_input), 0).map_err(|_| {
+        format!("invalid parameter \"end\": cannot parse \"{stop_input}\" to a valid timestamp")
+    })?;
+    let step_input = params.get("step").unwrap_or("");
+    let step = parse_prom_step(Some(step_input), 0).map_err(|_| {
+        format!("invalid parameter \"step\": cannot parse \"{step_input}\" to a valid duration")
+    })?;
+    let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
     if stop < start {
-        return Err("end timestamp must not be before start timestamp".into());
+        return Err(
+            "invalid parameter \"end\": end timestamp must not be before start time".into(),
+        );
     }
     if step <= 0 {
         return Err("step must be positive".into());
@@ -435,19 +463,14 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
                 .into(),
         );
     }
-    let plan = lower_promql(query, lookback)?;
+    let plan = lower_promql(query, lookback)
+        .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     match plan {
         PromPlan::RangeSelector { .. } => {
-            return Err(
-                "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
-                    .into(),
-            );
+            return Err("invalid parameter \"query\": invalid expression type \"range vector\" for range query, must be Scalar or instant Vector".into());
         }
         PromPlan::String(_) => {
-            return Err(
-                "invalid expression type \"string\" for range query, must be Scalar or instant Vector"
-                    .into(),
-            );
+            return Err("invalid parameter \"query\": invalid expression type \"string\" for range query, must be Scalar or instant Vector".into());
         }
         _ => {}
     }
@@ -461,7 +484,13 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
 }
 
 fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
-    let parsed = promql::parse(input).map_err(|error| format!("PromQL parse error: {error}"))?;
+    let parsed = promql::parse(input).map_err(|error| {
+        if error == "no expression found in input" {
+            "unknown position: parse error: no expression found in input".to_string()
+        } else {
+            format!("parse error: {error}")
+        }
+    })?;
     let lower_selector = |selector: promql::VectorSelector| -> Result<_, String> {
         if selector.offset.is_some() || selector.at.is_some() {
             return Err("PromQL modifiers are not shipped yet".into());
@@ -859,6 +888,15 @@ fn parse_prom_lookback(value: Option<&str>, default: i64) -> Result<i64, String>
     };
     let millis = parse_prom_duration_millis(value, "lookback delta")?;
     Ok(if millis == 0 { default } else { millis })
+}
+
+fn parse_prom_request_lookback(value: Option<&str>, default: i64) -> Result<i64, String> {
+    parse_prom_lookback(value, default).map_err(|_| {
+        format!(
+            "error parsing lookback delta duration: cannot parse \"{}\" to a valid duration",
+            value.unwrap_or("")
+        )
+    })
 }
 
 fn parse_prom_duration_millis(value: &str, parameter: &str) -> Result<i64, String> {

@@ -1061,7 +1061,7 @@ async fn session_two_promql_string_literals_match_prometheus() {
     assert_eq!(range.0, StatusCode::BAD_REQUEST, "{}", range.1);
     assert_eq!(
         range.1["error"],
-        "invalid expression type \"string\" for range query, must be Scalar or instant Vector"
+        "invalid parameter \"query\": invalid expression type \"string\" for range query, must be Scalar or instant Vector"
     );
 
     let invalid = get_json(
@@ -1291,6 +1291,98 @@ async fn session_two_promql_value_types_match_prometheus() {
     let range_scalar = get_json(&app, "/api/v1/query_range?query=1&start=0&end=1&step=1").await;
     assert_eq!(range_scalar.0, StatusCode::OK, "{}", range_scalar.1);
     assert_eq!(range_scalar.1["data"]["resultType"], "matrix");
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_two_promql_errors_match_the_documented_contract() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_two_promql_errors.db");
+    let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let app = router(storage.clone());
+
+    for (path, expected) in [
+        (
+            "/prometheus/api/v1/query",
+            "invalid parameter \"query\": unknown position: parse error: no expression found in input",
+        ),
+        (
+            "/prometheus/api/v1/query?query=up&time=bad",
+            "invalid parameter \"time\": invalid time value for 'time': cannot parse \"bad\" to a valid timestamp",
+        ),
+        (
+            "/prometheus/api/v1/query?query=up&lookback_delta=1.5s",
+            "error parsing lookback delta duration: cannot parse \"1.5s\" to a valid duration",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=1",
+            "invalid parameter \"start\": cannot parse \"\" to a valid timestamp",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=1&start=0",
+            "invalid parameter \"end\": cannot parse \"\" to a valid timestamp",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=1&start=0&end=1",
+            "invalid parameter \"step\": cannot parse \"\" to a valid duration",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=1&start=bad&end=1&step=1",
+            "invalid parameter \"start\": cannot parse \"bad\" to a valid timestamp",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=1&start=0&end=bad&step=1",
+            "invalid parameter \"end\": cannot parse \"bad\" to a valid timestamp",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=1&start=0&end=1&step=bad",
+            "invalid parameter \"step\": cannot parse \"bad\" to a valid duration",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=1&start=2&end=1&step=1",
+            "invalid parameter \"end\": end timestamp must not be before start time",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=up%5B1m%5D&start=0&end=1&step=1",
+            "invalid parameter \"query\": invalid expression type \"range vector\" for range query, must be Scalar or instant Vector",
+        ),
+        (
+            "/prometheus/api/v1/query_range?query=%22value%22&start=0&end=1&step=1",
+            "invalid parameter \"query\": invalid expression type \"string\" for range query, must be Scalar or instant Vector",
+        ),
+        (
+            "/prometheus/api/v1/query?query=rate%28up%5B5m%5D%29",
+            "invalid parameter \"query\": unsupported PromQL expression (parsed as function call)",
+        ),
+        (
+            "/prometheus/api/v1/query?query=up&extra=x",
+            "invalid parameter \"extra\": unsupported query parameter",
+        ),
+    ] {
+        let response = get_json(&app, path).await;
+        assert_eq!(response.0, StatusCode::BAD_REQUEST, "{path}: {}", response.1);
+        assert_eq!(response.1["status"], "error", "{path}");
+        assert_eq!(response.1["errorType"], "bad_data", "{path}");
+        assert_eq!(response.1["error"], expected, "{path}");
+        assert_eq!(response.1.as_object().unwrap().len(), 3, "{path}");
+    }
+
+    let post = post_form(
+        &app,
+        "/prometheus/api/v1/query_range",
+        "query=1&start=0&end=1&step=bad",
+    )
+    .await;
+    assert_eq!(post.0, StatusCode::BAD_REQUEST, "{}", post.1);
+    assert_eq!(
+        post.1["error"],
+        "invalid parameter \"step\": cannot parse \"bad\" to a valid duration"
+    );
 
     drop(app);
     storage.shutdown().await.unwrap();

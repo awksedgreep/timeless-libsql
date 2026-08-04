@@ -109,6 +109,22 @@ open-left `(T-lookback,T]` boundary at every evaluation point. Range grids
 start exactly at `start`, advance by `step`, and include only points at or
 before `end`; a non-aligned `end` does not create a shortened final step.
 
+Prometheus-compatible requests return either `{"status":"success","data":…}`
+or the three-field `{"status":"error","errorType":…,"error":…}` envelope.
+Malformed query/time/range/step/lookback parameters use HTTP `400` and
+`bad_data`; execution failures use HTTP `422` and `execution`. The canonical
+`/prometheus/api/v1/*` routes require all Prometheus range parameters.
+`/api/v1/query` and `/api/v1/query_range` use the same behavior whenever a
+`query` parameter is present; an omitted `query` on those unprefixed routes
+continues to select the documented native Timeless API for compatibility.
+
+Timeless deliberately rejects unknown parameters instead of silently ignoring
+them, rejects non-finite evaluation timestamps, and caps output at 11,000
+points rather than Prometheus 3.13.2's 11,000 intervals (11,001 points).
+Parser-specific diagnostic wording can differ after the common
+parameter/type prefix because the server uses the pinned Rust AST parser;
+status, error type, parameter ownership, and unsupported behavior are stable.
+
 The query layer lowers plain selectors
 to `timeless_raw_frame` and performs a linear last-sample sweep over the exact
 five-minute `(T-lookback,T]` window. Whole-second `avg_over_time` lowers to

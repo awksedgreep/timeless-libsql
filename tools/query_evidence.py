@@ -209,6 +209,15 @@ def string_json_cardinality(body: bytes) -> int:
     return 1
 
 
+def error_json_cardinality(body: bytes) -> int:
+    response = json.loads(body)
+    if set(response) != {"status", "errorType", "error"}:
+        raise RuntimeError(f"invalid error envelope: {response}")
+    if response["status"] != "error" or response["errorType"] != "bad_data":
+        raise RuntimeError(f"unexpected error envelope: {response}")
+    return 1
+
+
 def ndjson_cardinality(body: bytes) -> int:
     return sum(1 for line in body.splitlines() if line)
 
@@ -286,6 +295,23 @@ def metrics_evidence(
                 body,
                 "application/x-www-form-urlencoded",
             )[1]
+
+        def expected_bad_data(path: str, body: bytes | None = None) -> bytes:
+            request = urllib.request.Request(
+                server.base + path,
+                data=body,
+                headers={"content-type": "application/x-www-form-urlencoded"}
+                if body is not None
+                else {},
+            )
+            try:
+                urllib.request.urlopen(request, timeout=30)
+            except urllib.error.HTTPError as error:
+                response = error.read()
+                if error.code != 400:
+                    raise RuntimeError(f"expected 400 for {path}, got {error.code}: {response[:500]!r}")
+                return response
+            raise RuntimeError(f"expected bad_data for {path}")
 
         def promql_range(expression: str, start: int, end: int, step: int) -> bytes:
             query = urllib.parse.urlencode(
@@ -415,6 +441,31 @@ def metrics_evidence(
             iterations,
             warmup,
         )
+        error_narrow = measure(
+            "metrics-error-narrow",
+            lambda: expected_bad_data(
+                "/prometheus/api/v1/query_range?query=1&start=0&end=1&step=bad"
+            ),
+            error_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
+        large_error_body = urllib.parse.urlencode(
+            {"query": "up", "extra": "x" * 65_536}
+        ).encode()
+        error_64k = measure(
+            "metrics-error-64k",
+            lambda: expected_bad_data(
+                "/prometheus/api/v1/query", large_error_body
+            ),
+            error_json_cardinality,
+            1,
+            stat,
+            iterations,
+            warmup,
+        )
         final_stats = stat()
         return {
             "build": identity,
@@ -440,6 +491,8 @@ def metrics_evidence(
                 "string_64k": string_64k,
                 "grid_lookback_narrow": grid_lookback_narrow,
                 "grid_lookback_wide": grid_lookback_wide,
+                "error_narrow": error_narrow,
+                "error_64k": error_64k,
             },
             "storage": {
                 key: final_stats[key]

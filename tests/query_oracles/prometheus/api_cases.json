@@ -55,6 +55,83 @@
       }
     },
     {
+      "id": "PQL-S19-missing-query",
+      "endpoint": "/api/v1/query",
+      "params": {},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": unknown position: parse error: no expression found in input"
+      }
+    },
+    {
+      "id": "PQL-S19-invalid-instant-time",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "up", "time": "bad"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"time\": invalid time value for 'time': cannot parse \"bad\" to a valid timestamp"
+      }
+    },
+    {
+      "id": "PQL-S19-invalid-lookback",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "up", "lookback_delta": "1.5s"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "error parsing lookback delta duration: cannot parse \"1.5s\" to a valid duration"
+      }
+    },
+    {
+      "id": "PQL-S19-missing-range-start",
+      "endpoint": "/api/v1/query_range",
+      "params": {"query": "1"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"start\": cannot parse \"\" to a valid timestamp"
+      }
+    },
+    {
+      "id": "PQL-S19-missing-range-step",
+      "endpoint": "/api/v1/query_range",
+      "params": {"query": "1", "start": "0", "end": "1"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"step\": cannot parse \"\" to a valid duration"
+      }
+    },
+    {
+      "id": "PQL-S19-invalid-range-step",
+      "endpoint": "/api/v1/query_range",
+      "params": {"query": "1", "start": "0", "end": "1", "step": "bad"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"step\": cannot parse \"bad\" to a valid duration"
+      }
+    },
+    {
+      "id": "PQL-S19-reversed-range",
+      "endpoint": "/api/v1/query_range",
+      "params": {"query": "1", "start": "2", "end": "1", "step": "1"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"end\": end timestamp must not be before start time"
+      }
+    },
+    {
       "id": "PQL-S06-root-range-vector-range-error",
       "endpoint": "/api/v1/query_range",
       "params": {
