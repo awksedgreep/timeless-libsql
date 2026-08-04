@@ -1358,3 +1358,36 @@ invalid types, work limits, shutdown, and cold reopen. No extension signature,
 storage/frame format, batching, compression, index, rollup, retention,
 transaction, or migration behavior changed, and this row produced no new
 storage finding.
+
+## Session 7 `PQL-R16` instantaneous float-gauge delta
+
+The checked-in
+[`2026-08-04_session7_pql_r16.json`](evidence/2026-08-04_session7_pql_r16.json)
+was captured from exact extension and server build
+`0070c4b3b23270a9e68547de20592eac002ad978`. Both measured shapes use one
+bounded public packed raw read followed by the Rust PromQL final-pair gauge
+difference, without edge extrapolation or time normalization.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | raw points returned/query | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `idelta(...[5m])` | 1 | 131 | 0.389 | 0.542 | 0.591 | 0 | 31 | 1 | 32 | 131 |
+| 512 series × four steps, `idelta(...[5m])` | 2,048 | 63,806 | 3.521 | 3.919 | 4.024 | 0 | 16,384 | 512 | 16,384 | 53,831 |
+
+The wide request returns and decodes exactly 16,384 bounded raw gauge samples
+and emits 2,048 final-pair differences without an intermediate matrix. Its
+smaller response reflects compact non-extrapolated values; storage work is the
+same as the neighboring counter/gauge rows. At 3.919 ms p95, the existing
+public packed raw surface plus executable SQL recipe remains preferable to a
+last-pair-specific extension primitive.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 37,264 KiB. No benchmark request required cancellation; the shared
+range-executor cancellation regression covers cancellation and reader reuse.
+Pinned oracle and real-extension regressions cover positive and negative
+changes, sparse pairs, exact open-left boundaries, offset output timestamps,
+subqueries, NaN, both infinities, singleton and zero-interval omission,
+invalid types, work limits, shutdown, and cold reopen. No extension signature,
+storage/frame format, batching, compression, index, rollup, retention,
+transaction, or migration behavior changed, and this row produced no new
+storage finding.
