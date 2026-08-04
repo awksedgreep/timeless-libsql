@@ -19,8 +19,9 @@ recorded single-client iterations. The JSON records:
 
 - admission and durability-barrier time plus completed/failed/queued work;
 - p50/p95/p99/min/max latency and result cardinality;
-- extension/API counter deltas, including frames/response bytes for metrics
-  and candidate/decoded/returned work for logs;
+- extension/API counter deltas, including candidate chunks, decoded/returned
+  points, frame/payload/response bytes for metrics, and
+  candidate/decoded/returned work for logs;
 - logical extension storage, SQLite file/WAL/SHM and physical bytes;
 - response bytes and Linux process RSS HWM; and
 - the cancellation regression that accompanies the query surface.
@@ -65,3 +66,31 @@ file/WAL/SHM footprint was 525,016 bytes. Logs admitted 8,192 rich entries in
 bytes were 1,088,919 and live physical SQLite footprint was 1,190,496 bytes.
 The JSON retains nanosecond measurements and every counter delta used for these
 rounded values.
+
+## Session 2 `PQL-S06` range-vector result
+
+The checked-in
+[`2026-08-04_session2_pql_s06.json`](evidence/2026-08-04_session2_pql_s06.json)
+was captured from exact build `2789f091d3069617eb61996fe5a0b213dc886890`
+with the Session 0 fixture and host. Each instant root range vector used a
+five-minute window over 32 ten-second samples; the open-left boundary removes
+one of the extension's 31 returned samples, leaving 30 API samples per series.
+
+| shape | series | API points/query | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host | 1 | 30 | 741 | 0.540 | 0.838 | 0.953 | 1 | 32 | 131 |
+| all 512 series | 512 | 15,360 | 365,393 | 4.096 | 4.833 | 6.011 | 512 | 16,384 | 53,831 |
+
+The wide result crosses 365 KB of JSON and is 1.48x the Session 0 instant
+selector p95 while returning 30x as many samples; the verdict is acceptable.
+Label selection prunes the narrow query to one of 512 chunks before decode.
+The wide query necessarily decodes every fixture chunk. The extension reports
+31 raw returned points per series because its public bounds are inclusive;
+the API applies the documented `(T-W,T]` boundary without changing storage.
+
+The run durably completed all 16,384 ingested points with zero failed or
+queued points, used 525,016 physical SQLite/WAL/SHM bytes, and reached 19,920
+KiB RSS HWM. The dropped-request cancellation/reuse contract remained green.
+No extension format, batching, compression, rollup, retention, transaction, or
+migration behavior changed; only additive per-process read counters were
+added to `timeless_stats`.
