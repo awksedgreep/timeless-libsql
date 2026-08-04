@@ -1486,6 +1486,100 @@
       "expected_empty": true
     },
     {
+      "id": "PQL-R17-deriv-steady-centered-regression",
+      "query": "deriv(oracle_counter{case=\"steady\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-nonlinear-decrease",
+      "query": "deriv(oracle_counter{case=\"reset\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "reset", "job": "oracle"},
+      "expected_values": [-2],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-sparse",
+      "query": "deriv(oracle_counter{case=\"sparse\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "sparse", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-constant",
+      "query": "deriv(oracle_counter{case=\"constant\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "constant", "job": "oracle"},
+      "expected_values": [0],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-open-left-boundary",
+      "query": "deriv(oracle_counter{case=\"steady\"}[40s])",
+      "evaluation_offset_ms": 50000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-offset-keeps-output-time",
+      "query": "deriv(oracle_counter{case=\"steady\"}[40s] offset 10s)",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [10],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-over-subquery",
+      "query": "deriv(oracle_counter{case=\"steady\"}[40s:10s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "steady", "job": "oracle"},
+      "expected_values": [8],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-nan",
+      "query": "deriv(oracle_counter{case=\"nan\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "nan", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-positive-infinity",
+      "query": "deriv(oracle_counter{case=\"pos_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "pos_inf", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-negative-infinity",
+      "query": "deriv(oracle_counter{case=\"neg_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "neg_inf", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-constant-infinity",
+      "query": "deriv(oracle_counter{case=\"constant_inf\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_metric": {"case": "constant_inf", "job": "oracle"},
+      "expected_values": ["NaN"],
+      "drop_metric_name": true
+    },
+    {
+      "id": "PQL-R17-deriv-singleton-omitted",
+      "query": "deriv(oracle_counter{case=\"singleton\"}[60s])",
+      "evaluation_offset_ms": 60000,
+      "expected_empty": true
+    },
+    {
       "id": "PQL-O14-topk-tie-input-order",
       "query": "topk(1, oracle_rank_tie)",
       "evaluation_offset_ms": 30000,

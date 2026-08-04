@@ -126,7 +126,7 @@ correctness fallback.
 | `PQL-R14` | `increase` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-031-increase)); reset correction, edge extrapolation, zero-point clamp, sparse/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R15` | `delta` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-032-delta)); gauge decreases, edge extrapolation without reset or zero correction, sparse/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned; the native kernel is not relabeled | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R16` | `idelta` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-033-idelta)); last-two-sample gauge increases/decreases, zero-interval/singleton omission, boundaries, modifiers, subqueries, NaN/infinities, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
-| `PQL-R17` | `deriv` | missing | yes | `RAW` | `API` | P0 |
+| `PQL-R17` | `deriv` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-034-deriv)); timestamp-centered compensated least-squares slope, constant/IEEE behavior, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R18` | `predict_linear` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R19` | `changes` | missing | yes | `RAW` | `API` | P0 |
 | `PQL-R20` | `resets` | missing | yes | `RAW` | `API` | P0 |

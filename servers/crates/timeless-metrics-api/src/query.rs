@@ -409,6 +409,7 @@ enum PromRangeOp {
     Increase,
     Delta,
     IDelta,
+    Deriv,
     Last,
 }
 
@@ -429,6 +430,7 @@ impl PromRangeOp {
             Self::Increase => "increase",
             Self::Delta => "delta",
             Self::IDelta => "idelta",
+            Self::Deriv => "deriv",
             Self::Last => "last_over_time",
         }
     }
@@ -449,6 +451,7 @@ impl PromRangeOp {
             | Self::Increase
             | Self::Delta
             | Self::IDelta
+            | Self::Deriv
             | Self::Last => None,
         }
     }
@@ -469,6 +472,7 @@ impl PromRangeOp {
             | Self::Increase
             | Self::Delta
             | Self::IDelta
+            | Self::Deriv
             | Self::Last => None,
         }
     }
@@ -993,6 +997,7 @@ fn lower_promql_expr(
                     | "increase"
                     | "delta"
                     | "idelta"
+                    | "deriv"
                     | "last_over_time"
             ) =>
         {
@@ -1010,6 +1015,7 @@ fn lower_promql_expr(
                 "increase" => PromRangeOp::Increase,
                 "delta" => PromRangeOp::Delta,
                 "idelta" => PromRangeOp::IDelta,
+                "deriv" => PromRangeOp::Deriv,
                 "last_over_time" => PromRangeOp::Last,
                 _ => unreachable!("guarded range function"),
             };
@@ -4449,6 +4455,10 @@ fn prometheus_range_reduction(
             cancelled,
         );
     }
+    if matches!(op, PromRangeOp::Deriv) {
+        return prometheus_linear_regression(points, points[0].0, cancelled)
+            .map(|result| result.map(|(slope, _)| slope));
+    }
     if matches!(op, PromRangeOp::Quantile) {
         let quantile = parameter
             .ok_or_else(|| "quantile_over_time is missing its scalar parameter".to_string())?;
@@ -4550,6 +4560,65 @@ fn prometheus_instant_delta(
     }
     check_cancelled(cancelled)?;
     Ok(Some(result))
+}
+
+fn prometheus_linear_regression(
+    points: &[(i64, f64)],
+    intercept_time: i64,
+    cancelled: &AtomicBool,
+) -> Result<Option<(f64, f64)>, String> {
+    if points.len() < 2 {
+        return Ok(None);
+    }
+
+    let initial_y = points[0].1;
+    let mut constant_y = true;
+    let mut sum_x = 0.0;
+    let mut compensation_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut compensation_y = 0.0;
+    let mut sum_xy = 0.0;
+    let mut compensation_xy = 0.0;
+    let mut sum_x2 = 0.0;
+    let mut compensation_x2 = 0.0;
+
+    for &(timestamp, value) in points {
+        check_cancelled(cancelled)?;
+        if value != initial_y {
+            constant_y = false;
+        }
+        // Prometheus performs this subtraction in signed millisecond space
+        // before converting to seconds.
+        let x = timestamp.wrapping_sub(intercept_time) as f64 / 1_000.0;
+        (sum_x, compensation_x) =
+            prometheus_compensated_add(x, sum_x, compensation_x);
+        (sum_y, compensation_y) =
+            prometheus_compensated_add(value, sum_y, compensation_y);
+        (sum_xy, compensation_xy) =
+            prometheus_compensated_add(x * value, sum_xy, compensation_xy);
+        (sum_x2, compensation_x2) =
+            prometheus_compensated_add(x * x, sum_x2, compensation_x2);
+    }
+
+    if constant_y {
+        return if initial_y.is_infinite() {
+            Ok(Some((f64::NAN, f64::NAN)))
+        } else {
+            Ok(Some((0.0, initial_y)))
+        };
+    }
+
+    sum_x += compensation_x;
+    sum_y += compensation_y;
+    sum_xy += compensation_xy;
+    sum_x2 += compensation_x2;
+    let count = points.len() as f64;
+    let covariance_xy = sum_xy - sum_x * sum_y / count;
+    let variance_x = sum_x2 - sum_x * sum_x / count;
+    let slope = covariance_xy / variance_x;
+    let intercept = sum_y / count - slope * sum_x / count;
+    check_cancelled(cancelled)?;
+    Ok(Some((slope, intercept)))
 }
 
 fn empty_prometheus_matrix(limits: PromQueryLimits) -> Result<ReadOutput, String> {
@@ -5102,7 +5171,10 @@ fn execute_prometheus_range_raw(
                         Some(value)
                     } else if matches!(
                         op,
-                        PromRangeOp::Rate | PromRangeOp::Increase | PromRangeOp::Delta
+                        PromRangeOp::Rate
+                            | PromRangeOp::Increase
+                            | PromRangeOp::Delta
+                            | PromRangeOp::Deriv
                     ) {
                         let mut values = Vec::with_capacity(hi - lo);
                         for index in lo..hi {
@@ -5112,14 +5184,19 @@ fn execute_prometheus_range_raw(
                                 series.value(raw.frame.as_deref(), index)?,
                             ));
                         }
-                        let value = prometheus_extrapolated_rate(
-                            &values,
-                            lower,
-                            selection_time,
-                            !matches!(op, PromRangeOp::Delta),
-                            matches!(op, PromRangeOp::Rate),
-                            cancelled,
-                        )?;
+                        let value = if matches!(op, PromRangeOp::Deriv) {
+                            prometheus_linear_regression(&values, values[0].0, cancelled)?
+                                .map(|(slope, _)| slope)
+                        } else {
+                            prometheus_extrapolated_rate(
+                                &values,
+                                lower,
+                                selection_time,
+                                !matches!(op, PromRangeOp::Delta),
+                                matches!(op, PromRangeOp::Rate),
+                                cancelled,
+                            )?
+                        };
                         check_cancelled(cancelled)?;
                         value
                     } else if matches!(op, PromRangeOp::IRate | PromRangeOp::IDelta) {
@@ -6232,6 +6309,66 @@ mod tests {
             .unwrap(),
             Some(-130.0)
         );
+    }
+
+    #[test]
+    fn prometheus_linear_regression_is_centered_compensated_and_cancellable() {
+        let cancelled = AtomicBool::new(false);
+        for (points, expected) in [
+            (
+                vec![
+                    (1_700_750_010_000, 100.0),
+                    (1_700_750_030_000, 300.0),
+                    (1_700_750_050_000, 500.0),
+                ],
+                10.0,
+            ),
+            (
+                vec![
+                    (1_700_750_010_000, 100.0),
+                    (1_700_750_030_000, 150.0),
+                    (1_700_750_050_000, 20.0),
+                ],
+                -2.0,
+            ),
+            (
+                vec![
+                    (1_700_750_010_000, 7.0),
+                    (1_700_750_030_000, 7.0),
+                    (1_700_750_050_000, 7.0),
+                ],
+                0.0,
+            ),
+        ] {
+            let actual = prometheus_linear_regression(&points, points[0].0, &cancelled)
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual.0, expected);
+        }
+
+        assert_eq!(
+            prometheus_linear_regression(&[(50_000, 5.0)], 50_000, &cancelled).unwrap(),
+            None
+        );
+        for points in [
+            vec![(20_000, f64::NAN), (40_000, 2.0)],
+            vec![(20_000, 1.0), (40_000, f64::INFINITY)],
+            vec![(20_000, f64::INFINITY), (40_000, f64::INFINITY)],
+        ] {
+            let regression = prometheus_linear_regression(&points, points[0].0, &cancelled)
+                .unwrap()
+                .unwrap();
+            assert!(regression.0.is_nan());
+        }
+
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(prometheus_linear_regression(
+            &[(10_000, 1.0), (20_000, 2.0)],
+            10_000,
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("cancelled"));
     }
 
     #[test]

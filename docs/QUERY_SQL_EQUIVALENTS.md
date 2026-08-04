@@ -75,6 +75,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-031`](#sql-prom-031-increase) | `PQL-R14` | current foundation | finite float-counter reset correction and Prometheus edge extrapolation without per-second normalization; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-PROM-032`](#sql-prom-032-delta) | `PQL-R15` | current foundation | finite float-gauge difference with Prometheus edge extrapolation and no counter correction; API owns language, special values, labels, limits, and envelopes |
 | [`SQL-PROM-033`](#sql-prom-033-idelta) | `PQL-R16` | current foundation | finite float-gauge last-two-sample difference without extrapolation or time normalization; API owns language, special values, labels, limits, and envelopes |
+| [`SQL-PROM-034`](#sql-prom-034-deriv) | `PQL-R17` | current foundation | finite float-gauge least-squares slope over timestamp-centered public raw rows; API owns compensated/IEEE arithmetic, language, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -981,6 +982,91 @@ modifier and subquery evaluation, NaN/infinity strings, limits, cancellation,
 and HTTP envelopes. Native histograms are not stored. Direct regression:
 `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_seven_promql_idelta_uses_only_the_final_gauge_pair`.
+
+### SQL-PROM-034: `deriv`
+
+Compute a least-squares slope per second for every float-gauge slice in the
+exact PromQL interval `(T-window,T]`. Center each timestamp on the first sample
+before forming products; converting absolute epoch timestamps to floating
+point first needlessly loses precision:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.ts AS sample_ts,
+    raw.value,
+    MIN(raw.ts) OVER (
+      PARTITION BY raw.series_id, evaluation.ts
+    ) AS first_sample_ts
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+), centered AS (
+  SELECT
+    series_id,
+    labels,
+    ts,
+    (sample_ts - first_sample_ts) * 1.0 AS x,
+    value AS y
+  FROM selected
+), statistics AS (
+  SELECT
+    series_id,
+    labels,
+    ts,
+    COUNT(*) * 1.0 AS n,
+    MIN(y) AS min_y,
+    MAX(y) AS max_y,
+    SUM(x) AS sum_x,
+    SUM(y) AS sum_y,
+    SUM(x * y) AS sum_xy,
+    SUM(x * x) AS sum_x2
+  FROM centered
+  GROUP BY series_id, labels, ts
+)
+SELECT
+  labels,
+  ts,
+  CASE
+    WHEN min_y = max_y THEN 0.0
+    ELSE (sum_xy - sum_x * sum_y / n)
+         / (sum_x2 - sum_x * sum_x / n)
+  END AS value
+FROM statistics
+WHERE n >= 2
+ORDER BY labels, ts;
+```
+
+Metric timestamps, `:start`, `:end`, `:step`, and `:window` are integer
+seconds. `:filter_json` is the public matcher JSON accepted by `timeless_raw`,
+or NULL. Output grid bounds are inclusive and each sample window is exactly
+`(T-window,T]`. Fewer than two samples emit no row. Constant finite values
+return `0`; canonical label/timestamp ordering is deterministic. Prometheus
+normally admits one float sample per series/timestamp. If direct SQL inserts
+distinct values at one timestamp, the zero time variance makes this finite
+recipe return SQL NULL.
+
+This statement is the ordinary-SQL foundation for finite values within
+SQLite's aggregate precision. Prometheus uses compensated sums for `x`, `y`,
+`x*y`, and `x*x`; it also returns `NaN` for constant infinities and other IEEE
+indeterminacies. The Rust API performs that exact arithmetic over one bounded
+public packed raw read and owns PromQL parsing, metric-name removal, modifier
+and subquery evaluation, value strings, limits, cancellation, and HTTP
+envelopes. No extension-specific regression opcode is justified. Direct
+regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_seven_promql_deriv_matches_centered_compensated_regression`.
 
 ### SQL-PROM-006: range selector
 

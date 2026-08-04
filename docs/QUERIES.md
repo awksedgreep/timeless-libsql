@@ -846,6 +846,10 @@ extrapolated PromQL `increase` as
 extrapolated gauge `delta` is
 [`SQL-PROM-032`](QUERY_SQL_EQUIVALENTS.md#sql-prom-032-delta), and final-pair
 `idelta` is [`SQL-PROM-033`](QUERY_SQL_EQUIVALENTS.md#sql-prom-033-idelta).
+Timestamp-centered least-squares gauge `deriv` is
+[`SQL-PROM-034`](QUERY_SQL_EQUIVALENTS.md#sql-prom-034-deriv); the Rust API
+adds Prometheus's compensated and IEEE-exact arithmetic to that finite SQL
+foundation.
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

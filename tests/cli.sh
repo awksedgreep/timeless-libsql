@@ -3988,6 +3988,43 @@ assert idelta_values == [
     ('{"case":"steady"}', 60, 200.0),
 ]
 
+deriv_sql = (
+    "WITH RECURSIVE evaluation(ts) AS ("
+    " SELECT :start UNION ALL SELECT ts+:step FROM evaluation"
+    " WHERE ts+:step<=:end"
+    "),selected AS ("
+    " SELECT raw.series_id,raw.labels,evaluation.ts,raw.ts sample_ts,raw.value,"
+    " MIN(raw.ts) OVER (PARTITION BY raw.series_id,evaluation.ts) first_sample_ts"
+    " FROM evaluation JOIN timeless_raw("
+    " 'metrics',:metric,:filter_json,:start-:window,:end) raw"
+    " ON raw.ts>evaluation.ts-:window AND raw.ts<=evaluation.ts"
+    "),centered AS ("
+    " SELECT series_id,labels,ts,(sample_ts-first_sample_ts)*1.0 x,value y"
+    " FROM selected"
+    "),statistics AS ("
+    " SELECT series_id,labels,ts,COUNT(*)*1.0 n,MIN(y) min_y,MAX(y) max_y,"
+    " SUM(x) sum_x,SUM(y) sum_y,SUM(x*y) sum_xy,SUM(x*x) sum_x2"
+    " FROM centered GROUP BY series_id,labels,ts"
+    ") SELECT labels,ts,CASE WHEN min_y=max_y THEN 0.0"
+    " ELSE (sum_xy-sum_x*sum_y/n)/(sum_x2-sum_x*sum_x/n) END value"
+    " FROM statistics WHERE n>=2 ORDER BY labels,ts"
+)
+deriv_values = db.execute(
+    deriv_sql,
+    {
+        'metric': 'rate_counter',
+        'filter_json': None,
+        'start': 60,
+        'end': 60,
+        'step': 1,
+        'window': 60,
+    },
+).fetchall()
+assert deriv_values == [
+    ('{"case":"reset"}', 60, -2.0),
+    ('{"case":"steady"}', 60, 10.0),
+]
+
 minimum = db.execute(
     "SELECT value FROM timeless_window("
     "'metrics','min_window',NULL,30,30,1,20,'min')"
