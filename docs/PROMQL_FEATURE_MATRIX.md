@@ -90,7 +90,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O08` | trigonometric binary `atan2` | missing | no | `SQL` | `API` | P1 |
 | `PQL-O09` | `sum` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O10` | `avg` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-015-cross-series-average-by-label)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O11` | `min` and `max` with `by`/`without` | missing | yes | `SQL` | `API` | P0 |
+| `PQL-O11` | `min` and `max` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-016-cross-series-minimum-and-maximum)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O12` | `count` and `group` with `by`/`without` | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O13` | `stddev` and `stdvar` aggregations | missing | yes | `SQL` | `API` | P0 |
 | `PQL-O14` | `topk` and `bottomk` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-005-top-k-per-evaluation-step)) | missing | yes | `SQL` | `API` | P0 |

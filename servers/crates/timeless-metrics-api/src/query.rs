@@ -406,6 +406,8 @@ enum PromValueType {
 enum PromAggregateOp {
     Sum,
     Avg,
+    Min,
+    Max,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -865,6 +867,8 @@ fn lower_promql_aggregate(
     let op = match aggregate.op.id() {
         token::T_SUM => PromAggregateOp::Sum,
         token::T_AVG => PromAggregateOp::Avg,
+        token::T_MIN => PromAggregateOp::Min,
+        token::T_MAX => PromAggregateOp::Max,
         _ => {
             return Err(format!("unsupported PromQL aggregation {}", aggregate.op));
         }
@@ -2671,6 +2675,16 @@ impl PromAggregateState {
                     previous_weight * self.compensation,
                 );
             }
+            PromAggregateOp::Min => {
+                if self.value > value || self.value.is_nan() {
+                    self.value = value;
+                }
+            }
+            PromAggregateOp::Max => {
+                if self.value < value || self.value.is_nan() {
+                    self.value = value;
+                }
+            }
         }
     }
 
@@ -2679,6 +2693,7 @@ impl PromAggregateState {
             PromAggregateOp::Sum => self.value + self.compensation,
             PromAggregateOp::Avg if self.incremental_mean => self.mean + self.compensation,
             PromAggregateOp::Avg => self.value / self.count + self.compensation / self.count,
+            PromAggregateOp::Min | PromAggregateOp::Max => self.value,
         }
     }
 }

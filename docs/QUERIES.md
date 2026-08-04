@@ -376,7 +376,7 @@ compose the public grids and run an explicit uniqueness preflight; executable
 [`SQL-PROM-014`](QUERY_SQL_EQUIVALENTS.md#sql-prom-014-group_left-and-group_right)
 shows the complete foundation.
 
-## PromQL cross-series sum and average
+## PromQL cross-series numeric aggregations
 
 The Rust metrics API aggregates every shipped instant-vector expression at
 each evaluation timestamp:
@@ -386,6 +386,8 @@ sum(http_requests_total)
 sum by (service) (http_requests_total)
 sum without (instance, pod) (http_requests_total)
 avg by (service) (request_duration_seconds)
+min by (service) (queue_depth)
+max without (instance) (queue_depth)
 ```
 
 Without a modifier, all samples form one empty-label group. `by` keeps only
@@ -400,6 +402,8 @@ opposite infinities produce `NaN`.
 switches to a compensated incremental mean before a running-sum overflow.
 This preserves a finite mean for inputs such as two `f64::MAX` samples while
 retaining Prometheus `NaN` and infinity behavior.
+`min` and `max` ignore NaN when another value exists, retain signed
+infinities, and return `NaN` for an all-NaN group.
 
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
@@ -409,6 +413,9 @@ the public grid in executable
 The corresponding ordinary-SQL average is executable
 [`SQL-PROM-015`](QUERY_SQL_EQUIVALENTS.md#sql-prom-015-cross-series-average-by-label);
 the API adds Prometheus's compensated edge arithmetic.
+Direct SQL extrema are in executable
+[`SQL-PROM-016`](QUERY_SQL_EQUIVALENTS.md#sql-prom-016-cross-series-minimum-and-maximum),
+including the ordinary-SQL versus packed-NaN distinction.
 
 ## Scalar aggregate without raw materialization
 

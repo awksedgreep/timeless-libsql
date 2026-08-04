@@ -57,6 +57,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-013`](#sql-prom-013-on-and-ignoring-label-matching) | `PQL-O06` | current foundation | explicit JSON-label projection/equality over public grids; API owns AST/cardinality/name/error semantics |
 | [`SQL-PROM-014`](#sql-prom-014-group_left-and-group_right) | `PQL-O07` | current foundation | explicit many/one grid join and label copy; API owns uniqueness failures, name/value direction, limits, and envelopes |
 | [`SQL-PROM-015`](#sql-prom-015-cross-series-average-by-label) | `PQL-O10` | current foundation | bounded cross-series average; API owns compensated arithmetic, grouping syntax, labels, limits, and envelopes |
+| [`SQL-PROM-016`](#sql-prom-016-cross-series-minimum-and-maximum) | `PQL-O11` | current foundation | bounded cross-series extrema; API owns all-NaN behavior, grouping syntax, labels, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F08`, `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -708,6 +709,40 @@ foundation but is not advertised as bit-identical for adversarial
 cancellation/overflow inputs. This parameterized recipe executes in
 `tests/cli.sh` section 45; the exact API contract is
 `session_five_promql_avg_is_compensated_grouped_and_reopenable`.
+
+### SQL-PROM-016: cross-series minimum and maximum
+
+Use ordinary SQLite extrema over the public bounded grid:
+
+```sql
+WITH selected AS (
+  SELECT
+    ts,
+    COALESCE(json_extract(labels, '$.service'), '') AS service,
+    value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  json_object('service', service) AS labels,
+  ts,
+  MIN(value) AS min_value,
+  MAX(value) AS max_value
+FROM selected
+GROUP BY service, ts
+ORDER BY service, ts;
+```
+
+Parameter types, timestamp units, bounds, missing-label normalization, and
+ordering are the same as `SQL-PROM-015`. SQLite ignores SQL NULL in `MIN` and
+`MAX`; an IEEE NaN projected through an ordinary SQLite REAL is NULL. The Rust
+API reads raw value bits from `TRF1`, ignores NaN when a numeric/infinite value
+exists, and returns `NaN` for an all-NaN group exactly like Prometheus. It also
+owns language, labels, limits, cancellation, and envelopes. The statement is
+executed in `tests/cli.sh` section 45 and the exact API contract is
+`session_five_promql_min_max_group_ieee_range_and_reopen`.
 
 ### SQL-PROM-004: vector arithmetic with label matching
 

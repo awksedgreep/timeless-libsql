@@ -427,6 +427,44 @@
         {"metric": {"case": "positive"}, "value": "+Inf"},
         {"metric": {"case": "mixed"}, "value": "NaN"}
       ]
+    },
+    {
+      "id": "PQL-O11-min-by",
+      "query": "min by (region) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 3},
+        {"metric": {"region": "west"}, "value": 6}
+      ]
+    },
+    {
+      "id": "PQL-O11-max-by",
+      "query": "max by (region) (oracle_aggregation)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"region": "east"}, "value": 4},
+        {"metric": {"region": "west"}, "value": 6}
+      ]
+    },
+    {
+      "id": "PQL-O11-min-ieee",
+      "query": "min by (case) (oracle_avg_ieee)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "nan"}, "value": 1},
+        {"metric": {"case": "positive"}, "value": 1},
+        {"metric": {"case": "mixed"}, "value": "-Inf"}
+      ]
+    },
+    {
+      "id": "PQL-O11-max-ieee",
+      "query": "max by (case) (oracle_avg_ieee)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"case": "nan"}, "value": 1},
+        {"metric": {"case": "positive"}, "value": "+Inf"},
+        {"metric": {"case": "mixed"}, "value": "+Inf"}
+      ]
     }
   ],
   "operator_error_cases": [

@@ -2940,6 +2940,130 @@ async fn session_five_promql_avg_is_compensated_grouped_and_reopenable() {
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_five_promql_min_max_group_ieee_range_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_five_min_max.db");
+    let base = 1_700_520_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let victoria = [
+        ("a", "east", 1.0, 3.0),
+        ("b", "east", 2.0, 4.0),
+        ("c", "west", 5.0, 6.0),
+    ]
+    .into_iter()
+    .map(|(host, region, first, second)| {
+        format!(
+            "{{\"metric\":{{\"__name__\":\"aggregate_min_max\",\"host\":\"{host}\",\"region\":\"{region}\"}},\"values\":[{first},{second}],\"timestamps\":[{},{}]}}\n",
+            base * 1_000,
+            (base + 10) * 1_000,
+        )
+    })
+    .collect::<String>();
+    assert_no_content(post_body(&app, "/api/v1/import", victoria.as_bytes()).await);
+    let ieee = format!(
+        concat!(
+            "aggregate_min_max_ieee{{case=\"all_nan\",host=\"a\"}} NaN {}\n",
+            "aggregate_min_max_ieee{{case=\"all_nan\",host=\"b\"}} NaN {}\n",
+            "aggregate_min_max_ieee{{case=\"mixed\",host=\"a\"}} NaN {}\n",
+            "aggregate_min_max_ieee{{case=\"mixed\",host=\"b\"}} 2 {}\n",
+            "aggregate_min_max_ieee{{case=\"mixed\",host=\"c\"}} 4 {}\n",
+            "aggregate_min_max_ieee{{case=\"infinite\",host=\"a\"}} -Inf {}\n",
+            "aggregate_min_max_ieee{{case=\"infinite\",host=\"b\"}} +Inf {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", ieee.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let min = prom_query(&app, "min by (region) (aggregate_min_max)", base + 10).await;
+    assert_eq!(min.0, StatusCode::OK, "{}", min.1);
+    assert_eq!(
+        min.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base + 10, "3"]},
+            {"metric": {"region": "west"}, "value": [base + 10, "6"]}
+        ])
+    );
+    let max = prom_query(&app, "max by (region) (aggregate_min_max)", base + 10).await;
+    assert_eq!(max.0, StatusCode::OK, "{}", max.1);
+    assert_eq!(
+        max.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"region": "east"}, "value": [base + 10, "4"]},
+            {"metric": {"region": "west"}, "value": [base + 10, "6"]}
+        ])
+    );
+    let min_ieee = prom_query(&app, "min by (case) (aggregate_min_max_ieee)", base + 10).await;
+    assert_eq!(min_ieee.0, StatusCode::OK, "{}", min_ieee.1);
+    assert_eq!(
+        min_ieee.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "all_nan"}, "value": [base + 10, "NaN"]},
+            {"metric": {"case": "infinite"}, "value": [base + 10, "-Inf"]},
+            {"metric": {"case": "mixed"}, "value": [base + 10, "2"]}
+        ])
+    );
+    let max_ieee = prom_query(&app, "max by (case) (aggregate_min_max_ieee)", base + 10).await;
+    assert_eq!(max_ieee.0, StatusCode::OK, "{}", max_ieee.1);
+    assert_eq!(
+        max_ieee.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"case": "all_nan"}, "value": [base + 10, "NaN"]},
+            {"metric": {"case": "infinite"}, "value": [base + 10, "+Inf"]},
+            {"metric": {"case": "mixed"}, "value": [base + 10, "4"]}
+        ])
+    );
+    let range = prom_query_range(
+        &app,
+        "min by (region) (aggregate_min_max)",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base + 10, "3"]])
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "max by (region) (aggregate_min_max)",
+            base + 10,
+        )
+        .await
+        .1,
+        max.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_two_promql_scalar_literals_match_prometheus() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

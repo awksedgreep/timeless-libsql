@@ -42,7 +42,7 @@ matching, with Prometheus output-label and duplicate-cardinality rules.
 Many-to-one `group_left` and one-to-many `group_right` preserve operation
 direction, copy labels from the unique side, and reject both duplicate unique
 sides and non-unique result labelsets.
-Cross-series `sum` and compensated `avg` support unmodified, `by(...)`, and `without(...)`
+Cross-series `sum`, compensated `avg`, `min`, and `max` support unmodified, `by(...)`, and `without(...)`
 grouping over every shipped instant-vector expression, including exact empty,
 missing-label, metric-name, sparse-range, and IEEE behavior.
 Selectors and range selectors accept signed
@@ -68,7 +68,7 @@ The authoritative support contract is the
 Rust API rows at this revision are listed below for CI; prose in this README
 must not imply a broader language surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-O10 PQL-R01 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-O10 PQL-O11 PQL-R01 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are
