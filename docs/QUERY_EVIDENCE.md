@@ -198,3 +198,31 @@ default. It also pins a non-aligned range end. Real-extension tests cover those
 semantics on retained storage and invalid input; unit regressions cover
 negative/non-finite duration safety and extreme-grid overflow. Cancellation,
 shutdown, batching, compression, rollups, retention, and formats are unchanged.
+
+## Session 2 `PQL-S18` value-type result
+
+The checked-in
+[`2026-08-04_session2_pql_s18.json`](evidence/2026-08-04_session2_pql_s18.json)
+was captured from exact build `53337407a88eed2accdf268dcda6aeafa9ea7ae1`.
+This umbrella row remeasures every shipped Prometheus result type on one build;
+the real-extension contract separately pins populated and empty type dispatch.
+
+| value/shape | result cardinality | response bytes | p50 ms | p95 ms | p99 ms |
+|---|---:|---:|---:|---:|---:|
+| instant vector, exact host | 1 series | 164 | 0.401 | 0.519 | 0.635 |
+| instant vector, 512 series | 512 series | 53,497 | 3.295 | 3.397 | 3.560 |
+| range vector, exact host | 1 series / 30 points | 681 | 0.299 | 0.357 | 0.487 |
+| range vector, 512 series | 512 series / 15,360 points | 334,673 | 4.752 | 5.120 | 5.537 |
+| scalar instant | 1 point | 79 | 0.187 | 0.203 | 0.294 |
+| scalar 11,000-point range | 1 series | 209,087 | 0.767 | 0.853 | 0.924 |
+| escaped string | 1 point | 91 | 0.203 | 0.534 | 0.662 |
+| 64 KiB string | 1 point | 65,612 | 1.460 | 1.644 | 1.735 |
+
+Scalar and string values perform zero storage reads. Vector measurements keep
+their existing catalog/pruning/raw-frame behavior; no work moved into another
+owner for this row. The process reached 20,612 KiB RSS HWM, durably completed
+all 16,384 fixture points with zero failed or queued work, and retained the
+525,016-byte live SQLite/WAL/SHM footprint. The combined oracle/API/extension
+suite proves exact `scalar`, `string`, `vector`, and `matrix` envelopes,
+including empty results and range-query type restrictions. No SQL equivalent
+is claimed for an HTTP value envelope.
