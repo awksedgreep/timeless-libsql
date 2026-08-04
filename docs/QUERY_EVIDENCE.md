@@ -603,3 +603,43 @@ left-preferred `UNION ALL` using only public grids. No extension opcode,
 private table, storage format, batching, compression, rollup, retention,
 transaction, or migration behavior changed; ordinary SQL and bounded Rust
 composition remain the justified boundary.
+
+## Session 4 `PQL-O06` explicit-matching result
+
+The checked-in
+[`2026-08-04_session4_pql_o06.json`](evidence/2026-08-04_session4_pql_o06.json)
+was captured from exact extension and server build
+`1aa9b2593824fda5c51459d09820d0af6adfba9b`. Both shapes add identical
+vectors with `on(host)`; the narrow request selects one exact host and the
+wide request evaluates all 512 series at four timestamps.
+
+| shape | final points | intermediate points/query | response bytes | p50 ms | p95 ms | p99 ms | decoded points/query |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact host, `+ on(host)` | 1 | 2 | 116 | 0.559 | 0.694 | 0.742 | 64 |
+| 512 series × four points, `+ on(host)` | 2,048 | 4,096 | 59,026 | 9.001 | 11.569 | 22.832 | 32,768 |
+
+The same-run default-matching arithmetic shape measured
+9.083/10.504/11.222 ms p50/p95/p99. Explicit matching was 0.082 ms faster at
+p50, 1.065 ms slower at p95, and had one retained 22.832 ms p99/max outlier in
+the 50-request sample. The complete raw counters remain structurally equal:
+each request performs two packed reads, considers 1,024 candidate chunks,
+decodes 32,768 stored points, and charges 4,096 child points as intermediate
+work. The explicit result is smaller because `on(host)` projects away every
+other label. This evidence is retained as measured; it does not support a new
+extension primitive or a latency-regression verdict from one scheduling tail.
+
+The run durably completed all 118,457 main and boundary-fixture points with
+zero failed or queued work. Live SQLite/WAL/SHM storage was 672,688 bytes and
+whole-process RSS HWM was 37,712 KiB. This harness is cumulative and executed
+two more full query shapes than the preceding 36,460 KiB run, so the 1,252 KiB
+peak delta is an upper bound for added process residency, not a per-query
+allocation claim. Work, result, response-byte, deadline, and cancellation
+limits remain unchanged.
+
+Prometheus 3.13.2 API and promtool fixtures pin `on`, `on()`, `ignoring`,
+missing-as-empty labels, arithmetic/comparison output projection, set-label
+retention, and duplicate match-group errors. The real-extension regression
+adds range behavior, cumulative-work rejection, shutdown, and cold reopen.
+Section 33 executes both JSON-label SQL joins through public grids. No
+extension opcode, private table, storage format, batching, compression,
+rollup, retention, transaction, or migration behavior changed.
