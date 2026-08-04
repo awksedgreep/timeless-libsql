@@ -389,6 +389,7 @@ pub(crate) enum PromPlan {
     LabelReplace(PromLabelReplacePlan),
     LabelJoin(PromLabelJoinPlan),
     Absent(PromAbsentPlan),
+    Sort(PromSortPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -536,6 +537,12 @@ pub(crate) struct PromLabelJoinPlan {
 pub(crate) struct PromAbsentPlan {
     inner: Box<PromPlan>,
     labels: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromSortPlan {
+    inner: Box<PromPlan>,
+    descending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -822,6 +829,7 @@ impl PromPlan {
             Self::LabelReplace(_) => PromValueType::Vector,
             Self::LabelJoin(_) => PromValueType::Vector,
             Self::Absent(_) => PromValueType::Vector,
+            Self::Sort(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1368,6 +1376,19 @@ fn lower_promql_expr(
                 labels,
             }))
         }
+        promql::Expr::Call(call) if matches!(call.func.name, "sort" | "sort_desc") => {
+            let [argument] = call.args.args.as_slice() else {
+                return Err(format!("{} requires one instant vector", call.func.name));
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err(format!("{} requires an instant vector", call.func.name));
+            }
+            Ok(PromPlan::Sort(PromSortPlan {
+                inner: Box::new(inner),
+                descending: call.func.name == "sort_desc",
+            }))
+        }
         promql::Expr::Call(call) if call.func.name == "first_over_time" => Err(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
@@ -1752,6 +1773,7 @@ fn lower_promql_subquery(
             | PromPlan::LabelReplace(_)
             | PromPlan::LabelJoin(_)
             | PromPlan::Absent(_)
+            | PromPlan::Sort(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -3154,6 +3176,19 @@ fn execute_prometheus(
             limits,
             cancelled,
         ),
+        PromPlan::Sort(sort) => execute_prometheus_sort(
+            conn,
+            features,
+            sort,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -4397,6 +4432,89 @@ fn execute_prometheus_absent(
         limits,
         cancelled,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_sort(
+    conn: &Connection,
+    features: QueryFeatures,
+    sort: &PromSortPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let child = execute_prometheus(
+        conn,
+        features,
+        &sort.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        cancelled,
+    )?;
+    let frame_bytes = child.frame_bytes;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let IntermediateValue::Vector(mut series) = decode_prometheus_intermediate(
+        &child.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("sort input type was checked while lowering")
+    };
+    check_cancelled(cancelled)?;
+    if instant {
+        series.sort_by(|left, right| {
+            let left_value = left.points[0].1;
+            let right_value = right.points[0].1;
+            prometheus_sort_order(sort.descending, left_value, right_value)
+                .then_with(|| left.labels.cmp(&right.labels))
+        });
+    } else {
+        // Prometheus's range-query result is a matrix whose series ordering is
+        // always label-based; an instant-vector sort cannot reorder it per step.
+        series.sort_by(|left, right| left.labels.cmp(&right.labels));
+    }
+    check_cancelled(cancelled)?;
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn prometheus_sort_order(descending: bool, left: f64, right: f64) -> std::cmp::Ordering {
+    match (left.is_nan(), right.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => {
+            let order = left
+                .partial_cmp(&right)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if descending {
+                order.reverse()
+            } else {
+                order
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

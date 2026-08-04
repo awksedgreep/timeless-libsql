@@ -524,6 +524,16 @@ def prometheus_remote_write(timestamp_ms: int) -> bytes:
         [(9.0, timestamp_ms + 20_000)],
         {"case": "boundary", "service": "api"},
     )
+    write_request += series(
+        "oracle_sort_range",
+        [(1.0, timestamp_ms + 20_000), (10.0, timestamp_ms + 30_000)],
+        {"host": "a"},
+    )
+    write_request += series(
+        "oracle_sort_range",
+        [(2.0, timestamp_ms + 20_000), (0.0, timestamp_ms + 30_000)],
+        {"host": "b"},
+    )
     return snappy_literal(write_request)
 
 
@@ -789,24 +799,47 @@ def prometheus_api(root: Path, runtime: str, manifest: dict) -> int:
                 }
                 endpoint = "/api/v1/query_range"
                 result_type = "matrix"
-                values = case["expected_values"]
-                if "expected_offsets_ms" in case:
-                    timestamps = [
-                        sample_timestamp_ms + offset
-                        for offset in case["expected_offsets_ms"]
-                    ]
+                if "expected_results" in case:
+                    result = []
+                    for expected in case["expected_results"]:
+                        values = expected["values"]
+                        offsets = expected.get("offsets_ms")
+                        if offsets is None:
+                            timestamps = [
+                                start_ms
+                                + index * (end_ms - start_ms) // (len(values) - 1)
+                                for index in range(len(values))
+                            ]
+                        else:
+                            timestamps = [
+                                sample_timestamp_ms + offset for offset in offsets
+                            ]
+                        result.append({
+                            "metric": dict(expected["metric"]),
+                            "values": [
+                                [timestamp / 1_000, str(value)]
+                                for timestamp, value in zip(timestamps, values)
+                            ],
+                        })
                 else:
-                    timestamps = [
-                        start_ms + index * (end_ms - start_ms) // (len(values) - 1)
-                        for index in range(len(values))
-                    ]
-                result = [{
-                    "metric": dict(case.get("expected_metric", {"job": "oracle"})),
-                    "values": [
-                        [timestamp / 1_000, str(value)]
-                        for timestamp, value in zip(timestamps, values)
-                    ],
-                }]
+                    values = case["expected_values"]
+                    if "expected_offsets_ms" in case:
+                        timestamps = [
+                            sample_timestamp_ms + offset
+                            for offset in case["expected_offsets_ms"]
+                        ]
+                    else:
+                        timestamps = [
+                            start_ms + index * (end_ms - start_ms) // (len(values) - 1)
+                            for index in range(len(values))
+                        ]
+                    result = [{
+                        "metric": dict(case.get("expected_metric", {"job": "oracle"})),
+                        "values": [
+                            [timestamp / 1_000, str(value)]
+                            for timestamp, value in zip(timestamps, values)
+                        ],
+                    }]
             elif case.get("expected_empty"):
                 params = {
                     "query": case["query"],

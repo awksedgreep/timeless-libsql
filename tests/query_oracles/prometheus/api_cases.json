@@ -2652,6 +2652,63 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {},
       "expected_values": [1]
+    },
+    {
+      "id": "PQL-F13-sort-ascending-ieee-order",
+      "query": "sort(oracle_transform{case=~\"negative|positive|nan|negative_inf|positive_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "result_order": "ordered",
+      "expected_results": [
+        {"metric": {"__name__": "oracle_transform", "case": "negative_inf", "job": "oracle"}, "value": "-Inf"},
+        {"metric": {"__name__": "oracle_transform", "case": "negative", "job": "oracle"}, "value": -4},
+        {"metric": {"__name__": "oracle_transform", "case": "positive", "job": "oracle"}, "value": 2},
+        {"metric": {"__name__": "oracle_transform", "case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"__name__": "oracle_transform", "case": "nan", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F13-sort-descending-ieee-order",
+      "query": "sort_desc(oracle_transform{case=~\"negative|positive|nan|negative_inf|positive_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "result_order": "ordered",
+      "expected_results": [
+        {"metric": {"__name__": "oracle_transform", "case": "positive_inf", "job": "oracle"}, "value": "+Inf"},
+        {"metric": {"__name__": "oracle_transform", "case": "positive", "job": "oracle"}, "value": 2},
+        {"metric": {"__name__": "oracle_transform", "case": "negative", "job": "oracle"}, "value": -4},
+        {"metric": {"__name__": "oracle_transform", "case": "negative_inf", "job": "oracle"}, "value": "-Inf"},
+        {"metric": {"__name__": "oracle_transform", "case": "nan", "job": "oracle"}, "value": "NaN"}
+      ]
+    },
+    {
+      "id": "PQL-F13-sort-preserves-negative-zero-and-name",
+      "query": "sort(oracle_transform{case=\"negative_zero\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_transform", "case": "negative_zero", "job": "oracle"},
+      "expected_values": ["-0"]
+    },
+    {
+      "id": "PQL-F13-sort-nested-expression-preserves-child-label-policy",
+      "query": "sort(abs(oracle_transform{case=\"negative\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "negative", "job": "oracle"},
+      "expected_values": [4]
+    },
+    {
+      "id": "PQL-F13-sort-empty-vector",
+      "query": "sort(oracle_transform{case=\"missing\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "PQL-F13-range-query-uses-label-order-not-step-values",
+      "query": "sort_desc(oracle_sort_range)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "result_order": "ordered",
+      "expected_results": [
+        {"metric": {"__name__": "oracle_sort_range", "host": "a", "job": "oracle"}, "values": [1, 10]},
+        {"metric": {"__name__": "oracle_sort_range", "host": "b", "job": "oracle"}, "values": [2, 0]}
+      ]
     }
   ],
   "operator_error_cases": [
@@ -2766,6 +2823,14 @@
       "status": 400,
       "error_type": "bad_data",
       "error_contains": "expected type range vector"
+    },
+    {
+      "id": "PQL-F13-argument-type-errors",
+      "query": "sort(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
     }
   ],
   "cases": [

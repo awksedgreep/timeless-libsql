@@ -9766,6 +9766,142 @@ async fn session_eight_promql_absent_over_time_pins_windows_subqueries_limits_an
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eight_promql_sort_orders_ieee_instants_not_range_matrices_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eight_sort.db");
+    let base = 1_700_920_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "sort_metric{{case=\"negative_inf\"}} -Inf {}\n",
+            "sort_metric{{case=\"negative\"}} -4 {}\n",
+            "sort_metric{{case=\"negative_zero\"}} -0 {}\n",
+            "sort_metric{{case=\"positive\"}} 2 {}\n",
+            "sort_metric{{case=\"positive_inf\"}} +Inf {}\n",
+            "sort_metric{{case=\"nan\"}} NaN {}\n",
+            "sort_range{{host=\"a\"}} 1 {}\n",
+            "sort_range{{host=\"a\"}} 10 {}\n",
+            "sort_range{{host=\"b\"}} 2 {}\n",
+            "sort_range{{host=\"b\"}} 0 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let selector = "sort_metric{case=~\"negative|positive|nan|negative_inf|positive_inf\"}";
+    let ascending = prom_query(&app, &format!("sort({selector})"), base).await;
+    assert_eq!(ascending.0, StatusCode::OK, "{}", ascending.1);
+    assert_eq!(
+        ascending.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "sort_metric", "case": "negative_inf"}, "value": [base, "-Inf"]},
+            {"metric": {"__name__": "sort_metric", "case": "negative"}, "value": [base, "-4"]},
+            {"metric": {"__name__": "sort_metric", "case": "positive"}, "value": [base, "2"]},
+            {"metric": {"__name__": "sort_metric", "case": "positive_inf"}, "value": [base, "+Inf"]},
+            {"metric": {"__name__": "sort_metric", "case": "nan"}, "value": [base, "NaN"]}
+        ])
+    );
+    let descending = prom_query(&app, &format!("sort_desc({selector})"), base).await;
+    assert_eq!(descending.0, StatusCode::OK, "{}", descending.1);
+    assert_eq!(
+        descending.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "sort_metric", "case": "positive_inf"}, "value": [base, "+Inf"]},
+            {"metric": {"__name__": "sort_metric", "case": "positive"}, "value": [base, "2"]},
+            {"metric": {"__name__": "sort_metric", "case": "negative"}, "value": [base, "-4"]},
+            {"metric": {"__name__": "sort_metric", "case": "negative_inf"}, "value": [base, "-Inf"]},
+            {"metric": {"__name__": "sort_metric", "case": "nan"}, "value": [base, "NaN"]}
+        ])
+    );
+
+    let negative_zero = prom_query(&app, "sort(sort_metric{case=\"negative_zero\"})", base).await;
+    assert_eq!(negative_zero.0, StatusCode::OK, "{}", negative_zero.1);
+    assert_eq!(negative_zero.1["data"]["result"][0]["value"][1], "-0");
+    let nested = prom_query(&app, "sort(abs(sort_metric{case=\"negative\"}))", base).await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"][0],
+        serde_json::json!({"metric": {"case": "negative"}, "value": [base, "4"]})
+    );
+    let empty = prom_query(&app, "sort(sort_metric{case=\"missing\"})", base).await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+
+    let range = prom_query_range(&app, "sort_desc(sort_range)", base, base + 10, 10).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"__name__": "sort_range", "host": "a"}, "values": [[base, "1"], [base + 10, "10"]]},
+            {"metric": {"__name__": "sort_range", "host": "b"}, "values": [[base, "2"], [base + 10, "0"]]}
+        ])
+    );
+
+    for query in ["sort(1)", "sort_desc(sort_metric[1m])"] {
+        let invalid = prom_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 4,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, &format!("sort({selector})"), base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(&reopened_app, &format!("sort({selector})"), base)
+            .await
+            .1,
+        ascending.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
 async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app
         .clone()

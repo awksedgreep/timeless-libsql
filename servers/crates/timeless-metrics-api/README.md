@@ -72,6 +72,11 @@ to each exact open-left, closed-right sample window. It supports direct range
 selectors and subqueries, counts every IEEE sample as present, and charges the
 bounded range evaluation plus every inspected outer step to the cumulative
 work limit.
+`sort(vector)` and `sort_desc(vector)` value-order instant results while
+placing NaN last, preserving labels, names, timestamps, and float bits, and
+using labels only to make equal-value groups deterministic. Range-query
+matrices remain label ordered, matching Prometheus rather than applying one
+step's value order to complete series.
 Unary minus and arithmetic `+ - * / % ^`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves

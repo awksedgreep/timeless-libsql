@@ -951,6 +951,23 @@ step-local absence inversion, so limits and cancellation cover both stages.
 Direct SQLite/libSQL users have the executable public-raw anti-join in
 [`SQL-PROM-048`](QUERY_SQL_EQUIVALENTS.md#sql-prom-048-absent_over_time).
 
+PromQL ordering is intentionally an instant-vector presentation operation:
+
+```promql
+sort(http_request_duration_seconds)
+sort_desc(http_request_duration_seconds)
+```
+
+`sort` orders samples by ascending value and `sort_desc` by descending value;
+both put NaN last. Labels, metric names, timestamps, IEEE values, and nested
+expression label policy are preserved. Equal values have no PromQL ordering
+promise, so Timeless uses canonical labels as a deterministic tie-break.
+Range-query results remain label-ordered matrices rather than pretending one
+series order can represent a different value ordering at every step. Direct
+SQLite/libSQL callers can use the parameterized instant statement and range
+matrix statement in
+[`SQL-PROM-049`](QUERY_SQL_EQUIVALENTS.md#sql-prom-049-sort-and-sort_desc).
+
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points
 rather than raw samples over sqld/HTTP.

@@ -1788,6 +1788,57 @@ primitive is justified.
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_eight_promql_absent_over_time_pins_windows_subqueries_limits_and_reopen`.
 
+### SQL-PROM-049: `sort` and `sort_desc`
+
+For an instant-vector selection, order finite and infinite samples in the
+requested direction, place row-projected NaN last in both directions, and use
+canonical labels as a deterministic tie-break:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :at, :at, 1, :lookback
+)
+ORDER BY value IS NULL,
+         CASE WHEN :descending = 0 THEN value END ASC,
+         CASE WHEN :descending <> 0 THEN value END DESC,
+         labels;
+```
+
+`:at` and `:lookback` use the metric table's configured timestamp unit
+(integer seconds for the default table), and lookback is open-left. Bind
+`:descending` to zero for `sort` and nonzero for `sort_desc`. The public grid
+preserves labels, metric identity, timestamp, and ordinary REAL values. SQLite
+projects a stored NaN as SQL NULL; because metric inserts cannot store an
+ordinary SQL NULL and this is a sparse grid, `value IS NULL` identifies that
+stored IEEE class for ordering. The Rust API reads the public bit-exact packed
+frame so its response preserves `NaN` rather than exposing SQL NULL. Numeric
+ties, including signed zeros, use label order because PromQL does not promise
+an order within an equal-value group.
+
+Prometheus sorting affects only instant vectors. A range-query endpoint must
+return its matrix in canonical label-set order regardless of the value order
+at any individual step:
+
+```sql
+SELECT labels, ts, value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+The Rust API owns PromQL parsing and types, nested expression composition,
+instant-versus-range response semantics, exact float strings, cumulative work
+and response limits, and cancellation. Both forms use one bounded public read;
+there is no storage-read or row-crossing evidence for a sort-specific
+extension primitive.
+
+Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
+`session_eight_promql_sort_orders_ieee_instants_not_range_matrices_and_reopens`.
+
 ### SQL-PROM-006: range selector
 
 At instant evaluation timestamp `:at`, return every stored float sample in

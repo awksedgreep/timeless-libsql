@@ -3966,6 +3966,47 @@ absent_window_inclusive = db.execute(
 ).fetchall()
 assert absent_window_inclusive == []
 
+sort_sql = (
+    "SELECT labels,ts,value FROM timeless_grid("
+    " 'metrics',:metric,:filter_json,:at,:at,1,:lookback)"
+    " ORDER BY value IS NULL,"
+    " CASE WHEN :descending=0 THEN value END ASC,"
+    " CASE WHEN :descending<>0 THEN value END DESC,labels"
+)
+sort_ascending = db.execute(
+    sort_sql,
+    {
+        'metric': 'abs_metric',
+        'filter_json': None,
+        'at': 100,
+        'lookback': 1,
+        'descending': 0,
+    },
+).fetchall()
+assert [json.loads(row[0])['case'] for row in sort_ascending] == [
+    'negative_inf', 'negative', 'negative_zero', 'positive'
+]
+sort_descending = db.execute(
+    sort_sql,
+    {
+        'metric': 'abs_metric',
+        'filter_json': None,
+        'at': 100,
+        'lookback': 1,
+        'descending': 1,
+    },
+).fetchall()
+assert [json.loads(row[0])['case'] for row in sort_descending] == [
+    'positive', 'negative_zero', 'negative', 'negative_inf'
+]
+sort_range_labels = db.execute(
+    "SELECT labels,ts,value FROM timeless_grid("
+    " 'metrics','cpu',NULL,100,110,10,20) ORDER BY labels,ts"
+).fetchall()
+assert [json.loads(row[0])['host'] for row in sort_range_labels] == [
+    'web-1', 'web-1', 'web-2', 'web-2'
+]
+
 offset = db.execute(
     "SELECT labels,ts+:offset AS outer_ts,value FROM timeless_grid("
     "'metrics',:metric,:filter_json,:start-:offset,:end-:offset,:step,:lookback) "
