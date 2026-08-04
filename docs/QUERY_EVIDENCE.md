@@ -860,3 +860,32 @@ ranges, cumulative work limits, cancellation, and cold reopen. Public
 window-function SQL remains the direct-user foundation. No extension
 primitive, storage format, batching, compression, index, rollup, retention,
 transaction, or migration behavior changed.
+
+## Session 5 `PQL-O15` cross-series quantile
+
+The checked-in
+[`2026-08-04_session5_pql_o15.json`](evidence/2026-08-04_session5_pql_o15.json)
+was captured from exact build `359aa4e842289513473620046ef8a569782b4c52`.
+The narrow shape interpolates one selected host; the wide shape computes the
+0.95 quantile of 512 series grouped into two services at four timestamps.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact-host `quantile(0.5)` | 1 | 102 | 0.639 | 0.959 | 1.198 | 2 | 32 | 524 |
+| grouped `quantile(0.95)`, 512 series × four steps | 8 | 313 | 3.838 | 4.177 | 4.276 | 2,052 | 16,384 | 268,304 |
+
+The wide evaluator admits 2,048 child points plus four scalar-parameter
+points, then sorts bounded per-group/per-step vectors in memory. It makes one
+public packed-frame read and no extra storage pass. The 4.177 ms p95 is in the
+same range as simpler reductions, so there is no evidence for adding a
+storage-specific quantile opcode. Memory remains bounded by the configured
+intermediate-work limit.
+
+The run durably completed all 18,496 points with zero failed or queued work,
+retained 672,688 bytes of SQLite/WAL/SHM storage, and reached 37,528 KiB RSS
+HWM. Pinned Prometheus and real-extension cases cover interpolation,
+singletons, raw-NaN rank, infinities, NaN/out-of-range parameters, grouped and
+range evaluation, cumulative limits, cancellation, and cold reopen. The
+ordinary public-SQL recipe is explicitly finite-only rather than obscuring
+SQLite's NaN-to-NULL boundary. Storage format, batching, compression, indexes,
+rollups, retention, transactions, migrations, and packed frames are unchanged.
