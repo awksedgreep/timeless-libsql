@@ -308,7 +308,7 @@ enum WriteCommand {
 enum ReadCommand {
     Stats(oneshot::Sender<Result<(StorageStats, u64, u64), String>>),
     Query {
-        request: ReadRequest,
+        request: Box<ReadRequest>,
         cancelled: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<ReadOutput, String>>,
     },
@@ -751,7 +751,7 @@ impl Storage {
         if self
             .reader()
             .send(ReadCommand::Query {
-                request,
+                request: Box::new(request),
                 cancelled,
                 reply: reply_tx,
             })
@@ -1071,7 +1071,14 @@ fn reader_main(
                     .map_err(|error| format!("install query cancellation handler: {error}"))
                     .and_then(|()| {
                         retry_read(
-                            || query::execute(&conn, features, request.clone(), &cancelled),
+                            || {
+                                query::execute(
+                                    &conn,
+                                    features,
+                                    request.as_ref().clone(),
+                                    &cancelled,
+                                )
+                            },
                             || {},
                         )
                     });
@@ -1786,5 +1793,10 @@ mod tests {
             suffix_path(database, ".timeless-metrics-api.lock"),
             PathBuf::from("metrics.db.timeless-metrics-api.lock")
         );
+    }
+
+    #[test]
+    fn reader_queue_commands_keep_recursive_query_plans_behind_indirection() {
+        assert!(std::mem::size_of::<ReadCommand>() <= 64);
     }
 }
