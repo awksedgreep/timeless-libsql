@@ -771,3 +771,32 @@ finite values, infinities, mixed/all NaNs, sparse range grids, deterministic
 Timeless output, cancellation, and cold reopen. No extension primitive,
 storage format, batching, compression, index, rollup, retention, transaction,
 or migration behavior changed.
+
+## Session 5 `PQL-O12` cross-series count and group
+
+The checked-in
+[`2026-08-04_session5_pql_o12.json`](evidence/2026-08-04_session5_pql_o12.json)
+was captured from exact build `af80d8f90854d56fb48f20bbc80e39a356944393`.
+The narrow shape counts one selected host; the wide shape reports group
+presence for 512 series collapsed into two services across four timestamps.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact-host `count` | 1 | 115 | 0.498 | 0.630 | 0.794 | 1 | 32 | 524 |
+| all-series grouped `group` | 8 | 281 | 3.881 | 4.141 | 4.241 | 512 | 16,384 | 268,304 |
+
+The wide evaluator charges all 2,048 bounded child points before reducing
+them to eight output points. It performs one packed public-frame read and no
+additional storage work. The count path deliberately counts rows, not SQL
+numeric values, so NaN and both infinities contribute exactly as they do in
+Prometheus. Ordinary `COUNT(*)` and a constant one over the public grid are
+therefore the complete direct-SQL foundation and no extension primitive is
+warranted.
+
+All 18,496 fixture points completed durably with zero failed or queued work;
+physical SQLite/WAL/SHM storage remained 672,688 bytes and whole-process RSS
+HWM was 36,536 KiB. Pinned Prometheus API and promtool fixtures cover `by`,
+`without`, retained non-grouping labels, and non-finite inputs. The
+real-extension regression adds empty grouping, range grids, shutdown, and
+cold reopen. Batching, compression, indexes, rollups, retention, transactions,
+migrations, and packed formats are unchanged.
