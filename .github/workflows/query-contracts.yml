@@ -2,8 +2,6 @@ name: Query documentation contracts
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["main", "query/**"]
 
 permissions:
   contents: read

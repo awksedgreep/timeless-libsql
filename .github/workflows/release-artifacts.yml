@@ -3,7 +3,6 @@ name: Release artifacts
 on:
   workflow_dispatch:
   push:
-    branches: ["release/rust-telemetry-data-plane"]
     tags: ["v*"]
 
 permissions:

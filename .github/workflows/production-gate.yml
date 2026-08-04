@@ -2,8 +2,6 @@ name: Production data-plane gate
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["main", "release/rust-telemetry-data-plane"]
 
 permissions:
   contents: read
