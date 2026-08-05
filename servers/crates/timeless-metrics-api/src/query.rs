@@ -404,6 +404,7 @@ pub(crate) enum PromPlan {
     MetricsAlias(metricsql::AliasPlan),
     MetricsLabels(metricsql::LabelPlan),
     MetricsDynamicRollup(metricsql::DynamicRollupPlan),
+    MetricsRangeAggregate(metricsql::RangeAggregatePlan),
     MetricsBinary(metricsql::BinaryPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
@@ -1405,7 +1406,8 @@ impl PromPlan {
             Self::MetricsUnion(_)
             | Self::MetricsAlias(_)
             | Self::MetricsLabels(_)
-            | Self::MetricsDynamicRollup(_) => PromValueType::Vector,
+            | Self::MetricsDynamicRollup(_)
+            | Self::MetricsRangeAggregate(_) => PromValueType::Vector,
             Self::MetricsBinary(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
@@ -1960,6 +1962,9 @@ fn attach_promql_plan_source_positions(
             attach_promql_plan_source_positions(&mut labels.inner, calls)?;
         }
         PromPlan::MetricsDynamicRollup(_) => {}
+        PromPlan::MetricsRangeAggregate(range) => {
+            attach_promql_plan_source_positions(&mut range.inner, calls)?;
+        }
         PromPlan::MetricsBinary(binary) => {
             attach_promql_plan_source_positions(&mut binary.lhs, calls)?;
             attach_promql_plan_source_positions(&mut binary.rhs, calls)?;
@@ -4657,6 +4662,20 @@ fn execute_prometheus(
             false,
             cancelled,
         ),
+        PromPlan::MetricsRangeAggregate(range) => metricsql::execute_range_aggregate(
+            conn,
+            features,
+            range,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
         PromPlan::MetricsBinary(binary) => metricsql::execute_binary(
             conn,
             features,
@@ -4875,6 +4894,23 @@ fn execute_prometheus_keep_metric_names(
             query_end,
             limits,
             true,
+            cancelled,
+        ),
+        // VictoriaMetrics resets the metric group inside range_* before the
+        // outer keep_metric_names modifier is observed, so this path must be
+        // identical to ordinary range_* execution.
+        PromPlan::MetricsRangeAggregate(range) => metricsql::execute_range_aggregate(
+            conn,
+            features,
+            range,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Binary(binary) => execute_prometheus_binary(

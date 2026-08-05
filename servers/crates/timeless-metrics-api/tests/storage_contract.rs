@@ -13110,6 +13110,339 @@ async fn session_fifteen_metricsql_default_and_windowless_rollups_match_victoria
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_range_aggregates_match_victoriametrics_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fifteen_metricsql_range_aggregates.db");
+    let base = 1_785_908_200_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        64,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let fixtures = vec![
+        (
+            "mql_range",
+            vec![(base, 11.0), (base + 2, 13.0), (base + 4, 15.0)],
+        ),
+        (
+            "mql_range_precision",
+            vec![(base, 1e16), (base + 10, 1.0), (base + 20, -1e16)],
+        ),
+        (
+            "mql_range_overflow",
+            vec![(base + 10, f64::MAX), (base + 20, f64::MAX)],
+        ),
+        (
+            "mql_range_nan",
+            vec![(base + 10, f64::NAN), (base + 20, 1.0)],
+        ),
+        (
+            "mql_range_positive_inf",
+            vec![(base + 10, f64::INFINITY), (base + 20, 1.0)],
+        ),
+        (
+            "mql_range_mixed_inf",
+            vec![(base + 10, f64::INFINITY), (base + 20, f64::NEG_INFINITY)],
+        ),
+        ("mql_range_zero", vec![(base + 10, 0.0), (base + 20, -0.0)]),
+        (
+            "mql_range_zero_reverse",
+            vec![(base + 10, -0.0), (base + 20, 0.0)],
+        ),
+        ("mql_range_sparse_a", vec![(base, 10.0), (base + 20, 30.0)]),
+        ("mql_range_sparse_b", vec![(base + 10, 20.0)]),
+        ("mql_range_collision_a", vec![(base + 20, 2.0)]),
+        ("mql_range_collision_b", vec![(base + 20, 3.0)]),
+    ];
+    for (name, points) in fixtures {
+        storage
+            .submit_named_batch(named_series_batch(name, &points), points.len())
+            .await
+            .unwrap();
+    }
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    for (query, expected) in [
+        ("range_avg(mql_range)", "13"),
+        ("range_min(mql_range)", "11"),
+        ("range_max(mql_range)", "15"),
+        ("range_sum(mql_range)", "39"),
+    ] {
+        let response = mql_query_range(&app, query, base, base + 4, 2).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"],
+            serde_json::json!([{
+                "metric": {},
+                "values": [[base, expected], [base + 2, expected], [base + 4, expected]]
+            }]),
+            "{query}"
+        );
+    }
+
+    let instant = mql_query(&app, "range_sum(mql_range)", base + 4).await;
+    assert_eq!(instant.0, StatusCode::OK, "{}", instant.1);
+    assert_eq!(
+        instant.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base + 4, "15"]}])
+    );
+    let keep = mql_query_range(
+        &app,
+        "range_avg(mql_range) keep_metric_names",
+        base,
+        base + 4,
+        2,
+    )
+    .await;
+    assert_eq!(keep.0, StatusCode::OK, "{}", keep.1);
+    assert_eq!(keep.1["data"]["result"][0]["metric"], serde_json::json!({}));
+
+    let scalar = mql_query_range(&app, "range_avg(1)", base, base + 4, 2).await;
+    assert_eq!(scalar.0, StatusCode::OK, "{}", scalar.1);
+    assert_eq!(
+        scalar.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base, "1"], [base + 2, "1"], [base + 4, "1"]]
+        }])
+    );
+    let expression = mql_query_range(&app, "range_sum(mql_range * 2)", base, base + 4, 2).await;
+    assert_eq!(expression.0, StatusCode::OK, "{}", expression.1);
+    assert_eq!(
+        expression.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "78"], [base + 2, "78"], [base + 4, "78"]])
+    );
+    let uppercase = mql_query_range(&app, "RANGE_MAX(mql_range,)", base, base + 4, 2).await;
+    assert_eq!(uppercase.0, StatusCode::OK, "{}", uppercase.1);
+    assert_eq!(uppercase.1["data"]["result"][0]["values"][0][1], "15");
+
+    for (metric, expected) in [
+        ("mql_range_precision", "0"),
+        ("mql_range_nan", "1"),
+        ("mql_range_positive_inf", "+Inf"),
+        ("mql_range_mixed_inf", "+Inf"),
+    ] {
+        let response =
+            mql_query_range(&app, &format!("range_avg({metric})"), base, base + 20, 10).await;
+        assert_eq!(response.0, StatusCode::OK, "{metric}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["values"],
+            serde_json::json!([
+                [base, expected],
+                [base + 10, expected],
+                [base + 20, expected]
+            ]),
+            "{metric}"
+        );
+    }
+    let precision_sum =
+        mql_query_range(&app, "range_sum(mql_range_precision)", base, base + 20, 10).await;
+    assert_eq!(precision_sum.0, StatusCode::OK, "{}", precision_sum.1);
+    assert_eq!(
+        precision_sum.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "0"], [base + 10, "0"], [base + 20, "0"]])
+    );
+    let overflow = mql_query_range(
+        &app,
+        "range_sum(mql_range_overflow)",
+        base + 10,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(overflow.0, StatusCode::OK, "{}", overflow.1);
+    assert_eq!(
+        overflow.1["data"]["result"][0]["values"],
+        serde_json::json!([[base + 10, "+Inf"], [base + 20, "+Inf"]])
+    );
+    let safe_average = mql_query_range(
+        &app,
+        "range_avg(mql_range_overflow)",
+        base + 10,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(safe_average.0, StatusCode::OK, "{}", safe_average.1);
+    let maximum = safe_average.1["data"]["result"][0]["values"][0][1]
+        .as_str()
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    assert_eq!(maximum.to_bits(), f64::MAX.to_bits());
+
+    for (function, metric, expected) in [
+        ("range_min", "mql_range_zero", "-0"),
+        ("range_max", "mql_range_zero", "-0"),
+        ("range_min", "mql_range_zero_reverse", "0"),
+        ("range_max", "mql_range_zero_reverse", "0"),
+    ] {
+        let response = mql_query_range(
+            &app,
+            &format!("{function}({metric})"),
+            base + 10,
+            base + 20,
+            10,
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{function}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["values"][0][1], expected);
+    }
+
+    for (metric, expected) in [("mql_range_sparse_a", "50"), ("mql_range_sparse_b", "40")] {
+        let response =
+            mql_query_range(&app, &format!("range_sum({metric})"), base, base + 20, 10).await;
+        assert_eq!(response.0, StatusCode::OK, "{metric}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["values"],
+            serde_json::json!([
+                [base, expected],
+                [base + 10, expected],
+                [base + 20, expected]
+            ]),
+            "{metric}"
+        );
+    }
+
+    for query in ["range_avg()", "range_sum(mql_range, 1)"] {
+        let invalid = mql_query(&app, query, base + 20).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    let collision = mql_query(
+        &app,
+        "range_sum({__name__=~\"mql_range_collision_a|mql_range_collision_b\"})",
+        base + 20,
+    )
+    .await;
+    assert_eq!(
+        collision.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        collision.1
+    );
+    assert!(collision.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("duplicate output timeseries"));
+    let stable = prom_query(&app, "range_sum(mql_range)", base + 4).await;
+    assert_eq!(stable.0, StatusCode::BAD_REQUEST, "{}", stable.1);
+
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query_range",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "range_sum(mql_range)")
+            .append_pair("start", &base.to_string())
+            .append_pair("end", &(base + 4).to_string())
+            .append_pair("step", "2")
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted.0, StatusCode::OK, "{}", posted.1);
+    assert_eq!(posted.1["data"]["result"][0]["values"][0][1], "39");
+
+    let stats_before = storage.stats().await.unwrap();
+    let one_read = mql_query_range(&app, "range_sum(mql_range)", base, base + 4, 2).await;
+    assert_eq!(one_read.0, StatusCode::OK, "{}", one_read.1);
+    let stats_after = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after.extension_raw_batch_query_count - stats_before.extension_raw_batch_query_count,
+        1,
+        "range aggregation must retain one public raw read"
+    );
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 8,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query_range(&limited, "range_sum(mql_range)", base, base + 4, 2).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("intermediate-work limit of 8 points"));
+
+    let result_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_result_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let generated = mql_query_range(
+        &result_limited,
+        "range_sum(mql_range_sparse_b)",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(
+        generated.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        generated.1
+    );
+    assert!(generated.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("result-point limit of 2"));
+
+    let deadline_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            deadline: std::time::Duration::from_nanos(1),
+            ..PromQueryLimits::default()
+        },
+    );
+    let timed_out = mql_query_range(
+        &deadline_limited,
+        "range_sum(mql_range)",
+        base,
+        base + 10_999,
+        1,
+    )
+    .await;
+    assert_eq!(timed_out.0, StatusCode::GATEWAY_TIMEOUT, "{}", timed_out.1);
+    assert_eq!(timed_out.1["errorType"], "timeout");
+    assert_eq!(
+        mql_query(&app, "range_sum(mql_range)", base + 4).await.0,
+        StatusCode::OK
+    );
+
+    drop((deadline_limited, result_limited, limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 64, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query_range(&reopened_app, "range_sum(mql_range)", base, base + 4, 2,).await,
+        posted
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

@@ -1491,6 +1491,58 @@ The Rust API retains language parsing, exact packed-NaN handling, carry-in and
 reset composition, names, limits, cancellation, and HTTP envelopes; no
 MetricsQL syntax enters the extension.
 
+### Complete-grid MetricsQL range aggregates
+
+The explicit MetricsQL routes support four transformations over the complete
+instant-vector evaluation grid of the current request:
+
+```text
+range_avg(cpu_usage)
+range_min(cpu_usage)
+range_max(cpu_usage)
+range_sum(cpu_usage)
+range_sum(cpu_usage * 2)
+```
+
+These are not moving windows. Each input series is evaluated from inclusive
+`start` through inclusive `end` at `step`, reduced once, and its final value is
+repeated at every requested timestamp. An instant request therefore reduces a
+one-point grid. Scalars become nameless vectors, arbitrary shipped scalar or
+instant-vector expressions compose as the argument, names are
+case-insensitive, and one trailing comma is accepted.
+
+`range_avg` uses VictoriaMetrics's incremental arithmetic. After the first
+non-NaN value, every grid slot—including a missing slot—advances the average's
+position denominator. `range_sum` uses ordinary binary64 addition rather than
+the extension's compensated window sum. Minimum and maximum choose the later
+operand when values compare equal. Leading NaNs/missing values are skipped;
+later gaps carry the running value. After reduction, the last non-NaN running
+value fills the complete output grid, including leading gaps. A series with no
+non-NaN value is omitted.
+
+All four functions remove `__name__`. Pinned VictoriaMetrics does this even
+for `range_avg(q) keep_metric_names`, so Timeless preserves that upstream
+quirk instead of pretending the modifier restores the name. If removing names
+collapses two input identities, the request fails with HTTP 422 `execution`
+rather than merging samples. Zero/extra arguments fail with HTTP 400
+`bad_data`. The stable PromQL routes reject every `range_*` name.
+
+VictoriaMetrics's Remote Write/query path normalizes the signed-zero oracle
+fixture to positive zero. Timeless preserves the stronger stored binary64
+contract: because the extrema rule chooses the later equal operand,
+`range_min` and `range_max` return `-0` when that later operand has its sign bit
+set. NaN, infinity, maximum-float overflow avoidance, sparse grids, duplicate
+outputs, work/result limits, cancellation, GET/POST, shutdown, and reopen are
+all real-extension regressions.
+
+The API performs one bounded child evaluation and no second storage read.
+Direct SQLite/libSQL users can run the slot-indexed recursive equivalent over
+any public input grid with
+[`SQL-MQL-006`](QUERY_SQL_EQUIVALENTS.md#sql-mql-006-range-aggregates).
+MetricsQL parsing, arbitrary expression composition, implicit lookback,
+collision policy, limits, cancellation, and HTTP result shaping remain Rust
+API responsibilities; no extension syntax or storage format changed.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

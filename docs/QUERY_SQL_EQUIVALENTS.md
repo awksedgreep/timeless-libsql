@@ -103,6 +103,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-MQL-003`](#sql-mql-003-union-and-alias) | `MQL-03` | current foundation | public-grid `UNION ALL`, explicit metric-name projection, and first-branch labelset precedence; API owns grammar, scalar-vector conversion, duplicate-output errors, limits, cancellation, and envelopes |
 | [`SQL-MQL-004`](#sql-mql-004-label_set-and-label_del) | `MQL-04` | current foundation | ordinary JSON label projection and separate metric-name projection; API owns transform grammar, scalar vectorization, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-005`](#sql-mql-005-default_rollup-and-window-less-rollups) | `MQL-05` | current foundation | automatic finite-series last-sample window and step-sized public window reductions; API owns packed stale/NaN fidelity, carry-in/reset semantics, language, limits, cancellation, and envelopes |
+| [`SQL-MQL-006`](#sql-mql-006-range-aggregates) | `MQL-06` | current foundation | slot-indexed full-grid average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, implicit windows, duplicate outputs, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -3823,6 +3824,124 @@ cross-window composition.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-005`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_default_and_windowless_rollups_match_victoriametrics_and_reopen`.
+
+### SQL-MQL-006: range aggregates
+
+`range_avg`, `range_min`, `range_max`, and `range_sum` reduce each complete
+input evaluation grid to one value and repeat that value at every requested
+timestamp. The following ordinary recursive SQL applies those mechanics to
+one exact metric selected through the public `timeless_grid` TVF:
+
+```sql
+WITH RECURSIVE
+evaluation(slot, ts) AS (
+  SELECT 0, :start
+  UNION ALL
+  SELECT slot + 1, ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+), selected AS MATERIALIZED (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+), identities AS (
+  SELECT DISTINCT labels FROM selected
+), input_grid AS (
+  SELECT identities.labels, evaluation.slot, evaluation.ts, selected.value
+  FROM identities
+  CROSS JOIN evaluation
+  LEFT JOIN selected
+    ON selected.labels = identities.labels
+   AND selected.ts = evaluation.ts
+), first_slots AS (
+  SELECT labels, min(slot) AS first_slot
+  FROM input_grid
+  WHERE value IS NOT NULL
+  GROUP BY labels
+), running(labels, slot, value) AS (
+  SELECT input_grid.labels, input_grid.slot, input_grid.value
+  FROM input_grid
+  JOIN first_slots
+    ON first_slots.labels = input_grid.labels
+   AND first_slots.first_slot = input_grid.slot
+  UNION ALL
+  SELECT
+    input_grid.labels,
+    input_grid.slot,
+    CASE
+      WHEN input_grid.value IS NULL THEN running.value
+      WHEN :aggregate = 'avg' THEN
+        running.value + (input_grid.value - running.value)
+          / (input_grid.slot - first_slots.first_slot + 1.0)
+      WHEN :aggregate = 'min' THEN
+        CASE WHEN running.value < input_grid.value
+          THEN running.value ELSE input_grid.value END
+      WHEN :aggregate = 'max' THEN
+        CASE WHEN running.value > input_grid.value
+          THEN running.value ELSE input_grid.value END
+      WHEN :aggregate = 'sum' THEN running.value + input_grid.value
+    END
+  FROM running
+  JOIN input_grid
+    ON input_grid.labels = running.labels
+   AND input_grid.slot = running.slot + 1
+  JOIN first_slots USING (labels)
+), final_values AS (
+  SELECT
+    first_slots.labels,
+    (
+      SELECT candidate.value
+      FROM running AS candidate
+      WHERE candidate.labels = first_slots.labels
+        AND candidate.value IS NOT NULL
+      ORDER BY candidate.slot DESC
+      LIMIT 1
+    ) AS value
+  FROM first_slots
+)
+SELECT NULL AS name, final_values.labels, evaluation.ts, final_values.value
+FROM final_values
+CROSS JOIN evaluation
+WHERE :aggregate IN ('avg', 'min', 'max', 'sum')
+  AND final_values.value IS NOT NULL
+ORDER BY final_values.labels, evaluation.ts;
+```
+
+Bind `:aggregate` to `avg`, `min`, `max`, or `sum`. `:start` and `:end` are
+inclusive timestamps in the metric table's declared unit, `:step` is a
+positive interval in that unit, and `:lookback` is the public selector
+lookback. Bind `:filter_json` to canonical label equality JSON or NULL. The
+output name is deliberately SQL NULL because pinned VictoriaMetrics removes
+the metric group for every `range_*` function—even when the expression has a
+trailing `keep_metric_names` modifier. Labels are canonical JSON TEXT,
+timestamps are INTEGER, values are REAL, and the final order is complete
+label identity followed by timestamp.
+
+The recursive state skips leading SQL NULL values, counts every missing grid
+slot in `range_avg`'s denominator after the first value, carries the running
+value through later gaps, uses ordinary binary64 addition, chooses the later
+operand for equal minima/maxima, selects the last non-NULL running value, and
+fills that value across leading and trailing output timestamps. This is the
+exact row-visible transformation once `selected` represents the input
+instant-vector grid. SQLite projects packed NaN as SQL NULL; that is compatible
+with these four functions' treatment of NaN as missing, but direct SQL does
+not expose the original NaN payload bits. The API additionally owns arbitrary
+inner expressions and scalars, automatic per-series selector windows,
+post-name-drop duplicate detection, `keep_metric_names` grammar, result/work/
+response limits, cancellation, float string formatting, and instant/range
+HTTP envelopes. A direct query spanning multiple metric names must retain the
+name while forming identities and explicitly reject collisions after setting
+the output name to NULL.
+
+The statement materializes only the bounded public input grid. It never reads
+a shadow table and adds no extension primitive; range aggregation performs no
+additional storage selection or decode beyond its child expression.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-006`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_range_aggregates_match_victoriametrics_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

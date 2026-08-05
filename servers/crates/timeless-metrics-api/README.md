@@ -187,6 +187,18 @@ and default rollup retain the source metric name; the other rollups and
 `timestamp` drop it. `first_over_time` remains unavailable on the stable
 PromQL routes because the pinned Prometheus tier feature-gates it.
 
+`range_avg`, `range_min`, `range_max`, and `range_sum` reduce each series over
+the complete request evaluation grid and repeat the final value at every grid
+timestamp. Average uses VictoriaMetrics's slot-indexed incremental arithmetic,
+sum uses ordinary binary64 addition, and extrema choose the later equal
+operand. Leading NaN/missing slots are skipped, later gaps carry, and the last
+non-NaN running value fills the whole grid. Every function removes the metric
+name even under `keep_metric_names`; post-removal duplicates fail explicitly.
+Timeless retains exact signed-zero bits where VictoriaMetrics's Remote Write
+path normalizes them. Scalar/expression composition, limits, cancellation,
+stable-route isolation, GET/POST, and shutdown/reopen are pinned through the
+real extension with one child storage evaluation.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding
@@ -199,6 +211,8 @@ and
 [`SQL-MQL-004`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-004-label_set-and-label_del)
 and
 [`SQL-MQL-005`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-005-default_rollup-and-window-less-rollups)
+and
+[`SQL-MQL-006`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-006-range-aggregates)
 recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
 envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
 `422`. Limits and cancellation continue to use Timeless's existing execution
@@ -248,7 +262,7 @@ The authoritative support contract is the
 Rust API rows at this revision are listed below for CI; prose in this README
 must not imply a broader language surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S14 PQL-S15 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-S23 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O08 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 PQL-H02 MQL-01 MQL-02 MQL-03 MQL-04 MQL-05 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S14 PQL-S15 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-S23 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O08 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 PQL-H02 MQL-01 MQL-02 MQL-03 MQL-04 MQL-05 MQL-06 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are

@@ -48,6 +48,20 @@ pub(crate) struct LabelPlan {
     pub(super) operation: LabelOperation,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RangeAggregateOp {
+    Avg,
+    Min,
+    Max,
+    Sum,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RangeAggregatePlan {
+    pub(super) op: RangeAggregateOp,
+    pub(super) inner: Box<PromPlan>,
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum LabelOperation {
     Set(Vec<(String, String)>),
@@ -234,6 +248,7 @@ fn supports_keep_metric_names(plan: &PromPlan, input: &str) -> bool {
         | PromPlan::MetricsUnion(_)
         | PromPlan::MetricsLabels(_)
         | PromPlan::MetricsDynamicRollup(_)
+        | PromPlan::MetricsRangeAggregate(_)
         | PromPlan::MetricsBinary(_)
         | PromPlan::Binary(_)
         | PromPlan::RangeReduction(_) => true,
@@ -286,6 +301,10 @@ fn lower_union_or_alias(
     if normalized == "default_rollup" {
         let arguments = metric_sql_arguments(&input[open + 1..close], "default_rollup")?;
         return lower_default_rollup(arguments, context, depth).map(Some);
+    }
+    if let Some(op) = range_aggregate_op(&normalized) {
+        let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
+        return lower_range_aggregate(&normalized, op, arguments, context, depth).map(Some);
     }
     if let Some((dynamic, op)) = windowless_rollup_op(&normalized) {
         let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
@@ -354,6 +373,44 @@ fn windowless_rollup_op(name: &str) -> Option<(DynamicRollupOp, PromRangeOp)> {
         "last_over_time" => (DynamicRollupOp::Last, PromRangeOp::Last),
         _ => return None,
     })
+}
+
+fn range_aggregate_op(name: &str) -> Option<RangeAggregateOp> {
+    Some(match name {
+        "range_avg" => RangeAggregateOp::Avg,
+        "range_min" => RangeAggregateOp::Min,
+        "range_max" => RangeAggregateOp::Max,
+        "range_sum" => RangeAggregateOp::Sum,
+        _ => return None,
+    })
+}
+
+fn lower_range_aggregate(
+    function: &str,
+    op: RangeAggregateOp,
+    arguments: Vec<&str>,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    let [argument] = arguments.as_slice() else {
+        return Err(format!(
+            "MetricsQL {function} requires exactly one argument; got {}",
+            arguments.len()
+        ));
+    };
+    let inner = lower_expr(argument, context, depth + 1)?;
+    if !matches!(
+        inner.value_type(),
+        PromValueType::Scalar | PromValueType::Vector
+    ) {
+        return Err(format!(
+            "MetricsQL {function} requires a scalar or instant-vector expression"
+        ));
+    }
+    Ok(PromPlan::MetricsRangeAggregate(RangeAggregatePlan {
+        op,
+        inner: Box::new(inner),
+    }))
 }
 
 fn lower_default_rollup(
@@ -1106,6 +1163,7 @@ fn contains_custom_word(input: &str) -> bool {
                     || word.eq_ignore_ascii_case("label_set")
                     || word.eq_ignore_ascii_case("label_del")
                     || word.eq_ignore_ascii_case("default_rollup")
+                    || range_aggregate_op(&word.to_ascii_lowercase()).is_some()
                     || windowless_rollup_op(&word.to_ascii_lowercase()).is_some()
                 {
                     return true;
@@ -1174,6 +1232,9 @@ fn apply_implicit_rollups(plan: &mut PromPlan, max_lookback: i64) -> Result<(), 
         }
         PromPlan::MetricsAlias(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
         PromPlan::MetricsLabels(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::MetricsRangeAggregate(plan) => {
+            apply_implicit_rollups(&mut plan.inner, max_lookback)?
+        }
         PromPlan::MetricsBinary(plan) => {
             apply_implicit_rollups(&mut plan.lhs, max_lookback)?;
             apply_implicit_rollups(&mut plan.rhs, max_lookback)?;
@@ -1314,6 +1375,9 @@ fn replace_placeholders(
         PromPlan::MetricsAlias(plan) => replace_placeholders(&mut plan.inner, placeholders)?,
         PromPlan::MetricsLabels(plan) => replace_placeholders(&mut plan.inner, placeholders)?,
         PromPlan::MetricsDynamicRollup(_) => {}
+        PromPlan::MetricsRangeAggregate(plan) => {
+            replace_placeholders(&mut plan.inner, placeholders)?
+        }
         PromPlan::MetricsBinary(plan) => {
             replace_placeholders(&mut plan.lhs, placeholders)?;
             replace_placeholders(&mut plan.rhs, placeholders)?;
@@ -1951,6 +2015,167 @@ pub(super) fn execute_dynamic_rollup(
         intermediate_points: 0,
         rows: points,
     })
+}
+
+fn apply_range_aggregate(
+    op: RangeAggregateOp,
+    previous: f64,
+    value: f64,
+    slots_since_first: u64,
+) -> f64 {
+    match op {
+        RangeAggregateOp::Avg => previous + (value - previous) / (slots_since_first as f64 + 1.0),
+        RangeAggregateOp::Min => {
+            if previous < value {
+                previous
+            } else {
+                value
+            }
+        }
+        RangeAggregateOp::Max => {
+            if previous > value {
+                previous
+            } else {
+                value
+            }
+        }
+        RangeAggregateOp::Sum => previous + value,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_range_aggregate(
+    conn: &Connection,
+    features: QueryFeatures,
+    plan: &RangeAggregatePlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let input_type = plan.inner.value_type();
+    let child = execute_prometheus(
+        conn,
+        features,
+        &plan.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    let mut intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let series = into_series(decode_prometheus_intermediate(
+        &child.body,
+        input_type,
+        instant,
+        limits,
+        cancelled,
+    )?);
+    let grid_points = ((i128::from(stop) - i128::from(start)) / i128::from(step) + 1)
+        .try_into()
+        .map_err(|_| "MetricsQL range aggregate grid size overflow".to_string())?;
+    let mut timestamps = Vec::with_capacity(grid_points);
+    let mut timestamp = start;
+    loop {
+        check_cancelled(cancelled)?;
+        timestamps.push(timestamp);
+        if timestamp >= stop {
+            break;
+        }
+        let Some(next) = timestamp.checked_add(step).filter(|next| *next <= stop) else {
+            break;
+        };
+        timestamp = next;
+    }
+
+    let mut output = Vec::with_capacity(series.len());
+    let mut labels_seen = BTreeSet::new();
+    let mut retained_label_bytes = 0_usize;
+    let mut result_points = 0_u64;
+    for mut item in series {
+        check_cancelled(cancelled)?;
+        item.points.sort_unstable_by_key(|sample| sample.0);
+        let mut input = item.points.into_iter().peekable();
+        let mut previous = None;
+        let mut last_non_nan = None;
+        let mut slots_since_first = 0_u64;
+        for timestamp in &timestamps {
+            check_cancelled(cancelled)?;
+            intermediate_points = intermediate_points.saturating_add(1);
+            enforce_intermediate_work(intermediate_points, limits)?;
+            while input
+                .peek()
+                .is_some_and(|(sample_timestamp, _)| sample_timestamp < timestamp)
+            {
+                input.next();
+            }
+            let value = input
+                .peek()
+                .filter(|(sample_timestamp, _)| sample_timestamp == timestamp)
+                .map(|(_, value)| *value);
+            if value.is_some() {
+                input.next();
+            }
+            let Some(value) = value.filter(|value| !value.is_nan()) else {
+                if previous.is_some() {
+                    slots_since_first = slots_since_first.saturating_add(1);
+                }
+                continue;
+            };
+            let next = if let Some(previous) = previous {
+                slots_since_first = slots_since_first.saturating_add(1);
+                apply_range_aggregate(plan.op, previous, value, slots_since_first)
+            } else {
+                slots_since_first = 0;
+                value
+            };
+            previous = Some(next);
+            if !next.is_nan() {
+                last_non_nan = Some(next);
+            }
+        }
+        let Some(value) = last_non_nan else {
+            continue;
+        };
+        item.labels.remove("__name__");
+        if !labels_seen.insert(item.labels.clone()) {
+            return Err("duplicate output timeseries: range aggregate".into());
+        }
+        charge_metricsql_labels(&mut retained_label_bytes, &item.labels, limits)?;
+        let mut points = Vec::with_capacity(timestamps.len());
+        for timestamp in &timestamps {
+            check_cancelled(cancelled)?;
+            admit_prometheus_point(result_points, limits)?;
+            result_points = result_points.saturating_add(1);
+            intermediate_points = intermediate_points.saturating_add(1);
+            enforce_intermediate_work(intermediate_points, limits)?;
+            points.push((*timestamp, value));
+        }
+        output.push(IntermediateSeries {
+            labels: item.labels,
+            points,
+        });
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(output),
+        instant,
+        child.frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2853,6 +3078,31 @@ mod tests {
             "first_over_time(cpu, 1)",
             "avg_over_time()",
             "avg_over_time(cpu, 1)",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
+        }
+    }
+
+    #[test]
+    fn range_aggregates_match_metricsql_grammar() {
+        for query in [
+            "range_avg(cpu)",
+            "range_min(cpu)",
+            "range_max(cpu)",
+            "range_sum(cpu)",
+            "range_avg(1)",
+            "range_sum(cpu * 2)",
+            "RANGE_MAX(cpu,)",
+            "range_avg(cpu) keep_metric_names",
+            "sum(range_sum(cpu))",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_ok(), "{query}");
+        }
+        for query in [
+            "range_avg()",
+            "range_avg(cpu, 1)",
+            "range_sum()",
+            "range_sum(cpu, 1)",
         ] {
             assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
         }

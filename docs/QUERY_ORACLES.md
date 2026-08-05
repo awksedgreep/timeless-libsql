@@ -143,7 +143,13 @@ open-left windows, 0.6-quantile scrape inference, jitter inflation,
 `max_lookback`, stale markers, every retained one-argument window-less rollup,
 previous-sample and counter-reset behavior, metric-name policy, timestamp
 provenance, scalar and aggregate composition, case-insensitive names, and
-trailing commas. The fixture now contains 96 MetricsQL cases in total.
+trailing commas. The `MQL-06` corpus adds 17 successful range-aggregate cases
+and three errors. It pins whole-grid reduction and repeated output,
+slot-indexed incremental average, ordinary sum, later-operand extrema ties,
+leading/interior missing grids, NaN/infinity/overflow behavior, scalar and
+expression composition, case/trailing-comma grammar, unconditional name
+removal, arity, and duplicate outputs. The fixture now contains 116 MetricsQL
+cases in total.
 Timeless compares exact result labels, timestamp grids, and float values while
 retaining its documented HTTP 400 `bad_data` envelope in place of
 VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
@@ -158,6 +164,14 @@ window from inferred scrape cadence without fetching the same leading silence
 history used by `rate`; the slow-scrape leading evaluation consequently emits
 zero. Timeless pins that behavior instead of applying a superficially more
 uniform history policy.
+
+The `MQL-06` fixture records an additional representation boundary.
+VictoriaMetrics's Remote Write/query path renders both signed-zero input
+orders as positive zero, although its pinned transform source chooses the
+later operand for equal minima and maxima. Timeless retains exact stored
+binary64 bits and therefore returns negative zero when the later operand is
+negative zero. The API regression pins that stronger fidelity explicitly;
+all non-representation semantics remain oracle-equal.
 
 Session 14 also pins Prometheus 3 quoted UTF-8 metric and label names, comments
 and source positions, and classic-bucket `histogram_fraction` grouping and

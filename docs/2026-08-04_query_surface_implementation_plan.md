@@ -258,9 +258,12 @@ stable-route isolation, and bounded label projection over one public read.
 per-series scrape inference, jitter inflation, `max_lookback`, exact stale-bit
 handling, step-window rollups, previous-sample/reset correction, name and
 timestamp policy, executable `SQL-MQL-005`, stable-route isolation, and one
-public packed-raw evaluation plan. The remaining rows continue in their listed
-order; `MQL-11` is already corrected to deferred because the pinned oracle
-rejects `min_of` and `max_of`.
+public packed-raw evaluation plan. `MQL-06` is shipped with complete-grid
+`range_avg/min/max/sum`, pinned slot-index/missing/IEEE/name/collision
+behavior, executable `SQL-MQL-006`, one bounded child evaluation,
+generated-result/work limits, cancellation, and stable-route isolation. The
+remaining rows continue in their listed order; `MQL-11` is already corrected
+to deferred because the pinned oracle rejects `min_of` and `max_of`.
 
 ### Session 16: LogsQL P2 filters
 

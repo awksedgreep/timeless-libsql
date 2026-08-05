@@ -1077,6 +1077,103 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         }
     }
 
+    let range_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-006")
+        .context("SQL-MQL-006 recipe")?;
+    if range_recipe.statements.len() != 1 {
+        bail!("SQL-MQL-006 must retain one parameterized range statement");
+    }
+    for (aggregate, expected_values) in [
+        ("avg", [20.0_f64, 20.0_f64]),
+        ("min", [10.0_f64, 20.0_f64]),
+        ("max", [30.0_f64, 20.0_f64]),
+        ("sum", [40.0_f64, 40.0_f64]),
+    ] {
+        let mut statement = connection.prepare(&range_recipe.statements[0])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-006 parameter must be named")?
+                .trim_start_matches(':');
+            let value = if name == "aggregate" {
+                Value::Text(aggregate.to_owned())
+            } else {
+                parameter("SQL-MQL-006", name)
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected = [
+            (
+                None,
+                r#"{"host":"web-1","service":"api"}"#.to_owned(),
+                100_i64,
+                expected_values[0],
+            ),
+            (
+                None,
+                r#"{"host":"web-1","service":"api"}"#.to_owned(),
+                110_i64,
+                expected_values[0],
+            ),
+            (
+                None,
+                r#"{"host":"web-2","service":"api"}"#.to_owned(),
+                100_i64,
+                expected_values[1],
+            ),
+            (
+                None,
+                r#"{"host":"web-2","service":"api"}"#.to_owned(),
+                110_i64,
+                expected_values[1],
+            ),
+        ];
+        if rows != expected {
+            bail!("SQL-MQL-006 {aggregate} changed: {rows:?}");
+        }
+    }
+
+    let mut precision_statement = connection.prepare(&range_recipe.statements[0])?;
+    for index in 1..=precision_statement.parameter_count() {
+        let name = precision_statement
+            .parameter_name(index)
+            .context("SQL-MQL-006 precision parameter must be named")?
+            .trim_start_matches(':');
+        let value = match name {
+            "aggregate" => Value::Text("avg".to_owned()),
+            "metric" => Value::Text("avg_precision".to_owned()),
+            "start" => Value::Integer(10),
+            "end" => Value::Integer(30),
+            "step" => Value::Integer(10),
+            "lookback" => Value::Integer(30),
+            _ => parameter("SQL-MQL-006", name),
+        };
+        precision_statement.raw_bind_parameter(index, value)?;
+    }
+    let precision = precision_statement
+        .raw_query()
+        .mapped(|row| row.get::<_, f64>(3))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if precision.len() != 3
+        || precision
+            .iter()
+            .any(|value| value.to_bits() != 0.0_f64.to_bits())
+    {
+        bail!("SQL-MQL-006 slot-indexed average changed: {precision:?}");
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1500,13 +1597,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 74);
+        assert_eq!(recipes.len(), 75);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            98
+            99
         );
         assert_eq!(
             recipes
@@ -1514,7 +1611,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            104
+            105
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }
