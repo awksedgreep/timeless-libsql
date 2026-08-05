@@ -2645,3 +2645,73 @@ reopen, and reader reuse after rejection. No extension primitive, private table
 access, storage format, batching, compression, index, rollup, retention,
 transaction, migration, maintenance, or public batch/SQL contract changed. No
 CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: automatic and window-less rollups
+
+The checked-in
+[`2026-08-05_session15_mql_05_rollups.json`](evidence/2026-08-05_session15_mql_05_rollups.json)
+was captured from exact extension, metrics-server, and logs-server build
+`8a7cf6cf973be308021366723a7b650920a82b60`. It closes `MQL-05` with separate
+implicit-default, step-window aggregate, and previous-sample counter shapes.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query | extension frame bytes/query | raw points returned/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| implicit `default_rollup`, exact host | 1 | 164 | 0.680 | 0.954 | 1.045 | 1 | 32 | 131 | 540 | 32 |
+| implicit `default_rollup`, 512 series / four steps | 2,048 | 84,004 | 3.733 | 5.409 | 5.448 | 512 | 16,384 | 53,831 | 268,304 | 16,384 |
+| window-less `avg_over_time`, exact host | 1 | 166 | 0.736 | 0.966 | 1.038 | 1 | 32 | 131 | 524 | 31 |
+| window-less `avg_over_time`, 512 series / four steps | 2,048 | 84,004 | 3.636 | 4.083 | 4.188 | 512 | 16,384 | 53,831 | 47,120 | 2,560 |
+| window-less `rate`, exact host | 1 | 133 | 0.838 | 0.989 | 1.068 | 1 | 32 | 131 | 540 | 32 |
+| window-less `rate`, 512 series / four steps | 2,048 | 67,902 | 3.870 | 4.558 | 10.257 | 512 | 16,384 | 53,831 | 268,304 | 16,384 |
+
+Every shape performs one public packed-raw query. Candidate chunks, decoded
+points, and persisted payload bytes are identical to the corresponding
+retained selector grid; cadence inference, stale-bit inspection, prior-sample
+selection, reset correction, and output-name policy cause no second storage
+read. The three wide paths return 2,048 result points and remain within the
+same work, result, response, deadline, and cancellation envelopes.
+
+The implicit-default wide p95 is 45.2% above the same-run stable range selector
+(5.409 versus 3.725 ms) with the same 84,004-byte response and exactly the same
+storage and frame work. Narrow p95 is 2.3% below its selector reference despite
+retaining one additional cadence sample. The wide difference is therefore
+bounded per-series inference/evaluation variation rather than storage
+amplification; it is retained without claiming the narrow direction as a win.
+
+Window-less average wide p95 is 10.3% above the same-run explicit five-minute
+average (4.083 versus 3.703 ms). The comparison is directional, not semantic:
+the MetricsQL form uses a step window, retains `__name__`, and returns 13,371
+more response bytes. Its unified packed-raw frame is 47,120 bytes versus
+37,376 bytes from the existing `timeless_window` aggregate. That public window
+surface already gives direct SQLite/libSQL users the smaller reduction;
+automatic syntax, raw stale/ordinary-NaN bits, and cross-window composition
+remain API semantics, so no new extension primitive is justified.
+
+Window-less rate wide p95 is 8.1% above the same-run explicit five-minute rate
+(4.558 versus 4.215 ms), while narrow p95 is 2.2% higher. One wide iteration was
+the 10.257 ms p99/max; the other 49 observations leave p95 at 4.558 ms. Those
+expressions also have different windows and annotation behavior, so the
+evidence does not claim direct semantic equivalence. It proves that scrape
+inference, bounded silence history, previous-sample use, and reset correction
+stay within one retained raw read while preserving the observed tail.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 9.262 ms and the explicit durability barrier took 91.532 ms. Metrics
+storage is byte-identical to MQL-04: 224,688 payload bytes, 409,600 index bytes,
+and 1,542,312 physical database/WAL/SHM bytes. Logs remain 1,088,919 logical and
+1,190,496 physical bytes. Metrics RSS HWM was 51,444 KiB, 328 KiB above MQL-04;
+logs HWM was 64,452 KiB, 72 KiB lower. These whole-process variations are
+retained without attributing either direction to one query shape.
+
+All 528 pinned Prometheus 3.13.2 cases and all 96 pinned VictoriaMetrics
+1.148.0 cases pass. The complete 85-test metrics real-extension suite, 54
+metrics library tests, both complete Rust workspaces, clippy with warnings
+denied, formatting, the 25-test Rust query harness, documentation contracts,
+and all 74 SQL recipes (104 statements) pass locally. Regressions cover
+implicit/explicit rollups, inferred and capped windows, open-left boundaries,
+stale and ordinary NaN bits, all retained window-less functions, previous
+transitions, reset correction, name and timestamp policy, scalar and aggregate
+composition, invalid arity, stable PromQL isolation, GET/POST, limits,
+cancellation, flush, shutdown, durability, and reopen. No extension primitive,
+private table access, storage format, batching, compression, index, rollup,
+retention, transaction, migration, maintenance, or public batch/SQL contract
+changed. No CI workflow was invoked.
