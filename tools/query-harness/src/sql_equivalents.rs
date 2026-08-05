@@ -312,6 +312,11 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "service" => Value::Text("api".to_owned()),
         "limit" => Value::Integer(10),
         "needle" | "message_contains" => Value::Text("timeout".to_owned()),
+        "exact_message" => Value::Text("request timeout".to_owned()),
+        "empty_path" => Value::Text("$.nested.none".to_owned()),
+        "any_path" => Value::Text("$.deployment.region".to_owned()),
+        "duration_threshold" => Value::Integer(10),
+        "excluded_level" => Value::Text("info".to_owned()),
         "field" => Value::Text("host".to_owned()),
         "max_values" => Value::Integer(100),
         "region" => Value::Text("us-east".to_owned()),
@@ -655,6 +660,36 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         [],
         |row| row.get(0),
     )?;
+    let recipe_rows = |identifier: &str, statement_index: usize| -> Result<usize> {
+        let recipe = recipes
+            .iter()
+            .find(|recipe| recipe.identifier == identifier)
+            .with_context(|| format!("{identifier} recipe"))?;
+        let sql = recipe
+            .statements
+            .get(statement_index)
+            .with_context(|| format!("{identifier} statement {}", statement_index + 1))?;
+        let mut statement = connection.prepare(sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("documented SQL parameter must be named")?
+                .trim_start_matches(':');
+            statement.raw_bind_parameter(index, parameter(identifier, name))?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|_| Ok(()))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.len())
+    };
+    let session_twelve_recipe_rows = [
+        recipe_rows("SQL-LOG-007", 0)?,
+        recipe_rows("SQL-LOG-008", 0)?,
+        recipe_rows("SQL-LOG-008", 1)?,
+        recipe_rows("SQL-LOG-008", 2)?,
+        recipe_rows("SQL-LOG-009", 0)?,
+    ];
     if [
         bounded,
         substring,
@@ -683,6 +718,9 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
                 buckets
             ]
         );
+    }
+    if session_twelve_recipe_rows != [1, 1, 2, 2, 1] {
+        bail!("Session 12 SQL-LOG recipe results changed: {session_twelve_recipe_rows:?}");
     }
     let work_error = connection
         .query_row(
@@ -850,13 +888,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 61);
+        assert_eq!(recipes.len(), 64);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            77
+            82
         );
         assert_eq!(
             recipes
@@ -864,7 +902,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            78
+            83
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

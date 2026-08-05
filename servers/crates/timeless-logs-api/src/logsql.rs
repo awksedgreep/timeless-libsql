@@ -7,10 +7,13 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use regex::RegexBuilder;
 
 use serde_json::Value;
 
-use crate::{MetadataExact, QuerySpec, TimestampUnit};
+use crate::{
+    LogField, LogPredicate, MetadataExact, NumericOp, QuerySpec, TimestampUnit, ValueTypeKind,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogsqlOutput {
@@ -90,52 +93,132 @@ pub fn parse_at(
     if base.is_empty() {
         return Err(LogsqlError::malformed("LogsQL query is empty"));
     }
-    for term in logsql_terms(base)? {
-        match term {
-            LogsqlTerm::Token(token) if token == "*" => {}
-            LogsqlTerm::Token(token) if token.starts_with("level:") => {
-                let level = required_logsql_value(&token, "level:")?;
-                if !matches!(
-                    level.as_str(),
-                    "debug"
-                        | "info"
-                        | "notice"
-                        | "warning"
-                        | "error"
-                        | "critical"
-                        | "alert"
-                        | "emergency"
-                ) {
-                    return Err(LogsqlError::malformed(format!(
-                        "unsupported LogsQL level {level:?}"
-                    )));
+    let logical_tokens = lex_logical_tokens(base)?;
+    let use_logical_parser = logical_tokens.iter().any(|token| {
+        matches!(
+            token,
+            LogicalToken::And | LogicalToken::Or | LogicalToken::Not | LogicalToken::FieldGroup(_)
+        )
+    }) || matches!(logical_tokens.first(), Some(LogicalToken::LeftParen));
+    if use_logical_parser {
+        let expression = LogicalParser::new(logical_tokens).parse()?;
+        let predicate = compile_logical_expression(&expression, None, timestamp_unit, query_now)?;
+        apply_safe_logical_pushdowns(&predicate, &mut spec)?;
+        spec.predicate = Some(predicate);
+    } else {
+        for term in logsql_terms(base)? {
+            match term {
+                LogsqlTerm::Token(token) if token == "*" => {}
+                LogsqlTerm::Token(token)
+                    if token.starts_with("level:")
+                        && uses_legacy_exact_syntax(&token, "level:") =>
+                {
+                    let level = required_logsql_value(&token, "level:")?;
+                    if !matches!(
+                        level.as_str(),
+                        "debug"
+                            | "info"
+                            | "notice"
+                            | "warning"
+                            | "error"
+                            | "critical"
+                            | "alert"
+                            | "emergency"
+                    ) {
+                        return Err(LogsqlError::malformed(format!(
+                            "unsupported LogsQL level {level:?}"
+                        )));
+                    }
+                    spec.level = Some(level);
                 }
-                spec.level = Some(level);
-            }
-            LogsqlTerm::Token(token)
-                if token.starts_with("service:") && !token.starts_with("service:=") =>
-            {
-                spec.service = Some(required_logsql_value(&token, "service:")?);
-            }
-            LogsqlTerm::Token(token) if token.starts_with("_time:") => {
-                let window = required_logsql_value(&token, "_time:")?;
-                apply_time_filter(&mut spec, &window, timestamp_unit, query_now)?;
-            }
-            LogsqlTerm::Message(message) if spec.message_phrase.is_none() => {
-                spec.message_phrase = Some(message);
-            }
-            LogsqlTerm::Message(_) => {
-                return Err(LogsqlError::unsupported(
-                    "multiple LogsQL message terms are not supported",
-                ))
-            }
-            LogsqlTerm::Token(token) if token.contains(':') => {
-                apply_metadata_filter(&mut spec, &token)?;
-            }
-            LogsqlTerm::Token(token) => {
-                return Err(LogsqlError::unsupported(format!(
-                    "unsupported LogsQL term {token:?}"
-                )))
+                LogsqlTerm::Token(token)
+                    if token.starts_with("service:")
+                        && uses_legacy_exact_syntax(&token, "service:") =>
+                {
+                    spec.service = Some(required_logsql_value(&token, "service:")?);
+                }
+                LogsqlTerm::Token(token) if token.starts_with("_time:") => {
+                    let window = required_logsql_value(&token, "_time:")?;
+                    apply_time_filter(&mut spec, &window, timestamp_unit, query_now)?;
+                }
+                LogsqlTerm::Message(message) if spec.message_phrase.is_none() => {
+                    spec.message_phrase = Some(message);
+                }
+                LogsqlTerm::Message(_) => {
+                    return Err(LogsqlError::unsupported(
+                        "multiple LogsQL message terms are not supported",
+                    ))
+                }
+                LogsqlTerm::Token(token) if metadata_operator(&token).is_some() => {
+                    apply_metadata_filter(&mut spec, &token)?;
+                }
+                LogsqlTerm::Token(token) => {
+                    if matches!(token.to_ascii_uppercase().as_str(), "AND" | "OR" | "NOT") {
+                        return Err(LogsqlError::unsupported(format!(
+                            "LogsQL logical operator {token:?} is not implemented yet"
+                        )));
+                    }
+                    if let Some(value) = parse_exact_filter(&token)? {
+                        append_predicate(
+                            &mut spec,
+                            LogPredicate::Exact {
+                                field: LogField::Message,
+                                value,
+                            },
+                        );
+                        continue;
+                    }
+                    if let Some(predicate) = parse_case_insensitive_filter(&token)? {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
+                    if let Some(regex) = parse_regexp_filter(&token)? {
+                        append_predicate(
+                            &mut spec,
+                            LogPredicate::Regex {
+                                field: LogField::Message,
+                                regex,
+                            },
+                        );
+                        continue;
+                    }
+                    if let Some(value) = parse_substring_filter(&token)? {
+                        append_predicate(
+                            &mut spec,
+                            LogPredicate::Substring {
+                                field: LogField::Message,
+                                value,
+                                case_insensitive: false,
+                            },
+                        );
+                        continue;
+                    }
+                    if let Some((value, phrase)) = parse_prefix_filter(&token)? {
+                        append_predicate(
+                            &mut spec,
+                            LogPredicate::Prefix {
+                                field: LogField::Message,
+                                value,
+                                phrase,
+                                case_insensitive: false,
+                            },
+                        );
+                        continue;
+                    }
+                    if token.is_empty() || !token.chars().all(logsql_word_char) {
+                        return Err(LogsqlError::unsupported(format!(
+                            "unsupported LogsQL term {token:?}"
+                        )));
+                    }
+                    append_predicate(
+                        &mut spec,
+                        LogPredicate::Word {
+                            field: LogField::Message,
+                            value: token,
+                            case_insensitive: false,
+                        },
+                    );
+                }
             }
         }
     }
@@ -187,6 +270,768 @@ pub fn parse_at(
         output,
         limit_explicit,
     })
+}
+
+fn parse_exact_filter(token: &str) -> Result<Option<String>, LogsqlError> {
+    let Some(value) = token.strip_prefix('=') else {
+        return Ok(None);
+    };
+    let value = quoted_value(value)?.ok_or_else(|| {
+        LogsqlError::malformed("LogsQL exact message filter requires a quoted value after =")
+    })?;
+    Ok(Some(value))
+}
+
+fn parse_case_insensitive_filter(token: &str) -> Result<Option<LogPredicate>, LogsqlError> {
+    let Some(inner) = token.strip_prefix("i(") else {
+        return Ok(None);
+    };
+    let inner = inner
+        .strip_suffix(')')
+        .ok_or_else(|| LogsqlError::malformed("unterminated LogsQL case-insensitive filter"))?;
+    if inner.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL case-insensitive filter requires a value",
+        ));
+    }
+    if let Some(value) = parse_substring_filter(inner)? {
+        return Ok(Some(LogPredicate::Substring {
+            field: LogField::Message,
+            value: value.to_lowercase(),
+            case_insensitive: true,
+        }));
+    }
+    if let Some((value, phrase)) = parse_prefix_filter(inner)? {
+        return Ok(Some(LogPredicate::Prefix {
+            field: LogField::Message,
+            value: value.to_lowercase(),
+            phrase,
+            case_insensitive: true,
+        }));
+    }
+    if let Some(value) = quoted_value(inner)? {
+        return Ok(Some(LogPredicate::Phrase {
+            field: LogField::Message,
+            value: value.to_lowercase(),
+            case_insensitive: true,
+        }));
+    }
+    if !inner.chars().all(logsql_word_char) {
+        return Err(LogsqlError::unsupported(format!(
+            "unsupported LogsQL case-insensitive filter {token:?}"
+        )));
+    }
+    Ok(Some(LogPredicate::Word {
+        field: LogField::Message,
+        value: inner.to_lowercase(),
+        case_insensitive: true,
+    }))
+}
+
+fn parse_regexp_filter(token: &str) -> Result<Option<regex::Regex>, LogsqlError> {
+    let Some(value) = token.strip_prefix('~') else {
+        return Ok(None);
+    };
+    let pattern = quoted_value(value)?.ok_or_else(|| {
+        LogsqlError::malformed("LogsQL regexp filter requires a quoted pattern after ~")
+    })?;
+    RegexBuilder::new(&pattern)
+        .size_limit(1 << 20)
+        .build()
+        .map(Some)
+        .map_err(|error| LogsqlError::malformed(format!("invalid LogsQL regexp: {error}")))
+}
+
+fn parse_substring_filter(token: &str) -> Result<Option<String>, LogsqlError> {
+    let Some(value) = token
+        .strip_prefix('*')
+        .and_then(|value| value.strip_suffix('*'))
+    else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL substring filter requires a non-empty value",
+        ));
+    }
+    Ok(Some(
+        quoted_value(value)?.unwrap_or_else(|| value.to_owned()),
+    ))
+}
+
+fn parse_prefix_filter(token: &str) -> Result<Option<(String, bool)>, LogsqlError> {
+    let Some(value) = token.strip_suffix('*') else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.starts_with('*') {
+        return Ok(None);
+    }
+    if let Some(value) = quoted_value(value)? {
+        return Ok(Some((value, true)));
+    }
+    if !value.chars().all(logsql_word_char) {
+        return Ok(None);
+    }
+    Ok(Some((value.to_owned(), false)))
+}
+
+fn append_predicate(spec: &mut QuerySpec, predicate: LogPredicate) {
+    spec.predicate = Some(match spec.predicate.take() {
+        None => predicate,
+        Some(LogPredicate::And(mut predicates)) => {
+            predicates.push(predicate);
+            LogPredicate::And(predicates)
+        }
+        Some(existing) => LogPredicate::And(vec![existing, predicate]),
+    });
+}
+
+fn logsql_word_char(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LogicalToken {
+    Atom(String),
+    FieldGroup(String),
+    And,
+    Or,
+    Not,
+    LeftParen,
+    RightParen,
+}
+
+fn lex_logical_tokens(input: &str) -> Result<Vec<LogicalToken>, LogsqlError> {
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < input.len() {
+        let Some(character) = input[index..].chars().next() else {
+            break;
+        };
+        if character.is_whitespace() {
+            index += character.len_utf8();
+            continue;
+        }
+        if character == '(' {
+            tokens.push(LogicalToken::LeftParen);
+            index += 1;
+            continue;
+        }
+        if character == ')' {
+            tokens.push(LogicalToken::RightParen);
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        let mut field_group = None;
+        while index < input.len() {
+            let character = input[index..]
+                .chars()
+                .next()
+                .expect("index remains on a UTF-8 boundary");
+            if character.is_whitespace() || character == ')' {
+                break;
+            }
+            if matches!(character, '"' | '\'' | '`') {
+                let (_, consumed) = parse_quoted_prefix(&input[index..])?
+                    .expect("known quote delimiter starts a quoted value");
+                index += consumed;
+                continue;
+            }
+            if character == '(' {
+                let prefix = &input[start..index];
+                if prefix.ends_with(':') && prefix != "_time:" {
+                    field_group = Some(prefix[..prefix.len() - 1].to_owned());
+                    index += 1;
+                    break;
+                }
+                index = if prefix == "_time:" || prefix.ends_with(":range") || prefix == "range" {
+                    scan_time_range(input, index)?
+                } else {
+                    scan_balanced_parentheses(input, index)?
+                };
+                continue;
+            }
+            if character == '[' {
+                let prefix = &input[start..index];
+                if prefix == "_time:" || prefix.ends_with(":range") || prefix == "range" {
+                    index = scan_time_range(input, index)?;
+                    continue;
+                }
+            }
+            index += character.len_utf8();
+        }
+        if let Some(field) = field_group {
+            if field.is_empty() {
+                return Err(LogsqlError::malformed(
+                    "LogsQL field-scoped group requires a field name",
+                ));
+            }
+            tokens.push(LogicalToken::FieldGroup(field));
+            tokens.push(LogicalToken::LeftParen);
+            continue;
+        }
+        if index == start {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected LogsQL token near {:?}",
+                &input[index..]
+            )));
+        }
+        push_logical_atom(&mut tokens, &input[start..index])?;
+    }
+    Ok(tokens)
+}
+
+fn scan_balanced_parentheses(input: &str, start: usize) -> Result<usize, LogsqlError> {
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < input.len() {
+        let character = input[index..]
+            .chars()
+            .next()
+            .expect("index remains on a UTF-8 boundary");
+        if matches!(character, '"' | '\'' | '`') {
+            let (_, consumed) = parse_quoted_prefix(&input[index..])?
+                .expect("known quote delimiter starts a quoted value");
+            index += consumed;
+            continue;
+        }
+        if character == '(' {
+            depth = depth.saturating_add(1);
+        } else if character == ')' {
+            depth = depth
+                .checked_sub(1)
+                .ok_or_else(|| LogsqlError::malformed("unmatched LogsQL closing parenthesis"))?;
+            index += 1;
+            if depth == 0 {
+                return Ok(index);
+            }
+            continue;
+        }
+        index += character.len_utf8();
+    }
+    Err(LogsqlError::malformed(
+        "unterminated LogsQL function arguments",
+    ))
+}
+
+fn scan_time_range(input: &str, start: usize) -> Result<usize, LogsqlError> {
+    for (relative, character) in input[start + 1..].char_indices() {
+        if matches!(character, ']' | ')') {
+            return Ok(start + 1 + relative + character.len_utf8());
+        }
+    }
+    Err(LogsqlError::malformed("unterminated LogsQL time range"))
+}
+
+fn push_logical_atom(tokens: &mut Vec<LogicalToken>, atom: &str) -> Result<(), LogsqlError> {
+    if atom.is_empty() {
+        return Err(LogsqlError::malformed("empty LogsQL logical token"));
+    }
+    match atom {
+        "AND" => tokens.push(LogicalToken::And),
+        "OR" => tokens.push(LogicalToken::Or),
+        "NOT" => tokens.push(LogicalToken::Not),
+        _ if atom.starts_with('-') && atom.len() > 1 => {
+            tokens.push(LogicalToken::Not);
+            tokens.push(LogicalToken::Atom(atom[1..].to_owned()));
+        }
+        _ => tokens.push(LogicalToken::Atom(atom.to_owned())),
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+enum LogicalExpression {
+    Atom(String),
+    Field(String, Box<LogicalExpression>),
+    And(Vec<LogicalExpression>),
+    Or(Vec<LogicalExpression>),
+    Not(Box<LogicalExpression>),
+}
+
+struct LogicalParser {
+    tokens: Vec<LogicalToken>,
+    index: usize,
+}
+
+impl LogicalParser {
+    fn new(tokens: Vec<LogicalToken>) -> Self {
+        Self { tokens, index: 0 }
+    }
+
+    fn parse(mut self) -> Result<LogicalExpression, LogsqlError> {
+        if self.tokens.is_empty() {
+            return Err(LogsqlError::malformed("LogsQL query is empty"));
+        }
+        let expression = self.parse_or()?;
+        if self.index != self.tokens.len() {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected LogsQL logical token {:?}",
+                self.tokens[self.index]
+            )));
+        }
+        Ok(expression)
+    }
+
+    fn parse_or(&mut self) -> Result<LogicalExpression, LogsqlError> {
+        let mut expressions = vec![self.parse_and()?];
+        while self.consume(&LogicalToken::Or) {
+            expressions.push(self.parse_and()?);
+        }
+        Ok(combine_logical_or(expressions))
+    }
+
+    fn parse_and(&mut self) -> Result<LogicalExpression, LogsqlError> {
+        let mut expressions = vec![self.parse_unary()?];
+        loop {
+            if self.consume(&LogicalToken::And) || self.next_starts_expression() {
+                expressions.push(self.parse_unary()?);
+            } else {
+                break;
+            }
+        }
+        Ok(combine_logical_and(expressions))
+    }
+
+    fn parse_unary(&mut self) -> Result<LogicalExpression, LogsqlError> {
+        if self.consume(&LogicalToken::Not) {
+            return Ok(LogicalExpression::Not(Box::new(self.parse_unary()?)));
+        }
+        match self.tokens.get(self.index).cloned() {
+            Some(LogicalToken::Atom(atom)) => {
+                self.index += 1;
+                Ok(LogicalExpression::Atom(atom))
+            }
+            Some(LogicalToken::LeftParen) => {
+                self.index += 1;
+                let expression = self.parse_or()?;
+                self.expect(LogicalToken::RightParen)?;
+                Ok(expression)
+            }
+            Some(LogicalToken::FieldGroup(field)) => {
+                self.index += 1;
+                self.expect(LogicalToken::LeftParen)?;
+                let expression = self.parse_or()?;
+                self.expect(LogicalToken::RightParen)?;
+                Ok(LogicalExpression::Field(field, Box::new(expression)))
+            }
+            Some(token) => Err(LogsqlError::malformed(format!(
+                "expected LogsQL filter, found {token:?}"
+            ))),
+            None => Err(LogsqlError::malformed(
+                "LogsQL logical expression ends unexpectedly",
+            )),
+        }
+    }
+
+    fn consume(&mut self, expected: &LogicalToken) -> bool {
+        if self.tokens.get(self.index) == Some(expected) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, expected: LogicalToken) -> Result<(), LogsqlError> {
+        if self.consume(&expected) {
+            Ok(())
+        } else {
+            Err(LogsqlError::malformed(format!(
+                "expected LogsQL logical token {expected:?}"
+            )))
+        }
+    }
+
+    fn next_starts_expression(&self) -> bool {
+        matches!(
+            self.tokens.get(self.index),
+            Some(
+                LogicalToken::Atom(_)
+                    | LogicalToken::FieldGroup(_)
+                    | LogicalToken::Not
+                    | LogicalToken::LeftParen
+            )
+        )
+    }
+}
+
+fn combine_logical_and(expressions: Vec<LogicalExpression>) -> LogicalExpression {
+    if expressions.len() == 1 {
+        expressions.into_iter().next().unwrap()
+    } else {
+        LogicalExpression::And(expressions)
+    }
+}
+
+fn combine_logical_or(expressions: Vec<LogicalExpression>) -> LogicalExpression {
+    if expressions.len() == 1 {
+        expressions.into_iter().next().unwrap()
+    } else {
+        LogicalExpression::Or(expressions)
+    }
+}
+
+fn compile_logical_expression(
+    expression: &LogicalExpression,
+    inherited_field: Option<&LogField>,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<LogPredicate, LogsqlError> {
+    match expression {
+        LogicalExpression::Atom(atom) => {
+            compile_logical_atom(atom, inherited_field, timestamp_unit, query_now)
+        }
+        LogicalExpression::Field(field, expression) => {
+            let field = log_field(&parse_field_path(field)?);
+            compile_logical_expression(expression, Some(&field), timestamp_unit, query_now)
+        }
+        LogicalExpression::And(expressions) => expressions
+            .iter()
+            .map(|expression| {
+                compile_logical_expression(expression, inherited_field, timestamp_unit, query_now)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(LogPredicate::And),
+        LogicalExpression::Or(expressions) => expressions
+            .iter()
+            .map(|expression| {
+                compile_logical_expression(expression, inherited_field, timestamp_unit, query_now)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(LogPredicate::Or),
+        LogicalExpression::Not(expression) => Ok(LogPredicate::Not(Box::new(
+            compile_logical_expression(expression, inherited_field, timestamp_unit, query_now)?,
+        ))),
+    }
+}
+
+fn compile_logical_atom(
+    atom: &str,
+    inherited_field: Option<&LogField>,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<LogPredicate, LogsqlError> {
+    if atom == "*" {
+        return Ok(LogPredicate::True);
+    }
+    if atom.starts_with("_time:") {
+        let mut spec = QuerySpec::default();
+        let value = required_logsql_value(atom, "_time:")?;
+        apply_time_filter(&mut spec, &value, timestamp_unit, query_now)?;
+        return Ok(LogPredicate::Timestamp {
+            minimum: spec.ts_min,
+            maximum: spec.ts_max,
+        });
+    }
+    if let Some((operator, typed)) = metadata_operator(atom) {
+        let width = if typed { 2 } else { 1 };
+        let field = log_field(&parse_field_path(&atom[..operator])?);
+        let value = &atom[operator + width..];
+        return compile_field_filter(&field, value, typed);
+    }
+    let field = inherited_field.cloned().unwrap_or(LogField::Message);
+    compile_unqualified_filter(&field, atom)
+}
+
+fn compile_field_filter(
+    field: &LogField,
+    value: &str,
+    typed: bool,
+) -> Result<LogPredicate, LogsqlError> {
+    if typed {
+        let expected = parse_metadata_value(value, true)?;
+        return Ok(match (field, expected) {
+            (LogField::Message | LogField::Level, Value::String(value)) => LogPredicate::Exact {
+                field: field.clone(),
+                value,
+            },
+            (LogField::Message | LogField::Level, _) => {
+                return Err(LogsqlError::unsupported(
+                    "typed exact matching on message or level requires a string",
+                ))
+            }
+            (_, value) => LogPredicate::TypedExact {
+                field: field.clone(),
+                value,
+            },
+        });
+    }
+    if value == "*" {
+        return Ok(LogPredicate::AnyValue {
+            field: field.clone(),
+        });
+    }
+    if let Some(kind) = value_type_filter(value)? {
+        return Ok(LogPredicate::ValueType {
+            field: field.clone(),
+            kind,
+        });
+    }
+    if let Some(predicates) = numeric_filter_for_field(field, value)? {
+        return Ok(if predicates.len() == 1 {
+            predicates.into_iter().next().unwrap()
+        } else {
+            LogPredicate::And(predicates)
+        });
+    }
+    let value = quoted_value(value)?.unwrap_or_else(|| value.to_owned());
+    Ok(LogPredicate::Exact {
+        field: field.clone(),
+        value,
+    })
+}
+
+fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredicate, LogsqlError> {
+    if let Some(value) = quoted_value(atom)? {
+        return Ok(if value.is_empty() && !matches!(field, LogField::Message) {
+            LogPredicate::Empty {
+                field: field.clone(),
+            }
+        } else {
+            LogPredicate::Phrase {
+                field: field.clone(),
+                value,
+                case_insensitive: false,
+            }
+        });
+    }
+    if let Some(value) = parse_exact_filter(atom)? {
+        return Ok(LogPredicate::Exact {
+            field: field.clone(),
+            value,
+        });
+    }
+    if let Some(predicate) = parse_case_insensitive_filter(atom)? {
+        return Ok(predicate_for_field(predicate, field));
+    }
+    if let Some(regex) = parse_regexp_filter(atom)? {
+        return Ok(LogPredicate::Regex {
+            field: field.clone(),
+            regex,
+        });
+    }
+    if let Some(value) = parse_substring_filter(atom)? {
+        return Ok(LogPredicate::Substring {
+            field: field.clone(),
+            value,
+            case_insensitive: false,
+        });
+    }
+    if let Some((value, phrase)) = parse_prefix_filter(atom)? {
+        return Ok(LogPredicate::Prefix {
+            field: field.clone(),
+            value,
+            phrase,
+            case_insensitive: false,
+        });
+    }
+    if let Some(kind) = value_type_filter(atom)? {
+        return Ok(LogPredicate::ValueType {
+            field: field.clone(),
+            kind,
+        });
+    }
+    if let Some(predicates) = numeric_filter_for_field(field, atom)? {
+        return Ok(if predicates.len() == 1 {
+            predicates.into_iter().next().unwrap()
+        } else {
+            LogPredicate::And(predicates)
+        });
+    }
+    if atom.is_empty() || !atom.chars().all(logsql_word_char) {
+        return Err(LogsqlError::unsupported(format!(
+            "unsupported LogsQL logical filter {atom:?}"
+        )));
+    }
+    Ok(LogPredicate::Word {
+        field: field.clone(),
+        value: atom.to_owned(),
+        case_insensitive: false,
+    })
+}
+
+fn predicate_for_field(predicate: LogPredicate, field: &LogField) -> LogPredicate {
+    match predicate {
+        LogPredicate::Word {
+            value,
+            case_insensitive,
+            ..
+        } => LogPredicate::Word {
+            field: field.clone(),
+            value,
+            case_insensitive,
+        },
+        LogPredicate::Phrase {
+            value,
+            case_insensitive,
+            ..
+        } => LogPredicate::Phrase {
+            field: field.clone(),
+            value,
+            case_insensitive,
+        },
+        LogPredicate::Prefix {
+            value,
+            phrase,
+            case_insensitive,
+            ..
+        } => LogPredicate::Prefix {
+            field: field.clone(),
+            value,
+            phrase,
+            case_insensitive,
+        },
+        LogPredicate::Substring {
+            value,
+            case_insensitive,
+            ..
+        } => LogPredicate::Substring {
+            field: field.clone(),
+            value,
+            case_insensitive,
+        },
+        other => other,
+    }
+}
+
+fn numeric_filter_for_field(
+    field: &LogField,
+    value: &str,
+) -> Result<Option<Vec<LogPredicate>>, LogsqlError> {
+    let comparison = [
+        (">=", NumericOp::GreaterOrEqual),
+        ("<=", NumericOp::LessOrEqual),
+        (">", NumericOp::Greater),
+        ("<", NumericOp::Less),
+    ]
+    .into_iter()
+    .find_map(|(prefix, operator)| value.strip_prefix(prefix).map(|value| (operator, value)));
+    if let Some((operator, value)) = comparison {
+        return Ok(Some(vec![LogPredicate::Numeric {
+            field: field.clone(),
+            operator,
+            value: parse_numeric_value(value)?,
+        }]));
+    }
+    let Some((inner, lower_operator, upper_operator)) = numeric_range_shape(value)? else {
+        return Ok(None);
+    };
+    let (lower, upper) = inner.split_once(',').ok_or_else(|| {
+        LogsqlError::malformed("LogsQL numeric range requires lower and upper bounds")
+    })?;
+    if upper.contains(',') {
+        return Err(LogsqlError::malformed(
+            "LogsQL numeric range accepts exactly two bounds",
+        ));
+    }
+    Ok(Some(vec![
+        LogPredicate::Numeric {
+            field: field.clone(),
+            operator: lower_operator,
+            value: parse_numeric_value(lower.trim())?,
+        },
+        LogPredicate::Numeric {
+            field: field.clone(),
+            operator: upper_operator,
+            value: parse_numeric_value(upper.trim())?,
+        },
+    ]))
+}
+
+fn numeric_range_shape(value: &str) -> Result<Option<(&str, NumericOp, NumericOp)>, LogsqlError> {
+    let Some((inner, lower_operator)) = value
+        .strip_prefix("range(")
+        .map(|inner| (inner, NumericOp::Greater))
+        .or_else(|| {
+            value
+                .strip_prefix("range[")
+                .map(|inner| (inner, NumericOp::GreaterOrEqual))
+        })
+    else {
+        if value.starts_with("range") {
+            return Err(LogsqlError::malformed(
+                "LogsQL numeric range must start with range( or range[",
+            ));
+        }
+        return Ok(None);
+    };
+    let (inner, upper_operator) = if let Some(inner) = inner.strip_suffix(')') {
+        (inner, NumericOp::Less)
+    } else if let Some(inner) = inner.strip_suffix(']') {
+        (inner, NumericOp::LessOrEqual)
+    } else {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL numeric range filter",
+        ));
+    };
+    Ok(Some((inner, lower_operator, upper_operator)))
+}
+
+fn apply_safe_logical_pushdowns(
+    predicate: &LogPredicate,
+    spec: &mut QuerySpec,
+) -> Result<(), LogsqlError> {
+    match predicate {
+        LogPredicate::And(predicates) => {
+            for predicate in predicates {
+                apply_safe_logical_pushdowns(predicate, spec)?;
+            }
+        }
+        LogPredicate::Timestamp { minimum, maximum } => {
+            if let Some(minimum) = minimum {
+                spec.ts_min = Some(spec.ts_min.map_or(*minimum, |value| value.max(*minimum)));
+            }
+            if let Some(maximum) = maximum {
+                spec.ts_max = Some(spec.ts_max.map_or(*maximum, |value| value.min(*maximum)));
+            }
+        }
+        LogPredicate::Exact { field, value }
+        | LogPredicate::TypedExact {
+            field,
+            value: Value::String(value),
+        } => apply_exact_pushdown(field, value, spec)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn apply_exact_pushdown(
+    field: &LogField,
+    value: &str,
+    spec: &mut QuerySpec,
+) -> Result<(), LogsqlError> {
+    match field {
+        LogField::Level => {
+            if !matches!(
+                value,
+                "debug"
+                    | "info"
+                    | "notice"
+                    | "warning"
+                    | "error"
+                    | "critical"
+                    | "alert"
+                    | "emergency"
+            ) {
+                return Err(LogsqlError::malformed(format!(
+                    "unsupported LogsQL level {value:?}"
+                )));
+            }
+            spec.level = Some(value.to_owned());
+        }
+        LogField::Metadata(path) if path.as_slice() == ["service"] => {
+            spec.service = Some(value.to_owned());
+        }
+        LogField::Metadata(path) if matches!(path.as_slice(), [key] if matches!(key.as_str(), "host" | "path" | "status")) =>
+        {
+            spec.metadata_eq.insert(path[0].clone(), value.to_owned());
+        }
+        LogField::Message | LogField::Metadata(_) => {}
+    }
+    Ok(())
 }
 
 fn pipeline_segments(input: &str) -> Result<Vec<&str>, LogsqlError> {
@@ -277,6 +1122,8 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
     let mut quote = None;
     let mut escaped = false;
     let mut time_range = false;
+    let mut numeric_range = false;
+    let mut parenthesis_depth = 0usize;
     for character in input.chars() {
         if let Some(delimiter) = quote {
             current.push(character);
@@ -298,10 +1145,23 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
         if current.starts_with("_time:[") || current.starts_with("_time:(") {
             time_range = true;
         }
+        if matches!(character, '(' | '[')
+            && (current.ends_with(":range(") || current.ends_with(":range["))
+        {
+            numeric_range = true;
+        }
         if time_range && matches!(character, ']' | ')') {
             time_range = false;
+        } else if numeric_range && matches!(character, ']' | ')') {
+            numeric_range = false;
+        } else if !time_range && !numeric_range && character == '(' {
+            parenthesis_depth = parenthesis_depth.saturating_add(1);
+        } else if !time_range && !numeric_range && character == ')' {
+            parenthesis_depth = parenthesis_depth
+                .checked_sub(1)
+                .ok_or_else(|| LogsqlError::malformed("unmatched LogsQL closing parenthesis"))?;
         }
-        if character.is_whitespace() && !time_range {
+        if character.is_whitespace() && !time_range && !numeric_range && parenthesis_depth == 0 {
             current.pop();
             if !current.is_empty() {
                 raw_terms.push(std::mem::take(&mut current));
@@ -313,6 +1173,16 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
     }
     if time_range {
         return Err(LogsqlError::malformed("unterminated LogsQL time range"));
+    }
+    if numeric_range {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL numeric range filter",
+        ));
+    }
+    if parenthesis_depth != 0 {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL parenthesized expression",
+        ));
     }
     if !current.is_empty() {
         raw_terms.push(current);
@@ -339,6 +1209,18 @@ fn required_logsql_value(token: &str, prefix: &str) -> Result<String, LogsqlErro
     Ok(quoted_value(value)?.unwrap_or_else(|| value.to_owned()))
 }
 
+fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
+    token.strip_prefix(prefix).is_some_and(|value| {
+        value != "*"
+            && !value.starts_with('=')
+            && !value.starts_with('(')
+            && !value.starts_with('>')
+            && !value.starts_with('<')
+            && !value.starts_with("range(")
+            && !value.starts_with("range[")
+    })
+}
+
 fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), LogsqlError> {
     let Some((operator, typed)) = metadata_operator(token) else {
         return Err(LogsqlError::unsupported(format!(
@@ -349,7 +1231,68 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
     let field = &token[..operator];
     let value = &token[operator + operator_width..];
     let path = parse_field_path(field)?;
+    if !typed {
+        if let Some(kind) = value_type_filter(value)? {
+            append_predicate(
+                spec,
+                LogPredicate::ValueType {
+                    field: log_field(&path),
+                    kind,
+                },
+            );
+            return Ok(());
+        }
+        if let Some(predicates) = numeric_filter(&path, value)? {
+            for predicate in predicates {
+                append_predicate(spec, predicate);
+            }
+            return Ok(());
+        }
+    }
+    if !typed && empty_group_value(value)? {
+        append_predicate(
+            spec,
+            LogPredicate::Empty {
+                field: log_field(&path),
+            },
+        );
+        return Ok(());
+    }
+    if !typed && value == "*" {
+        append_predicate(
+            spec,
+            LogPredicate::AnyValue {
+                field: log_field(&path),
+            },
+        );
+        return Ok(());
+    }
     let expected = parse_metadata_value(value, typed)?;
+
+    if path.as_slice() == ["level"] {
+        let Value::String(level) = expected else {
+            return Err(LogsqlError::unsupported(
+                "LogsQL level exact matching requires a string value",
+            ));
+        };
+        spec.level = Some(level);
+        return Ok(());
+    }
+    if matches!(path.as_slice(), [field] if field == "_msg" || field == "message") {
+        let Value::String(value) = expected else {
+            return Err(LogsqlError::unsupported(
+                "LogsQL message exact matching requires a string value",
+            ));
+        };
+        append_predicate(
+            spec,
+            LogPredicate::Exact {
+                field: LogField::Message,
+                value,
+            },
+        );
+        return Ok(());
+    }
 
     // Reuse declared posting-list columns as a sound candidate prefilter.
     // The typed predicate remains in metadata_exact, so a JSON number `500`
@@ -368,6 +1311,68 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
     }
     spec.metadata_exact.push(MetadataExact { path, expected });
     Ok(())
+}
+
+fn value_type_filter(value: &str) -> Result<Option<ValueTypeKind>, LogsqlError> {
+    let Some(inner) = value.strip_prefix("value_type(") else {
+        return Ok(None);
+    };
+    let inner = inner
+        .strip_suffix(')')
+        .ok_or_else(|| LogsqlError::malformed("unterminated LogsQL value_type filter"))?;
+    let kind = match inner {
+        "string" => ValueTypeKind::String,
+        "uint64" => ValueTypeKind::Uint64,
+        "int64" => ValueTypeKind::Int64,
+        "float64" => ValueTypeKind::Float64,
+        "bool" => ValueTypeKind::Bool,
+        "null" => ValueTypeKind::Null,
+        "array" => ValueTypeKind::Array,
+        "object" => ValueTypeKind::Object,
+        "number" => ValueTypeKind::Number,
+        "const" | "dict" | "ipv4" | "iso8601" => {
+            return Err(LogsqlError::unsupported(format!(
+                "LogsQL value_type({inner}) is a VictoriaLogs physical encoding; Timeless exposes retained logical value types"
+            )))
+        }
+        _ => {
+            return Err(LogsqlError::malformed(format!(
+                "unknown LogsQL logical value type {inner:?}"
+            )))
+        }
+    };
+    Ok(Some(kind))
+}
+
+fn numeric_filter(path: &[String], value: &str) -> Result<Option<Vec<LogPredicate>>, LogsqlError> {
+    numeric_filter_for_field(&log_field(path), value)
+}
+
+fn parse_numeric_value(value: &str) -> Result<serde_json::Number, LogsqlError> {
+    match serde_json::from_str::<Value>(value) {
+        Ok(Value::Number(value)) => Ok(value),
+        _ => Err(LogsqlError::malformed(format!(
+            "LogsQL numeric filter requires a JSON number, not {value:?}"
+        ))),
+    }
+}
+
+fn empty_group_value(value: &str) -> Result<bool, LogsqlError> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Ok(false);
+    };
+    Ok(quoted_value(inner)?.is_some_and(|value| value.is_empty()))
+}
+
+fn log_field(path: &[String]) -> LogField {
+    match path {
+        [field] if field == "_msg" || field == "message" => LogField::Message,
+        [field] if field == "level" => LogField::Level,
+        _ => LogField::Metadata(path.to_vec()),
+    }
 }
 
 fn metadata_operator(token: &str) -> Option<(usize, bool)> {
@@ -951,6 +1956,120 @@ mod tests {
         let plan = parse_at(r#""ssh: login fail""#, TimestampUnit::Microseconds, 0).unwrap();
         assert_eq!(plan.spec.message_phrase.as_deref(), Some("ssh: login fail"));
         assert_eq!(plan.spec.message, None);
+    }
+
+    #[test]
+    fn session_twelve_word_filter_preserves_case_and_unicode_boundaries() {
+        assert!(parse_at("alpha", TimestampUnit::Microseconds, 0).is_ok());
+        assert!(parse_at("тест45", TimestampUnit::Microseconds, 0).is_ok());
+    }
+
+    #[test]
+    fn session_twelve_prefix_filter_accepts_words_and_quoted_phrases() {
+        assert!(parse_at("alph*", TimestampUnit::Microseconds, 0).is_ok());
+        let phrase = parse_at(r#""ssh: login fai"*"#, TimestampUnit::Microseconds, 0);
+        assert!(phrase.is_ok(), "{phrase:?}");
+    }
+
+    #[test]
+    fn session_twelve_case_insensitive_filters_cover_word_phrase_prefix_and_unicode() {
+        for query in ["i(alpha)", r#"i("SSH: LOGIN FAIL")"#, "i(alph*)", "i(café)"] {
+            let parsed = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(parsed.is_ok(), "{query}: {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn session_twelve_exact_message_filter_requires_an_explicit_quoted_value() {
+        assert!(parse_at(r#"="alpha""#, TimestampUnit::Microseconds, 0).is_ok());
+        assert!(parse_at("=alpha", TimestampUnit::Microseconds, 0).is_err());
+    }
+
+    #[test]
+    fn session_twelve_empty_and_any_filters_preserve_legacy_exact_empty() {
+        let legacy = parse_at(r#"probe:"""#, TimestampUnit::Microseconds, 0).unwrap();
+        assert_eq!(
+            legacy.spec.metadata_exact[0].expected,
+            Value::String(String::new())
+        );
+        assert!(legacy.spec.predicate.is_none());
+
+        let compatible = parse_at(r#"probe:("")"#, TimestampUnit::Microseconds, 0).unwrap();
+        assert!(compatible.spec.metadata_exact.is_empty());
+        assert!(compatible.spec.predicate.is_some());
+        assert!(parse_at("probe:*", TimestampUnit::Microseconds, 0).is_ok());
+        assert!(parse_at("nested.leaf:*", TimestampUnit::Microseconds, 0).is_ok());
+    }
+
+    #[test]
+    fn session_twelve_numeric_filters_are_typed_and_ranges_are_open() {
+        for query in [
+            "n:>2",
+            "n:>=2",
+            "n:<10",
+            "n:<=10",
+            "n:range(2, 10)",
+            "n:range[2, 10)",
+            "n:range(2, 10]",
+            "n:range[2, 10]",
+        ] {
+            let parsed = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(parsed.is_ok(), "{query}: {parsed:?}");
+        }
+        assert!(parse_at("n:>two", TimestampUnit::Microseconds, 0).is_err());
+        assert!(parse_at("n:range(2)", TimestampUnit::Microseconds, 0).is_err());
+    }
+
+    #[test]
+    fn session_twelve_value_type_uses_retained_logical_types() {
+        for kind in [
+            "string", "uint64", "int64", "float64", "bool", "null", "array", "object", "number",
+        ] {
+            let query = format!("field:value_type({kind})");
+            let parsed = parse_at(&query, TimestampUnit::Microseconds, 0);
+            assert!(parsed.is_ok(), "{query}: {parsed:?}");
+        }
+        let physical =
+            parse_at("field:value_type(const)", TimestampUnit::Microseconds, 0).unwrap_err();
+        assert_eq!(physical.kind, LogsqlErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn session_twelve_logical_parser_honors_precedence_and_safe_pushdowns() {
+        for query in [
+            r#"alpha AND ~"before""#,
+            r#"="alpha" OR ="ALPHA""#,
+            r#"alpha AND NOT ~"before""#,
+            r#"(="alpha" OR ="ALPHA") AND ~"ALPHA""#,
+            r#"case:(="word-exact" OR ="word-case")"#,
+            r#"numeric_group:="numeric" AND (n:<0 OR n:>9)"#,
+        ] {
+            let parsed = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(parsed.is_ok(), "{query}: {parsed:?}");
+        }
+        let safe = parse_at(
+            r#"service:="api" AND (alpha OR beta)"#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(safe.spec.service.as_deref(), Some("api"));
+
+        let unsafe_branch =
+            parse_at(r#"service:="api" OR alpha"#, TimestampUnit::Microseconds, 0).unwrap();
+        assert_eq!(unsafe_branch.spec.service, None);
+    }
+
+    #[test]
+    fn session_twelve_substring_filter_is_explicit_and_case_sensitive() {
+        assert!(parse_at("*pha*", TimestampUnit::Microseconds, 0).is_ok());
+    }
+
+    #[test]
+    fn session_twelve_regexp_filter_is_re2_compatible_and_strict() {
+        assert!(parse_at(r#"~"alp(ha|ine)""#, TimestampUnit::Microseconds, 0).is_ok());
+        assert!(parse_at(r#"~"(?i)^alpha$""#, TimestampUnit::Microseconds, 0).is_ok());
+        assert!(parse_at(r#"~"(""#, TimestampUnit::Microseconds, 0).is_err());
     }
 
     #[test]

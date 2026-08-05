@@ -668,6 +668,54 @@ async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reope
         ["exact", "inside", "punctuation", "unicode-punctuation"]
     );
 
+    let prefix_query = r#""ssh: login fai"* | limit 10"#;
+    let response = app
+        .clone()
+        .oneshot(logsql_request(prefix_query))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut prefix_cases =
+        ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+    prefix_cases.sort();
+    assert_eq!(
+        prefix_cases,
+        [
+            "exact",
+            "inside",
+            "punctuation",
+            "suffix",
+            "unicode-punctuation"
+        ]
+    );
+
+    let insensitive_query = r#"i("SSH: LOGIN FAIL") | limit 10"#;
+    let response = app
+        .clone()
+        .oneshot(logsql_request(insensitive_query))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut insensitive_cases =
+        ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+    insensitive_cases.sort();
+    assert_eq!(
+        insensitive_cases,
+        [
+            "case",
+            "exact",
+            "inside",
+            "punctuation",
+            "unicode-punctuation"
+        ]
+    );
+
     let response = app
         .clone()
         .oneshot(logsql_request(r#""ssh: login fail" | stats count()"#))
@@ -698,7 +746,640 @@ async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reope
         ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).len(),
         4
     );
+    let response = router(reopened.clone())
+        .oneshot(logsql_request(prefix_query))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).len(),
+        5
+    );
+    let response = router(reopened.clone())
+        .oneshot(logsql_request(insensitive_query))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).len(),
+        5
+    );
     reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_twelve_logsql_word_filter_matches_unicode_oracle_and_reopens() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("word-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let body = [
+        r#"{"_time":1800000000000001,"_msg":"alpha","level":"info","case":"exact"}"#,
+        r#"{"_time":1800000000000002,"_msg":"before alpha after","level":"info","case":"inside"}"#,
+        r#"{"_time":1800000000000003,"_msg":"ALPHA","level":"info","case":"case"}"#,
+        r#"{"_time":1800000000000004,"_msg":"alphas","level":"info","case":"suffix"}"#,
+        r#"{"_time":1800000000000005,"_msg":"xalpha","level":"info","case":"prefix"}"#,
+        r#"{"_time":1800000000000006,"_msg":"x_alpha","level":"info","case":"underscore"}"#,
+        r#"{"_time":1800000000000007,"_msg":"(alpha)!","level":"info","case":"punctuation"}"#,
+        r#"{"_time":1800000000000008,"_msg":"éalpha","level":"info","case":"unicode-boundary"}"#,
+        r#"{"_time":1800000000000009,"_msg":"prefix тест45 suffix","level":"info","case":"unicode"}"#,
+        r#"{"_time":1800000000000010,"_msg":"CAFÉ","level":"info","case":"unicode-case"}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn cases(app: &axum::Router, query: &str) -> Vec<String> {
+        let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let mut cases = ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cases.sort();
+        cases
+    }
+
+    assert_eq!(
+        cases(&app, "alpha | limit 100").await,
+        ["exact", "inside", "punctuation"]
+    );
+    assert_eq!(
+        cases(&app, "alph* | limit 100").await,
+        ["exact", "inside", "punctuation", "suffix"]
+    );
+    assert_eq!(
+        cases(&app, "*pha* | limit 100").await,
+        [
+            "exact",
+            "inside",
+            "prefix",
+            "punctuation",
+            "suffix",
+            "underscore",
+            "unicode-boundary"
+        ]
+    );
+    assert_eq!(
+        cases(&app, r#"~"alp(ha|ine)" | limit 100"#).await,
+        [
+            "exact",
+            "inside",
+            "prefix",
+            "punctuation",
+            "suffix",
+            "underscore",
+            "unicode-boundary"
+        ]
+    );
+    assert_eq!(
+        cases(&app, r#"~"(?i)^alpha$" | limit 100"#).await,
+        ["case", "exact"]
+    );
+    let invalid = app
+        .clone()
+        .oneshot(logsql_request(r#"~"(""#))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(invalid.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "malformed_logsql"
+    );
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 1,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(r#"~"before" | limit 1"#))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(work_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(cases(&app, "тест45 | limit 100").await, ["unicode"]);
+    assert_eq!(
+        cases(&app, "i(alpha) | limit 100").await,
+        ["case", "exact", "inside", "punctuation"]
+    );
+    assert_eq!(
+        cases(&app, "i(alph*) | limit 100").await,
+        ["case", "exact", "inside", "punctuation", "suffix"]
+    );
+    assert_eq!(cases(&app, "i(café) | limit 100").await, ["unicode-case"]);
+    assert_eq!(cases(&app, r#"="alpha" | limit 100"#).await, ["exact"]);
+    assert_eq!(cases(&app, r#"case:="exact" | limit 100"#).await, ["exact"]);
+    assert_eq!(
+        cases(&app, r#"alpha AND ~"before" | limit 100"#).await,
+        ["inside"]
+    );
+    assert_eq!(
+        cases(&app, r#"="alpha" OR ="ALPHA" | limit 100"#).await,
+        ["case", "exact"]
+    );
+    assert_eq!(
+        cases(&app, r#"alpha AND NOT ~"before" | limit 100"#).await,
+        ["exact", "punctuation"]
+    );
+    assert_eq!(
+        cases(&app, r#"(="alpha" OR ="ALPHA") AND ~"ALPHA" | limit 100"#).await,
+        ["case"]
+    );
+    assert_eq!(
+        cases(&app, r#"case:(="exact" OR ="case") | limit 100"#).await,
+        ["case", "exact"]
+    );
+    let count = app
+        .clone()
+        .oneshot(logsql_request("alpha | stats count()"))
+        .await
+        .unwrap();
+    assert_eq!(count.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(count.into_body(), usize::MAX).await.unwrap()[..],
+        b"{\"total\":3}\n"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(reopened.clone());
+    assert_eq!(
+        cases(&app, "alpha | limit 100").await,
+        ["exact", "inside", "punctuation"]
+    );
+    assert_eq!(
+        cases(&app, "alph* | limit 100").await,
+        ["exact", "inside", "punctuation", "suffix"]
+    );
+    assert_eq!(
+        cases(&app, "*pha* | limit 100").await,
+        [
+            "exact",
+            "inside",
+            "prefix",
+            "punctuation",
+            "suffix",
+            "underscore",
+            "unicode-boundary"
+        ]
+    );
+    assert_eq!(
+        cases(&app, r#"~"alp(ha|ine)" | limit 100"#).await,
+        [
+            "exact",
+            "inside",
+            "prefix",
+            "punctuation",
+            "suffix",
+            "underscore",
+            "unicode-boundary"
+        ]
+    );
+    assert_eq!(
+        cases(&app, "i(alpha) | limit 100").await,
+        ["case", "exact", "inside", "punctuation"]
+    );
+    assert_eq!(cases(&app, "i(café) | limit 100").await, ["unicode-case"]);
+    assert_eq!(cases(&app, r#"="alpha" | limit 100"#).await, ["exact"]);
+    assert_eq!(
+        cases(&app, r#"="alpha" OR ="ALPHA" | limit 100"#).await,
+        ["case", "exact"]
+    );
+    assert_eq!(
+        cases(&app, r#"case:(="exact" OR ="case") | limit 100"#).await,
+        ["case", "exact"]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_twelve_empty_any_and_typed_presence_remain_distinct_after_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("presence-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let body = [
+        r#"{"_time":1800000000000001,"_msg":"missing","level":"info","case":"missing","state_group":"state"}"#,
+        r#"{"_time":1800000000000002,"_msg":"null","level":"info","case":"null","state_group":"state","probe":null,"nested":{"leaf":null}}"#,
+        r#"{"_time":1800000000000003,"_msg":"empty","level":"info","case":"empty","state_group":"state","probe":"","nested":{"leaf":""}}"#,
+        r#"{"_time":1800000000000004,"_msg":"string","level":"info","case":"string","state_group":"state","probe":"value","nested":{"leaf":"value"}}"#,
+        r#"{"_time":1800000000000005,"_msg":"zero","level":"info","case":"zero","state_group":"state","probe":0,"nested":{"leaf":0}}"#,
+        r#"{"_time":1800000000000006,"_msg":"false","level":"info","case":"false","state_group":"state","probe":false,"nested":{"leaf":false}}"#,
+        r#"{"_time":1800000000000007,"_msg":"array","level":"info","case":"array","state_group":"state","probe":[],"nested":{"leaf":[]}}"#,
+        r#"{"_time":1800000000000008,"_msg":"object","level":"info","case":"object","state_group":"state","probe":{},"nested":{"leaf":{}}}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn cases(app: &axum::Router, query: &str) -> Vec<String> {
+        let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let mut cases = ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cases.sort();
+        cases
+    }
+
+    let compatible_empty = r#"state_group:="state" probe:("") | limit 100"#;
+    let any_value = r#"state_group:="state" probe:* | limit 100"#;
+    assert_eq!(
+        cases(&app, compatible_empty).await,
+        ["empty", "missing", "null"]
+    );
+    assert_eq!(
+        cases(&app, r#"state_group:="state" probe:"" | limit 100"#).await,
+        ["empty"]
+    );
+    assert_eq!(
+        cases(&app, r#"state_group:="state" probe:=null | limit 100"#).await,
+        ["null"]
+    );
+    assert_eq!(
+        cases(&app, any_value).await,
+        ["array", "false", "object", "string", "zero"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"state_group:="state" probe:value_type(string) | limit 100"#
+        )
+        .await,
+        ["empty", "string"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"state_group:="state" probe:value_type(bool) | limit 100"#
+        )
+        .await,
+        ["false"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"state_group:="state" probe:value_type(null) | limit 100"#
+        )
+        .await,
+        ["null"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"state_group:="state" probe:value_type(array) | limit 100"#
+        )
+        .await,
+        ["array"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"state_group:="state" probe:value_type(object) | limit 100"#
+        )
+        .await,
+        ["object"]
+    );
+    let physical = app
+        .clone()
+        .oneshot(logsql_request("probe:value_type(const)"))
+        .await
+        .unwrap();
+    assert_eq!(physical.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        cases(
+            &app,
+            r#"state_group:="state" AND (probe:="" OR probe:=null) | limit 100"#
+        )
+        .await,
+        ["empty", "null"]
+    );
+    assert_eq!(
+        cases(&app, r#"state_group:="state" nested.leaf:("") | limit 100"#).await,
+        ["empty", "missing", "null"]
+    );
+    let count = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"state_group:="state" probe:* | stats count()"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(count.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(count.into_body(), usize::MAX).await.unwrap()[..],
+        b"{\"total\":5}\n"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(reopened.clone());
+    assert_eq!(
+        cases(&app, compatible_empty).await,
+        ["empty", "missing", "null"]
+    );
+    assert_eq!(
+        cases(&app, any_value).await,
+        ["array", "false", "object", "string", "zero"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"state_group:="state" probe:value_type(null) | limit 100"#
+        )
+        .await,
+        ["null"]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_twelve_numeric_filters_keep_types_and_integer_precision_after_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("numeric-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let body = [
+        r#"{"_time":1800000000000001,"_msg":"missing","level":"info","case":"missing","numeric_group":"numeric"}"#,
+        r#"{"_time":1800000000000002,"_msg":"null","level":"info","case":"null","numeric_group":"numeric","n":null}"#,
+        r#"{"_time":1800000000000003,"_msg":"negative","level":"info","case":"negative","numeric_group":"numeric","n":-2}"#,
+        r#"{"_time":1800000000000004,"_msg":"zero","level":"info","case":"zero","numeric_group":"numeric","n":0}"#,
+        r#"{"_time":1800000000000005,"_msg":"two","level":"info","case":"two","numeric_group":"numeric","n":2}"#,
+        r#"{"_time":1800000000000006,"_msg":"decimal","level":"info","case":"decimal","numeric_group":"numeric","n":2.5}"#,
+        r#"{"_time":1800000000000007,"_msg":"string","level":"info","case":"string","numeric_group":"numeric","n":"3"}"#,
+        r#"{"_time":1800000000000008,"_msg":"ten","level":"info","case":"ten","numeric_group":"numeric","n":10}"#,
+        r#"{"_time":1800000000000009,"_msg":"huge","level":"info","case":"huge","numeric_group":"numeric","n":9007199254740993}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn cases(app: &axum::Router, query: &str) -> Vec<String> {
+        let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let mut cases = ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cases.sort();
+        cases
+    }
+
+    let greater = r#"numeric_group:="numeric" n:>2 | limit 100"#;
+    let between = r#"numeric_group:="numeric" n:>=2 n:<10 | limit 100"#;
+    assert_eq!(cases(&app, greater).await, ["decimal", "huge", "ten"]);
+    assert_eq!(cases(&app, between).await, ["decimal", "two"]);
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:value_type(uint64) | limit 100"#
+        )
+        .await,
+        ["huge", "ten", "two", "zero"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:value_type(int64) | limit 100"#
+        )
+        .await,
+        ["negative"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:value_type(float64) | limit 100"#
+        )
+        .await,
+        ["decimal"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:value_type(string) | limit 100"#
+        )
+        .await,
+        ["string"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:value_type(number) | limit 100"#
+        )
+        .await,
+        ["decimal", "huge", "negative", "ten", "two", "zero"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" AND (n:<0 OR n:>9) | limit 100"#
+        )
+        .await,
+        ["huge", "negative", "ten"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:range(2, 10) | limit 100"#
+        )
+        .await,
+        ["decimal"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:range[2, 10) | limit 100"#
+        )
+        .await,
+        ["decimal", "two"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:range(2, 10] | limit 100"#
+        )
+        .await,
+        ["decimal", "ten"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:range[2, 10] | limit 100"#
+        )
+        .await,
+        ["decimal", "ten", "two"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:>9007199254740992 | limit 100"#
+        )
+        .await,
+        ["huge"]
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(reopened.clone());
+    assert_eq!(cases(&app, greater).await, ["decimal", "huge", "ten"]);
+    assert_eq!(cases(&app, between).await, ["decimal", "two"]);
+    assert_eq!(
+        cases(
+            &app,
+            r#"numeric_group:="numeric" n:value_type(uint64) | limit 100"#
+        )
+        .await,
+        ["huge", "ten", "two", "zero"]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_twelve_safe_logical_conjunct_prunes_before_bounded_decode() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start_with_timestamp_unit(
+        temp.path().join("logical-pruning.db"),
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let ingest_app = router(storage.clone());
+    assert_eq!(
+        ingest_app
+            .oneshot(ingest_request(make_lines(0, 8_192)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    let before = storage.stats().await.unwrap();
+    let app = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 500,
+            max_work_rows: 500,
+            ..LogsQueryLimits::default()
+        },
+    );
+    let response = app
+        .oneshot(logsql_request(
+            r#"service:="api" AND (request OR ="never") | limit 500"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).len(),
+        410
+    );
+    let after = storage.stats().await.unwrap();
+    assert_eq!(
+        after.query_decoded_entries - before.query_decoded_entries,
+        410,
+        "the indexed service conjunct must prune before the Rust OR evaluator"
+    );
+    assert_eq!(
+        after.query_candidate_blocks - before.query_candidate_blocks,
+        1,
+        "only the service=api/level=error block should reach bounded decode"
+    );
+    storage.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

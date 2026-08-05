@@ -30,7 +30,7 @@ durability. `/api/v1/flush` is the explicit ordered durability barrier.
 - `GET /health`
 - `POST /insert/jsonline`
 - `GET /select/logsql/query`
-- `POST /select/logsql/query` for the frozen narrow LogsQL grammar
+- `POST /select/logsql/query` for the versioned LogsQL compatibility grammar
 - `GET /select/logsql/field_values`
 - `GET /select/logsql/stats`
 - `GET /api/v1/flush`
@@ -42,14 +42,34 @@ audit; native GET parameters do not expand this LogsQL claim.
 
 <!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P09 LQL-Q01 LQL-Q07 LQL-Q08 LQL-S01 -->
 
-The POST grammar currently includes wildcard selection; upper-exclusive
-relative windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with
-open or closed native-unit edges; all eight exact severities; service and
-arbitrary typed metadata equality; quoted message phrases; time sort, limit,
-and offset aliases; and exact count with an optional output alias.
+The POST grammar includes wildcard selection; upper-exclusive relative
+windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
+closed native-unit edges; all eight exact severities; service and arbitrary
+typed metadata equality; message word, phrase, word-prefix, phrase-prefix,
+case-sensitive substring, bounded RE2-compatible regexp, case-insensitive,
+and full-message exact filters; time sort, limit, and offset aliases; and
+exact count with an optional output alias. `NOT` binds before `AND`, which
+binds before `OR`; parentheses and field-scoped groups override precedence.
+Safe top-level indexed conjuncts are pushed into public extension rows before
+the bounded Rust predicate evaluator. Predicates below `OR` or `NOT` are not
+unsafely pushed.
+
+Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
+`range` bounds without coercing numeric strings or losing integer precision.
+`field:("")` follows VictoriaLogs empty semantics and matches missing, JSON
+null, or an empty string; retained `field:""`, `field:=null`, and `field:=""`
+forms remain exact so all three states can be distinguished. `field:*`
+requires a present non-null value other than the empty string, while retaining
+zero, false, arrays, and objects. `value_type` names the logical retained JSON
+type (`string`, `uint64`, `int64`, `float64`, `number`, `bool`, `null`,
+`array`, or `object`), not a private block encoding. VictoriaLogs physical
+types such as `const` and `dict` fail explicitly.
+
 Double- and single-quoted strings decode VictoriaLogs-compatible Go escapes,
 backtick strings are raw, and quoted field identifiers select one literal
-metadata key. Unsupported syntax is rejected rather than ignored.
+metadata key. Unsupported syntax is rejected rather than ignored. The exact
+compatibility choices and intentional typed-data differences are recorded in
+the feature matrix and query findings.
 
 The release binary requires Phoenix-managed policy authentication by default.
 Backup and cluster administration remain in Phoenix; this process deliberately

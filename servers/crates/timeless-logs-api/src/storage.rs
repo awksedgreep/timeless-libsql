@@ -1,3 +1,4 @@
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,9 @@ pub struct QuerySpec {
     pub metadata_exact: Vec<MetadataExact>,
     pub message: Option<String>,
     pub message_phrase: Option<String>,
+    /// Bounded API-owned row predicate for LogsQL behavior that has no honest
+    /// storage pushdown. Language syntax never enters the extension.
+    pub predicate: Option<LogPredicate>,
     pub ts_min: Option<i64>,
     pub ts_max: Option<i64>,
     pub limit: usize,
@@ -71,6 +75,7 @@ impl Default for QuerySpec {
             metadata_exact: Vec::new(),
             message: None,
             message_phrase: None,
+            predicate: None,
             ts_min: None,
             ts_max: None,
             limit: 0,
@@ -79,6 +84,105 @@ impl Default for QuerySpec {
             max_work_rows: 100_000,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LogField {
+    Message,
+    Level,
+    Metadata(Vec<String>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NumericOp {
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
+}
+
+impl NumericOp {
+    fn matches(self, ordering: CmpOrdering) -> bool {
+        match self {
+            Self::Greater => ordering == CmpOrdering::Greater,
+            Self::GreaterOrEqual => ordering != CmpOrdering::Less,
+            Self::Less => ordering == CmpOrdering::Less,
+            Self::LessOrEqual => ordering != CmpOrdering::Greater,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueTypeKind {
+    String,
+    Uint64,
+    Int64,
+    Float64,
+    Bool,
+    Null,
+    Array,
+    Object,
+    Number,
+}
+
+#[derive(Clone, Debug)]
+pub enum LogPredicate {
+    True,
+    And(Vec<LogPredicate>),
+    Or(Vec<LogPredicate>),
+    Not(Box<LogPredicate>),
+    Word {
+        field: LogField,
+        value: String,
+        case_insensitive: bool,
+    },
+    Phrase {
+        field: LogField,
+        value: String,
+        case_insensitive: bool,
+    },
+    Prefix {
+        field: LogField,
+        value: String,
+        phrase: bool,
+        case_insensitive: bool,
+    },
+    Substring {
+        field: LogField,
+        value: String,
+        case_insensitive: bool,
+    },
+    Exact {
+        field: LogField,
+        value: String,
+    },
+    TypedExact {
+        field: LogField,
+        value: JsonValue,
+    },
+    Empty {
+        field: LogField,
+    },
+    AnyValue {
+        field: LogField,
+    },
+    Numeric {
+        field: LogField,
+        operator: NumericOp,
+        value: serde_json::Number,
+    },
+    ValueType {
+        field: LogField,
+        kind: ValueTypeKind,
+    },
+    Timestamp {
+        minimum: Option<i64>,
+        maximum: Option<i64>,
+    },
+    Regex {
+        field: LogField,
+        regex: regex::Regex,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -950,7 +1054,9 @@ fn reader_main(
                 reply,
             } => {
                 let started = Instant::now();
-                let result = cancellable_read(&conn, &cancelled, || query_rows(&conn, &spec));
+                let result = cancellable_read(&conn, &cancelled, || {
+                    query_rows(&conn, &spec, cancelled.as_ref())
+                });
                 let rows = result.as_ref().map_or(0, Vec::len);
                 record_query(&profile, started.elapsed(), result.is_err(), rows);
                 let _ = reply.send(result);
@@ -961,7 +1067,9 @@ fn reader_main(
                 reply,
             } => {
                 let started = Instant::now();
-                let result = cancellable_read(&conn, &cancelled, || query_count(&conn, &spec));
+                let result = cancellable_read(&conn, &cancelled, || {
+                    query_count(&conn, &spec, cancelled.as_ref())
+                });
                 let rows = usize::from(result.is_ok());
                 record_query(&profile, started.elapsed(), result.is_err(), rows);
                 let _ = reply.send(result);
@@ -1279,12 +1387,16 @@ fn query_parts(spec: &QuerySpec) -> Result<(String, Vec<SqlValue>), String> {
     Ok((where_sql, values))
 }
 
-fn query_rows(conn: &Connection, spec: &QuerySpec) -> Result<Vec<QueryRow>, String> {
+fn query_rows(
+    conn: &Connection,
+    spec: &QuerySpec,
+    cancelled: &AtomicBool,
+) -> Result<Vec<QueryRow>, String> {
     if spec.limit == 0 {
         return Ok(Vec::new());
     }
     if has_api_postfilter(spec) {
-        return query_rows_with_postfilters(conn, spec);
+        return query_rows_with_postfilters(conn, spec, cancelled);
     }
     let (where_sql, mut values) = query_parts(spec)?;
     let order = if spec.descending { "DESC" } else { "ASC" };
@@ -1314,6 +1426,7 @@ fn query_rows(conn: &Connection, spec: &QuerySpec) -> Result<Vec<QueryRow>, Stri
 fn query_rows_with_postfilters(
     conn: &Connection,
     spec: &QuerySpec,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<QueryRow>, String> {
     if spec.limit == 0 {
         return Ok(Vec::new());
@@ -1337,29 +1450,41 @@ fn query_rows_with_postfilters(
     let mut considered = 0usize;
     let mut matched = 0usize;
     let mut output = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("read LogsQL post-filter candidate: {error}"))?
-    {
+    loop {
+        ensure_query_active(cancelled)?;
+        let Some(row) = rows
+            .next()
+            .map_err(|error| format!("read LogsQL post-filter candidate: {error}"))?
+        else {
+            break;
+        };
         considered = considered.saturating_add(1);
+        if considered > spec.max_work_rows {
+            return Err(format!(
+                "LogsQL post-filter exceeded max_work_rows={}",
+                spec.max_work_rows
+            ));
+        }
+        let level: String = row
+            .get(1)
+            .map_err(|error| format!("read post-filtered log level: {error}"))?;
         let message: String = row
             .get(2)
             .map_err(|error| format!("read post-filtered log message: {error}"))?;
         let metadata_json: String = row
             .get(3)
             .map_err(|error| format!("read post-filtered log metadata JSON: {error}"))?;
-        if api_postfilters_match(&message, &metadata_json, spec)? {
+        let timestamp: i64 = row
+            .get(0)
+            .map_err(|error| format!("read post-filtered log timestamp: {error}"))?;
+        if api_postfilters_match(timestamp, &message, &level, &metadata_json, spec, cancelled)? {
             if matched < spec.offset {
                 matched += 1;
                 continue;
             }
             output.push(QueryRow {
-                ts: row
-                    .get(0)
-                    .map_err(|error| format!("read typed log timestamp: {error}"))?,
-                level: row
-                    .get(1)
-                    .map_err(|error| format!("read typed log level: {error}"))?,
+                ts: timestamp,
+                level,
                 message,
                 metadata_json,
             });
@@ -1368,18 +1493,12 @@ fn query_rows_with_postfilters(
             }
         }
     }
-    if considered > spec.max_work_rows {
-        return Err(format!(
-            "LogsQL post-filter exceeded max_work_rows={}",
-            spec.max_work_rows
-        ));
-    }
     Ok(output)
 }
 
-fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
+fn query_count(conn: &Connection, spec: &QuerySpec, cancelled: &AtomicBool) -> Result<i64, String> {
     if has_api_postfilter(spec) {
-        return query_count_with_postfilters(conn, spec);
+        return query_count_with_postfilters(conn, spec, cancelled);
     }
     let mut filter = BTreeMap::new();
     if let Some(level) = &spec.level {
@@ -1414,9 +1533,14 @@ fn query_count(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
     .map_err(|e| format!("count logs: {e}"))
 }
 
-fn query_count_with_postfilters(conn: &Connection, spec: &QuerySpec) -> Result<i64, String> {
+fn query_count_with_postfilters(
+    conn: &Connection,
+    spec: &QuerySpec,
+    cancelled: &AtomicBool,
+) -> Result<i64, String> {
     let (where_sql, mut values) = query_parts(spec)?;
-    let sql = format!("SELECT message, metadata FROM logs{where_sql} ORDER BY ts ASC LIMIT ?");
+    let sql =
+        format!("SELECT ts, level, message, metadata FROM logs{where_sql} ORDER BY ts ASC LIMIT ?");
     values.push(SqlValue::Integer(
         i64::try_from(spec.max_work_rows.saturating_add(1)).unwrap_or(i64::MAX),
     ));
@@ -1428,10 +1552,14 @@ fn query_count_with_postfilters(conn: &Connection, spec: &QuerySpec) -> Result<i
         .map_err(|error| format!("query LogsQL post-filter count: {error}"))?;
     let mut considered = 0usize;
     let mut total = 0i64;
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("read LogsQL post-filter count row: {error}"))?
-    {
+    loop {
+        ensure_query_active(cancelled)?;
+        let Some(row) = rows
+            .next()
+            .map_err(|error| format!("read LogsQL post-filter count row: {error}"))?
+        else {
+            break;
+        };
         considered = considered.saturating_add(1);
         if considered > spec.max_work_rows {
             return Err(format!(
@@ -1439,13 +1567,19 @@ fn query_count_with_postfilters(conn: &Connection, spec: &QuerySpec) -> Result<i
                 spec.max_work_rows
             ));
         }
-        let message: String = row
+        let timestamp: i64 = row
             .get(0)
+            .map_err(|error| format!("read post-filter count timestamp: {error}"))?;
+        let level: String = row
+            .get(1)
+            .map_err(|error| format!("read post-filter count level: {error}"))?;
+        let message: String = row
+            .get(2)
             .map_err(|error| format!("read post-filter count message: {error}"))?;
         let metadata_json: String = row
-            .get(1)
+            .get(3)
             .map_err(|error| format!("read post-filter count metadata: {error}"))?;
-        if api_postfilters_match(&message, &metadata_json, spec)? {
+        if api_postfilters_match(timestamp, &message, &level, &metadata_json, spec, cancelled)? {
             total = total.saturating_add(1);
         }
     }
@@ -1453,14 +1587,18 @@ fn query_count_with_postfilters(conn: &Connection, spec: &QuerySpec) -> Result<i
 }
 
 fn has_api_postfilter(spec: &QuerySpec) -> bool {
-    spec.message_phrase.is_some() || !spec.metadata_exact.is_empty()
+    spec.message_phrase.is_some() || !spec.metadata_exact.is_empty() || spec.predicate.is_some()
 }
 
 fn api_postfilters_match(
+    timestamp: i64,
     message: &str,
+    level: &str,
     metadata_json: &str,
     spec: &QuerySpec,
+    cancelled: &AtomicBool,
 ) -> Result<bool, String> {
+    ensure_query_active(cancelled)?;
     if spec
         .message_phrase
         .as_deref()
@@ -1468,7 +1606,372 @@ fn api_postfilters_match(
     {
         return Ok(false);
     }
-    metadata_exact_matches(metadata_json, &spec.metadata_exact)
+    let needs_metadata = !spec.metadata_exact.is_empty()
+        || spec
+            .predicate
+            .as_ref()
+            .is_some_and(predicate_references_metadata);
+    let metadata = needs_metadata
+        .then(|| {
+            serde_json::from_str(metadata_json)
+                .map_err(|error| format!("decode stored typed log metadata: {error}"))
+        })
+        .transpose()?;
+    if !metadata_exact_matches(metadata.as_ref(), &spec.metadata_exact) {
+        return Ok(false);
+    }
+    match spec.predicate.as_ref() {
+        None => Ok(true),
+        Some(predicate) => log_predicate_matches(
+            predicate,
+            timestamp,
+            message,
+            level,
+            metadata.as_ref(),
+            cancelled,
+        ),
+    }
+}
+
+fn log_predicate_matches(
+    predicate: &LogPredicate,
+    timestamp: i64,
+    message: &str,
+    level: &str,
+    metadata: Option<&JsonValue>,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    ensure_query_active(cancelled)?;
+    match predicate {
+        LogPredicate::True => Ok(true),
+        LogPredicate::And(predicates) => {
+            for predicate in predicates {
+                if !log_predicate_matches(
+                    predicate, timestamp, message, level, metadata, cancelled,
+                )? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        LogPredicate::Or(predicates) => {
+            for predicate in predicates {
+                if log_predicate_matches(predicate, timestamp, message, level, metadata, cancelled)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        LogPredicate::Not(predicate) => Ok(!log_predicate_matches(
+            predicate, timestamp, message, level, metadata, cancelled,
+        )?),
+        LogPredicate::Word {
+            field,
+            value,
+            case_insensitive,
+        } => Ok(
+            log_field_text(field, message, level, metadata).is_some_and(|text| {
+                if *case_insensitive {
+                    logsql_word_matches(&text.to_lowercase(), value)
+                } else {
+                    logsql_word_matches(text, value)
+                }
+            }),
+        ),
+        LogPredicate::Phrase {
+            field,
+            value,
+            case_insensitive,
+        } => Ok(
+            log_field_text(field, message, level, metadata).is_some_and(|text| {
+                if *case_insensitive {
+                    logsql_phrase_matches(&text.to_lowercase(), value)
+                } else {
+                    logsql_phrase_matches(text, value)
+                }
+            }),
+        ),
+        LogPredicate::Prefix {
+            field,
+            value,
+            phrase,
+            case_insensitive,
+        } => Ok(
+            log_field_text(field, message, level, metadata).is_some_and(|text| {
+                if *case_insensitive {
+                    logsql_prefix_matches(&text.to_lowercase(), value, *phrase)
+                } else {
+                    logsql_prefix_matches(text, value, *phrase)
+                }
+            }),
+        ),
+        LogPredicate::Substring {
+            field,
+            value,
+            case_insensitive,
+        } => Ok(
+            log_field_text(field, message, level, metadata).is_some_and(|text| {
+                if *case_insensitive {
+                    text.to_lowercase().contains(value)
+                } else {
+                    text.contains(value)
+                }
+            }),
+        ),
+        LogPredicate::Exact { field, value } => {
+            Ok(log_field_text(field, message, level, metadata).is_some_and(|text| text == value))
+        }
+        LogPredicate::TypedExact { field, value } => {
+            Ok(log_field_value(field, message, level, metadata)
+                .is_some_and(|actual| actual.equals_json(value)))
+        }
+        LogPredicate::Empty { field } => Ok(
+            log_field_value(field, message, level, metadata).is_none_or(LogFieldValue::is_empty)
+        ),
+        LogPredicate::AnyValue { field } => Ok(log_field_value(field, message, level, metadata)
+            .is_some_and(LogFieldValue::is_nonempty)),
+        LogPredicate::Numeric {
+            field,
+            operator,
+            value,
+        } => Ok(log_field_value(field, message, level, metadata)
+            .and_then(LogFieldValue::number)
+            .and_then(|actual| compare_json_numbers(actual, value))
+            .is_some_and(|ordering| operator.matches(ordering))),
+        LogPredicate::ValueType { field, kind } => {
+            Ok(log_field_value(field, message, level, metadata)
+                .is_some_and(|value| value.is_type(*kind)))
+        }
+        LogPredicate::Timestamp { minimum, maximum } => Ok(minimum
+            .is_none_or(|minimum| timestamp >= minimum)
+            && maximum.is_none_or(|maximum| timestamp <= maximum)),
+        LogPredicate::Regex { field, regex } => {
+            let matched = log_field_text(field, message, level, metadata)
+                .is_some_and(|text| regex.is_match(text));
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
+    }
+}
+
+fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
+    match predicate {
+        LogPredicate::True | LogPredicate::Timestamp { .. } => false,
+        LogPredicate::And(predicates) | LogPredicate::Or(predicates) => {
+            predicates.iter().any(predicate_references_metadata)
+        }
+        LogPredicate::Not(predicate) => predicate_references_metadata(predicate),
+        LogPredicate::Word { field, .. }
+        | LogPredicate::Phrase { field, .. }
+        | LogPredicate::Prefix { field, .. }
+        | LogPredicate::Substring { field, .. }
+        | LogPredicate::Exact { field, .. }
+        | LogPredicate::TypedExact { field, .. }
+        | LogPredicate::Empty { field }
+        | LogPredicate::AnyValue { field }
+        | LogPredicate::Numeric { field, .. }
+        | LogPredicate::ValueType { field, .. }
+        | LogPredicate::Regex { field, .. } => matches!(field, LogField::Metadata(_)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LogFieldValue<'a> {
+    Text(&'a str),
+    Json(&'a JsonValue),
+}
+
+impl<'a> LogFieldValue<'a> {
+    fn is_empty(self) -> bool {
+        match self {
+            Self::Text(value) => value.is_empty(),
+            Self::Json(JsonValue::Null) => true,
+            Self::Json(JsonValue::String(value)) => value.is_empty(),
+            Self::Json(_) => false,
+        }
+    }
+
+    fn is_nonempty(self) -> bool {
+        !self.is_empty()
+    }
+
+    fn number(self) -> Option<&'a serde_json::Number> {
+        match self {
+            Self::Json(JsonValue::Number(value)) => Some(value),
+            Self::Text(_) | Self::Json(_) => None,
+        }
+    }
+
+    fn equals_json(self, expected: &JsonValue) -> bool {
+        match self {
+            Self::Text(actual) => expected.as_str().is_some_and(|expected| actual == expected),
+            Self::Json(actual) => json_values_equal(actual, expected),
+        }
+    }
+
+    fn is_type(self, kind: ValueTypeKind) -> bool {
+        match (self, kind) {
+            (Self::Text(_), ValueTypeKind::String)
+            | (Self::Json(JsonValue::String(_)), ValueTypeKind::String)
+            | (Self::Json(JsonValue::Bool(_)), ValueTypeKind::Bool)
+            | (Self::Json(JsonValue::Null), ValueTypeKind::Null)
+            | (Self::Json(JsonValue::Array(_)), ValueTypeKind::Array)
+            | (Self::Json(JsonValue::Object(_)), ValueTypeKind::Object)
+            | (Self::Json(JsonValue::Number(_)), ValueTypeKind::Number) => true,
+            (Self::Json(JsonValue::Number(value)), ValueTypeKind::Uint64) => {
+                value.as_u64().is_some()
+            }
+            (Self::Json(JsonValue::Number(value)), ValueTypeKind::Int64) => {
+                value.as_i64().is_some() && value.as_u64().is_none()
+            }
+            (Self::Json(JsonValue::Number(value)), ValueTypeKind::Float64) => {
+                value.as_i64().is_none() && value.as_u64().is_none() && value.as_f64().is_some()
+            }
+            _ => false,
+        }
+    }
+}
+
+fn compare_json_numbers(
+    left: &serde_json::Number,
+    right: &serde_json::Number,
+) -> Option<CmpOrdering> {
+    match (exact_integer(left), exact_integer(right)) {
+        (Some(left), Some(right)) => Some(left.cmp(&right)),
+        (Some(left), None) => compare_i128_to_f64(left, right.as_f64()?),
+        (None, Some(right)) => compare_i128_to_f64(right, left.as_f64()?).map(CmpOrdering::reverse),
+        (None, None) => left.as_f64()?.partial_cmp(&right.as_f64()?),
+    }
+}
+
+fn exact_integer(value: &serde_json::Number) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+}
+
+fn compare_i128_to_f64(integer: i128, float: f64) -> Option<CmpOrdering> {
+    if !float.is_finite() {
+        return None;
+    }
+    if integer < 0 {
+        if float >= 0.0 {
+            return Some(CmpOrdering::Less);
+        }
+        return compare_u128_to_positive_f64(integer.unsigned_abs(), -float)
+            .map(CmpOrdering::reverse);
+    }
+    if float < 0.0 {
+        return Some(CmpOrdering::Greater);
+    }
+    compare_u128_to_positive_f64(integer as u128, float)
+}
+
+fn compare_u128_to_positive_f64(integer: u128, float: f64) -> Option<CmpOrdering> {
+    debug_assert!(float.is_finite() && float >= 0.0);
+    if float == 0.0 {
+        return Some(integer.cmp(&0));
+    }
+    let bits = float.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1u64 << 52) - 1);
+    let (significand, shift) = if exponent_bits == 0 {
+        (u128::from(fraction), -1074)
+    } else {
+        (
+            u128::from((1u64 << 52) | fraction),
+            exponent_bits - 1023 - 52,
+        )
+    };
+    if shift >= 0 {
+        let shift = u32::try_from(shift).ok()?;
+        let Some(float_integer) = significand.checked_shl(shift) else {
+            return Some(CmpOrdering::Less);
+        };
+        return Some(integer.cmp(&float_integer));
+    }
+    let right_shift = u32::try_from(-shift).ok()?;
+    if right_shift >= 128 {
+        return Some(if integer == 0 {
+            CmpOrdering::Less
+        } else {
+            CmpOrdering::Greater
+        });
+    }
+    let whole = significand >> right_shift;
+    match integer.cmp(&whole) {
+        CmpOrdering::Equal => {
+            let mask = (1u128 << right_shift) - 1;
+            Some(if significand & mask == 0 {
+                CmpOrdering::Equal
+            } else {
+                CmpOrdering::Less
+            })
+        }
+        ordering => Some(ordering),
+    }
+}
+
+fn log_field_value<'a>(
+    field: &LogField,
+    message: &'a str,
+    level: &'a str,
+    metadata: Option<&'a JsonValue>,
+) -> Option<LogFieldValue<'a>> {
+    match field {
+        LogField::Message => Some(LogFieldValue::Text(message)),
+        LogField::Level => Some(LogFieldValue::Text(level)),
+        LogField::Metadata(path) => Some(LogFieldValue::Json(metadata_path(metadata?, path)?)),
+    }
+}
+
+fn ensure_query_active(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("logs query cancelled".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn log_field_text<'a>(
+    field: &LogField,
+    message: &'a str,
+    level: &'a str,
+    metadata: Option<&'a JsonValue>,
+) -> Option<&'a str> {
+    match field {
+        LogField::Message => Some(message),
+        LogField::Level => Some(level),
+        LogField::Metadata(path) => metadata_path(metadata?, path)?.as_str(),
+    }
+}
+
+fn logsql_word_matches(value: &str, expected: &str) -> bool {
+    value
+        .split(|character: char| !logsql_word_char(character))
+        .any(|word| word == expected)
+}
+
+fn logsql_prefix_matches(value: &str, prefix: &str, phrase: bool) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    if !phrase {
+        return value
+            .split(|character: char| !logsql_word_char(character))
+            .any(|word| word.starts_with(prefix));
+    }
+    let require_start_boundary = prefix.chars().next().is_some_and(logsql_word_char);
+    value.match_indices(prefix).any(|(start, _)| {
+        !require_start_boundary
+            || start == 0
+            || value[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !logsql_word_char(character))
+    })
 }
 
 /// VictoriaLogs phrases preserve every byte between the quotes, while word
@@ -1503,24 +2006,22 @@ fn logsql_word_char(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
 }
 
-fn metadata_exact_matches(
-    metadata_json: &str,
-    predicates: &[MetadataExact],
-) -> Result<bool, String> {
+fn metadata_exact_matches(metadata: Option<&JsonValue>, predicates: &[MetadataExact]) -> bool {
     if predicates.is_empty() {
-        return Ok(true);
+        return true;
     }
-    let metadata: JsonValue = serde_json::from_str(metadata_json)
-        .map_err(|error| format!("decode stored typed log metadata: {error}"))?;
+    let Some(metadata) = metadata else {
+        return false;
+    };
     for predicate in predicates {
-        let Some(actual) = metadata_path(&metadata, &predicate.path) else {
-            return Ok(false);
+        let Some(actual) = metadata_path(metadata, &predicate.path) else {
+            return false;
         };
         if !json_values_equal(actual, &predicate.expected) {
-            return Ok(false);
+            return false;
         }
     }
-    Ok(true)
+    true
 }
 
 fn metadata_path<'a>(metadata: &'a JsonValue, path: &[String]) -> Option<&'a JsonValue> {
@@ -1879,6 +2380,46 @@ mod tests {
 
         record_read_return(&profile);
         assert_eq!(profile_lock(&profile).query_in_flight, 0);
+    }
+
+    #[test]
+    fn decoded_log_predicates_observe_query_cancellation() {
+        let predicate = LogPredicate::Regex {
+            field: LogField::Message,
+            regex: regex::Regex::new("request").unwrap(),
+        };
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            log_predicate_matches(&predicate, 0, "request", "info", None, &cancelled).unwrap_err(),
+            "logs query cancelled"
+        );
+    }
+
+    #[test]
+    fn typed_numeric_comparison_keeps_integer_bits_and_fractional_ordering() {
+        let number = |value: &str| {
+            serde_json::from_str::<JsonValue>(value)
+                .unwrap()
+                .as_number()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            compare_json_numbers(&number("9007199254740993"), &number("9007199254740992")),
+            Some(CmpOrdering::Greater)
+        );
+        assert_eq!(
+            compare_json_numbers(&number("2"), &number("2.5")),
+            Some(CmpOrdering::Less)
+        );
+        assert_eq!(
+            compare_json_numbers(&number("-3"), &number("-2.5")),
+            Some(CmpOrdering::Less)
+        );
+        assert_eq!(
+            compare_json_numbers(&number("10"), &number("10.0")),
+            Some(CmpOrdering::Equal)
+        );
     }
 
     #[test]

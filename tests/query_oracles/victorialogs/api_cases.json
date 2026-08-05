@@ -11,12 +11,37 @@
     {"case": "phrase-unicode-prefix", "_msg": "éssh: login fail"},
     {"case": "phrase-punctuation", "_msg": "(ssh: login fail)!"},
     {"case": "phrase-unicode-punctuation", "_msg": "ssh: login fail—next"},
+    {"case": "word-exact", "_msg": "alpha"},
+    {"case": "word-inside", "_msg": "before alpha after"},
+    {"case": "word-case", "_msg": "ALPHA"},
+    {"case": "word-suffix", "_msg": "alphas"},
+    {"case": "word-prefix", "_msg": "xalpha"},
+    {"case": "word-underscore", "_msg": "x_alpha"},
+    {"case": "word-punctuation", "_msg": "(alpha)!"},
+    {"case": "word-unicode-boundary", "_msg": "éalpha"},
+    {"case": "word-unicode", "_msg": "prefix тест45 suffix"},
+    {"case": "word-unicode-case", "_msg": "CAFÉ"},
     {"case": "quote-double", "_msg": "line one\nline two\t\"quoted\"\\slash"},
     {"case": "quote-single", "_msg": "single'quote \\ slash"},
     {"case": "quote-backtick", "_msg": "raw\\n\"double\"'single\\slash"},
     {"case": "quote-pipe", "_msg": "left|right"},
     {"case": "quote-hex-unicode", "_msg": "AλB"},
     {"case": "identifier-colon", "_msg": "quoted field", "log:level": "error"},
+    {"case": "state-missing", "_msg": "state missing", "state_group": "state"},
+    {"case": "state-null", "_msg": "state null", "state_group": "state", "probe": null},
+    {"case": "state-empty", "_msg": "state empty", "state_group": "state", "probe": ""},
+    {"case": "state-string", "_msg": "state string", "state_group": "state", "probe": "value"},
+    {"case": "state-zero", "_msg": "state zero", "state_group": "state", "probe": 0},
+    {"case": "state-false", "_msg": "state false", "state_group": "state", "probe": false},
+    {"case": "numeric-missing", "_msg": "numeric missing", "numeric_group": "numeric"},
+    {"case": "numeric-null", "_msg": "numeric null", "numeric_group": "numeric", "n": null},
+    {"case": "numeric-negative", "_msg": "numeric negative", "numeric_group": "numeric", "n": -2},
+    {"case": "numeric-zero", "_msg": "numeric zero", "numeric_group": "numeric", "n": 0},
+    {"case": "numeric-two", "_msg": "numeric two", "numeric_group": "numeric", "n": 2},
+    {"case": "numeric-decimal", "_msg": "numeric decimal", "numeric_group": "numeric", "n": 2.5},
+    {"case": "numeric-string", "_msg": "numeric string", "numeric_group": "numeric", "n": "3"},
+    {"case": "numeric-ten", "_msg": "numeric ten", "numeric_group": "numeric", "n": 10},
+    {"case": "numeric-huge", "_msg": "numeric huge", "numeric_group": "numeric", "n": 9007199254740993},
     {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
     {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
     {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
@@ -39,6 +64,251 @@
       "query": "\"\"",
       "status": 200,
       "expected_cases": []
+    },
+    {
+      "id": "LQL-F09-word-case-and-unicode-boundaries",
+      "query": "alpha",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F09-unicode-word",
+      "query": "тест45",
+      "status": 200,
+      "expected_cases": ["word-unicode"]
+    },
+    {
+      "id": "LQL-F10-word-prefix-boundaries",
+      "query": "alph*",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-suffix", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F10-phrase-prefix-last-word",
+      "query": "\"ssh: login fai\"*",
+      "status": 200,
+      "expected_cases": [
+        "phrase-exact", "phrase-inside", "phrase-suffix",
+        "phrase-punctuation", "phrase-unicode-punctuation"
+      ]
+    },
+    {
+      "id": "LQL-F12-case-sensitive-substring",
+      "query": "*pha*",
+      "status": 200,
+      "expected_cases": [
+        "word-exact", "word-inside", "word-suffix", "word-prefix",
+        "word-underscore", "word-punctuation", "word-unicode-boundary"
+      ]
+    },
+    {
+      "id": "LQL-F13-regexp-searches-at-any-position",
+      "query": "~\"alp(ha|ine)\"",
+      "status": 200,
+      "expected_cases": [
+        "word-exact", "word-inside", "word-suffix", "word-prefix",
+        "word-underscore", "word-punctuation", "word-unicode-boundary"
+      ]
+    },
+    {
+      "id": "LQL-F13-inline-case-insensitive-regexp",
+      "query": "~\"(?i)^alpha$\"",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-case"]
+    },
+    {
+      "id": "LQL-F14-case-insensitive-word",
+      "query": "i(alpha)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-case", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F14-case-insensitive-phrase",
+      "query": "i(\"SSH: LOGIN FAIL\")",
+      "status": 200,
+      "expected_cases": [
+        "phrase-exact", "phrase-inside", "phrase-case",
+        "phrase-punctuation", "phrase-unicode-punctuation"
+      ]
+    },
+    {
+      "id": "LQL-F14-case-insensitive-prefix",
+      "query": "i(alph*)",
+      "status": 200,
+      "expected_cases": [
+        "word-exact", "word-inside", "word-case", "word-suffix", "word-punctuation"
+      ]
+    },
+    {
+      "id": "LQL-F14-unicode-case-fold",
+      "query": "i(café)",
+      "status": 200,
+      "expected_cases": ["word-unicode-case"]
+    },
+    {
+      "id": "LQL-F15-exact-message",
+      "query": "=\"alpha\"",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F15-exact-message-with-punctuation",
+      "query": "=\"ssh: login fail\"",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-F15-exact-field",
+      "query": "case:=\"word-exact\"",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F18-empty-field",
+      "query": "state_group:=\"state\" probe:\"\"",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty"]
+    },
+    {
+      "id": "LQL-F18-empty-field-group",
+      "query": "state_group:=\"state\" probe:(\"\")",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty"]
+    },
+    {
+      "id": "LQL-F19-any-value-field",
+      "query": "state_group:=\"state\" probe:*",
+      "status": 200,
+      "expected_cases": ["state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F24-greater-than-number",
+      "query": "numeric_group:=\"numeric\" n:>2",
+      "status": 200,
+      "expected_cases": ["numeric-decimal", "numeric-string", "numeric-ten", "numeric-huge"]
+    },
+    {
+      "id": "LQL-F24-intersected-comparisons",
+      "query": "numeric_group:=\"numeric\" n:>=2 n:<10",
+      "status": 200,
+      "expected_cases": ["numeric-two", "numeric-decimal", "numeric-string"]
+    },
+    {
+      "id": "LQL-F24-range-boundaries",
+      "query": "numeric_group:=\"numeric\" n:range(2, 10)",
+      "status": 200,
+      "expected_cases": ["numeric-decimal", "numeric-string"]
+    },
+    {
+      "id": "LQL-F24-inclusive-lower-range",
+      "query": "numeric_group:=\"numeric\" n:range[2, 10)",
+      "status": 200,
+      "expected_cases": ["numeric-two", "numeric-decimal", "numeric-string"]
+    },
+    {
+      "id": "LQL-F24-inclusive-upper-range",
+      "query": "numeric_group:=\"numeric\" n:range(2, 10]",
+      "status": 200,
+      "expected_cases": ["numeric-decimal", "numeric-string", "numeric-ten"]
+    },
+    {
+      "id": "LQL-F24-inclusive-both-range",
+      "query": "numeric_group:=\"numeric\" n:range[2, 10]",
+      "status": 200,
+      "expected_cases": ["numeric-two", "numeric-decimal", "numeric-string", "numeric-ten"]
+    },
+    {
+      "id": "LQL-F24-integer-above-f64-exact-range",
+      "query": "numeric_group:=\"numeric\" n:>9007199254740992",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F29-uint64-storage-type",
+      "query": "numeric_group:=\"numeric\" n:value_type(uint64)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F29-int64-storage-type",
+      "query": "numeric_group:=\"numeric\" n:value_type(int64)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F29-float64-storage-type",
+      "query": "numeric_group:=\"numeric\" n:value_type(float64)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F29-string-storage-type",
+      "query": "state_group:=\"state\" probe:value_type(string)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F29-physical-const-storage-type",
+      "query": "numeric_group:=\"numeric\" n:value_type(const)",
+      "status": 200,
+      "expected_cases": [
+        "numeric-negative", "numeric-zero", "numeric-two", "numeric-decimal",
+        "numeric-string", "numeric-ten", "numeric-huge"
+      ]
+    },
+    {
+      "id": "LQL-F31-explicit-and",
+      "query": "alpha AND ~\"before\"",
+      "status": 200,
+      "expected_cases": ["word-inside"]
+    },
+    {
+      "id": "LQL-F31-implicit-and",
+      "query": "alpha ~\"before\"",
+      "status": 200,
+      "expected_cases": ["word-inside"]
+    },
+    {
+      "id": "LQL-F31-or",
+      "query": "=\"alpha\" OR =\"ALPHA\"",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-case"]
+    },
+    {
+      "id": "LQL-F31-not",
+      "query": "alpha AND NOT ~\"before\"",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F31-and-precedence-over-or",
+      "query": "=\"alpha\" OR =\"ALPHA\" AND ~\"ALPHA\"",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-case"]
+    },
+    {
+      "id": "LQL-F31-parentheses-change-precedence",
+      "query": "(=\"alpha\" OR =\"ALPHA\") AND ~\"ALPHA\"",
+      "status": 200,
+      "expected_cases": ["word-case"]
+    },
+    {
+      "id": "LQL-F31-field-scoped-group",
+      "query": "case:(=\"word-exact\" OR =\"word-case\")",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-case"]
+    },
+    {
+      "id": "LQL-F31-typed-branch-with-safe-conjunct",
+      "query": "state_group:=\"state\" AND (probe:=\"\" OR probe:=null)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty"]
+    },
+    {
+      "id": "LQL-F31-numeric-branches",
+      "query": "numeric_group:=\"numeric\" AND (n:<0 OR n:>9)",
+      "status": 200,
+      "expected_cases": ["numeric-negative", "numeric-ten", "numeric-huge"]
     },
     {
       "id": "LQL-F39-double-quoted-go-escapes",
@@ -100,7 +370,14 @@
         "phrase-unicode-prefix", "phrase-punctuation",
         "phrase-unicode-punctuation", "quote-double", "quote-single",
         "quote-backtick", "quote-pipe", "quote-hex-unicode",
-        "identifier-colon", "page-0", "page-1", "page-2", "page-3"
+        "identifier-colon", "state-missing", "state-null", "state-empty",
+        "state-string", "state-zero", "state-false",
+        "numeric-missing", "numeric-null", "numeric-negative", "numeric-zero",
+        "numeric-two", "numeric-decimal", "numeric-string", "numeric-ten", "numeric-huge",
+        "page-0", "page-1", "page-2", "page-3",
+        "word-exact", "word-inside", "word-case", "word-suffix",
+        "word-prefix", "word-underscore", "word-punctuation",
+        "word-unicode-boundary", "word-unicode", "word-unicode-case"
       ]
     },
     {
@@ -219,6 +496,13 @@
     {
       "id": "LQL-F39-invalid-unicode-escape",
       "query": "\"bad\\uD800\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F13-invalid-regexp",
+      "query": "~\"(\"",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

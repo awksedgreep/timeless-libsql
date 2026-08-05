@@ -103,6 +103,9 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-004`](#sql-log-004-distinct-field-values) | `LQL-P04`, `LQL-S03`, `LQL-S04` | current foundation | bounded lexical values; aggregate syntax remains API work |
 | [`SQL-LOG-005`](#sql-log-005-arbitrary-metadata-equality) | `LQL-F05` | current | exact typed decoded fallback for a non-indexed field; `json_type` distinguishes missing, null, and empty |
 | [`SQL-LOG-006`](#sql-log-006-counts-by-field-and-time-bucket) | `LQL-P09`, `LQL-S05`, `LQL-S08` | current foundation | storage bucket vector or ordinary SQL grouping |
+| [`SQL-LOG-007`](#sql-log-007-case-sensitive-message-substring) | `LQL-F12` | current foundation | exact case-sensitive literal substring over bounded public rows |
+| [`SQL-LOG-008`](#sql-log-008-exact-empty-and-any-value-predicates) | `LQL-F15`, `LQL-F18`, `LQL-F19` | current foundation | full-message exactness and explicit missing/null/empty/non-empty typed JSON states |
+| [`SQL-LOG-009`](#sql-log-009-boolean-composition) | `LQL-F31` | current foundation | ordinary SQL `AND`/`OR`/`NOT` precedence over SQL-expressible public-row atoms |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -3380,6 +3383,125 @@ ORDER BY bucket_ts;
 
 The second form is deliberately decode-heavy. Measurements determine whether
 a future typed storage-aware aggregate earns a new `EXT` row.
+
+### SQL-LOG-007: case-sensitive message substring
+
+Use SQLite's binary `instr()` over bounded public rows for LogsQL `*text*`
+semantics:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND instr(message, :needle) > 0
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+Bind timestamps in the table's declared unit (`us` for the release server;
+the cookbook fixture uses the legacy `ms` default). `instr()` is
+case-sensitive and searches literal bytes, so it matches VictoriaLogs
+substring behavior for retained UTF-8 text. It is intentionally different
+from the extension's storage-aware `message_contains` hidden input in
+`SQL-LOG-002`, which is the established case-insensitive Timeless operation.
+The SQL form decodes candidates before applying `instr`; the Rust API owns the
+LogsQL parser, cancellation between decoded rows, and HTTP limits/envelopes.
+
+### SQL-LOG-008: exact, empty, and any-value predicates
+
+Full-message exact matching is ordinary equality:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND message = :exact_message
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+For a dynamic nested metadata path, an empty-value predicate explicitly
+includes missing, JSON null, and the stored empty string:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND (
+    json_type(metadata, :empty_path) IS NULL
+    OR json_type(metadata, :empty_path) = 'null'
+    OR (
+      json_type(metadata, :empty_path) = 'text'
+      AND json_extract(metadata, :empty_path) = ''
+    )
+  )
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+The complementary any-value predicate requires a present, non-null value and
+excludes only the stored empty string. Typed zero, false, arrays, and objects
+remain values:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND json_type(metadata, :any_path) IS NOT NULL
+  AND json_type(metadata, :any_path) <> 'null'
+  AND NOT (
+    json_type(metadata, :any_path) = 'text'
+    AND json_extract(metadata, :any_path) = ''
+  )
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+For exact typed metadata equality, use the `json_type` plus `json_extract`
+table in `SQL-LOG-005`. The Rust compatibility grammar deliberately keeps
+legacy `field:""` as exact empty string and provides `field:("")` for the
+VictoriaLogs-compatible empty predicate. `field:=null` and `field:=""` remain
+exact retained-type predicates, so applications can distinguish every state.
+
+### SQL-LOG-009: boolean composition
+
+Direct SQLite/libSQL users compose SQL-expressible atoms with ordinary
+`AND`, `OR`, `NOT`, and parentheses. This example pushes the indexed service
+conjunct into the virtual table before applying decoded message/numeric logic:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND service = :service
+  AND max_work_entries = :max_work_entries
+  AND (
+    message = :exact_message
+    OR (
+      json_type(metadata, '$.duration_ms') IN ('integer', 'real')
+      AND json_extract(metadata, '$.duration_ms') > :duration_threshold
+    )
+  )
+  AND NOT level = :excluded_level
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+SQLite precedence is `NOT`, then `AND`, then `OR`, matching the shipped
+LogsQL composition row; parentheses override it. This recipe is an exact SQL
+equivalent for its stated atoms. It does not claim that portable SQLite can
+reproduce LogsQL's Unicode word boundaries, RE2-compatible regexps, Unicode
+case folding, or the Rust API's exact full-domain `u64`/`f64` comparison. Use
+the corresponding bounded Rust query surface for those atoms.
 
 ## Adding the next recipe
 

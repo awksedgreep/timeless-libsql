@@ -1202,6 +1202,13 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         }
         let mut queries = Map::new();
         let exact_matches = (0..entries).filter(|index| index % 8 == 4).count();
+        let host_matches = (0..entries).filter(|index| index % 64 == 0).count();
+        let numeric_matches = (0..entries)
+            .filter(|index| matches!(index % 5, 2 | 3))
+            .count();
+        let host_numeric_matches = (0..entries)
+            .filter(|index| index % 64 == 0 && matches!(index % 5, 2 | 3))
+            .count();
         for (key, name, expression, expected, expected_total) in [
             (
                 "narrow",
@@ -1223,6 +1230,160 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "service:api | stats count() as total",
                 1,
                 Some(entries.div_ceil(4) as u64),
+            ),
+            (
+                "word_narrow",
+                "logs-word-narrow",
+                "host:=\"h00\" AND query | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "word_wide",
+                "logs-word-wide",
+                "query | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "prefix_narrow",
+                "logs-prefix-narrow",
+                "host:=\"h00\" AND quer* | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "prefix_wide",
+                "logs-prefix-wide",
+                "quer* | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "substring_narrow",
+                "logs-substring-narrow",
+                "host:=\"h00\" AND *contract* | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "substring_wide",
+                "logs-substring-wide",
+                "*contract* | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "regexp_narrow",
+                "logs-regexp-narrow",
+                "host:=\"h00\" AND ~\"event [0-9]+$\" | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "regexp_wide",
+                "logs-regexp-wide",
+                "~\"event [0-9]+$\" | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "case_insensitive_narrow",
+                "logs-case-insensitive-narrow",
+                "host:=\"h00\" AND i(QUERY) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "case_insensitive_wide",
+                "logs-case-insensitive-wide",
+                "i(QUERY) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "exact_narrow",
+                "logs-exact-narrow",
+                "host:=\"h00\" AND =\"query contract event 0\" | limit 10000",
+                1,
+                None,
+            ),
+            (
+                "exact_wide",
+                "logs-exact-wide-absent",
+                "=\"query contract event absent\" | limit 10000",
+                0,
+                None,
+            ),
+            (
+                "empty_narrow",
+                "logs-empty-narrow",
+                "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "empty_wide",
+                "logs-empty-wide",
+                "optional:(\"\") | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "any_narrow",
+                "logs-any-narrow",
+                "host:=\"h00\" AND context.retry:* | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "any_wide",
+                "logs-any-wide",
+                "context.retry:* | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "numeric_narrow",
+                "logs-numeric-narrow",
+                "host:=\"h00\" AND context.attempt:range[2,4) | sort by (_time) asc | limit 10000",
+                host_numeric_matches,
+                None,
+            ),
+            (
+                "numeric_wide",
+                "logs-numeric-wide",
+                "context.attempt:range[2,4) | sort by (_time) asc | limit 10000",
+                numeric_matches,
+                None,
+            ),
+            (
+                "value_type_narrow",
+                "logs-value-type-narrow",
+                "host:=\"h00\" AND context.attempt:value_type(uint64) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "value_type_wide",
+                "logs-value-type-wide",
+                "context.attempt:value_type(uint64) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "logical_narrow",
+                "logs-logical-narrow",
+                "host:=\"h00\" AND (query OR =\"never\") | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "logical_wide",
+                "logs-logical-wide",
+                "query AND (contract OR =\"never\") | sort by (_time) asc | limit 10000",
+                entries,
+                None,
             ),
         ] {
             let mut request = || {

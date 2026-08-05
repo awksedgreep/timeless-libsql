@@ -22,7 +22,10 @@ pub use logsql::{
     parse as parse_logsql, parse_at as parse_logsql_at, LogsqlError, LogsqlErrorKind, LogsqlOutput,
     LogsqlPlan,
 };
-pub use storage::{LogEntry, MetadataExact, QuerySpec, Storage, StorageStats, TimestampUnit};
+pub use storage::{
+    LogEntry, LogField, LogPredicate, MetadataExact, NumericOp, QuerySpec, Storage, StorageStats,
+    TimestampUnit, ValueTypeKind,
+};
 pub use timeless_api_common::BackupReport;
 
 /// Hard LogsQL execution limits applied even when authentication is disabled.

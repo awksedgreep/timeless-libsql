@@ -166,12 +166,36 @@ need a hard policy should verify the corresponding `query_surfaces` flag from
 `timeless_capabilities()` and always bind the cap. SQLite progress handlers and
 `sqlite3_interrupt()` are observed between block reads/decodes, and a cancelled
 connection remains reusable. LogsQL syntax, typed post-filters, result limits,
-deadlines, and HTTP errors remain Rust signal-API responsibilities; see
-[`SQL-LOG-001` through `SQL-LOG-005`](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination).
+deadlines, and HTTP errors remain Rust signal-API responsibilities. The
+[SQL cookbook](QUERY_SQL_EQUIVALENTS.md#logsql-foundations-and-equivalents)
+contains executable direct-user recipes, including bounded rows/count/value
+discovery and `SQL-LOG-007` through `SQL-LOG-009` for substring, exact and
+presence predicates, and boolean composition.
 Zero, negative, NULL, and non-integer equality guards fail, including a
 supplied NULL positional TVF guard. With no equality guard the hidden column
 projects NULL, so `logs.max_work_entries IS NULL` selects the compatible
 unbounded form.
+
+The Rust LogsQL layer now composes these public rows into case-sensitive
+Unicode word and phrase filters, word/phrase prefixes, literal substring,
+bounded RE2-compatible regexp, case-insensitive forms, full-message exactness,
+typed numeric comparisons and open/closed ranges, logical retained-value
+types, and `NOT`/`AND`/`OR` expressions with parentheses. Indexed service,
+severity, time, and configured metadata constraints are pushed only when they
+are safe top-level conjuncts; `OR` and `NOT` remain above the extension so
+candidate pruning cannot change truth values. Regex and every decoded-row
+predicate observe the request cancellation flag and `max_work_entries` before
+a matching row may be returned.
+
+The retained rich-log model intentionally differs from VictoriaLogs where
+flattening would discard information. Numeric strings are not coerced, and
+integer comparisons remain exact beyond 2^53. `field:("")` provides the
+VictoriaLogs-compatible missing/null/empty predicate, while exact typed forms
+continue to distinguish those states. `field:*` includes present zero, false,
+arrays, and objects but excludes null and the empty string. `value_type(...)`
+reports the stored logical JSON type rather than exposing private block
+encoding choices. These decisions preserve embedded SQLite/libSQL value
+fidelity without changing batching, compression, indexes, or on-disk formats.
 
 ## Public log storage statistics
 

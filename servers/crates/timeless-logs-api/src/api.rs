@@ -183,6 +183,7 @@ async fn field_values(
         metadata_exact: Vec::new(),
         message: query.message,
         message_phrase: None,
+        predicate: None,
         ts_min: query
             .start
             .as_deref()
@@ -535,6 +536,7 @@ fn get_query_spec(query: GetQuery, timestamp_unit: TimestampUnit) -> QuerySpec {
         metadata_exact: Vec::new(),
         message: query.message,
         message_phrase: None,
+        predicate: None,
         ts_min: query
             .start
             .as_deref()
