@@ -97,6 +97,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-053`](#sql-prom-053-day_of_year-days_in_month-month-and-year) | `PQL-F18` | current foundation | UTC calendar extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
 | [`SQL-PROM-054`](#sql-prom-054-histogram_quantile-over-classic-buckets) | `PQL-H01` | current foundation | bounded classic-bucket grouping, monotonic correction, and linear interpolation; API owns strict bound parsing, tolerance, annotations, IEEE, names, limits, and envelopes |
 | [`SQL-PROM-055`](#sql-prom-055-atan2) | `PQL-O08` | current foundation | bounded SQLite `atan2(Y,X)` over scalar/vector or label-matched vectors; API owns Go-compatible last-bit rounding, types, names, matching errors, limits, and envelopes |
+| [`SQL-PROM-056`](#sql-prom-056-histogram_fraction-over-classic-buckets) | `PQL-H02` | current foundation | bounded classic-bucket grouping and linear CDF interpolation; API owns strict bounds, scalar ASTs, IEEE values, names, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -168,6 +169,13 @@ string. The Rust API remains responsible for parsing PromQL, expanding
 multi-metric selectors, preserving duplicate matcher AND semantics, and
 formatting the vector response. Direct regression: `tests/cli.sh` sections 22
 and 35.
+
+Prometheus 3 quoted UTF-8 metric names are syntax only at the API boundary.
+Bind their decoded value to `:metric` as ordinary SQLite TEXT—for example,
+`{"oracle.metric/温度","node.name"="東京"}` binds
+`:metric = 'oracle.metric/温度'` and includes `{"node.name":"東京"}` in
+`:filter_json`. A metric name is data, never a SQL identifier, so it must not
+be interpolated or identifier-quoted into this statement.
 
 For a nameless selector, first enumerate distinct `name` values from
 `timeless_series('metrics')`, applying its optional matcher-aware arguments
@@ -2283,6 +2291,124 @@ special extension primitive would not reduce storage reads or decoded points.
 Executable regression: Rust SQL-equivalent harness `SQL-PROM-055` semantic
 check; HTTP/oracle/reopen regression:
 `session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens`.
+
+### SQL-PROM-056: `histogram_fraction` over classic buckets
+
+For one classic histogram family, this parameterized ordinary-SQL recipe
+estimates the fraction of observations between `:lower` and `:upper` at each
+evaluation step:
+
+```sql
+WITH selected AS (
+  SELECT json_remove(labels, '$.le') AS labels, ts,
+         json_extract(labels, '$.le') AS le, value AS count
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+), parsed AS (
+  SELECT labels, ts,
+         CASE
+           WHEN le IN ('+Inf','Inf','+Infinity','Infinity') THEN 1e999
+           WHEN le IN ('-Inf','-Infinity') THEN -1e999
+           ELSE CAST(le AS REAL)
+         END AS upper_bound,
+         count
+  FROM selected
+  WHERE le IS NOT NULL
+), coalesced AS (
+  SELECT labels, ts, upper_bound, SUM(count) AS count
+  FROM parsed
+  GROUP BY labels, ts, upper_bound
+), ordered AS (
+  SELECT *,
+         LAG(upper_bound) OVER (
+           PARTITION BY labels, ts ORDER BY upper_bound
+         ) AS previous_bound,
+         LAG(count) OVER (
+           PARTITION BY labels, ts ORDER BY upper_bound
+         ) AS previous_count
+  FROM coalesced
+), positioned AS (
+  SELECT labels, ts, upper_bound, count,
+         COALESCE(
+           previous_bound,
+           CASE WHEN upper_bound > 0 THEN 0.0 ELSE -1e999 END
+         ) AS lower_bound,
+         COALESCE(previous_count, 0.0) AS lower_count
+  FROM ordered
+), stats AS (
+  SELECT labels, ts,
+         MAX(CASE WHEN upper_bound = 1e999 THEN count END) AS total
+  FROM positioned
+  GROUP BY labels, ts
+), bounds(kind, bound) AS (
+  SELECT 'lower', CAST(:lower AS REAL)
+  UNION ALL
+  SELECT 'upper', CAST(:upper AS REAL)
+), candidates AS (
+  SELECT s.labels, s.ts, s.total, b.kind, b.bound,
+         p.lower_bound, p.upper_bound, p.lower_count, p.count,
+         ROW_NUMBER() OVER (
+           PARTITION BY s.labels, s.ts, b.kind
+           ORDER BY p.upper_bound
+         ) AS choice
+  FROM stats AS s
+  CROSS JOIN bounds AS b
+  JOIN positioned AS p USING (labels, ts)
+  WHERE p.upper_bound >= b.bound
+), evaluated AS (
+  SELECT labels, ts, total, kind,
+         CASE
+           WHEN bound = -1e999 THEN 0.0
+           WHEN bound = 1e999 THEN total
+           WHEN bound <= lower_bound THEN lower_count
+           WHEN lower_bound = -1e999 THEN count
+           WHEN upper_bound = 1e999 THEN lower_count
+           ELSE lower_count + (count - lower_count)
+                * (bound - lower_bound) / (upper_bound - lower_bound)
+         END AS rank
+  FROM candidates
+  WHERE choice = 1
+), ranks AS (
+  SELECT labels, ts, total,
+         MAX(CASE WHEN kind = 'lower' THEN rank END) AS lower_rank,
+         MAX(CASE WHEN kind = 'upper' THEN rank END) AS upper_rank
+  FROM evaluated
+  GROUP BY labels, ts, total
+)
+SELECT labels, ts,
+       CASE
+         WHEN total IS NULL OR total = 0 THEN NULL
+         WHEN :lower >= :upper THEN 0.0
+         ELSE (upper_rank - lower_rank) / total
+       END AS value
+FROM ranks
+ORDER BY labels, ts;
+```
+
+`:metric` names one classic `*_bucket` family and `:filter_json` is a public
+Timeless matcher object or NULL. Metric timestamps and `:start`, `:end`,
+`:step`, and `:lookback` use the table's native unit; the public grid uses an
+open-left lookback and inclusive evaluation grid. Bounds are SQLite REALs;
+bind `-Inf`/`+Inf` where the host supports them. Equal parsed `le` bounds are
+summed, output labels omit `le`, the first positive bucket begins at zero,
+finite bounds inside a bucket interpolate linearly, and rows are deterministic
+by labels then timestamp. NULL represents a missing `+Inf` bucket or zero
+total, which the API serializes as `NaN`.
+
+This is the bounded direct-SQL foundation, not the PromQL parser. Ordinary SQL
+does not provide the API's strict OpenMetrics bound parser, packed NaN and
+signed-zero behavior, arbitrary scalar-expression bounds, metric-family
+collision checks, work limits, cancellation, or warning/result envelopes.
+The Rust API supplies those semantics and retains metric names internally
+until bucket families have been separated. The public grid already crosses
+each selected bucket once, so a histogram-specific extension primitive would
+not reduce storage reads or decoding.
+
+Executable regression: Rust SQL-equivalent harness `SQL-PROM-056`; HTTP,
+oracle, compact, and reopen regression:
+`session_fourteen_histogram_fraction_matches_classic_buckets_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

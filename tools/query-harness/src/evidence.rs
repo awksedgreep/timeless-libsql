@@ -813,6 +813,12 @@ fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec
         instant("calendar_part_two_wide", "metrics-calendar-day-of-year-wide", "day_of_year(query_contract_cpu)", series),
         instant("histogram_quantile_narrow", "metrics-histogram-quantile-narrow", r#"histogram_quantile(0.95, query_contract_histogram_bucket{host="h0000"})"#, 1),
         instant("histogram_quantile_wide", "metrics-histogram-quantile-wide", "histogram_quantile(0.95, query_contract_histogram_bucket)", series),
+        instant("quoted_name_narrow", "metrics-quoted-name-narrow", r#"{"query.contract/温度","node.name"="n0000"}"#, 1),
+        range("quoted_name_wide", "metrics-quoted-name-wide", r#"{"query.contract/温度"}"#, at, series * 4),
+        instant("comments_narrow", "metrics-comments-narrow", "# narrow query\nquery_contract_cpu{host=\"h0000\"} # trailing", 1),
+        range("comments_wide", "metrics-comments-wide", "query_contract_cpu # all retained series", at, series * 4),
+        instant("histogram_fraction_narrow", "metrics-histogram-fraction-narrow", r#"histogram_fraction(0.1, 0.5, query_contract_histogram_bucket{host="h0000"})"#, 1),
+        instant("histogram_fraction_wide", "metrics-histogram-fraction-wide", "histogram_fraction(0.1, 0.5, query_contract_histogram_bucket)", series),
         instant("atan2_narrow", "metrics-atan2-narrow", r#"query_contract_cpu{host="h0000"} atan2 2"#, 1),
         range("atan2_wide", "metrics-atan2-wide", "query_contract_cpu atan2 2", at, series * 4),
         instant("annotations_narrow", "metrics-annotations-warning-narrow", r#"quantile(-1, query_contract_cpu{host="h0000"})"#, 1),
@@ -949,6 +955,16 @@ fn metrics_evidence(context: &SignalEvidence<'_>, series: usize, points: usize) 
                 }),
             )?;
         }
+        for index in 0..series {
+            append_json_line(
+                &mut payload,
+                &json!({
+                    "metric": {"__name__": "query.contract/温度", "node.name": format!("n{index:04}"), "service": if index % 2 == 0 { "api" } else { "worker" }},
+                    "values": (0..points).map(|point| (index + point) as f64).collect::<Vec<_>>(),
+                    "timestamps": timestamps,
+                }),
+            )?;
+        }
         let histogram_bounds = [("0.1", 10.0), ("0.5", 20.0), ("1", 30.0), ("+Inf", 40.0)];
         for index in 0..series {
             for (bound, count) in histogram_bounds {
@@ -991,7 +1007,7 @@ fn metrics_evidence(context: &SignalEvidence<'_>, series: usize, points: usize) 
         }
         let after_flush = stats(context.client, &server.base, "/select/metrics/stats")?;
         let expected_points =
-            (series + selector_names + 2) * points + series * histogram_bounds.len();
+            (series * 2 + selector_names + 2) * points + series * histogram_bounds.len();
         if after_flush.get("completed_points").and_then(Value::as_u64)
             != Some(expected_points as u64)
             || after_flush.get("queued_points").and_then(Value::as_u64) != Some(0)
@@ -1110,7 +1126,7 @@ fn metrics_evidence(context: &SignalEvidence<'_>, series: usize, points: usize) 
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
             "build": identity,
-            "fixture": {"exact_metric_series": series, "selector_metric_names": selector_names, "points_per_series": points, "logical_points": expected_points},
+            "fixture": {"exact_metric_series": series, "quoted_metric_series": series, "selector_metric_names": selector_names, "points_per_series": points, "logical_points": expected_points},
             "ingestion": {"wire_bytes": payload.len(), "admission_ns": admission_ns, "durability_barrier_ns": durable_ns, "completed_points": after_flush["completed_points"], "failed_points": after_flush["failed_points"], "queued_points": after_flush["queued_points"]},
             "limit_fixture_ingestion": {"series": limit_series, "points_per_series": limit_points, "logical_points": limit_logical_points, "wire_bytes": limit_payload.len(), "admission_ns": limit_admission_ns, "durability_barrier_ns": limit_durable_ns, "completed_points_after": after_limit_flush["completed_points"], "failed_points_after": after_limit_flush["failed_points"], "queued_points_after": after_limit_flush["queued_points"]},
             "queries": queries,
@@ -1705,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn metric_spec_keys_are_unique_and_include_session_eleven_rows() {
+    fn metric_spec_keys_are_unique_and_include_session_fourteen_rows() {
         let specs = metric_specs(512, 64, 1_800_000_310);
         let mut keys = std::collections::BTreeSet::new();
         for spec in &specs {
@@ -1714,9 +1730,15 @@ mod tests {
         // The work-limit query is appended only after its 100,025-point
         // fixture crosses the second durability barrier.
         assert!(keys.insert("work_limit_rejected"));
-        assert_eq!(keys.len(), 135);
+        assert_eq!(keys.len(), 141);
         assert!(keys.contains("histogram_quantile_narrow"));
         assert!(keys.contains("histogram_quantile_wide"));
+        assert!(keys.contains("quoted_name_narrow"));
+        assert!(keys.contains("quoted_name_wide"));
+        assert!(keys.contains("comments_narrow"));
+        assert!(keys.contains("comments_wide"));
+        assert!(keys.contains("histogram_fraction_narrow"));
+        assert!(keys.contains("histogram_fraction_wide"));
         assert!(keys.contains("atan2_narrow"));
         assert!(keys.contains("atan2_wide"));
         assert!(keys.contains("annotations_narrow"));
@@ -1746,6 +1768,12 @@ mod tests {
             "atan2_wide",
             "annotations_narrow",
             "annotations_wide",
+            "quoted_name_narrow",
+            "quoted_name_wide",
+            "comments_narrow",
+            "comments_wide",
+            "histogram_fraction_narrow",
+            "histogram_fraction_wide",
         ]);
         assert_eq!(keys, expected);
     }

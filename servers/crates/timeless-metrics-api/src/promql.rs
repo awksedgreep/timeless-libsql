@@ -126,6 +126,47 @@ mod tests {
     }
 
     #[test]
+    fn parses_prometheus_three_quoted_utf8_metric_and_label_names() {
+        let Expr::VectorSelector(selector) =
+            parse(r#"{"oracle.metric/温度","node.name"="東京"}"#).unwrap()
+        else {
+            panic!("vector selector expected")
+        };
+        assert_eq!(selector.name, None);
+        assert_eq!(selector.matchers.matchers.len(), 2);
+        assert_eq!(selector.matchers.matchers[0].name, "__name__");
+        assert_eq!(selector.matchers.matchers[0].value, "oracle.metric/温度");
+        assert_eq!(selector.matchers.matchers[1].name, "node.name");
+        assert_eq!(selector.matchers.matchers[1].value, "東京");
+
+        let Expr::VectorSelector(escaped) = parse(r#"{"oracle.\"quoted\"\\温度"}"#).unwrap()
+        else {
+            panic!("vector selector expected")
+        };
+        assert_eq!(escaped.name, None);
+        assert_eq!(escaped.matchers.matchers.len(), 1);
+        assert_eq!(escaped.matchers.matchers[0].name, "__name__");
+        assert_eq!(
+            escaped.matchers.matchers[0].value,
+            "oracle.\"quoted\"\\温度"
+        );
+    }
+
+    #[test]
+    fn parses_prometheus_line_comments_without_treating_hashes_in_strings_as_comments() {
+        for query in [
+            "# leading comment\noracle_temporal # trailing comment",
+            "oracle_temporal\n# between operands\n+ 1",
+            "sum(\n  # argument comment\n  oracle_temporal\n)",
+            r##"label_replace(oracle_temporal, "note", "#literal", "job", ".*")"##,
+            r#"`# raw string`"#,
+        ] {
+            assert!(parse(query).is_ok(), "{query:?} did not parse");
+        }
+        assert!(parse("# only a comment").is_err());
+    }
+
+    #[test]
     fn malformed_promql_is_rejected_by_the_parser() {
         for query in [
             "avg_over_time(cpu)",

@@ -296,6 +296,41 @@ string does not by itself make a nameless selector legal, so
 Catalog rows are tested against every name matcher before any metric payload
 is requested.
 
+## PromQL quoted UTF-8 names and comments
+
+Prometheus 3 quoted metric and label names work through the public text-ingest
+and query paths:
+
+```promql
+{"http.request/duration-秒","node.name"="東京"}
+{"oracle.\"quoted\"\\温度","node.name"="大阪"}
+```
+
+The exposition parser preserves decoded UTF-8, quote, and backslash bytes as
+series identity. The same identity survives `timeless_series` discovery,
+compact, shutdown, and reopen. Direct SQLite/libSQL users bind the decoded
+metric name as ordinary TEXT and the decoded label key in the matcher JSON;
+[`SQL-PROM-001`](QUERY_SQL_EQUIVALENTS.md#sql-prom-001-instant-selector)
+is the executable equivalent.
+
+Line comments begin with `#` outside a quoted string and continue to the next
+newline. They may occur before, after, or between expression tokens:
+
+```promql
+# compare the current request rate
+sum by (service) (
+  rate( # one bounded counter window
+    http_requests_total[5m]
+  )
+) # trailing explanation
+```
+
+Comments are API syntax and require no extension primitive. Error and warning
+positions still refer to the original query text; parentheses, calls, and
+brackets inside a comment do not participate in source scanning, while `#`
+inside a quoted matcher remains part of its value. A comment-only query fails
+as `bad_data` rather than becoming an empty expression.
+
 ## PromQL temporal selectors
 
 Temporal modifiers change where a selector reads without changing the outer
@@ -1217,6 +1252,39 @@ in
 [`SQL-PROM-054`](QUERY_SQL_EQUIVALENTS.md#sql-prom-054-histogram_quantile-over-classic-buckets),
 including the documented distinction between its ordinary-SQL foundation and
 the API's complete Prometheus float/tolerance behavior.
+
+`histogram_fraction(lower, upper, buckets)` estimates the fraction of classic
+histogram observations between two scalar bounds:
+
+```promql
+histogram_fraction(
+  0.1,
+  0.5,
+  sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+)
+```
+
+The pinned Prometheus classic-bucket algorithm coalesces equal numeric bounds,
+requires a `+Inf` total, interpolates inside finite buckets, treats natural
+zero and infinite-width buckets specially, and does not apply
+`histogram_quantile`'s monotonicity repair. Bounds may be scalar expressions
+evaluated per step; inverted bounds return zero, zero totals and missing
+`+Inf` return NaN, and output labels omit the metric name and `le`. Metric
+families remain distinct internally, so a post-name-removal collision fails
+instead of emitting duplicate label sets. Every selected bucket and scalar
+bound is charged to cumulative work and cancellation limits.
+
+This support is for ordinary classic float `*_bucket` series only. Native
+histograms still require a typed storage model. Direct SQLite/libSQL users can
+use the bounded ordinary-SQL CDF foundation in
+[`SQL-PROM-056`](QUERY_SQL_EQUIVALENTS.md#sql-prom-056-histogram_fraction-over-classic-buckets).
+
+Prometheus 3.13.2 feature-gates `start()`, `end()`, `step()`, `range()`,
+`min_of`, `max_of`, and `histogram_quantiles`; `start_timestamp()` is not a
+PromQL function. The stable endpoint returns the pinned disabled/unknown
+diagnostics. This does not affect the shipped selector modifiers
+`@ start()` and `@ end()`. MetricsQL variants remain separately tracked and
+are never enabled by silently broadening PromQL.
 
 ## Prometheus warning and info annotations
 

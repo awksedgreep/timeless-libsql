@@ -82,6 +82,25 @@ pub(super) fn prometheus_remote_write(timestamp_ms: i64) -> Vec<u8> {
             .collect::<Vec<_>>(),
         &[],
     );
+    request.series(
+        "oracle_step",
+        &(-10_000..=20_000)
+            .step_by(1_000)
+            .enumerate()
+            .map(|(index, offset)| (index as f64 + 1.0, offset))
+            .collect::<Vec<_>>(),
+        &[],
+    );
+    request.series(
+        "oracle.metric/温度",
+        &[(42.0, 30_000)],
+        &[("node.name", "東京")],
+    );
+    request.series(
+        "oracle.\"quoted\"\\温度",
+        &[(43.0, 30_000)],
+        &[("node.name", "大阪")],
+    );
     for (name, value, labels) in [
         (
             "oracle_arithmetic_lhs",

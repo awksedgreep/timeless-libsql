@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "oracle": "victoriametrics-v1.148.0",
+  "cases": [
+    {
+      "id": "PQL-S10-direct-window-one-second-step",
+      "query": "count_over_time(oracle_step[5i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "1s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [5, 5, 5, 5, 5]
+    },
+    {
+      "id": "PQL-S10-direct-window-two-second-step",
+      "query": "count_over_time(oracle_step[5i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [10, 10, 10]
+    },
+    {
+      "id": "PQL-S10-subquery-window-and-resolution",
+      "query": "max_over_time(vector(time())[5i:1i]) - min_over_time(vector(time())[5i:1i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_values": [8, 8, 8]
+    },
+    {
+      "id": "PQL-S10-millisecond-step",
+      "query": "max_over_time(vector(time())[5i:1i]) - min_over_time(vector(time())[5i:1i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 3000, "step": "1500ms"},
+      "expected_values": [6, 6, 6]
+    },
+    {
+      "id": "PQL-S10-zero-step-relative-window",
+      "query": "count_over_time(vector(time())[0i:1i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 2000, "step": "1s"},
+      "expected_values": [1, 1, 1]
+    }
+  ],
+  "error_cases": [
+    {
+      "id": "PQL-S10-bare-i-is-not-a-duration",
+      "params": {
+        "query": "count_over_time(vector(time())[5i:i])",
+        "start": "0",
+        "end": "2",
+        "step": "1s"
+      },
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "cannot find WITH template for \"i\""
+    }
+  ]
+}

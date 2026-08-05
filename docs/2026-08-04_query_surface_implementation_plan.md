@@ -225,10 +225,19 @@ Exit: every applicable P2 PromQL row passes Prometheus, including quoted UTF-8
 names, comments, calendar/evaluation functions, step-relative ranges, and
 classic-histogram boundary behavior. Experimental features remain separate.
 
+Outcome: shipped `PQL-S14`, `PQL-S15`, and classic-bucket `PQL-H02` with
+pinned Prometheus 3.13.2 cases, real-extension HTTP/durability regressions,
+and executable `SQL-PROM-056`. Oracle audit corrected the original roadmap:
+`PQL-S10` is MetricsQL-only and is deferred to `MQL-09`; `PQL-F19`,
+`PQL-F20`, and `PQL-H03` are feature-gated experimental PromQL and their
+stable MetricsQL variants are tracked as `MQL-10` through `MQL-12`. The
+stable endpoint pins the upstream rejection diagnostics without changing the
+shipped `@ start()`/`@ end()` modifiers.
+
 ### Session 15: MetricsQL compatibility tier
 
-Rows: `MQL-01`–`MQL-07` in order. `MQL-08` receives a bounded explicit
-disposition later, not a blanket compatibility claim.
+Rows: `MQL-01`–`MQL-07` and `MQL-09`–`MQL-12` in order. `MQL-08` receives a
+bounded explicit disposition later, not a blanket compatibility claim.
 
 Exit: each shipped construct is labeled MetricsQL, passes VictoriaMetrics
 `v1.148.0`, records every Prometheus difference, and cannot alter the default

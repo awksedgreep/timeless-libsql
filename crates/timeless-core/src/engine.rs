@@ -1674,7 +1674,11 @@ impl Engine {
         labels: &[(&'a [u8], &'a [u8])],
         sorted: &mut Vec<(&'a str, &'a str)>,
     ) -> EngineResult<i64> {
-        if labels.iter().any(|(_, value)| value.contains(&b'\\')) {
+        if name.contains(&b'\\')
+            || labels
+                .iter()
+                .any(|(key, value)| key.contains(&b'\\') || value.contains(&b'\\'))
+        {
             return self.resolve_escaped(name, labels);
         }
         let Some(metric) = std::str::from_utf8(name).ok() else {
@@ -1715,19 +1719,29 @@ impl Engine {
         self.resolve_pairs_slow(hash, metric, sorted)
     }
 
-    /// Prometheus exposition escapes label-value newline, quote, and
-    /// backslash bytes. Keep the allocation-free borrowed fast path for the
-    /// overwhelmingly common unescaped labels, and materialize only samples
-    /// that actually contain an escape.
+    /// Prometheus exposition escapes newline, quote, and backslash bytes in
+    /// quoted metric names, label names, and label values. Keep the
+    /// allocation-free borrowed fast path for overwhelmingly common
+    /// unescaped identities, and materialize only samples that contain an
+    /// escape.
     fn resolve_escaped(&self, name: &[u8], labels: &[(&[u8], &[u8])]) -> EngineResult<i64> {
-        let metric = String::from_utf8_lossy(name);
+        let metric_storage = name
+            .contains(&b'\\')
+            .then(|| unescape_prom_label_value(name));
+        let metric = String::from_utf8_lossy(metric_storage.as_deref().unwrap_or(name));
         let labels: HashMap<String, String> = labels
             .iter()
-            .map(|&(key, value)| {
-                let value = unescape_prom_label_value(value);
+            .map(|&(raw_key, raw_value)| {
+                let key_storage = raw_key
+                    .contains(&b'\\')
+                    .then(|| unescape_prom_label_value(raw_key));
+                let value_storage = raw_value
+                    .contains(&b'\\')
+                    .then(|| unescape_prom_label_value(raw_value));
                 (
-                    String::from_utf8_lossy(key).into_owned(),
-                    String::from_utf8_lossy(&value).into_owned(),
+                    String::from_utf8_lossy(key_storage.as_deref().unwrap_or(raw_key)).into_owned(),
+                    String::from_utf8_lossy(value_storage.as_deref().unwrap_or(raw_value))
+                        .into_owned(),
                 )
             })
             .collect();
@@ -4825,47 +4839,93 @@ fn parse_prom_value(bytes: &[u8]) -> Option<f64> {
     s.parse().ok()
 }
 
+fn take_prom_quoted(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if index + 1 < bytes.len() => index += 2,
+            b'"' => return Some((&bytes[1..index], &bytes[index + 1..])),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn find_prom_label_close(line: &[u8], open: usize) -> Option<usize> {
+    let mut quoted = false;
+    let mut index = open + 1;
+    while index < line.len() {
+        match line[index] {
+            b'\\' if quoted && index + 1 < line.len() => index += 2,
+            b'"' => {
+                quoted = !quoted;
+                index += 1;
+            }
+            b'}' if !quoted => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn trim_prom_separators(mut bytes: &[u8]) -> &[u8] {
+    while bytes
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b','))
+    {
+        bytes = &bytes[1..];
+    }
+    bytes
+}
+
 /// Parse the inside of a `{key="val",key2="val2"}` label block into `out`.
 /// The scanner keeps escaped bytes borrowed here. `resolve_entry` decodes the
-/// three Prometheus exposition escapes only on the uncommon escaped-label
-/// path, preserving zero-allocation resolution for ordinary labels.
-fn parse_prom_labels_into<'a>(mut s: &'a [u8], out: &mut Vec<(&'a [u8], &'a [u8])>) {
+/// three Prometheus exposition escapes only on the uncommon escaped-identity
+/// path, preserving zero-allocation resolution for ordinary identities.
+fn parse_prom_labels_into<'a>(mut s: &'a [u8], out: &mut Vec<(&'a [u8], &'a [u8])>) -> bool {
     loop {
-        while let Some((&b, rest)) = s.split_first() {
-            if b == b' ' || b == b',' {
-                s = rest;
-            } else {
-                break;
-            }
-        }
+        s = trim_prom_separators(s);
         if s.is_empty() {
-            break;
+            return true;
         }
 
-        let Some(eq) = s.iter().position(|&b| b == b'=') else {
-            break;
+        let (key, rest) = if s[0] == b'"' {
+            let Some((key, rest)) = take_prom_quoted(s) else {
+                return false;
+            };
+            (key, rest)
+        } else {
+            let Some(eq) = s.iter().position(|&b| b == b'=') else {
+                return false;
+            };
+            let mut key = &s[..eq];
+            while let [rest @ .., b' ' | b'\t'] = key {
+                key = rest;
+            }
+            (key, &s[eq..])
         };
-        let mut key = &s[..eq];
-        while let [rest @ .., b' '] = key {
-            key = rest;
+        if key.is_empty() {
+            return false;
         }
-        s = &s[eq + 1..];
-
-        let Some((&b'"', rest)) = s.split_first() else {
-            break;
+        s = rest;
+        while s.first().is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+            s = &s[1..];
+        }
+        let Some((&b'=', rest)) = s.split_first() else {
+            return false;
         };
         s = rest;
-
-        let mut i = 0;
-        while i < s.len() && s[i] != b'"' {
-            if s[i] == b'\\' && i + 1 < s.len() {
-                i += 2;
-            } else {
-                i += 1;
-            }
+        while s.first().is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+            s = &s[1..];
         }
-        out.push((key, &s[..i]));
-        s = if i < s.len() { &s[i + 1..] } else { &s[i..] };
+        let Some((value, rest)) = take_prom_quoted(s) else {
+            return false;
+        };
+        out.push((key, value));
+        s = rest;
     }
 }
 
@@ -4907,20 +4967,39 @@ fn parse_prom_line_into<'a>(
         return None;
     }
 
-    let name_end = line
-        .iter()
-        .position(|&b| b == b'{' || b == b' ' || b == b'\t')?;
-    if name_end == 0 {
-        return None;
-    }
-    let name = &line[..name_end];
-
-    let rest = if line[name_end] == b'{' {
-        let close = name_end + 1 + line[name_end + 1..].iter().position(|&b| b == b'}')?;
-        parse_prom_labels_into(&line[name_end + 1..close], labels);
-        &line[close + 1..]
+    let (name, rest) = if line[0] == b'{' {
+        let close = find_prom_label_close(line, 0)?;
+        let inside = line[1..close].trim_ascii();
+        let (name, remaining) = take_prom_quoted(inside)?;
+        if name.is_empty() {
+            return None;
+        }
+        let remaining = remaining.trim_ascii();
+        if !remaining.is_empty() {
+            let remaining = remaining.strip_prefix(b",")?;
+            if !parse_prom_labels_into(remaining, labels) {
+                return None;
+            }
+        }
+        (name, &line[close + 1..])
     } else {
-        &line[name_end..]
+        let name_end = line
+            .iter()
+            .position(|&b| b == b'{' || b == b' ' || b == b'\t')?;
+        if name_end == 0 {
+            return None;
+        }
+        let name = &line[..name_end];
+        let rest = if line[name_end] == b'{' {
+            let close = find_prom_label_close(line, name_end)?;
+            if !parse_prom_labels_into(&line[name_end + 1..close], labels) {
+                return None;
+            }
+            &line[close + 1..]
+        } else {
+            &line[name_end..]
+        };
+        (name, rest)
     };
 
     let mut fields = rest

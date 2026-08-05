@@ -396,6 +396,7 @@ pub(crate) enum PromPlan {
     Timestamp(PromTimestampPlan),
     Calendar(PromCalendarPlan),
     HistogramQuantile(PromHistogramQuantilePlan),
+    HistogramFraction(PromHistogramFractionPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -572,6 +573,14 @@ pub(crate) struct PromTimestampPlan {
 #[derive(Clone, Debug)]
 pub(crate) struct PromHistogramQuantilePlan {
     quantile: Box<PromPlan>,
+    inner: Box<PromPlan>,
+    source: Option<PromSourceCall>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromHistogramFractionPlan {
+    lower: Box<PromPlan>,
+    upper: Box<PromPlan>,
     inner: Box<PromPlan>,
     source: Option<PromSourceCall>,
 }
@@ -1370,6 +1379,7 @@ impl PromPlan {
             Self::Timestamp(_) => PromValueType::Vector,
             Self::Calendar(_) => PromValueType::Vector,
             Self::HistogramQuantile(_) => PromValueType::Vector,
+            Self::HistogramFraction(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1592,6 +1602,9 @@ fn enforce_prometheus_grid(
 }
 
 fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
+    if let Some(error) = prometheus_preparse_function_error(input) {
+        return Err(error);
+    }
     let parsed = promql::parse(input).map_err(|error| {
         if error == "no expression found in input" {
             "unknown position: parse error: no expression found in input".to_string()
@@ -1605,13 +1618,150 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
         {
             "1:20: parse error: expected type scalar in call to function \"quantile_over_time\", got instant vector"
                 .to_string()
+        } else if let Some(error) = prometheus_step_relative_parse_error(input, &error) {
+            error
+        } else if let Some(name) = prometheus_unknown_function_name(&error) {
+            if prometheus_disabled_stable_function(name) {
+                prometheus_disabled_function_error(input, name)
+            } else {
+                let position = scan_promql_source_calls(input)
+                    .get(name)
+                    .and_then(|calls| calls.front())
+                    .map_or_else(|| "unknown position".to_string(), |call| {
+                        promql_source_position(input, call.start)
+                    });
+                format!("{position}: parse error: unknown function with name \"{name}\"")
+            }
         } else {
             format!("parse error: {error}")
         }
     })?;
-    let mut plan = lower_promql_expr(parsed, lookback, 0)?;
+    let mut plan = lower_promql_expr(parsed, lookback, 0).map_err(|error| {
+        error
+            .strip_prefix(PROMQL_DISABLED_FUNCTION)
+            .map_or(error.clone(), |name| {
+                prometheus_disabled_function_error(input, name)
+            })
+    })?;
     attach_promql_source_positions(&mut plan, input)?;
     Ok(plan)
+}
+
+const PROMQL_DISABLED_FUNCTION: &str = "disabled stable PromQL function: ";
+
+fn prometheus_disabled_stable_function(name: &str) -> bool {
+    matches!(
+        name,
+        "start" | "end" | "step" | "range" | "min_of" | "max_of" | "histogram_quantiles"
+    )
+}
+
+fn prometheus_disabled_function_error(input: &str, name: &str) -> String {
+    let position = scan_promql_source_calls(input)
+        .get(name)
+        .and_then(|calls| calls.front())
+        .map_or_else(
+            || "unknown position".to_string(),
+            |call| promql_source_position(input, call.start),
+        );
+    format!("{position}: parse error: function \"{name}\" is not enabled")
+}
+
+fn prometheus_preparse_function_error(input: &str) -> Option<String> {
+    let calls = scan_promql_source_calls(input);
+    let mut first: Option<(&str, usize, bool)> = None;
+    for (name, calls) in &calls {
+        let known_unknown = name == "start_timestamp";
+        if !known_unknown && !prometheus_disabled_stable_function(name) {
+            continue;
+        }
+        for call in calls {
+            if matches!(name.as_str(), "start" | "end")
+                && prometheus_previous_code_byte(input, call.start) == Some(b'@')
+            {
+                continue;
+            }
+            if first.is_none_or(|(_, start, _)| call.start < start) {
+                first = Some((name, call.start, known_unknown));
+            }
+        }
+    }
+    first.map(|(name, start, known_unknown)| {
+        let position = promql_source_position(input, start);
+        if known_unknown {
+            format!("{position}: parse error: unknown function with name \"{name}\"")
+        } else {
+            format!("{position}: parse error: function \"{name}\" is not enabled")
+        }
+    })
+}
+
+fn prometheus_previous_code_byte(input: &str, limit: usize) -> Option<u8> {
+    let bytes = input.as_bytes();
+    let mut index = 0_usize;
+    let mut quote = None;
+    let mut previous = None;
+    while index < limit {
+        if let Some(delimiter) = quote {
+            if delimiter == b'"' && bytes[index] == b'\\' {
+                index = (index + 2).min(limit);
+                continue;
+            }
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'#' => index = skip_promql_line_comment(bytes, index).min(limit),
+            delimiter @ (b'"' | b'`') => {
+                quote = Some(delimiter);
+                previous = Some(delimiter);
+                index += 1;
+            }
+            byte if byte.is_ascii_whitespace() => index += 1,
+            byte => {
+                previous = Some(byte);
+                index += 1;
+            }
+        }
+    }
+    previous
+}
+
+fn prometheus_unknown_function_name(error: &str) -> Option<&str> {
+    error
+        .strip_prefix("unknown function with name '")
+        .and_then(|name| name.strip_suffix('\''))
+        .or_else(|| {
+            error
+                .strip_prefix("unknown function with name \"")
+                .and_then(|name| name.strip_suffix('"'))
+        })
+}
+
+fn prometheus_step_relative_parse_error(input: &str, error: &str) -> Option<String> {
+    let token = error.strip_prefix("bad number or duration syntax: ")?;
+    let number = token.strip_suffix('i')?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let offset = input.match_indices(token).find_map(|(offset, _)| {
+        let before = input[..offset]
+            .bytes()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        matches!(before, Some(b'[' | b':')).then_some(offset)
+    })?;
+    let prefix = &input[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map_or(prefix.len() + 1, |(_, tail)| tail.len() + 1);
+    Some(format!(
+        "{line}:{column}: parse error: bad number or duration syntax: \"{number}\""
+    ))
 }
 
 fn attach_promql_source_positions(plan: &mut PromPlan, input: &str) -> Result<(), String> {
@@ -1666,6 +1816,14 @@ fn attach_promql_plan_source_positions(
                 "PromQL source locator could not find histogram_quantile call".to_string()
             })?);
             attach_promql_plan_source_positions(&mut histogram.quantile, calls)?;
+            attach_promql_plan_source_positions(&mut histogram.inner, calls)?;
+        }
+        PromPlan::HistogramFraction(histogram) => {
+            histogram.source = Some(take(calls, "histogram_fraction").ok_or_else(|| {
+                "PromQL source locator could not find histogram_fraction call".to_string()
+            })?);
+            attach_promql_plan_source_positions(&mut histogram.lower, calls)?;
+            attach_promql_plan_source_positions(&mut histogram.upper, calls)?;
             attach_promql_plan_source_positions(&mut histogram.inner, calls)?;
         }
         PromPlan::Binary(binary) => {
@@ -1726,6 +1884,10 @@ fn scan_promql_source_calls(input: &str) -> BTreeMap<String, VecDeque<PromSource
             index += 1;
             continue;
         }
+        if bytes[index] == b'#' {
+            index = skip_promql_line_comment(bytes, index);
+            continue;
+        }
         if matches!(bytes[index], b'"' | b'`') {
             quote = Some(bytes[index]);
             index += 1;
@@ -1776,10 +1938,23 @@ fn is_promql_identifier_continue(byte: u8) -> bool {
 }
 
 fn skip_promql_whitespace(bytes: &[u8], mut index: usize) -> usize {
-    while bytes
-        .get(index)
-        .is_some_and(|byte| byte.is_ascii_whitespace())
-    {
+    loop {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'#') {
+            index = skip_promql_line_comment(bytes, index);
+            continue;
+        }
+        return index;
+    }
+}
+
+fn skip_promql_line_comment(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(|byte| *byte != b'\n') {
         index += 1;
     }
     index
@@ -1821,7 +1996,10 @@ fn matching_promql_delimiter(bytes: &[u8], start: usize, open: u8, close: u8) ->
             index += 1;
             continue;
         }
-        if matches!(bytes[index], b'"' | b'`') {
+        if bytes[index] == b'#' {
+            index = skip_promql_line_comment(bytes, index);
+            continue;
+        } else if matches!(bytes[index], b'"' | b'`') {
             quote = Some(bytes[index]);
         } else if bytes[index] == open {
             depth += 1;
@@ -1862,6 +2040,10 @@ fn promql_direct_argument_offsets(bytes: &[u8], open: usize) -> Option<Vec<usize
         }
         match bytes[index] {
             b'"' | b'`' => quote = Some(bytes[index]),
+            b'#' => {
+                index = skip_promql_line_comment(bytes, index);
+                continue;
+            }
             b'(' => parens += 1,
             b')' => parens -= 1,
             b'[' => brackets += 1,
@@ -2083,6 +2265,33 @@ fn lower_promql_expr(
                 op,
                 inner: Box::new(inner),
                 parameters,
+            }))
+        }
+        promql::Expr::Call(call) if prometheus_disabled_stable_function(call.func.name) => Err(
+            format!("{PROMQL_DISABLED_FUNCTION}{}", call.func.name),
+        ),
+        promql::Expr::Call(call) if call.func.name == "histogram_fraction" => {
+            let [lower, upper, argument] = call.args.args.as_slice() else {
+                return Err(
+                    "histogram_fraction requires two scalar bounds and an instant vector".into(),
+                );
+            };
+            let lower = lower_promql_expr((**lower).clone(), lookback, depth + 1)?;
+            let upper = lower_promql_expr((**upper).clone(), lookback, depth + 1)?;
+            if lower.value_type() != PromValueType::Scalar
+                || upper.value_type() != PromValueType::Scalar
+            {
+                return Err("histogram_fraction bounds must be scalars".into());
+            }
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err("histogram_fraction buckets must be an instant vector".into());
+            }
+            Ok(PromPlan::HistogramFraction(PromHistogramFractionPlan {
+                lower: Box::new(lower),
+                upper: Box::new(upper),
+                inner: Box::new(inner),
+                source: None,
             }))
         }
         promql::Expr::Call(call) if call.func.name == "histogram_quantile" => {
@@ -2707,6 +2916,7 @@ fn lower_promql_subquery(
             | PromPlan::Timestamp(_)
             | PromPlan::Calendar(_)
             | PromPlan::HistogramQuantile(_)
+            | PromPlan::HistogramFraction(_)
             | PromPlan::Binary(_)
     ) {
         return Err("PromQL subquery requires an instant-vector expression".into());
@@ -4203,6 +4413,20 @@ fn execute_prometheus(
             annotations,
             cancelled,
         ),
+        PromPlan::HistogramFraction(histogram) => execute_prometheus_histogram_fraction(
+            conn,
+            features,
+            histogram,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
             conn,
             features,
@@ -5361,6 +5585,169 @@ fn execute_prometheus_histogram_quantile(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_histogram_fraction(
+    conn: &Connection,
+    features: QueryFeatures,
+    histogram: &PromHistogramFractionPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let lower = execute_prometheus(
+        conn,
+        features,
+        &histogram.lower,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    let upper = execute_prometheus(
+        conn,
+        features,
+        &histogram.upper,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    let buckets = execute_prometheus(
+        conn,
+        features,
+        &histogram.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    let frame_bytes = lower
+        .frame_bytes
+        .saturating_add(upper.frame_bytes)
+        .saturating_add(buckets.frame_bytes);
+    let intermediate_points = lower
+        .intermediate_points
+        .saturating_add(lower.points)
+        .saturating_add(upper.intermediate_points)
+        .saturating_add(upper.points)
+        .saturating_add(buckets.intermediate_points)
+        .saturating_add(buckets.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let IntermediateValue::Scalar(lower) = decode_prometheus_intermediate(
+        &lower.body,
+        PromValueType::Scalar,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("histogram fraction lower-bound type was checked while lowering")
+    };
+    let IntermediateValue::Scalar(upper) = decode_prometheus_intermediate(
+        &upper.body,
+        PromValueType::Scalar,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("histogram fraction upper-bound type was checked while lowering")
+    };
+    let IntermediateValue::Vector(series) = decode_prometheus_intermediate(
+        &buckets.body,
+        PromValueType::Vector,
+        instant,
+        limits,
+        cancelled,
+    )?
+    else {
+        unreachable!("histogram fraction bucket type was checked while lowering")
+    };
+    let bucket_position = histogram
+        .source
+        .as_ref()
+        .map_or(0, |source| source.argument(2));
+    let lower: BTreeMap<i64, f64> = lower.into_iter().collect();
+    let upper: BTreeMap<i64, f64> = upper.into_iter().collect();
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, Vec<PromClassicBucket>>> =
+        BTreeMap::new();
+    for item in series {
+        check_cancelled(cancelled)?;
+        let bucket_label = item.labels.get("le").map_or("", String::as_str);
+        let upper_bound = match parse_prometheus_bucket_bound(bucket_label) {
+            Ok(upper_bound) => upper_bound,
+            Err(()) => {
+                annotations.bad_bucket_label(bucket_label, bucket_position);
+                continue;
+            }
+        };
+        let mut labels = item.labels;
+        labels.remove("le");
+        let group = groups.entry(labels).or_default();
+        for (timestamp, count) in item.points {
+            check_cancelled(cancelled)?;
+            group
+                .entry(timestamp)
+                .or_default()
+                .push(PromClassicBucket { upper_bound, count });
+        }
+    }
+
+    let mut output = Vec::with_capacity(groups.len());
+    for (mut labels, steps) in groups {
+        check_cancelled(cancelled)?;
+        labels.remove("__name__");
+        let mut points = Vec::with_capacity(steps.len());
+        for (timestamp, buckets) in steps {
+            check_cancelled(cancelled)?;
+            let lower = lower.get(&timestamp).copied().ok_or_else(|| {
+                "histogram_fraction lower bound is missing an evaluation timestamp".to_string()
+            })?;
+            let upper = upper.get(&timestamp).copied().ok_or_else(|| {
+                "histogram_fraction upper bound is missing an evaluation timestamp".to_string()
+            })?;
+            points.push((
+                timestamp,
+                prometheus_classic_bucket_fraction(lower, upper, buckets, cancelled)?,
+            ));
+        }
+        if !points.is_empty() {
+            output.push(IntermediateSeries { labels, points });
+        }
+    }
+    let output = normalize_prometheus_vector(output, cancelled)?;
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(output),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
 fn parse_prometheus_bucket_bound(value: &str) -> Result<f64, ()> {
     match value {
         "NaN" => Ok(f64::NAN),
@@ -5510,6 +5897,103 @@ fn prometheus_classic_bucket_quantile(
         value: lower_bound + (bucket.upper_bound - lower_bound) * (rank / bucket_count),
         repair,
     })
+}
+
+fn prometheus_classic_bucket_fraction(
+    lower: f64,
+    upper: f64,
+    mut buckets: Vec<PromClassicBucket>,
+    cancelled: &AtomicBool,
+) -> Result<f64, String> {
+    buckets.sort_by(|lhs, rhs| {
+        if lhs.upper_bound < rhs.upper_bound {
+            std::cmp::Ordering::Less
+        } else if rhs.upper_bound < lhs.upper_bound {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    if !buckets
+        .last()
+        .is_some_and(|bucket| bucket.upper_bound == f64::INFINITY)
+    {
+        return Ok(f64::NAN);
+    }
+    let mut coalesced: Vec<PromClassicBucket> = Vec::with_capacity(buckets.len());
+    for bucket in buckets {
+        check_cancelled(cancelled)?;
+        if let Some(previous) = coalesced
+            .last_mut()
+            .filter(|previous| previous.upper_bound == bucket.upper_bound)
+        {
+            previous.count += bucket.count;
+        } else {
+            coalesced.push(bucket);
+        }
+    }
+    let count = coalesced.last().expect("nonempty buckets").count;
+    if count == 0.0 || lower.is_nan() || upper.is_nan() {
+        return Ok(f64::NAN);
+    }
+    if lower >= upper {
+        return Ok(0.0);
+    }
+
+    let mut rank = 0.0;
+    let mut lower_rank = 0.0;
+    let mut upper_rank = 0.0;
+    let mut lower_set = false;
+    let mut upper_set = false;
+    let mut lower_bound = if coalesced[0].upper_bound <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        0.0
+    };
+    for (index, bucket) in coalesced.iter().copied().enumerate() {
+        check_cancelled(cancelled)?;
+        if index > 0 {
+            lower_bound = coalesced[index - 1].upper_bound;
+        }
+        let upper_bound = bucket.upper_bound;
+        let interpolate = |value: f64| {
+            if lower_bound == f64::NEG_INFINITY {
+                bucket.count
+            } else {
+                rank + (bucket.count - rank) * (value - lower_bound) / (upper_bound - lower_bound)
+            }
+        };
+        if !lower_set && lower_bound >= lower {
+            lower_rank = rank;
+            lower_set = true;
+        }
+        if !upper_set && lower_bound >= upper {
+            upper_rank = rank;
+            upper_set = true;
+        }
+        if lower_set && upper_set {
+            break;
+        }
+        if !lower_set && lower_bound < lower && upper_bound > lower {
+            lower_rank = interpolate(lower);
+            lower_set = true;
+        }
+        if !upper_set && lower_bound < upper && upper_bound > upper {
+            upper_rank = interpolate(upper);
+            upper_set = true;
+        }
+        if lower_set && upper_set {
+            break;
+        }
+        rank = bucket.count;
+    }
+    if !lower_set || lower_rank > count {
+        lower_rank = count;
+    }
+    if !upper_set || upper_rank > count {
+        upper_rank = count;
+    }
+    Ok((upper_rank - lower_rank) / count)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8946,6 +9430,76 @@ mod tests {
             &quoted[calls["sort"].front().unwrap().argument(0)..],
             "real)"
         );
+
+        let commented = concat!(
+            "sort # rate(fake[5m]) and an unmatched ) are comments\n",
+            "(\n",
+            "  # sort(fake) is not a call or an argument\n",
+            "  oracle_temporal\n",
+            ")"
+        );
+        let calls = scan_promql_source_calls(commented);
+        assert_eq!(calls["sort"].len(), 1);
+        assert!(!calls.contains_key("rate"));
+        let sort = calls["sort"].front().unwrap();
+        assert_eq!(promql_source_position(commented, sort.start), "1:1");
+        assert_eq!(promql_source_position(commented, sort.argument(0)), "4:3");
+        assert!(lower_promql(commented, 300_000).is_ok());
+    }
+
+    #[test]
+    fn prometheus_step_relative_rejection_keeps_exact_source_location() {
+        let query = "count_over_time(oracle_temporal[5i])";
+        assert_eq!(
+            lower_promql(query, 300_000).unwrap_err(),
+            "1:33: parse error: bad number or duration syntax: \"5\""
+        );
+        let multiline = "# future MetricsQL tier\ncount_over_time(oracle_temporal[5i])";
+        assert_eq!(
+            prometheus_step_relative_parse_error(multiline, "bad number or duration syntax: 5i")
+                .unwrap(),
+            "2:33: parse error: bad number or duration syntax: \"5\""
+        );
+    }
+
+    #[test]
+    fn prometheus_experimental_and_metricsql_functions_fail_with_pinned_diagnostics() {
+        for (query, expected) in [
+            (
+                "start()",
+                "1:1: parse error: function \"start\" is not enabled",
+            ),
+            ("end()", "1:1: parse error: function \"end\" is not enabled"),
+            (
+                "start_timestamp()",
+                "1:1: parse error: unknown function with name \"start_timestamp\"",
+            ),
+            (
+                "# context\nstep()",
+                "2:1: parse error: function \"step\" is not enabled",
+            ),
+            (
+                "range()",
+                "1:1: parse error: function \"range\" is not enabled",
+            ),
+            (
+                "min_of(1, 2)",
+                "1:1: parse error: function \"min_of\" is not enabled",
+            ),
+            (
+                "max_of(1, 2)",
+                "1:1: parse error: function \"max_of\" is not enabled",
+            ),
+            (
+                "histogram_quantiles(buckets, \"quantile\", 0.5)",
+                "1:1: parse error: function \"histogram_quantiles\" is not enabled",
+            ),
+        ] {
+            assert_eq!(lower_promql(query, 300_000).unwrap_err(), expected);
+        }
+
+        assert!(lower_promql("oracle_temporal @ start()", 300_000).is_ok());
+        assert!(lower_promql("oracle_temporal @ end()", 300_000).is_ok());
     }
 
     #[test]
@@ -9626,6 +10180,94 @@ mod tests {
             &cancelled,
         )
         .unwrap_err();
+        assert!(error.contains("cancelled"), "{error}");
+    }
+
+    #[test]
+    fn prometheus_classic_histogram_fraction_matches_interpolation_and_boundaries() {
+        let cancelled = AtomicBool::new(false);
+        let buckets = || {
+            vec![
+                PromClassicBucket {
+                    upper_bound: 0.1,
+                    count: 10.0,
+                },
+                PromClassicBucket {
+                    upper_bound: 0.5,
+                    count: 20.0,
+                },
+                PromClassicBucket {
+                    upper_bound: 1.0,
+                    count: 30.0,
+                },
+                PromClassicBucket {
+                    upper_bound: f64::INFINITY,
+                    count: 40.0,
+                },
+            ]
+        };
+        assert_eq!(
+            prometheus_classic_bucket_fraction(0.1, 0.5, buckets(), &cancelled).unwrap(),
+            0.25
+        );
+        assert_eq!(
+            prometheus_classic_bucket_fraction(0.25, 0.75, buckets(), &cancelled).unwrap(),
+            0.28125
+        );
+        assert_eq!(
+            prometheus_classic_bucket_fraction(
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                buckets(),
+                &cancelled,
+            )
+            .unwrap(),
+            1.0
+        );
+        assert_eq!(
+            prometheus_classic_bucket_fraction(1.0, 1.0, buckets(), &cancelled).unwrap(),
+            0.0
+        );
+        assert!(
+            prometheus_classic_bucket_fraction(f64::NAN, 1.0, buckets(), &cancelled,)
+                .unwrap()
+                .is_nan()
+        );
+        assert!(prometheus_classic_bucket_fraction(
+            0.0,
+            1.0,
+            vec![PromClassicBucket {
+                upper_bound: 1.0,
+                count: 1.0,
+            }],
+            &cancelled,
+        )
+        .unwrap()
+        .is_nan());
+
+        let negative = vec![
+            PromClassicBucket {
+                upper_bound: -5.0,
+                count: 2.0,
+            },
+            PromClassicBucket {
+                upper_bound: -1.0,
+                count: 4.0,
+            },
+            PromClassicBucket {
+                upper_bound: f64::INFINITY,
+                count: 4.0,
+            },
+        ];
+        assert_eq!(
+            prometheus_classic_bucket_fraction(f64::NEG_INFINITY, -5.0, negative, &cancelled,)
+                .unwrap(),
+            0.5
+        );
+
+        cancelled.store(true, Ordering::Relaxed);
+        let error =
+            prometheus_classic_bucket_fraction(0.0, 1.0, buckets(), &cancelled).unwrap_err();
         assert!(error.contains("cancelled"), "{error}");
     }
 }

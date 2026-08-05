@@ -13,9 +13,11 @@ flush durability barrier, and measures the public query APIs. It never reads a
 private shadow table. Shutdown sends `SIGTERM` and requires the server's normal
 drain to exit successfully.
 
-The current harness retains the 512-series, 32-point metric baseline and adds
-64 one-series metric names for multi-name selector work; its log fixture keeps
-8,192 entries spanning all eight severities with typed nested metadata.
+The current harness retains the 512-series, 32-point metric baseline, adds 64
+one-series metric names for multi-name selector work, and carries a second
+512-series metric whose UTF-8 name and label key require Prometheus 3 quoted
+syntax. Its log fixture keeps 8,192 entries spanning all eight severities with
+typed nested metadata.
 Each signal runs indexed narrow and wide shapes for five warmups and 50
 recorded single-client iterations. The JSON records:
 

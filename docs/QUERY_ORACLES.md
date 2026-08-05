@@ -82,6 +82,7 @@ containers and execute the baseline Prometheus fixture:
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle probe
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle prometheus-smoke
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle prometheus-api
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle victoria-metrics-api
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle victoria-logs-api
 ```
 
@@ -110,6 +111,24 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
+
+The VictoriaMetrics API fixture Remote Writes a deterministic one-second
+series, then evaluates MetricsQL-only cases with explicit range-query steps.
+It pins `Ni` lookbehind and subquery durations against the request step,
+including millisecond steps, and records the exact Prometheus rejection of the
+same syntax separately. This oracle is used only for rows explicitly assigned
+to the MetricsQL compatibility tier. The first fixture contains five success
+cases and one explicit syntax error for `MQL-09`.
+
+Session 14 also pins Prometheus 3 quoted UTF-8 metric and label names, comments
+and source positions, and classic-bucket `histogram_fraction` grouping and
+interpolation. Its classification cases prove that query-context
+`start`/`end`/`step`/`range` and `min_of`/`max_of` require
+`promql-duration-expr`, vector-first `histogram_quantiles` requires
+`promql-experimental-functions`, and `start_timestamp` is unknown to
+Prometheus. These are explicit experimental or MetricsQL rows; the stable
+Timeless endpoint must not enable them merely because the parser recognizes a
+similar construct.
 
 The following Timeless compatibility choices intentionally differ from the
 pinned VictoriaLogs wire/storage model and are asserted on both sides rather

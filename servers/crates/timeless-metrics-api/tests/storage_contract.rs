@@ -11044,6 +11044,614 @@ async fn session_eleven_promql_double_exponential_smoothing_is_explicitly_experi
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fourteen_prometheus_rejects_metricsql_step_relative_durations() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_fourteen_metricsql_step.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let query = "count_over_time(oracle_temporal[5i])";
+    let expected = serde_json::json!({
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:33: parse error: bad number or duration syntax: \"5\""
+    });
+
+    let get = prom_query_range(&app, query, 0, 4, 1).await;
+    assert_eq!(get.0, StatusCode::BAD_REQUEST, "{}", get.1);
+    assert_eq!(get.1, expected);
+    let post = post_form(
+        &app,
+        "/prometheus/api/v1/query_range",
+        "query=count_over_time%28oracle_temporal%5B5i%5D%29&start=0&end=4&step=1",
+    )
+    .await;
+    assert_eq!(post.0, StatusCode::BAD_REQUEST, "{}", post.1);
+    assert_eq!(post.1, expected);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query_range(&reopened_app, query, 0, 4, 1).await.1,
+        expected
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_fourteen_quoted_utf8_names_ingest_query_catalog_compact_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_fourteen_quoted_utf8.db");
+    let base = 1_701_400_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "{{\"oracle.metric/温度\",job=\"oracle\",\"node.name\"=\"東京\"}} 42 {}\n",
+            "{{\"oracle.\\\"quoted\\\"\\\\温度\",job=\"oracle\",\"node.name\"=\"大阪\"}} 43 {}\n",
+            "{{\"oracle_temporal\",job=\"oracle\"}} 7 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let cases = [
+        (
+            r#"{"oracle.metric/温度"}"#,
+            serde_json::json!({
+                "__name__": "oracle.metric/温度",
+                "job": "oracle",
+                "node.name": "東京"
+            }),
+            "42",
+        ),
+        (
+            r#"{job="oracle","oracle.metric/温度","node.name"="東京"}"#,
+            serde_json::json!({
+                "__name__": "oracle.metric/温度",
+                "job": "oracle",
+                "node.name": "東京"
+            }),
+            "42",
+        ),
+        (
+            r#"{"oracle.\"quoted\"\\温度"}"#,
+            serde_json::json!({
+                "__name__": "oracle.\"quoted\"\\温度",
+                "job": "oracle",
+                "node.name": "大阪"
+            }),
+            "43",
+        ),
+        (
+            r#"{"oracle_temporal"}"#,
+            serde_json::json!({"__name__": "oracle_temporal", "job": "oracle"}),
+            "7",
+        ),
+    ];
+    for (query, labels, value) in &cases {
+        let response = prom_query(&app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], "vector");
+        assert_eq!(response.1["data"]["result"][0]["metric"], *labels);
+        assert_eq!(
+            response.1["data"]["result"][0]["value"],
+            serde_json::json!([base, value])
+        );
+    }
+    let range = prom_query_range(&app, r#"{"oracle.metric/温度"}"#, base, base, 1).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "42"]])
+    );
+
+    let malformed = prom_query(&app, r#"{"unterminated}"#, base).await;
+    assert_eq!(malformed.0, StatusCode::BAD_REQUEST, "{}", malformed.1);
+    assert_eq!(malformed.1["errorType"], "bad_data");
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let conn = open_with_extension(&database, &extension);
+    conn.execute(
+        "INSERT INTO metric_samples(metric_samples) VALUES ('compact')",
+        [],
+    )
+    .unwrap();
+    let catalog = conn
+        .prepare(
+            "SELECT name, labels, min_ts, max_ts, points
+               FROM timeless_series('metric_samples')
+              ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(catalog.len(), 3);
+    assert_eq!(catalog[0].0, "oracle.\"quoted\"\\温度");
+    assert_eq!(
+        serde_json::from_str::<Value>(&catalog[0].1).unwrap(),
+        serde_json::json!({"job": "oracle", "node.name": "大阪"})
+    );
+    assert_eq!(catalog[1].0, "oracle.metric/温度");
+    assert_eq!(
+        serde_json::from_str::<Value>(&catalog[1].1).unwrap(),
+        serde_json::json!({"job": "oracle", "node.name": "東京"})
+    );
+    assert_eq!(catalog[2].0, "oracle_temporal");
+    assert_eq!(
+        serde_json::from_str::<Value>(&catalog[2].1).unwrap(),
+        serde_json::json!({"job": "oracle"})
+    );
+    for (_, _, min_ts, max_ts, points) in &catalog {
+        assert_eq!((*min_ts, *max_ts, *points), (base, base, 1));
+    }
+    drop(conn);
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    for (query, labels, value) in &cases {
+        let response = prom_query(&reopened_app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["metric"], *labels);
+        assert_eq!(
+            response.1["data"]["result"][0]["value"],
+            serde_json::json!([base, value])
+        );
+    }
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_fourteen_promql_line_comments_match_get_post_range_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_fourteen_line_comments.db");
+    let base = 1_701_400_100_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!("oracle_temporal{{job=\"oracle\"}} 7 {}\n", base * 1_000);
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let selector = "# leading comment\noracle_temporal # trailing comment";
+    let selected = prom_query(&app, selector, base).await;
+    assert_eq!(selected.0, StatusCode::OK, "{}", selected.1);
+    assert_eq!(
+        selected.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "oracle_temporal", "job": "oracle"},
+            "value": [base, "7"]
+        }])
+    );
+
+    let binary = prom_query(&app, "oracle_temporal\n# between operands\n+ 1", base).await;
+    assert_eq!(binary.0, StatusCode::OK, "{}", binary.1);
+    assert_eq!(
+        binary.1["data"]["result"],
+        serde_json::json!([{"metric": {"job": "oracle"}, "value": [base, "8"]}])
+    );
+
+    let commented_call = concat!(
+        "sort # rate(fake[5m]) and an unmatched ) are comments\n",
+        "(\n",
+        "  # sort(fake) is not a call or an argument\n",
+        "  oracle_temporal\n",
+        ")"
+    );
+    let sorted = prom_query(&app, commented_call, base).await;
+    assert_eq!(sorted.0, StatusCode::OK, "{}", sorted.1);
+    assert_eq!(sorted.1, selected.1);
+
+    let hash_in_string = prom_query(&app, r#"oracle_temporal{job=~"oracle#|oracle"}"#, base).await;
+    assert_eq!(hash_in_string.0, StatusCode::OK, "{}", hash_in_string.1);
+    assert_eq!(hash_in_string.1, selected.1);
+
+    let post_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", commented_call)
+        .append_pair("time", &base.to_string())
+        .finish();
+    let posted = post_form(&app, "/prometheus/api/v1/query", &post_params).await;
+    assert_eq!(posted.0, StatusCode::OK, "{}", posted.1);
+    assert_eq!(posted.1, selected.1);
+
+    let range = prom_query_range(&app, selector, base, base, 1).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "oracle_temporal", "job": "oracle"},
+            "values": [[base, "7"]]
+        }])
+    );
+
+    let comment_only = prom_query(&app, "# only a comment", base).await;
+    assert_eq!(
+        comment_only.0,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        comment_only.1
+    );
+    assert_eq!(
+        comment_only.1,
+        serde_json::json!({
+            "status": "error",
+            "errorType": "bad_data",
+            "error": "invalid parameter \"query\": unknown position: parse error: no expression found in input"
+        })
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(&reopened_app, commented_call, base).await.1,
+        selected.1
+    );
+    assert_eq!(
+        prom_query(&reopened_app, "# only a comment", base).await.1,
+        comment_only.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_fourteen_histogram_fraction_matches_classic_buckets_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fourteen_histogram_fraction.db");
+    let base = 1_701_400_200_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        32,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut fixture = String::new();
+    for (bound, count) in [("0.1", 10.0), ("0.5", 20.0), ("1", 30.0), ("+Inf", 40.0)] {
+        fixture.push_str(&format!(
+            "fraction_bucket{{host=\"a\",le=\"{bound}\"}} {} {}\n",
+            count,
+            base * 1_000
+        ));
+        fixture.push_str(&format!(
+            "fraction_bucket{{host=\"a\",le=\"{bound}\"}} {} {}\n",
+            count * 2.0,
+            (base + 10) * 1_000
+        ));
+    }
+    for (bound, count) in [("0.1", 2.0), ("0.5", 4.0), ("1", 6.0), ("+Inf", 8.0)] {
+        fixture.push_str(&format!(
+            "fraction_other_bucket{{host=\"a\",le=\"{bound}\"}} {count} {}\n",
+            (base + 10) * 1_000
+        ));
+    }
+    for (case, buckets) in [
+        ("missing_inf", vec![("1", 10.0), ("2", 20.0)]),
+        ("zero_total", vec![("1", 0.0), ("+Inf", 0.0)]),
+        (
+            "duplicate_bound",
+            vec![("1", 3.0), ("1.0", 4.0), ("2", 10.0), ("+Inf", 10.0)],
+        ),
+        (
+            "malformed_bound",
+            vec![("bogus", 9.0), ("1", 5.0), ("+Inf", 10.0)],
+        ),
+    ] {
+        for (bound, count) in buckets {
+            fixture.push_str(&format!(
+                "fraction_special_bucket{{case=\"{case}\",le=\"{bound}\"}} {count} {}\n",
+                (base + 10) * 1_000
+            ));
+        }
+    }
+    fixture.push_str(&format!(
+        "fraction_special_bucket{{case=\"absent_bound\"}} 123 {}\n",
+        (base + 10) * 1_000
+    ));
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (query, expected) in [
+        ("histogram_fraction(0.1, 0.5, fraction_bucket)", "0.25"),
+        ("histogram_fraction(0.25, 0.75, fraction_bucket)", "0.28125"),
+        ("histogram_fraction(-Inf, +Inf, fraction_bucket)", "1"),
+        ("histogram_fraction(1, 0.5, fraction_bucket)", "0"),
+        ("histogram_fraction(NaN, 1, fraction_bucket)", "NaN"),
+        (
+            "histogram_fraction(0, 1, fraction_special_bucket{case=\"missing_inf\"})",
+            "NaN",
+        ),
+        (
+            "histogram_fraction(0, 1, fraction_special_bucket{case=\"zero_total\"})",
+            "NaN",
+        ),
+        (
+            "histogram_fraction(0, 1, fraction_special_bucket{case=\"duplicate_bound\"})",
+            "0.7",
+        ),
+    ] {
+        let response = prom_query(&app, query, base + 10).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+        assert!(response.1["data"]["result"][0]["metric"]
+            .get("__name__")
+            .is_none());
+    }
+
+    let range = prom_query_range(
+        &app,
+        "histogram_fraction(0.1, 0.5, fraction_bucket)",
+        base,
+        base + 10,
+        10,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a"},
+            "values": [[base, "0.25"], [base + 10, "0.25"]]
+        }])
+    );
+    let nested = prom_query(
+        &app,
+        "avg_over_time(histogram_fraction(0.1, 0.5, fraction_bucket)[10s:10s])",
+        base + 10,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "0.25");
+
+    let warning_query = concat!(
+        "histogram_fraction(0, 1, ",
+        "fraction_special_bucket{case=~\"malformed_bound|absent_bound\"})"
+    );
+    let warnings = prom_query(&app, warning_query, base + 10).await;
+    assert_eq!(warnings.0, StatusCode::OK, "{}", warnings.1);
+    assert_eq!(warnings.1["data"]["result"][0]["value"][1], "0.5");
+    assert_eq!(
+        warnings.1["warnings"],
+        serde_json::json!([
+            "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"\" (1:26)",
+            "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bogus\" (1:26)"
+        ])
+    );
+
+    let collision = prom_query(
+        &app,
+        "histogram_fraction(0, 1, {__name__=~\"fraction(_other)?_bucket\",host=\"a\"})",
+        base + 10,
+    )
+    .await;
+    assert_eq!(
+        collision.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        collision.1
+    );
+    assert_eq!(collision.1["errorType"], "execution");
+    assert!(collision.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("vector cannot contain metrics with the same labelset"));
+
+    let post_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "histogram_fraction(0.1, 0.5, fraction_bucket)")
+        .append_pair("time", &(base + 10).to_string())
+        .finish();
+    let posted = post_form(&app, "/prometheus/api/v1/query", &post_params).await;
+    assert_eq!(posted.0, StatusCode::OK, "{}", posted.1);
+    assert_eq!(posted.1["data"]["result"][0]["value"][1], "0.25");
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 5,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(
+        &limited,
+        "histogram_fraction(0.1, 0.5, fraction_bucket)",
+        base + 10,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+    assert!(
+        rejected.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("work point limit 5 exceeded"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let conn = open_with_extension(&database, &extension);
+    conn.execute(
+        "INSERT INTO metric_samples(metric_samples) VALUES ('compact')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_result = prom_query(
+        &reopened_app,
+        "histogram_fraction(0.25, 0.75, fraction_bucket)",
+        base + 10,
+    )
+    .await;
+    assert_eq!(reopened_result.0, StatusCode::OK, "{}", reopened_result.1);
+    assert_eq!(
+        reopened_result.1["data"]["result"][0]["value"][1],
+        "0.28125"
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fourteen_experimental_functions.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let cases = [
+        ("start()", "function \"start\" is not enabled"),
+        ("end()", "function \"end\" is not enabled"),
+        (
+            "start_timestamp()",
+            "unknown function with name \"start_timestamp\"",
+        ),
+        ("step()", "function \"step\" is not enabled"),
+        ("range()", "function \"range\" is not enabled"),
+        ("min_of(1, 2)", "function \"min_of\" is not enabled"),
+        ("max_of(1, 2)", "function \"max_of\" is not enabled"),
+        (
+            "histogram_quantiles(vector(1), \"quantile\", 0.5, 0.9)",
+            "function \"histogram_quantiles\" is not enabled",
+        ),
+    ];
+    for (query, diagnostic) in cases {
+        let response = prom_query(&app, query, 2).await;
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "{query}: {}",
+            response.1
+        );
+        assert_eq!(
+            response.1,
+            serde_json::json!({
+                "status": "error",
+                "errorType": "bad_data",
+                "error": format!("invalid parameter \"query\": 1:1: parse error: {diagnostic}")
+            })
+        );
+    }
+
+    let at_start = prom_query_range(&app, "missing_metric @ start()", 2, 4, 1).await;
+    assert_eq!(at_start.0, StatusCode::OK, "{}", at_start.1);
+    assert_eq!(at_start.1["data"]["result"], serde_json::json!([]));
+    let at_end = prom_query_range(&app, "missing_metric @ end()", 2, 4, 1).await;
+    assert_eq!(at_end.0, StatusCode::OK, "{}", at_end.1);
+    assert_eq!(at_end.1["data"]["result"], serde_json::json!([]));
+
+    let post_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "query",
+            "histogram_quantiles(vector(1), \"quantile\", 0.5, 0.9)",
+        )
+        .append_pair("time", "2")
+        .finish();
+    let posted = post_form(&app, "/prometheus/api/v1/query", &post_params).await;
+    assert_eq!(posted.0, StatusCode::BAD_REQUEST, "{}", posted.1);
+    assert!(posted.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("function \"histogram_quantiles\" is not enabled"));
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    for (query, diagnostic) in cases {
+        let response = prom_query(&reopened_app, query, 2).await;
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "{query}: {}",
+            response.1
+        );
+        assert!(response.1["error"].as_str().unwrap().contains(diagnostic));
+    }
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

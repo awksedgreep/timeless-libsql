@@ -27,7 +27,9 @@
       "version_entrypoint": "/victoria-metrics-prod",
       "version_args": ["-version"],
       "version_contains": "v1.148.0",
-      "fixtures": []
+      "fixtures": [
+        "tests/query_oracles/victoriametrics/api_cases.json"
+      ]
     },
     "victorialogs": {
       "language": "LogsQL",

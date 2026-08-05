@@ -269,7 +269,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "SQL-PROM-047" | "SQL-PROM-048" => "absent_late",
         "SQL-PROM-052" => "calendar_metric",
         "SQL-PROM-053" => "calendar_leap_metric",
-        "SQL-PROM-054" => "sql_histogram_bucket",
+        "SQL-PROM-054" | "SQL-PROM-056" => "sql_histogram_bucket",
         "SQL-PROM-055" => "cpu",
         _ => "cpu",
     };
@@ -297,6 +297,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "nearest" => Value::Real(0.5),
         "minimum" => Value::Real(0.0),
         "maximum" => Value::Real(5.0),
+        "lower" => Value::Real(0.1),
+        "upper" => Value::Real(0.5),
         "destination" => Value::Text("joined".to_owned()),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
@@ -602,6 +604,40 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
                 statement_index + 1
             );
         }
+    }
+
+    let fraction_sql = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-PROM-056")
+        .context("SQL-PROM-056 recipe")?
+        .statements
+        .first()
+        .context("SQL-PROM-056 statement")?;
+    let mut statement = connection.prepare(fraction_sql)?;
+    for index in 1..=statement.parameter_count() {
+        let name = statement
+            .parameter_name(index)
+            .unwrap()
+            .trim_start_matches(':');
+        statement.raw_bind_parameter(index, parameter("SQL-PROM-056", name))?;
+    }
+    let fractions = statement
+        .raw_query()
+        .mapped(|row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if fractions
+        != [
+            (r#"{"host":"web-1"}"#.to_owned(), 100, 0.25),
+            (r#"{"host":"web-1"}"#.to_owned(), 110, 0.25),
+        ]
+    {
+        bail!("SQL-PROM-056 histogram fraction changed: {fractions:?}");
     }
 
     let bounded: i64 = connection.query_row(
@@ -1027,13 +1063,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 68);
+        assert_eq!(recipes.len(), 69);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            86
+            87
         );
         assert_eq!(
             recipes
@@ -1041,7 +1077,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            92
+            93
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

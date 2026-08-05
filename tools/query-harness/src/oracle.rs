@@ -33,6 +33,7 @@ enum OracleCommand {
     Probe,
     PrometheusSmoke,
     PrometheusApi,
+    VictoriaMetricsApi,
     VictoriaLogsApi,
 }
 
@@ -282,10 +283,7 @@ fn post_remote_write(client: &Client, base: &str, sample_timestamp_ms: i64) -> R
         .body(fixture::prometheus_remote_write(sample_timestamp_ms))
         .send()?;
     if response.status().as_u16() != 204 {
-        bail!(
-            "Prometheus oracle Remote Write returned {}",
-            response.status()
-        );
+        bail!("query oracle Remote Write returned {}", response.status());
     }
     Ok(())
 }
@@ -1024,6 +1022,161 @@ fn prometheus_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Resu
     Ok(())
 }
 
+fn victoriametrics_cases(
+    client: &Client,
+    base: &str,
+    fixture: &Value,
+    sample_ms: i64,
+) -> Result<usize> {
+    let mut failures = 0;
+    for case in object_cases(fixture, "cases")? {
+        let range = case
+            .get("range")
+            .and_then(Value::as_object)
+            .context("VictoriaMetrics case range")?;
+        let start_ms = sample_ms + offset(range, "start_offset_ms")?;
+        let end_ms = sample_ms + offset(range, "end_offset_ms")?;
+        let expected_values = values(case, "expected_values")?;
+        let timestamps = evenly_spaced(start_ms, end_ms, expected_values.len());
+        let points: Result<Vec<_>> = timestamps
+            .iter()
+            .zip(&expected_values)
+            .map(|(at, value)| Ok(json!([timestamp(*at), value_string(value)?])))
+            .collect();
+        let metric = case
+            .get("expected_metric")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let expected = json!({
+            "resultType": "matrix",
+            "result": [{"metric": metric, "values": points?}]
+        });
+        let params = Map::from_iter([
+            ("query".to_owned(), json!(string(case, "query")?)),
+            ("start".to_owned(), timestamp(start_ms)),
+            ("end".to_owned(), timestamp(end_ms)),
+            ("step".to_owned(), json!(string(range, "step")?)),
+        ]);
+        let (status, body) = query(client, base, "/api/v1/query_range", &params)?;
+        let valid = status == 200
+            && body.get("status") == Some(&json!("success"))
+            && body.get("data") == Some(&expected);
+        failures += print_verdict(case, valid, || {
+            format!("expected {expected}; got {status} {body}")
+        });
+    }
+    Ok(failures)
+}
+
+fn victoriametrics_error_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
+    let mut failures = 0;
+    for case in object_cases(fixture, "error_cases")? {
+        let params = case
+            .get("params")
+            .and_then(Value::as_object)
+            .context("VictoriaMetrics error case params")?;
+        let (status, body) = query(client, base, "/api/v1/query_range", params)?;
+        let expected_status = case
+            .get("status")
+            .and_then(Value::as_u64)
+            .context("VictoriaMetrics error case status")? as u16;
+        let error_contains = string(case, "error_contains")?;
+        let valid = status == expected_status
+            && body.get("status") == Some(&json!("error"))
+            && body.get("errorType") == case.get("error_type")
+            && body
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains(&error_contains));
+        failures += print_verdict(case, valid, || {
+            format!("unexpected response {status} {body}")
+        });
+    }
+    Ok(failures)
+}
+
+fn victoriametrics_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Result<()> {
+    let relative = oracle
+        .fixtures
+        .iter()
+        .find(|path| path.ends_with("victoriametrics/api_cases.json"))
+        .context("VictoriaMetrics API fixture is not declared")?;
+    let fixture: Value = load_json(&root.join(relative))?;
+    let port = free_port()?;
+    let name = format!("timeless-metricsql-oracle-{}", std::process::id());
+    let args = vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "-d".to_owned(),
+        "--name".to_owned(),
+        name.clone(),
+        "--platform".to_owned(),
+        "linux/amd64".to_owned(),
+        "-p".to_owned(),
+        format!("127.0.0.1:{port}:8428"),
+        oracle.image.clone(),
+        "-storageDataPath=/victoria-metrics-data".to_owned(),
+        "-httpListenAddr=:8428".to_owned(),
+        "-retentionPeriod=1d".to_owned(),
+    ];
+    let output = command_output(runtime, &args, Duration::from_secs(180))?;
+    if !output.status.success() {
+        bail!(
+            "failed to start VictoriaMetrics oracle: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let _guard = ContainerGuard { runtime, name };
+    let base = format!("http://127.0.0.1:{port}");
+    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if client
+            .get(format!("{base}/health"))
+            .send()
+            .is_ok_and(|response| response.status().is_success())
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("VictoriaMetrics API oracle did not become ready");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+    let sample_ms = (now_ms / 60_000 - 1) * 60_000;
+    post_remote_write(&client, &base, sample_ms)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let params = Map::from_iter([
+            ("query".to_owned(), json!("oracle_step")),
+            ("time".to_owned(), timestamp(sample_ms)),
+            ("step".to_owned(), json!("1s")),
+        ]);
+        let (status, body) = query(&client, &base, "/api/v1/query", &params)?;
+        if status == 200
+            && body
+                .pointer("/data/result")
+                .and_then(Value::as_array)
+                .is_some_and(|result| result.len() == 1)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("VictoriaMetrics oracle did not make the Remote Write fixture query-visible");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let failures = victoriametrics_cases(&client, &base, &fixture, sample_ms)?
+        + victoriametrics_error_cases(&client, &base, &fixture)?;
+    if failures != 0 {
+        bail!("{failures} VictoriaMetrics API oracle case(s) failed");
+    }
+    Ok(())
+}
+
 fn victorialogs_request(client: &Client, base: &str, query: &str) -> Result<(u16, String, String)> {
     response_text(
         client
@@ -1308,6 +1461,9 @@ pub(crate) fn run(root: &Path, args: OracleArgs) -> Result<()> {
         }
         OracleCommand::PrometheusApi => {
             prometheus_api(root, &args.runtime, &manifest.oracles["prometheus"])?
+        }
+        OracleCommand::VictoriaMetricsApi => {
+            victoriametrics_api(root, &args.runtime, &manifest.oracles["victoriametrics"])?
         }
         OracleCommand::VictoriaLogsApi => {
             victorialogs_api(root, &args.runtime, &manifest.oracles["victorialogs"])?

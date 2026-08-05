@@ -3448,6 +3448,137 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {"host": "a", "job": "oracle"},
       "expected_values": [0.5]
+    },
+    {
+      "id": "PQL-H02-classic-grouping-and-exact-boundaries",
+      "query": "histogram_fraction(0.1, 0.5, oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle"}, "value": 0.25},
+        {"metric": {"host": "b", "job": "oracle"}, "value": 0.3}
+      ]
+    },
+    {
+      "id": "PQL-H02-linear-interpolation-inside-classic-buckets",
+      "query": "histogram_fraction(0.25, 0.75, oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle"}, "value": 0.28125},
+        {"metric": {"host": "b", "job": "oracle"}, "value": 0.3375}
+      ]
+    },
+    {
+      "id": "PQL-H02-infinite-bounds-cover-all-observations",
+      "query": "histogram_fraction(-Inf, +Inf, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": [1]
+    },
+    {
+      "id": "PQL-H02-inverted-bounds-return-zero",
+      "query": "histogram_fraction(1, 0.5, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": [0]
+    },
+    {
+      "id": "PQL-H02-nan-bound-returns-nan",
+      "query": "histogram_fraction(NaN, 1, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H02-missing-infinite-bucket-returns-nan",
+      "query": "histogram_fraction(0, 1, oracle_histogram_special_bucket{case=\"missing_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "missing_inf", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H02-zero-total-returns-nan",
+      "query": "histogram_fraction(0, 1, oracle_histogram_special_bucket{case=\"zero_total\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "zero_total", "job": "oracle"},
+      "expected_values": ["NaN"]
+    },
+    {
+      "id": "PQL-H02-duplicate-parsed-bounds-are-coalesced",
+      "query": "histogram_fraction(0, 1, oracle_histogram_special_bucket{case=\"duplicate_bound\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "duplicate_bound", "job": "oracle"},
+      "expected_values": [0.7]
+    },
+    {
+      "id": "PQL-H02-range-grid-and-name-policy",
+      "query": "histogram_fraction(0.1, 0.5, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": [0.25, 0.25, 0.25]
+    },
+    {
+      "id": "PQL-H02-composes-as-an-instant-vector",
+      "query": "abs(histogram_fraction(0.1, 0.5, oracle_histogram_bucket{host=\"a\"}))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle"},
+      "expected_values": [0.25]
+    },
+    {
+      "id": "PQL-S14-quoted-utf8-metric-name",
+      "query": "{\"oracle.metric/温度\"}",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle.metric/温度", "job": "oracle", "node.name": "東京"},
+      "expected_values": [42]
+    },
+    {
+      "id": "PQL-S14-quoted-name-among-quoted-label-matchers",
+      "query": "{job=\"oracle\",\"oracle.metric/温度\",\"node.name\"=\"東京\"}",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle.metric/温度", "job": "oracle", "node.name": "東京"},
+      "expected_values": [42]
+    },
+    {
+      "id": "PQL-S14-quoted-metric-name-escapes",
+      "query": "{\"oracle.\\\"quoted\\\"\\\\温度\"}",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle.\"quoted\"\\温度", "job": "oracle", "node.name": "大阪"},
+      "expected_values": [43]
+    },
+    {
+      "id": "PQL-S14-quoted-legacy-metric-name",
+      "query": "{\"oracle_temporal\"}",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_temporal", "job": "oracle"},
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-S15-leading-and-trailing-line-comments",
+      "query": "# leading comment\noracle_temporal # trailing comment",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_temporal", "job": "oracle"},
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-S15-comment-between-binary-operands",
+      "query": "oracle_temporal\n# between operands\n+ 1",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [8]
+    },
+    {
+      "id": "PQL-S15-comment-between-call-name-and-arguments",
+      "query": "sort # rate(fake[5m]) and an unmatched ) are comments\n(\n  # sort(fake) is not a call or an argument\n  oracle_temporal\n)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_temporal", "job": "oracle"},
+      "expected_values": [7]
+    },
+    {
+      "id": "PQL-S15-hash-inside-quoted-matcher-is-data",
+      "query": "oracle_temporal{job=~\"oracle#|oracle\"}",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "oracle_temporal", "job": "oracle"},
+      "expected_values": [7]
     }
   ],
   "operator_error_cases": [
@@ -3666,6 +3797,118 @@
       "status": 422,
       "error_type": "execution",
       "error_contains": "vector cannot contain metrics with the same labelset"
+    },
+    {
+      "id": "PQL-H02-lower-bound-type-errors",
+      "query": "histogram_fraction(oracle_temporal, 1, oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type scalar"
+    },
+    {
+      "id": "PQL-H02-bucket-type-errors",
+      "query": "histogram_fraction(0, 1, 1)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected type instant vector"
+    },
+    {
+      "id": "PQL-H02-arity-errors",
+      "query": "histogram_fraction(0, oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "expected 3 argument(s)"
+    },
+    {
+      "id": "PQL-H02-output-family-collision-errors",
+      "query": "histogram_fraction(0, 1, {__name__=~\"oracle_histogram(_other)?_bucket\",host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "execution",
+      "error_contains": "vector cannot contain metrics with the same labelset"
+    },
+    {
+      "id": "PQL-F19-start-is-experimental",
+      "query": "start()",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "function \"start\" is not enabled"
+    },
+    {
+      "id": "PQL-F19-end-is-experimental",
+      "query": "end()",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "function \"end\" is not enabled"
+    },
+    {
+      "id": "PQL-F19-start-timestamp-is-not-promql",
+      "query": "start_timestamp()",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "unknown function with name \"start_timestamp\""
+    },
+    {
+      "id": "PQL-F19-step-is-experimental",
+      "query": "step()",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "function \"step\" is not enabled"
+    },
+    {
+      "id": "PQL-F19-range-is-experimental",
+      "query": "range()",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "function \"range\" is not enabled"
+    },
+    {
+      "id": "PQL-F20-min-of-is-experimental",
+      "query": "min_of(1, 2)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "function \"min_of\" is not enabled"
+    },
+    {
+      "id": "PQL-F20-max-of-is-experimental",
+      "query": "max_of(1, 2)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "function \"max_of\" is not enabled"
+    },
+    {
+      "id": "PQL-H03-histogram-quantiles-is-experimental",
+      "query": "histogram_quantiles(oracle_histogram_bucket, \"quantile\", 0.5, 0.9)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "function \"histogram_quantiles\" is not enabled"
+    },
+    {
+      "id": "PQL-S10-prometheus-rejects-step-relative-duration",
+      "query": "count_over_time(oracle_temporal[5i])",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "bad number or duration syntax: \"5\""
+    },
+    {
+      "id": "PQL-S15-comment-only-query-is-empty",
+      "query": "# only a comment",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "no expression found in input"
     }
   ],
   "cases": [

@@ -59,12 +59,12 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S07` | positive and negative `offset` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-008-temporal-selector-modifiers)) | shipped | yes | `RAW`, `GRID`, `SQL` | `API` | P0 | Signed millisecond lookup shifts preserve outer timestamps, lookback/window boundaries, limits and cancellation across instant/range/root/function forms. |
 | `PQL-S08` | `@ timestamp`, `@ start()`, `@ end()` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-008-temporal-selector-modifiers)) | shipped | yes | `RAW`, `GRID`, `SQL` | `API` | P0 | Fixed selection instants resolve before offset; numeric/pre-epoch, start/end range context, output timestamps, modifier order, oracle parity and reopen are pinned. |
 | `PQL-S09` | subqueries `[range:resolution]` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-009-aligned-selector-subquery)) | shipped | yes | `RAW`, `GRID`, `SQL` | `API` | P0 | Open-left/global grids, configurable 15-second default, root/consumer types, nested shipped vector plans, `@`/offset context, outer timestamps, metric-name policy, work/response/intermediate limits, cancellation, oracle parity and reopen are pinned. |
-| `PQL-S10` | step-relative ranges such as `[5i]` | missing | yes | `RAW`, `GRID` | `API` | P2 | MetricsQL-compatible extension used by the existing oracle. |
+| `PQL-S10` | step-relative ranges such as `[5i]` | deferred | yes | `RAW`, `GRID` | `DEFER` | DEFER | Pinned Prometheus rejects this syntax, so it is not part of stable PromQL. Exact request-step scaling is tracked as `MQL-09`; the stable endpoint pins Prometheus's diagnostic through GET, POST, and reopen. |
 | `PQL-S11` | scalar literals and IEEE `NaN`/`Inf` behavior | shipped | yes | none | `API` | P0 | Decimal/exponent, hexadecimal, octal, underscored, signed, `NaN`, and `Inf` roots use Prometheus value strings; SQLite cannot portably preserve NaN as an ordinary REAL. |
 | `PQL-S12` | duration literals, including compound and `ms` | shipped | yes | none | `API` | P0 | Scalar literals, range windows, numeric/duration steps, and numeric/RFC3339 evaluation times use Prometheus's millisecond clock; second-native samples keep their public storage format. |
 | `PQL-S13` | string literals and escaping | shipped | yes | none | `API` | P0 | Double-quoted escapes and raw backtick strings return the Prometheus instant `string` envelope; range queries reject string roots. |
-| `PQL-S14` | UTF-8 quoted metric names | missing | no | `CAT`, `RAW` | `API` | P2 | Add only with ingestion/name round-trip fixtures. |
-| `PQL-S15` | line comments | missing | no | none | `API` | P2 | Parser-only, but still requires complete-expression tests. |
+| `PQL-S14` | UTF-8 quoted metric names ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-001-instant-selector)) | shipped | no | `CAT`, `RAW`, `SQL` | `API` | P2 | Prometheus 3 quoted names and label keys preserve UTF-8/escapes through text ingest, catalog identity, GET/POST instant and range selection, compact, and reopen; direct SQL binds the decoded name as ordinary TEXT. |
+| `PQL-S15` | line comments | shipped | no | none | `API` | P2 | Leading/trailing/inter-token comments, multiline calls, comment-only errors, and `#` inside quoted strings are pinned; source/annotation scanners skip fake calls and unmatched delimiters in comments. |
 | `PQL-S16` | exact query grid and configurable lookback | shipped | yes | `GRID`, `RAW` | `API` | P0 | Request-scoped `lookback_delta`, the zero/default rule, exact millisecond open-left boundaries, non-aligned ends, and overflow-safe 11,000-point grids apply to every shipped expression. |
 | `PQL-S17` | Prometheus stale-marker semantics | deferred | partial | `RAW` | `DEFER` | DEFER | Exact NaN payloads survive public binary ingest, flush, and reopen, but exposition `NaN` is an ordinary NaN, Victoria JSON cannot carry a NaN payload, and the Rust server has no bit-preserving remote-write ingress. Shipping requires an explicit marker-capable ingress plus selector/range/window paths that exclude only `0x7ff0000000000002` while preserving ordinary NaNs; see `QSF-004` and `QSF-065`. |
 | `PQL-S18` | instant vector, range vector, scalar, and string types | shipped | yes | none | `API` | P0 | Exact instant/empty result typing is pinned across all four Prometheus values; range evaluation accepts scalar/vector roots and returns a matrix while string/range-vector roots fail. Prometheus envelopes have no honest SQL equivalent. |
@@ -160,8 +160,8 @@ bounded frames.
 | `PQL-F16` | `time` and `timestamp` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-051-time-and-timestamp)); millisecond evaluation clocks, stored-sample provenance, response timestamps, lookback, `offset`, `@`, composed-sample time, labels/names, IEEE samples, ranges, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-F17` | `minute`, `hour`, `day_of_week`, `day_of_month` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-052-minute-hour-day_of_week-and-day_of_month)); optional `vector(time())` default, UTC fields, Sunday-zero numbering, fractional truncation, non-finite/out-of-range sentinel conversion, labels/names, nested range grids, errors, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F18` | `day_of_year`, `days_in_month`, `month`, `year` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-053-day_of_year-days_in_month-month-and-year)); optional `vector(time())` default, UTC and one-indexed fields, Gregorian leap years, fractional and non-finite/out-of-range conversion, labels/names, nested range grids, errors, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-F19` | `start`, `end`, `start_timestamp`, `step`, `range` | missing | partial | `SQL` | `API` | P2 |
-| `PQL-F20` | `min_of` and `max_of` | missing | no | `SQL` | `API` | P2 |
+| `PQL-F19` | experimental query-context `start`, `end`, `step`, and `range`; `start_timestamp` is not PromQL; pinned Prometheus requires `promql-duration-expr` for the four context functions and reports `start_timestamp` as unknown; the stable endpoint preserves those exact failures while `@ start()`/`@ end()` remain shipped; MetricsQL ownership is `MQL-10` | experimental | partial | `SQL` | `API` | EXP |
+| `PQL-F20` | experimental `min_of` and `max_of`; pinned Prometheus requires `promql-duration-expr`; the stable endpoint rejects both through GET, POST, and reopen; stable MetricsQL ownership is `MQL-11` | experimental | no | `SQL` | `API` | EXP |
 | `PQL-F21` | experimental `info` | missing | no | `CAT`, `SQL` | `API` | EXP |
 
 ## Histogram functions
@@ -172,8 +172,8 @@ an `le` label; they fit the existing storage model. Native histograms do not.
 | ID | function | Rust now | Elixir | foundation | target | priority | notes |
 |---|---|---|---|---|---|---|---|
 | `PQL-H01` | `histogram_quantile` over classic buckets ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-054-histogram_quantile-over-classic-buckets)) | shipped | yes | `RAW`, `SQL` | `API` | P0 | Scalar quantiles, classic-family grouping, strict bounds, equal-bound coalescing, precision tolerance, monotonic repair, interpolation, special values, range grids, output collisions, limits, cancellation, and reopen are pinned. |
-| `PQL-H02` | `histogram_fraction` over classic buckets | missing | no | `RAW`, `SQL` | `API` | P2 | Implement only after an upstream differential fixture. |
-| `PQL-H03` | `histogram_quantiles` | missing | no | `RAW`, `SQL` | `API` | P2 | Confirm the exact upstream/stability contract first. |
+| `PQL-H02` | `histogram_fraction` over classic buckets ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-056-histogram_fraction-over-classic-buckets)) | shipped | no | `RAW`, `SQL` | `API` | P2 | Pinned Prometheus classic grouping, exact/interpolated/infinite/inverted/NaN bounds, equal-bound coalescing, missing/zero totals, strict `le` warnings, range/subquery composition, name collisions, limits, cancellation, compact, and reopen are covered. Native histogram inputs remain deferred with their storage model. |
+| `PQL-H03` | experimental `histogram_quantiles` | experimental | no | `RAW`, `SQL` | `API` | EXP | Prometheus 3.13.2 requires `promql-experimental-functions` and uses vector-first syntax. The stable endpoint pins the disabled diagnostic; VictoriaMetrics has different argument order and is tracked as `MQL-12`. |
 | `PQL-H04` | `histogram_avg/count/sum/stddev/stdvar` on native samples | deferred | no | none | `DEFER` | DEFER | Requires `QSF-003` storage work. |
 
 ## MetricsQL compatibility tier
@@ -192,6 +192,10 @@ the P0 PromQL rows. They remain `API` composition, not extension syntax.
 | `MQL-06` | `range_avg/min/max/sum` | missing | yes | `API` | P2 |
 | `MQL-07` | `running_avg/min/max/sum` | missing | yes | `API` | P2 |
 | `MQL-08` | remaining MetricsQL functions/operators | missing | partial | `API` | DEFER |
+| `MQL-09` | request-step-relative durations such as `[5i]`, `[5i:1i]`, and `offset 5i` | missing | yes | `API` | P2 |
+| `MQL-10` | query-context `start`, `end`, `start_timestamp`, `step`, and `range` with MetricsQL semantics | missing | partial | `API` | P2 |
+| `MQL-11` | stable MetricsQL `min_of` and `max_of` | missing | no | `API` | P2 |
+| `MQL-12` | VictoriaMetrics `histogram_quantiles("label", phi..., buckets)` argument order and labels | missing | no | `API` | P2 |
 
 ## Higher-order library boundary
 
