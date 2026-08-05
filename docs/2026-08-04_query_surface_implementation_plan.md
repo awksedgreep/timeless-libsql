@@ -335,12 +335,14 @@ and reopen. Exact-build evidence at commit
 `16b372ac31bd01e18dafd3aa29244577a0fcf993` records bounded message and rich-
 field costs with storage work unchanged. Portable SQLite cannot reproduce the
 Unicode-category phrase boundary, so this remains `ROWS`/`API` without a
-misleading SQL or extension primitive. `LQL-F22` now has 17 successful and two
-error pinned `contains_any` cases plus failing-then-passing parser and real-
-extension regressions. Its disjunction, empty-list false, empty-value true,
-typed projection, alias, pipeline, strict-error, limit, cancellation,
-durability, and reopen behavior use the same bounded public-row plan; exact-
-build measurement remains the final row exit criterion.
+misleading SQL or extension primitive. `LQL-F22` is shipped with 17 successful
+and two error pinned `contains_any` cases plus failing-then-passing parser and
+real-extension regressions. Its disjunction, empty-list false, empty-value
+true, typed projection, alias, pipeline, strict-error, limit, cancellation,
+durability, and reopen behavior use the same bounded public-row plan. Exact-
+build evidence at commit `61ddbe72416f6858fb546c1fb6ace9c2f88ba3bc`
+records byte-identical storage work and rejects a misleading SQL or extension
+primitive.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

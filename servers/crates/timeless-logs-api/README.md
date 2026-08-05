@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -390,6 +390,17 @@ query because it projects JSON and checks two phrases per row. Physical
 storage remains 1,190,496 bytes and whole-process HWM is 65,004KiB.
 `QSF-122` retains the measured decode-first cost and rejects both a redundant
 extension primitive and an inexact portable-SQL claim.
+
+Session 16 static `contains_any` measured 2.143ms/22.301ms message and
+2.383ms/27.391ms rich-object narrow/wide p95 while returning 128/8,192 rows.
+All four shapes perform the same one-block/1,024-entry or four-block/8,192-
+entry public reads and return the same 21,826/1,424,639 response bytes as
+equal-cardinality comparisons. Message p95 is 1.3% above/4.0% below the
+same-run word query; rich-object p95 is 9.6%/8.0% below `contains_all` and
+17.8%/5.8% above rich pattern matching. Physical storage remains 1,190,496
+bytes and whole-process HWM is 64,604KiB. `QSF-124` retains the bounded API
+composition and rejects both a redundant extension primitive and an inexact
+portable-SQL claim.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).
