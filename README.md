@@ -758,6 +758,11 @@ null, and empty values share the omitted empty-text group. Executable
 `SQL-LOG-029` gives direct SQLite/libSQL users the public `GROUP BY` and window
 rank foundation; multi-field grammar, collision naming, limits, cancellation,
 and HTTP envelopes remain Rust API work.
+Frequency `top` measures 3.385/35.948 ms narrow/wide p95 versus
+3.330/38.060 ms for same-scan, equal-cardinality time-sort controls. Its
++1.6%/-5.5% p95 variation follows byte-identical public storage work and does
+not justify an extension primitive; executable public SQL remains the direct
+SQLite/libSQL path.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

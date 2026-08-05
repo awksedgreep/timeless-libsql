@@ -553,16 +553,22 @@ Session 17 continues with `LQL-P15`.
 
 `LQL-P15` implements VictoriaLogs-compatible `top [N] [by] fields`, optional
 `hits [as] field`, and optional `rank [as] field` as bounded Rust API
-aggregation over public current-pipeline rows. Ten successful and eight error
+aggregation over public current-pipeline rows. Eleven successful and eight error
 oracle cases pin default and explicit limits, parenthesized/bare multi-field
 grammar, textual missing/null/type projection, frequency/key order, collision
-names, case-insensitive modifiers, composition, and empty input. Executable
+names including explicit `hits as hits`, case-insensitive modifiers,
+composition, and empty input. Executable
 `SQL-LOG-029` gives direct SQLite/libSQL users the parameterized public
 single-field `GROUP BY` and rank foundation. Work/group/result/response-state
 limits, cancellation, optimize, shutdown, reopen, and reader reuse are pinned
-without a new extension primitive or storage-contract change. `QSF-157`
-records the semantic boundary; exact-build evidence and the final verdict are
-recorded in `QSF-158`.
+without a new extension primitive or storage-contract change. The first
+evidence attempt exposed and pinned the explicit-default hits alias before
+shipment. `QSF-157` records the semantic boundary. Exact-build commit
+`2bb2f4dd0046574e116ae05b6d75a77cef04ef20` measures `top` at
+3.385/35.948 ms narrow/wide p95 versus 3.330/38.060 ms for same-scan,
+equal-cardinality time-sort controls. `QSF-158` accepts the +1.6%/-5.5% p95
+variation, records the byte-identical storage and HWM verdict, and closes the
+row.
 Session 17 continues with `LQL-P16`.
 
 ### Session 18: applicable LogsQL P3

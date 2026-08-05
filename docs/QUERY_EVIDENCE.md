@@ -4063,3 +4063,66 @@ authoritative 8,192-entry batching, storage formats, compression, indexes,
 retention, optimize, transactions, migrations, and public batch/SQL contracts
 are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
 workflow, tag, release, or downstream repository was used or modified.
+
+## Session 17 LogsQL P2: bounded `top`
+
+The checked-in
+[`2026-08-05_session17_lql_p15_top.json`](evidence/2026-08-05_session17_lql_p15_top.json)
+was captured from exact release build
+`2bb2f4dd0046574e116ae05b6d75a77cef04ef20`. The narrow shape scans one
+indexed host and counts its five textual `context.attempt` groups. The wide
+shape scans all 8,192 entries and counts the eight actual `(service, level)`
+groups. Both add explicit default-name hits and a global string rank. Same-run
+controls scan the identical source rowsets and return the same five/eight
+cardinality through the established `_time` sort and projection. They are
+storage/cardinality controls, not semantic equivalents to frequency grouping.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| frequency `top`, indexed host | 5 | 255 | 3.143 | 3.385 | 3.510 | 1 | 1,024 | 235,778 | 128 |
+| frequency `top`, full fixture | 8 | 531 | 34.501 | 35.948 | 36.855 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 5 | 130 | 3.153 | 3.330 | 3.352 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 8 | 299 | 35.285 | 38.060 | 38.448 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The `top` p95 is 1.6% above/5.5% below its narrow/wide same-run control. Its
+internal API timer averages 2.491/33.367 ms versus 2.416/34.119 ms, or
+3.1% above/2.2% below. Responses are 96.2%/77.6% larger because `top` emits both
+the counted string hits and requested string rank; this is intended summary
+data, not storage amplification. Every equal-width pair performs exactly the
+same public storage scan, block decode, payload read, and row materialization.
+The measured bounded textual grouping/key sort is accepted in the Rust API.
+`SQL-LOG-029` already gives direct SQLite/libSQL users the ordinary public
+`GROUP BY` and window-rank foundation, so a new extension primitive would not
+avoid storage work.
+
+The first capture attempt stopped before recording evidence because the API
+rejected explicit `hits as hits`. Source audit and a live pinned-oracle case
+proved VictoriaLogs accepts the redundant default alias. The parser, unit,
+real-extension, and oracle regressions now pin it; the retained failed-run
+diagnostic led directly to the exact `QSF-157` correction.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+14.167 ms and the explicit durability barrier took 38.939 ms. Storage remains
+four raw blocks, 1,914,055 logical payload bytes, and 2,022,736 physical
+database/WAL/SHM bytes. Logs HWM was 96,884 KiB, 3,400 KiB above LQL-P14;
+metrics HWM was 53,100 KiB, 144 KiB below it. Each maximum spans the enlarged
+complete workload and is retained as whole-process variation rather than
+attributed to one `top` request. Cancellation ended with zero requests in
+flight; direct evaluator and HTTP limit regressions pin cancellation, bounded
+work/group/result/state, rejection, and reader reuse.
+
+All 490 pinned VictoriaLogs v1.52.0 cases pass live. The final 33-test logs
+real-extension suite, 71 logs library tests, complete extension and Rust
+server workspaces, 29-test Rust query harness, documentation contracts,
+Clippy with warnings denied, formatting, and all 95 SQL recipes (131
+statements) pass locally. The legacy 45-section `tests/cli.sh` suite was not
+rerun because multiple retained sections still invoke Python and the active
+Rust-only instruction forbids that execution. Its last green result is the
+LQL-P14 closeout; LQL-P15 changes only the Rust logs API, while the extension
+and storage source are unchanged, and `SQL-LOG-029` ran through the Rust
+harness. The remaining legacy CLI drivers must move to Rust before this gate
+rejoins per-row closeout. The extension's
+authoritative 8,192-entry batching, storage formats, compression, indexes,
+retention, optimize, transactions, migrations, and public batch/SQL contracts
+are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
+workflow, tag, release, or downstream repository was used or modified.
