@@ -796,9 +796,18 @@ fn predicate_matches(
             }))
         }
         LogPredicate::TextualContainsAll { field, values } => {
-            Ok(projected_field_matches(row, field, |text| {
+            let matched = projected_field_matches(row, field, |text| {
                 values.iter().all(|phrase| phrase_matches(text, phrase))
-            }))
+            });
+            ensure_active(cancelled)?;
+            Ok(matched)
+        }
+        LogPredicate::TextualContainsAny { field, values } => {
+            let matched = projected_field_matches(row, field, |text| {
+                values.iter().any(|phrase| phrase_matches(text, phrase))
+            });
+            ensure_active(cancelled)?;
+            Ok(matched)
         }
         LogPredicate::ExactPrefix { field, value } => {
             Ok(projected_field_matches(row, field, |text| {
@@ -1128,6 +1137,28 @@ mod tests {
         let exact = Number::from(9_007_199_254_740_993u64);
         let rounded = Number::from_f64(9_007_199_254_740_992.0).unwrap();
         assert_eq!(compare_numbers(&exact, &rounded), Some(Ordering::Greater));
+    }
+
+    #[test]
+    fn contains_predicates_observe_pipeline_cancellation() {
+        let row = json!({"_msg": "request 42"});
+        let cancelled = AtomicBool::new(true);
+        for predicate in [
+            LogPredicate::TextualContainsAll {
+                field: LogField::Message,
+                values: vec!["request".into(), "42".into()],
+            },
+            LogPredicate::TextualContainsAny {
+                field: LogField::Message,
+                values: vec!["other".into(), "request".into()],
+            },
+        ] {
+            assert_eq!(
+                predicate_matches(&predicate, &row, TimestampUnit::Microseconds, &cancelled)
+                    .unwrap_err(),
+                "LogsQL pipeline cancelled"
+            );
+        }
     }
 
     #[test]

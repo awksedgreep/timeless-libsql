@@ -622,6 +622,114 @@
       "expected_cases": ["pattern-num-decimal", "pattern-num-hex", "pattern-num-short-hex"]
     },
     {
+      "id": "LQL-F21-numeric-textual-phrase",
+      "query": "numeric_group:=\"numeric\" n:contains_all(2)",
+      "status": 200,
+      "expected_cases": ["numeric-negative", "numeric-two", "numeric-decimal"]
+    },
+    {
+      "id": "LQL-F22-unqualified-word-or-phrase",
+      "query": "contains_any(alpha, \"ssh: login fail\")",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-inside", "phrase-punctuation", "phrase-unicode-punctuation", "word-exact", "word-inside", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F22-either-value-may-match",
+      "query": "contains_any(before, after)",
+      "status": 200,
+      "expected_cases": ["pattern-anchor-any", "pattern-anchor-miss", "pattern-anchor-prefix", "pattern-anchor-suffix", "word-inside"]
+    },
+    {
+      "id": "LQL-F22-field-scoped-phrases",
+      "query": "case:contains_any(pattern-num-decimal, word-exact)",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal", "word-exact"]
+    },
+    {
+      "id": "LQL-F22-quoted-comma-is-one-phrase",
+      "query": "contains_any(\"time=10:20:30,123\")",
+      "status": 200,
+      "expected_cases": ["pattern-time"]
+    },
+    {
+      "id": "LQL-F22-word-boundaries-are-case-sensitive",
+      "query": "contains_any(alpha)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F22-uppercase-remains-distinct",
+      "query": "contains_any(ALPHA)",
+      "status": 200,
+      "expected_cases": ["word-case"]
+    },
+    {
+      "id": "LQL-F22-empty-list-matches-nothing",
+      "query": "state_group:=\"state\" never_present:contains_any()",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F22-empty-phrase-is-field-independent",
+      "query": "state_group:=\"state\" never_present:contains_any(\"\")",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F22-empty-phrase-among-values-is-noop",
+      "query": "state_group:=\"state\" never_present:contains_any(alpha, \"\")",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F22-duplicate-phrases-do-not-change-results",
+      "query": "contains_any(alpha, alpha)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F22-missing-field-with-nonempty-phrases-does-not-match",
+      "query": "state_group:=\"state\" never_present:contains_any(alpha, value)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F22-function-name-is-case-insensitive",
+      "query": "case:CoNtAiNs_AnY(word-exact, word-case)",
+      "status": 200,
+      "expected_cases": ["word-case", "word-exact"]
+    },
+    {
+      "id": "LQL-F22-trailing-comma-is-accepted",
+      "query": "case:contains_any(word-exact,)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F22-logical-composition",
+      "query": "contains_any(alpha, ALPHA) AND NOT case:=\"word-inside\"",
+      "status": 200,
+      "expected_cases": ["word-case", "word-exact", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F22-pipeline-composition",
+      "query": "pattern_group:=\"number\" | filter case:contains_any(pattern-num-decimal, pattern-num-hex)",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal", "pattern-num-hex"]
+    },
+    {
+      "id": "LQL-F22-numeric-textual-phrase",
+      "query": "numeric_group:=\"numeric\" n:contains_any(2)",
+      "status": 200,
+      "expected_cases": ["numeric-negative", "numeric-two", "numeric-decimal"]
+    },
+    {
+      "id": "LQL-F22-boolean-textual-phrase",
+      "query": "state_group:=\"state\" probe:contains_any(false)",
+      "status": 200,
+      "expected_cases": ["state-false"]
+    },
+    {
       "id": "LQL-F18-empty-field",
       "query": "state_group:=\"state\" probe:\"\"",
       "status": 200,
@@ -1141,6 +1249,20 @@
     {
       "id": "LQL-F21-attached-wildcard-is-invalid",
       "query": "contains_all(alpha*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F22-unseparated-values-are-invalid",
+      "query": "contains_any(alpha beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F22-attached-wildcard-is-invalid",
+      "query": "contains_any(alpha*)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

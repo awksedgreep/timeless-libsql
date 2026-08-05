@@ -1270,6 +1270,50 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
             vec![1_811_000_000_000_001],
         ),
         (r#"unicode:contains_all(alpha)"#, Vec::new()),
+        (
+            r#"contains_any(missing, object)"#,
+            vec![1_811_000_000_000_001, 1_811_000_000_000_008],
+        ),
+        (
+            r#"case:contains_any(missing, object, missing,)"#,
+            vec![1_811_000_000_000_001, 1_811_000_000_000_008],
+        ),
+        (
+            r#"probe:contains_any(value, false)"#,
+            vec![1_811_000_000_000_004, 1_811_000_000_000_006],
+        ),
+        (
+            r#"probe:contains_any(1, ok)"#,
+            vec![1_811_000_000_000_007, 1_811_000_000_000_008],
+        ),
+        (
+            r#"nested.leaf:contains_any(1, ok)"#,
+            vec![1_811_000_000_000_007, 1_811_000_000_000_008],
+        ),
+        (r#"never:contains_any()"#, Vec::new()),
+        (
+            r#"never:contains_any("")"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"never:contains_any(value, "")"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (r#"never:contains_any(value)"#, Vec::new()),
+        (r#"case:contains_any("*")"#, Vec::new()),
+        (
+            r#"level:contains_any(debug, info)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"service:contains_any(gateway, absent)"#,
+            vec![1_811_000_000_000_001],
+        ),
+        (
+            r#"unicode:contains_any(alpha, beta)"#,
+            vec![1_811_000_000_000_001],
+        ),
+        (r#"unicode:contains_any(alpha)"#, Vec::new()),
         (r#"case:in()"#, Vec::new()),
         (
             r#"case:in(missing, string) AND NOT case:in(string)"#,
@@ -1321,6 +1365,17 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
     contains_all_pipeline_cases.sort();
     assert_eq!(contains_all_pipeline_cases, ["array"]);
 
+    let mut contains_any_pipeline_cases = pipeline_rows(
+        &app,
+        r#"* | filter probe:contains_any(false, ok) | fields case | limit 100"#,
+    )
+    .await
+    .into_iter()
+    .map(|row| row["case"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+    contains_any_pipeline_cases.sort();
+    assert_eq!(contains_any_pipeline_cases, ["false", "object"]);
+
     for malformed in [
         "in",
         "in(",
@@ -1328,6 +1383,10 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
         "in(value other)",
         "in(value*)",
         "contains_any",
+        "contains_any(",
+        "contains_any(,value)",
+        "contains_any(value other)",
+        "contains_any(value*)",
         "contains_any(* value)",
         "contains_all(,*)",
     ] {
@@ -1361,7 +1420,6 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
     );
 
     for unsupported in [
-        "case:contains_any(missing)",
         "case:contains_all(missing | fields case)",
         "case:contains_any(missing | fields case)",
     ] {
@@ -1434,6 +1492,39 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
         "max_work_rows"
     );
     assert_eq!(timestamps(&storage, "contains_all(missing)").await.len(), 1);
+
+    let limited_contains_any = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "case:contains_any(missing, object) | limit 100",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        limited_contains_any.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited_contains_any.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        timestamps(&storage, "contains_any(missing, object)")
+            .await
+            .len(),
+        2
+    );
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

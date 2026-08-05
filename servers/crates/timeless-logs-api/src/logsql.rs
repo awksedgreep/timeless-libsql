@@ -1038,12 +1038,18 @@ fn parse_contains_filter(
         }));
     }
     if let Some(parsed) = parse_static_value_list(token, "contains_any")? {
-        return match parsed {
-            ParsedStaticValueList::Noop => Ok(Some(LogPredicate::True)),
-            ParsedStaticValueList::Values(_) => Err(LogsqlError::unsupported(
-                "LogsQL contains_any(values) is owned by LQL-F22 and is not supported yet",
-            )),
-        };
+        return Ok(Some(match parsed {
+            ParsedStaticValueList::Noop => LogPredicate::True,
+            ParsedStaticValueList::Values(values) => {
+                if values.iter().any(String::is_empty) {
+                    LogPredicate::True
+                } else if values.is_empty() {
+                    LogPredicate::Or(Vec::new())
+                } else {
+                    LogPredicate::TextualContainsAny { field, values }
+                }
+            }
+        }));
     }
     Ok(None)
 }
@@ -3127,13 +3133,6 @@ mod tests {
             assert!(plan.is_ok(), "{query}: {plan:?}");
         }
 
-        {
-            let (query, row) = ("contains_any(alpha)", "LQL-F22");
-            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
-            assert_eq!(error.kind, LogsqlErrorKind::Unsupported, "{query}");
-            assert!(error.message.contains(row), "{query}: {error}");
-        }
-
         for malformed in ["contains_any", "contains_any(* alpha)", "contains_all(,*)"] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
@@ -3174,6 +3173,46 @@ mod tests {
             "contains_all(,alpha)",
             "contains_all(alpha beta)",
             "contains_all(alpha*)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_sixteen_contains_any_static_grammar_is_complete_and_strict() {
+        for query in [
+            "contains_any(alpha)",
+            r#"contains_any(alpha, "before alpha")"#,
+            "case:contains_any(word, exact)",
+            r#"case:contains_any("", word, exact)"#,
+            "case:contains_any(word, word, exact,)",
+            "never_present:contains_any()",
+            r#"never_present:contains_any("")"#,
+            "level:contains_any(info)",
+            "case:CoNtAiNs_AnY(word, exact)",
+            "contains_any(alpha) AND NOT case:exact(word-inside)",
+            "* | filter case:contains_any(word, exact)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        let subquery = parse_at(
+            "case:contains_any(* | fields case)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(subquery.kind, LogsqlErrorKind::Unsupported);
+        assert!(subquery.message.contains("LQL-F38"), "{subquery}");
+
+        for malformed in [
+            "contains_any",
+            "contains_any(",
+            "contains_any(,alpha)",
+            "contains_any(alpha beta)",
+            "contains_any(alpha*)",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");

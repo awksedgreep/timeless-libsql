@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 159 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 179 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -150,13 +150,14 @@ no-op produced by any standalone unquoted wildcard in `in(...)`,
 `contains_any(...)`, or `contains_all(...)`. They cover missing fields,
 case-insensitive function names, mixed value/wildcard lists, `NOT`, pipelines,
 the optimized Timeless `service` and `level` aliases, and strict comma/
-separator errors. A quoted `"*"` is an ordinary value, while non-wildcard
-`contains_all`/`contains_any` values and query-backed lists remain independently
-owned by `LQL-F21`, `LQL-F22`, and `LQL-F38`. The behavior is source-audited
+separator errors. A quoted `"*"` is an ordinary value; non-wildcard
+`contains_all` and `contains_any` semantics are pinned independently by
+`LQL-F21` and `LQL-F22`, while query-backed lists remain `LQL-F38`. The
+wildcard behavior is source-audited
 against `parseInValues`, `parseArgsInParensPossibleWildcard`, and
 `filter_noop.go` at the immutable VictoriaLogs commit above.
 
-The fifteen successful and two error `LQL-F21` cases pin static
+The sixteen successful and two error `LQL-F21` cases pin static
 `contains_all(...)` semantics independently from the wildcard no-op. Every
 non-empty argument is a case-sensitive phrase with Unicode letter, digit, and
 underscore word boundaries, and every argument must match the same projected
@@ -169,6 +170,17 @@ does not match a missing field. Query-backed values remain the separate
 `LQL-F38` capability. The behavior is source-audited against
 `filter_contains_all.go`, `filter_phrase.go`, `in_values.go`, and `parser.go`
 at the immutable VictoriaLogs commit above.
+
+The seventeen successful and two error `LQL-F22` cases pin static
+`contains_any(...)` independently from both conjunction and wildcard no-op
+behavior. Any matching case-sensitive phrase succeeds; an empty list matches
+nothing, while any empty-string argument is field-independent true. The cases
+cover missing fields, compact numeric and boolean textual projection, Unicode
+word boundaries, field scope, quoted commas, duplicates, trailing commas,
+case-insensitive function names, logical/pipeline composition, and strict
+separator/wildcard errors. Query-backed values remain `LQL-F38`. The behavior
+is source-audited against `filter_contains_any.go`, `filter_phrase.go`,
+`in_values.go`, and `parser.go` at the immutable VictoriaLogs commit above.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

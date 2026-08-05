@@ -327,7 +327,7 @@ pipeline composition; executable `SQL-LOG-016`; and real-extension durability/
 reopen coverage. Exact-build evidence at commit
 `e824450234b6f3cc57faa9d342696b222b3b532b` shows byte-identical public reads
 and confirms that ordinary constant-true SQL is the complete direct-user
-primitive. `LQL-F21` is shipped with 15 successful and two error pinned
+primitive. `LQL-F21` is shipped with 16 successful and two error pinned
 `contains_all` cases; exact phrase/word boundaries, static-list identity rules,
 rich typed/nested projection, service/level aliases, logical/pipeline
 composition, strict LQL-F38 deferral, work limits, cancellation, durability,
@@ -335,7 +335,12 @@ and reopen. Exact-build evidence at commit
 `16b372ac31bd01e18dafd3aa29244577a0fcf993` records bounded message and rich-
 field costs with storage work unchanged. Portable SQLite cannot reproduce the
 Unicode-category phrase boundary, so this remains `ROWS`/`API` without a
-misleading SQL or extension primitive.
+misleading SQL or extension primitive. `LQL-F22` now has 17 successful and two
+error pinned `contains_any` cases plus failing-then-passing parser and real-
+extension regressions. Its disjunction, empty-list false, empty-value true,
+typed projection, alias, pipeline, strict-error, limit, cancellation,
+durability, and reopen behavior use the same bounded public-row plan; exact-
+build measurement remains the final row exit criterion.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

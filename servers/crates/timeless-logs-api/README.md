@@ -50,7 +50,8 @@ case-sensitive substring, bounded RE2-compatible regexp, case-insensitive,
 full-message exact, start-anchored exact-prefix, and static
 `in(v1, ..., vN)` exact membership; field-independent wildcard no-ops for
 `in`, `contains_any`, and `contains_all`; static case-sensitive
-`contains_all(v1, ..., vN)` with VictoriaLogs phrase boundaries;
+`contains_all(v1, ..., vN)` and `contains_any(v1, ..., vN)` with VictoriaLogs
+phrase boundaries;
 VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
@@ -127,8 +128,12 @@ The standalone unquoted wildcard has the same field-independent no-op meaning
 inside `contains_any(...)` and `contains_all(...)`, including mixed lists and
 missing fields. Function names are case-insensitive, and logical/pipeline
 composition treats the result as a constant true predicate. Non-wildcard
-`contains_all`/`contains_any` values return an explicit unsupported-capability
-error until `LQL-F21`/`LQL-F22` ship; query-backed lists remain `LQL-F38`.
+`contains_all` requires every static phrase while `contains_any` requires at
+least one. `contains_all()` and empty arguments are true identities;
+`contains_any()` is false, while any empty argument makes it true without
+inspecting the field. Both preserve case, Unicode word boundaries, compact
+rich-value projection, aliases, and logical/pipeline composition. Query-backed
+lists remain explicitly deferred as `LQL-F38`.
 `SQL-LOG-016` shows the direct SQL equivalent: omit the field predicate.
 
 Double- and single-quoted strings decode VictoriaLogs-compatible Go escapes,
