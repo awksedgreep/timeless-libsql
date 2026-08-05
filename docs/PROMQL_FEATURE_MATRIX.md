@@ -184,7 +184,7 @@ the P0 PromQL rows. They remain `API` composition, not extension syntax.
 
 | ID | construct | Rust now | Elixir | target | priority |
 |---|---|---|---|---|---|
-| `MQL-01` | binary `default`, `if`, `ifnot` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-001-default-if-and-ifnot)) | in progress | yes | `API` | P2 |
+| `MQL-01` | binary `default`, `if`, `ifnot` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-001-default-if-and-ifnot)) | shipped | yes | `API` | P2 |
 | `MQL-02` | `keep_metric_names` | missing | yes | `API` | P2 |
 | `MQL-03` | `union` and `alias` | missing | yes | `API` | P2 |
 | `MQL-04` | `label_set` and `label_del` | missing | yes | `API` | P2 |

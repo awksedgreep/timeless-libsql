@@ -243,6 +243,12 @@ Exit: each shipped construct is labeled MetricsQL, passes VictoriaMetrics
 `v1.148.0`, records every Prometheus difference, and cannot alter the default
 PromQL interpretation silently.
 
+Progress: `MQL-01` is shipped on explicit MetricsQL routes with pinned
+VictoriaMetrics parity, executable `SQL-MQL-001`, bounded single-read
+comparison-identity retention, and stable PromQL route isolation. The
+remaining rows continue in their listed order; `MQL-11` is already corrected
+to deferred because the pinned oracle rejects `min_of` and `max_of`.
+
 ### Session 16: LogsQL P2 filters
 
 Rows: `LQL-F11`, `LQL-F16`, `LQL-F17`, `LQL-F20`–`LQL-F23`,

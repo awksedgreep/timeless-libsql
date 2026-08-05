@@ -2431,3 +2431,59 @@ limits, GET/POST envelopes, compact, shutdown, reopen, and public catalog
 identity have real-extension regressions. No extension primitive, storage
 format, batching, compression, index, rollup, retention, transaction,
 migration, maintenance, or public batch/SQL contract changed.
+
+## Session 15 MetricsQL P2 progress: conditional operators
+
+The checked-in
+[`2026-08-05_session15_metricsql_p2.json`](evidence/2026-08-05_session15_metricsql_p2.json)
+was captured from exact extension, metrics-server, and logs-server build
+`93fac6ae3134e480d522f70c0bc2a3e3fa900f43`. It closes `MQL-01` on the
+explicit MetricsQL routes with the worst-case identity shape: every comparison
+value is filtered, then `default 0` must retain and fill every selected series.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query | intermediate work/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| filtered `default`, exact host | 1 | 163 | 0.662 | 0.887 | 0.931 | 1 | 32 | 131 | 4 |
+| ordinary exact selector | 1 | 164 | 0.654 | 0.798 | 0.856 | 1 | 32 | 131 | 0 |
+| filtered `default`, 512 series / four steps | 2,048 | 80,190 | 4.918 | 5.277 | 5.423 | 512 | 16,384 | 53,831 | 2,568 |
+| ordinary selector, 512 series / four steps | 2,048 | 84,004 | 3.131 | 3.522 | 4.359 | 512 | 16,384 | 53,831 | 0 |
+| boolean comparison, 512 series / four steps | 2,048 | 63,806 | 4.466 | 4.631 | 5.073 | 512 | 16,384 | 53,831 | 2,052 |
+
+The first oracle-correct implementation recovered a comparison's otherwise
+empty identities with a second public evaluation. Its preliminary wide p95
+was 9.228 ms and every storage counter doubled to 1,024 chunks, 32,768 decoded
+points, 107,662 payload bytes, and 536,608 frame bytes per query. That path was
+removed before shipment. The final evaluator retains only candidate labels
+during the original comparison evaluation. It therefore reads exactly the
+same chunks, decoded points, payload bytes, and 268,304 frame bytes as the
+ordinary selector while also handling matched vectors whose samples never
+overlap in time.
+
+The retained language work is visible rather than hidden: the wide shape
+charges 2,568 intermediate items, comprising the comparison grid, scalar
+grid, and 512 candidate identities. Wide p95 is 49.8% above the ordinary
+selector but only 14.0% above the same-run boolean comparison, while returning
+16,384 additional response bytes. Narrow p95 is 11.1% above its selector.
+These are bounded API composition costs, not evidence for a new extension
+primitive; direct SQLite/libSQL users already have the single-grid
+`SQL-MQL-001` recipes.
+
+The unchanged 36,928-point fixture completed its durability barrier with zero
+failed or queued work. Admission took 8.880 ms and the barrier took 81.725 ms.
+Logical and physical metrics storage are byte-identical to Session 14:
+224,688 payload bytes, 409,600 index bytes, and 1,542,312 database/WAL/SHM
+bytes. The logs fixture is likewise byte-identical at 1,088,919 logical and
+1,190,496 physical bytes. Metrics RSS HWM was 51,876 KiB, 2,760 KiB (5.62%)
+above Session 14 after adding two measured shapes; logs HWM was 64,536 KiB,
+96 KiB (0.15%) above Session 14. The exact HWM increase is preserved without
+attributing it to the label-only candidate state.
+
+All 19 pinned VictoriaMetrics 1.148.0 cases, all 81 metrics real-extension
+tests, all 49 metrics parser/evaluator/storage units, all 70 SQL recipes (96
+statements), the 24-test Rust query harness, query-contract validation, both
+complete Rust workspaces, formatting, and clippy pass. The real-extension
+contract covers GET/POST, instant/range envelopes, stable PromQL isolation,
+errors, limits, cancellation boundary, flush, shutdown, and reopen. No
+extension primitive, private table access, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed.
