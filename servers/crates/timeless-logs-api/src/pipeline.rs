@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Number, Value};
 
-use crate::logsql::{PipelineField, PipelineOp, StatsExpression, StatsKind};
+use crate::logsql::{parse_ipv4_address, PipelineField, PipelineOp, StatsExpression, StatsKind};
 use crate::storage::QueryRow;
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
 
@@ -820,6 +820,18 @@ fn predicate_matches(
             ensure_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::Ipv4Range {
+            field,
+            minimum,
+            maximum,
+        } => {
+            let matched = minimum <= maximum
+                && field_text(row, field)
+                    .and_then(parse_ipv4_address)
+                    .is_some_and(|address| address >= *minimum && address <= *maximum);
+            ensure_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => {
             Ok(projected_field_matches(row, field, |text| {
                 text.starts_with(value)
@@ -1182,6 +1194,11 @@ mod tests {
             LogPredicate::JsonArrayContainsAny {
                 field: LogField::Metadata(vec!["tags".into()]),
                 values: vec!["other".into(), "request".into()],
+            },
+            LogPredicate::Ipv4Range {
+                field: LogField::Message,
+                minimum: 0,
+                maximum: u32::MAX,
             },
         ] {
             assert_eq!(

@@ -71,6 +71,19 @@
     {"case": "json-array-escaped", "_msg": "jaca escaped", "array_group": "array", "tags": ["a\"b", "a\nb", "a/b", "ab"]},
     {"case": "json-array-star", "_msg": "jaca star", "array_group": "array", "tags": ["*"]},
     {"case": "json-array-missing", "_msg": "jaca missing", "array_group": "array"},
+    {"case": "ipv4-missing", "_msg": "ip missing", "ip_group": "ipv4"},
+    {"case": "ipv4-null", "_msg": "ip null", "ip_group": "ipv4", "ip": null},
+    {"case": "ipv4-numeric", "_msg": "ip numeric", "ip_group": "ipv4", "ip": 167772161},
+    {"case": "ipv4-network", "_msg": "ip network", "ip_group": "ipv4", "ip": "10.0.0.0"},
+    {"case": "ipv4-low", "_msg": "ip low", "ip_group": "ipv4", "ip": "10.0.0.1"},
+    {"case": "ipv4-leading-zero", "_msg": "ip leading zero", "ip_group": "ipv4", "ip": "010.000.000.002"},
+    {"case": "ipv4-broadcast", "_msg": "ip broadcast", "ip_group": "ipv4", "ip": "10.0.0.255"},
+    {"case": "ipv4-outside", "_msg": "ip outside", "ip_group": "ipv4", "ip": "10.0.1.0"},
+    {"case": "ipv4-invalid", "_msg": "ip invalid", "ip_group": "ipv4", "ip": "10.0.0.256"},
+    {"case": "ipv4-embedded", "_msg": "ip embedded", "ip_group": "ipv4", "ip": "before 10.0.0.1"},
+    {"case": "ipv4-service", "_msg": "ip service", "ip_group": "ipv4", "service": "10.0.0.4"},
+    {"case": "ipv4-message", "_msg": "10.0.0.42", "ip_group": "ipv4"},
+    {"case": "ipv4-message-embedded", "_msg": "before 10.0.0.42", "ip_group": "ipv4"},
     {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
     {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
     {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
@@ -646,7 +659,7 @@
       "id": "LQL-F22-either-value-may-match",
       "query": "contains_any(before, after)",
       "status": 200,
-      "expected_cases": ["pattern-anchor-any", "pattern-anchor-miss", "pattern-anchor-prefix", "pattern-anchor-suffix", "word-inside"]
+      "expected_cases": ["ipv4-message-embedded", "pattern-anchor-any", "pattern-anchor-miss", "pattern-anchor-prefix", "pattern-anchor-suffix", "word-inside"]
     },
     {
       "id": "LQL-F22-field-scoped-phrases",
@@ -1078,6 +1091,10 @@
         "json-array-strings", "json-array-mixed", "json-array-nested",
         "json-array-scalar", "json-array-object", "json-array-empty",
         "json-array-escaped", "json-array-star", "json-array-missing",
+        "ipv4-missing", "ipv4-null", "ipv4-numeric", "ipv4-network",
+        "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast", "ipv4-outside",
+        "ipv4-invalid", "ipv4-embedded", "ipv4-service", "ipv4-message",
+        "ipv4-message-embedded",
         "page-0", "page-1", "page-2", "page-3",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
@@ -1159,6 +1176,72 @@
       },
       "status": 200,
       "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-F25-ipv4-cidr-is-inclusive",
+      "query": "ip_group:=\"ipv4\" ip:ipv4_range(10.0.0.0/24)",
+      "status": 200,
+      "expected_cases": ["ipv4-network", "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast"]
+    },
+    {
+      "id": "LQL-F25-ipv4-cidr-normalizes-host-bits-and-trailing-comma",
+      "query": "ip_group:=\"ipv4\" ip:ipv4_range(10.0.0.34/24,)",
+      "status": 200,
+      "expected_cases": ["ipv4-network", "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast"]
+    },
+    {
+      "id": "LQL-F25-ipv4-two-bounds-are-inclusive",
+      "query": "ip_group:=\"ipv4\" ip:ipv4_range(10.0.0.1, 10.0.1.0)",
+      "status": 200,
+      "expected_cases": ["ipv4-low", "ipv4-leading-zero", "ipv4-broadcast", "ipv4-outside"]
+    },
+    {
+      "id": "LQL-F25-ipv4-single-address",
+      "query": "ip_group:=\"ipv4\" ip:ipv4_range(10.0.0.1)",
+      "status": 200,
+      "expected_cases": ["ipv4-low"]
+    },
+    {
+      "id": "LQL-F25-ipv4-zero-prefix-and-exact-string-parsing",
+      "query": "ip_group:=\"ipv4\" ip:IpV4_RaNgE(0.0.0.0/0)",
+      "status": 200,
+      "expected_cases": ["ipv4-network", "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast", "ipv4-outside"]
+    },
+    {
+      "id": "LQL-F25-ipv4-inverted-range-matches-nothing",
+      "query": "ip_group:=\"ipv4\" ip:ipv4_range(10.0.1.0, 10.0.0.0)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F25-ipv4-leading-zero-address-is-decimal",
+      "query": "ip_group:=\"ipv4\" ip:ipv4_range(010.000.000.002)",
+      "status": 200,
+      "expected_cases": ["ipv4-leading-zero"]
+    },
+    {
+      "id": "LQL-F25-ipv4-message-requires-whole-string",
+      "query": "ip_group:=\"ipv4\" ipv4_range(10.0.0.42)",
+      "status": 200,
+      "expected_cases": ["ipv4-message"]
+    },
+    {
+      "id": "LQL-F25-ipv4-arbitrary-field-and-quoted-argument",
+      "query": "ip_group:=\"ipv4\" service:ipv4_range(\"10.0.0.4\")",
+      "status": 200,
+      "expected_cases": ["ipv4-service"]
+    },
+    {
+      "id": "LQL-F25-ipv4-logical-composition",
+      "query": "ip_group:=\"ipv4\" ip:ipv4_range(10.0.0.0/24) AND NOT ip:ipv4_range(10.0.0.128/25)",
+      "status": 200,
+      "expected_cases": ["ipv4-network", "ipv4-low", "ipv4-leading-zero"]
+    },
+    {
+      "id": "LQL-F25-ipv4-pipeline-composition",
+      "query": "ip_group:=\"ipv4\" | filter ip:ipv4_range(10.0.0.0/24)",
+      "status": 200,
+      "expected_cases": ["ipv4-network", "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast"]
     }
   ],
   "stats_cases": [
@@ -1425,6 +1508,55 @@
     {
       "id": "LQL-F23-unquoted-wildcard-is-invalid",
       "query": "tags:json_array_contains_any(*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F25-empty-range-is-invalid",
+      "query": "ipv4_range()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F25-invalid-address-is-invalid",
+      "query": "ipv4_range(10.0.0.256)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F25-invalid-prefix-is-invalid",
+      "query": "ipv4_range(10.0.0.1/33)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F25-invalid-upper-bound-is-invalid",
+      "query": "ipv4_range(10.0.0.1, 10.0.0)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F25-three-bounds-are-invalid",
+      "query": "ipv4_range(10.0.0.1, 10.0.0.2, 10.0.0.3)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F25-attached-wildcard-is-invalid",
+      "query": "ipv4_range(10.0.0.1*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F25-unseparated-bounds-are-invalid",
+      "query": "ipv4_range(10.0.0.1 10.0.0.2)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -706,6 +706,10 @@ pub fn parse_at(
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
+                    if let Some(predicate) = parse_ipv4_range_filter(&token, LogField::Message)? {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
                     if let Some(predicate) = parse_case_insensitive_filter(&token)? {
                         append_predicate(&mut spec, predicate);
                         continue;
@@ -1123,6 +1127,133 @@ fn parse_json_array_contains_any_filter(
     values.sort_unstable();
     values.dedup();
     Ok(Some(LogPredicate::JsonArrayContainsAny { field, values }))
+}
+
+fn parse_ipv4_range_filter(
+    token: &str,
+    field: LogField,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    const FUNCTION: &str = "ipv4_range";
+
+    // As in VictoriaLogs, the bare name is still an ordinary word. It is a
+    // function only when the case-insensitive name is followed by `(`.
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    if !token[..open].eq_ignore_ascii_case(FUNCTION) {
+        return Ok(None);
+    }
+    let close = matching_parenthesis(token, open)?;
+    if close + 1 != token.len() {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected text after LogsQL {FUNCTION}() filter"
+        )));
+    }
+    let inner = token[open + 1..close].trim();
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    let arguments = if inner.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(inner, ',')?
+            .into_iter()
+            .map(|argument| {
+                let argument = argument.trim();
+                if argument.is_empty() {
+                    return Err(LogsqlError::malformed(format!(
+                        "empty LogsQL {FUNCTION}() argument"
+                    )));
+                }
+                Ok(quoted_value(argument)?.unwrap_or_else(|| argument.to_owned()))
+            })
+            .collect::<Result<Vec<_>, LogsqlError>>()?
+    };
+
+    let (minimum, maximum) = match arguments.as_slice() {
+        [value] => parse_ipv4_or_cidr(value).ok_or_else(|| {
+            LogsqlError::malformed(format!(
+                "LogsQL {FUNCTION}() requires a valid IPv4 address or CIDR, not {value:?}"
+            ))
+        })?,
+        [minimum, maximum] => {
+            let minimum = parse_ipv4_address(minimum).ok_or_else(|| {
+                LogsqlError::malformed(format!(
+                    "LogsQL {FUNCTION}() has invalid lower IPv4 bound {minimum:?}"
+                ))
+            })?;
+            let maximum = parse_ipv4_address(maximum).ok_or_else(|| {
+                LogsqlError::malformed(format!(
+                    "LogsQL {FUNCTION}() has invalid upper IPv4 bound {maximum:?}"
+                ))
+            })?;
+            (minimum, maximum)
+        }
+        _ => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {FUNCTION}() accepts one address/CIDR or two address bounds"
+            )))
+        }
+    };
+    Ok(Some(LogPredicate::Ipv4Range {
+        field,
+        minimum,
+        maximum,
+    }))
+}
+
+pub(crate) fn parse_ipv4_address(value: &str) -> Option<u32> {
+    if !(7..=15).contains(&value.len()) {
+        return None;
+    }
+    let mut address = 0u32;
+    let mut count = 0usize;
+    for octet in value.split('.') {
+        count += 1;
+        if !(1..=3).contains(&octet.len()) || !octet.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let octet = octet.parse::<u16>().ok()?;
+        if octet > u16::from(u8::MAX) {
+            return None;
+        }
+        address = (address << 8) | u32::from(octet);
+    }
+    (count == 4).then_some(address)
+}
+
+fn parse_ipv4_or_cidr(value: &str) -> Option<(u32, u32)> {
+    let Some((address, prefix)) = value.split_once('/') else {
+        let address = parse_ipv4_address(value)?;
+        return Some((address, address));
+    };
+    if prefix.contains('/') {
+        return None;
+    }
+    let address = parse_ipv4_address(address)?;
+    let prefix = parse_ipv4_prefix(prefix)?;
+    let host_mask = if prefix == 0 {
+        u32::MAX
+    } else {
+        (1u32 << (32 - prefix)) - 1
+    };
+    Some((address & !host_mask, address | host_mask))
+}
+
+fn parse_ipv4_prefix(value: &str) -> Option<u32> {
+    if value.is_empty()
+        || value.len() > "18_446_744_073_709_551_615".len()
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'_')
+    {
+        return None;
+    }
+    let mut prefix = 0u64;
+    for digit in value.bytes().filter(|byte| *byte != b'_') {
+        prefix = prefix.checked_mul(10)?;
+        prefix = prefix.checked_add(u64::from(digit - b'0'))?;
+    }
+    (prefix <= 32).then_some(prefix as u32)
 }
 
 fn parse_exact_prefix_argument(value: &str) -> Result<Option<String>, LogsqlError> {
@@ -1708,6 +1839,9 @@ fn compile_field_filter(
     if let Some(predicate) = parse_json_array_contains_any_filter(value, field.clone())? {
         return Ok(predicate);
     }
+    if let Some(predicate) = parse_ipv4_range_filter(value, field.clone())? {
+        return Ok(predicate);
+    }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
             field: field.clone(),
@@ -1763,6 +1897,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
         return Ok(predicate);
     }
     if let Some(predicate) = parse_json_array_contains_any_filter(atom, field.clone())? {
+        return Ok(predicate);
+    }
+    if let Some(predicate) = parse_ipv4_range_filter(atom, field.clone())? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
@@ -2202,6 +2339,7 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
                 "contains_all",
                 "contains_any",
                 "json_array_contains_any",
+                "ipv4_range",
             ]
             .iter()
             .any(|function| is_named_filter_call(value, function))
@@ -2245,6 +2383,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         append_predicate(spec, predicate);
         return Ok(());
     } else if let Some(predicate) = parse_json_array_contains_any_filter(value, log_field(&path))? {
+        append_predicate(spec, predicate);
+        return Ok(());
+    } else if let Some(predicate) = parse_ipv4_range_filter(value, log_field(&path))? {
         append_predicate(spec, predicate);
         return Ok(());
     }
@@ -3337,6 +3478,62 @@ mod tests {
             "tags:json_array_contains_any(prod dev)",
             "tags:json_array_contains_any(*)",
             "tags:json_array_contains_any(prod | fields tags)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_sixteen_ipv4_range_grammar_is_complete_and_strict() {
+        assert_eq!(parse_ipv4_address("0.0.0.0"), Some(0));
+        assert_eq!(parse_ipv4_address("255.255.255.255"), Some(u32::MAX));
+        assert_eq!(parse_ipv4_address("010.000.000.001"), Some(0x0a00_0001));
+        assert_eq!(parse_ipv4_address("10.0.0.256"), None);
+        assert_eq!(parse_ipv4_address("before 10.0.0.1"), None);
+        assert_eq!(
+            parse_ipv4_or_cidr("10.0.0.34/24"),
+            Some((0x0a00_0000, 0x0a00_00ff))
+        );
+        assert_eq!(parse_ipv4_or_cidr("10.0.0.34/0"), Some((0, u32::MAX)));
+        assert_eq!(parse_ipv4_or_cidr("10.0.0.34/33"), None);
+
+        for query in [
+            "ipv4_range(10.0.0.1)",
+            "ipv4_range(10.0.0.1, 10.0.0.255)",
+            "ip:ipv4_range(10.0.0.0/24)",
+            "ip:ipv4_range(10.0.0.34/24)",
+            "ip:ipv4_range(10.0.0.1/32)",
+            "ip:ipv4_range(10.0.0.1,)",
+            r#"ip:ipv4_range("010.000.000.001")"#,
+            "service:IpV4_RaNgE(10.0.0.1)",
+            "ip:ipv4_range(10.0.0.0/24) AND NOT ip:ipv4_range(10.0.0.128/25)",
+            "* | filter nested.ip:ipv4_range(10.0.0.0/24)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            assert!(plan.spec.metadata_exact.is_empty(), "{query}: {plan:?}");
+            assert!(
+                plan.spec.predicate.is_some() || !plan.pipeline.is_empty(),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for word_filter in ["ipv4_range", "ip:ipv4_range"] {
+            assert!(
+                parse_at(word_filter, TimestampUnit::Microseconds, 0).is_ok(),
+                "{word_filter}"
+            );
+        }
+
+        for malformed in [
+            "ipv4_range(",
+            "ipv4_range()",
+            "ipv4_range(10.0.0.256)",
+            "ipv4_range(10.0.0.1/33)",
+            "ipv4_range(10.0.0.1, 10.0.0)",
+            "ipv4_range(10.0.0.1, 10.0.0.2, 10.0.0.3)",
+            "ipv4_range(10.0.0.1 10.0.0.2)",
+            "ipv4_range(10.0.0.1*)",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");

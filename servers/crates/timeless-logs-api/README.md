@@ -52,7 +52,8 @@ full-message exact, start-anchored exact-prefix, and static
 `in`, `contains_any`, and `contains_all`; static case-sensitive
 `contains_all(v1, ..., vN)` and `contains_any(v1, ..., vN)` with VictoriaLogs
 phrase boundaries; retained-array primitive membership through
-`json_array_contains_any(v1, ..., vN)`;
+`json_array_contains_any(v1, ..., vN)`; inclusive one-address, CIDR, or
+two-address `ipv4_range(...)` filtering over exact retained strings;
 VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
@@ -102,6 +103,15 @@ zero, false, arrays, and objects. `value_type` names the logical retained JSON
 type (`string`, `uint64`, `int64`, `float64`, `number`, `bool`, `null`,
 `array`, or `object`), not a private block encoding. VictoriaLogs physical
 types such as `const` and `dict` fail explicitly.
+
+IPv4 range filters accept exact dotted-decimal addresses, including decimal
+octets with leading zeroes. One argument selects an address or expands a CIDR
+from `/0` through `/32`; two arguments are inclusive unsigned address bounds,
+and an inverted range matches nothing. Missing, null, numeric, object, array,
+invalid, and embedded-address values do not match. `SQL-LOG-018` gives direct
+SQLite/libSQL users an executable bounded public-row equivalent with packed
+integer bounds; LogsQL grammar, composition, limits, cancellation, and errors
+remain Rust API behavior.
 
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept

@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 203 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 221 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -194,6 +194,16 @@ is source-audited against `filter_json_array_contains_any.go`, its parser, and
 tests at the immutable VictoriaLogs commit above. Timeless intentionally
 compares decoded retained JSON strings, so a stored Unicode escape matches its
 decoded candidate even though VictoriaLogs' raw-lexeme shortcut does not.
+
+The eleven successful and seven error `LQL-F25` cases pin inclusive unsigned IPv4
+ordering for one address, one CIDR, or two explicit address bounds. They cover
+`/0`, network/broadcast edges, an inverted range that matches nothing,
+case-insensitive function names, quoted arguments, decimal octets with leading
+zeroes, exact whole-string parsing, arbitrary/message fields, logical and
+pipeline composition, missing/null/numeric/invalid/embedded non-matches, and
+strict argument/address/prefix errors. The behavior is source-audited against
+`filter_ipv4_range.go`, `parser.go`, and `values_encoder.go` at VictoriaLogs
+commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit
@@ -354,9 +364,9 @@ than hidden:
   duplicate counts and the surrounding result-row order. Timeless continues
   to promise its own deterministic input order.
 
-`QSF-063`, `QSF-076` through `QSF-080`, and `QSF-125` record these selected
-compatibility behaviors. The fixture now contains 168 row-query cases, 23
-error cases, and twelve statistics/pipeline cases (203 total). Phrase, escape,
+`QSF-063`, `QSF-076` through `QSF-080`, `QSF-125`, and `QSF-127` record these
+selected compatibility behaviors. The fixture now contains 179 row-query
+cases, 30 error cases, and twelve statistics/pipeline cases (221 total). Phrase, escape,
 identifier,
 filtering, ordering, cardinality, pipeline-order, limit-zero, and rate-window
 semantics remain exact to the pinned oracle where the retained Timeless

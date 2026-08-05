@@ -125,6 +125,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-015`](#sql-log-015-static-multi-exact-membership) | `LQL-F17` | current foundation | case-sensitive message and retained-text membership with one bound parameter per value; API owns rich-value projection and static-list grammar |
 | [`SQL-LOG-016`](#sql-log-016-field-no-op) | `LQL-F20` | current foundation | exact field-independent true predicate; API owns wildcard-function grammar and composition |
 | [`SQL-LOG-017`](#sql-log-017-json-array-primitive-membership) | `LQL-F23` | current foundation | exact primitive membership in a retained JSON array through public JSON1 rows; API owns function grammar, composition, and semantic-JSON compatibility policy |
+| [`SQL-LOG-018`](#sql-log-018-ipv4-range-over-retained-strings) | `LQL-F25` | current foundation | exact whole-string IPv4 membership between inclusive packed address bounds; API owns address/CIDR grammar, composition, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5154,6 +5155,71 @@ function parsing, static-list grammar, logical/pipeline composition, limits,
 cancellation, and HTTP errors. Query-backed lists remain deferred `LQL-F38`.
 The bounded public row and JSON1 implementation is sufficient, so no extension
 primitive is warranted.
+
+### SQL-LOG-018: IPv4 range over retained strings
+
+Bind the inclusive IPv4 bounds as unsigned network-order integers. For
+example, `10.0.0.0/24` becomes `:ipv4_min = 167772160` and
+`:ipv4_max = 167772415`. This statement selects an arbitrary retained string
+field using a bound JSON path and strictly parses four decimal octets:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT *,
+    CASE WHEN json_type(metadata, :field_path) = 'text'
+      THEN json_extract(metadata, :field_path)
+    END AS ipv4_text
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM projected
+WHERE (
+  SELECT CASE
+    WHEN count(*) = 4
+     AND min(length(CAST(octet.value AS TEXT)) BETWEEN 1 AND 3) = 1
+     AND min(CAST(octet.value AS TEXT) NOT GLOB '*[^0-9]*') = 1
+     AND max(CAST(octet.value AS INTEGER)) <= 255
+    THEN sum(
+      CAST(octet.value AS INTEGER)
+      << ((3 - CAST(octet.key AS INTEGER)) * 8)
+    )
+  END
+  FROM json_each(
+    CASE
+      WHEN length(ipv4_text) BETWEEN 7 AND 15
+       AND ipv4_text NOT GLOB '*[^0-9.]*'
+       AND length(ipv4_text) - length(replace(ipv4_text, '.', '')) = 3
+      THEN '["' || replace(ipv4_text, '.', '","') || '"]'
+      ELSE '[]'
+    END
+  ) AS octet
+) BETWEEN :ipv4_min AND :ipv4_max
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+`:field_path` is a valid SQLite JSON path such as `$.client_ip`. To query the
+public `message` column, use `message AS ipv4_text` in `projected`; to query
+`level`, use `level AS ipv4_text`. Bounds use the table's configured timestamp
+unit (milliseconds here), are inclusive, and `max_work_entries` bounds public
+decode before parsing. The result limit applies after the address predicate,
+and output is explicitly newest first.
+
+The recipe accepts decimal octets with leading zeroes, but not signs, spaces,
+hex, missing octets, values above 255, embedded addresses, missing fields,
+JSON null, or non-string JSON values. An inverted packed range matches
+nothing. The Rust API additionally parses the case-insensitive one-address,
+one-CIDR, and two-address `ipv4_range(...)` forms, expands `/0` through `/32`,
+rejects malformed input, and owns field scoping, logical/pipeline composition,
+limits, cancellation, and HTTP errors. Ordinary public SQL already provides
+the retained-string operation; no extension scalar or storage change is
+justified.
 
 ## Adding the next recipe
 

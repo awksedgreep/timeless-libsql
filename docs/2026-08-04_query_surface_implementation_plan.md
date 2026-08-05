@@ -350,7 +350,13 @@ durability, and reopen. Executable `SQL-LOG-017` proves the public JSON1 form.
 Exact-build evidence at commit
 `075d166e962482d2be3aa7622250b13c9dd51768` records narrow/wide string and
 boolean membership with byte-identical same-run public reads and closes the
-row without an extension primitive.
+row without an extension primitive. `LQL-F25` now has eleven successful and seven
+error pinned `ipv4_range` cases, failing-then-passing parser and real-extension
+regressions, exact retained-string parsing, inclusive address/CIDR/two-bound
+ordering, strict grammar, logical/pipeline composition, work limits,
+cancellation, durability, and reopen. Executable `SQL-LOG-018` proves the
+bounded public JSON1 form; exact-build measurement remains the final row exit
+criterion.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

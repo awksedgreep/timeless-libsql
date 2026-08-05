@@ -20,7 +20,7 @@ use timeless_api_common::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::logsql::PipelineOp;
+use crate::logsql::{parse_ipv4_address, PipelineOp};
 use crate::pipeline::{self, PipelineLimits};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -583,6 +583,14 @@ pub enum LogPredicate {
     JsonArrayContainsAny {
         field: LogField,
         values: Vec<String>,
+    },
+    /// VictoriaLogs `ipv4_range(...)` over an exact retained string. Bounds
+    /// are inclusive unsigned network-order addresses; malformed, embedded,
+    /// missing, null, and non-string values do not match.
+    Ipv4Range {
+        field: LogField,
+        minimum: u32,
+        maximum: u32,
     },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
@@ -2318,6 +2326,18 @@ fn log_predicate_matches(
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::Ipv4Range {
+            field,
+            minimum,
+            maximum,
+        } => {
+            let matched = minimum <= maximum
+                && log_field_text(field, message, level, metadata)
+                    .and_then(parse_ipv4_address)
+                    .is_some_and(|address| address >= *minimum && address <= *maximum);
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
             field,
             message,
@@ -2380,6 +2400,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::TextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
+        | LogPredicate::Ipv4Range { field, .. }
         | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
@@ -3062,6 +3083,11 @@ mod tests {
             LogPredicate::JsonArrayContainsAny {
                 field: LogField::Metadata(vec!["tags".into()]),
                 values: vec!["other".into(), "request".into()],
+            },
+            LogPredicate::Ipv4Range {
+                field: LogField::Message,
+                minimum: 0,
+                maximum: u32::MAX,
             },
             LogPredicate::Regex {
                 field: LogField::Message,
