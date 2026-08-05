@@ -116,7 +116,7 @@ extension.
 | `LQL-P10` | `block_stats` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P11` | `blocks_count` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P12` | `query_stats` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)) | shipped | no | `STATS`, `SQL` | `API` | P2 |
-| `LQL-P13` | `first` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)) | in progress | no | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-P13` | `first` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)) | shipped | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P14` | `last` | missing | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P15` | `top` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P16` | `uniq` | missing | no | `VALUES`, `SQL` | `API` | P2 |

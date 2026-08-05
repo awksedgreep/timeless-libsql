@@ -3965,3 +3965,55 @@ storage formats, compression, indexes, retention, optimize, transactions,
 migrations, and public batch/SQL contracts are unchanged. No private shadow
 table, Elixir/BEAM/NIF/HTTP fallback, CI workflow, tag, release, or downstream
 repository was used or modified.
+
+## Session 17 LogsQL P2: bounded `first`
+
+The checked-in
+[`2026-08-05_session17_lql_p13_first.json`](evidence/2026-08-05_session17_lql_p13_first.json)
+was captured from exact release build
+`9225cc54db38e66707cd0d04837fb656cfc778ea`. The feature shapes select the
+first eight rows by numeric `context.attempt` and natural `range_key`, partition
+them into two narrow or eight wide groups, insert a partition-local string
+rank, and project a rich response. Same-run controls return the same 16/64
+cardinality through the established simpler `_time` sort; they are a
+storage/cardinality comparison, not a claim that the sort expressions are
+semantically interchangeable.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| partitioned/ranked `first`, indexed host | 16 | 2,604 | 3.295 | 3.681 | 3.867 | 1 | 1,024 | 235,778 | 128 |
+| partitioned/ranked `first`, full fixture | 64 | 11,864 | 42.508 | 44.182 | 44.321 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 16 | 2,349 | 2.880 | 3.153 | 3.224 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 64 | 10,766 | 33.997 | 37.107 | 40.241 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The `first` p95 is 16.8%/19.1% above its narrow/wide same-run control. Its
+internal API timer averages 2.738/40.870 ms versus 2.368/33.224 ms. That
+measured cost is bounded Rust composition: exact numeric and natural
+comparison, partition grouping, top-eight selection, rank insertion, and rich
+projection. The extra rank field makes the response 10.9%/10.2% larger. Every
+equal-width pair performs exactly the same public storage scan, block decode,
+payload read, and row materialization. There is no evidence that a new
+extension primitive would avoid storage work; `SQL-LOG-027` already gives
+direct SQLite/libSQL users the honest numeric window-rank foundation.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+12.670 ms and the explicit durability barrier took 36.348 ms. Storage remains
+four raw blocks, 1,914,055 logical payload bytes, and 2,022,736 physical
+database/WAL/SHM bytes, exactly matching LQL-P12. Logs HWM was 93,732 KiB,
+1,252 KiB above LQL-P12; metrics HWM was 53,612 KiB, 4,296 KiB above it. Each
+maximum spans the enlarged complete workload and is recorded as whole-process
+variation rather than attributed to one `first` request. Cancellation ended
+with zero requests in flight. The evaluator checks cancellation before key
+construction, periodically during key/partition/output work, inside long sort
+comparison loops, and after sorting; the direct rejection regression and
+state-limit HTTP regression prove failure plus reader reuse.
+
+All 453 pinned VictoriaLogs v1.52.0 cases pass live. The final 31-test logs
+real-extension suite, 67 logs library tests, complete extension and Rust
+server workspaces, 45-section CLI/crash/transaction suite, 29-test Rust query
+harness, documentation contracts, Clippy with warnings denied, formatting,
+and all 93 SQL recipes (129 statements) pass locally. The extension's
+authoritative 8,192-entry batching, storage formats, compression, indexes,
+retention, optimize, transactions, migrations, and public batch/SQL contracts
+are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
+workflow, tag, release, or downstream repository was used or modified.

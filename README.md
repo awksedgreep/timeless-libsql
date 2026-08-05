@@ -739,6 +739,10 @@ existing query limits, and performs all language composition over public rows.
 Executable `SQL-LOG-027` gives embedded users the bounded numeric
 `row_number()` foundation without claiming that SQLite `REAL` or its default
 collation implements the complete LogsQL order.
+Partitioned/ranked `first` measures 3.681/44.182 ms narrow/wide p95 versus
+3.153/37.107 ms for same-run equal-cardinality time-sort controls. The
+16.8%/19.1% bounded composition cost follows byte-identical public storage
+reads and does not justify a new extension primitive.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

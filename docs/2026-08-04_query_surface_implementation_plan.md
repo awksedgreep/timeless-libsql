@@ -524,8 +524,12 @@ window-rank foundation and states where ordinary SQLite lacks VictoriaLogs'
 exact integer and natural-text semantics. State, work, result, response,
 cancellation, optimize, shutdown, and reopen behavior are pinned without a
 new extension primitive, private-table access, or storage-contract change.
-`QSF-153` records the semantic boundary. Final exact-build evidence and the
-row verdict are recorded in `QSF-154`.
+`QSF-153` records the semantic boundary. Exact-build commit
+`9225cc54db38e66707cd0d04837fb656cfc778ea` measures partitioned/ranked
+`first` at 3.681/44.182 ms narrow/wide p95 versus 3.153/37.107 ms for
+same-run equal-cardinality time-sort controls, with byte-identical public
+storage work. `QSF-154` accepts that bounded API composition cost and records
+the final HWM/storage verdict.
 Session 17 continues with `LQL-P14`.
 
 ### Session 18: applicable LogsQL P3
