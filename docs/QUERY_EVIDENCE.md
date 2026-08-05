@@ -2590,3 +2590,58 @@ reader reuse after a rejected label fan-out. No extension primitive, private
 table access, storage format, batching, compression, index, rollup, retention,
 transaction, migration, maintenance, or public batch/SQL contract changed. No
 CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: label transformations
+
+The checked-in
+[`2026-08-05_session15_mql_04_labels.json`](evidence/2026-08-05_session15_mql_04_labels.json)
+was captured from exact extension, metrics-server, and logs-server build
+`bcafebd21145657e093f8f825f178dff461835d3`. It closes `MQL-04` with
+independent `label_set` and `label_del` shapes over the same public float-series
+grid.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query | intermediate work/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `label_set`, exact host | 1 | 195 | 0.806 | 0.940 | 1.090 | 1 | 32 | 131 | 1 |
+| `label_set`, 512 series / four steps | 2,048 | 97,828 | 4.808 | 5.351 | 7.998 | 512 | 16,384 | 53,831 | 2,048 |
+| `label_del`, exact host | 1 | 149 | 0.701 | 0.822 | 0.871 | 1 | 32 | 131 | 1 |
+| `label_del`, 512 series / four steps | 2,048 | 67,620 | 4.377 | 4.659 | 5.161 | 512 | 16,384 | 53,831 | 2,048 |
+
+Both operations perform exactly one public-grid read and have the same
+candidate-chunk, decode, payload, frame, and intermediate-point work as the
+same-run alias and name-retention transforms. `label_set` wide p95 is 10.0%
+above alias (5.351 versus 4.864 ms) while returning 12,800 additional bytes;
+its narrow p95 is 15.8% above alias. `label_del` wide p95 is 7.1% above
+`keep_metric_names` (4.659 versus 4.351 ms), while deleting `__name__` reduces
+the response by 16,384 bytes; its narrow p95 is 2.8% above the comparison.
+These are bounded label-map and encoding costs, not avoidable storage work, so
+no extension primitive is justified.
+
+The first evidence attempt deleted the only distinguishing `host` label from
+all 512 series and correctly received the pinned duplicate-output 422 error.
+The valid wide deletion shape removes `__name__` while retaining `host`; the
+real-extension collision regression continues to prove that deleting a
+distinguishing label fails rather than silently dropping series. This fixture
+correction changes neither product semantics nor the measured storage path.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 7.763 ms and the explicit durability barrier took 82.725 ms. Metrics
+storage remains byte-identical to the preceding Session 15 captures: 224,688
+payload bytes, 409,600 index bytes, and 1,542,312 physical database/WAL/SHM
+bytes. Logs remain 1,088,919 logical and 1,190,496 physical bytes. Metrics RSS
+HWM was 51,116 KiB, 1,912 KiB below the preceding capture; logs HWM was 64,524
+KiB, 548 KiB higher. These whole-process variations are retained without
+attributing either direction to one label operation.
+
+All 528 pinned Prometheus 3.13.2 cases and all 65 pinned VictoriaMetrics
+1.148.0 cases pass. The complete 84-test metrics real-extension suite, 54
+metrics library/binary tests, both complete Rust workspaces, clippy with
+warnings denied, formatting, the 24-test Rust query harness, documentation
+contracts, and all 73 SQL recipes (102 statements) pass locally. Regressions
+cover ordered set/delete behavior, empty-value deletion, metric-name mutation,
+identity and scalar forms, duplicate outputs, case behavior, stable PromQL
+isolation, GET/POST, instant/range, work and response limits, flush, shutdown,
+reopen, and reader reuse after rejection. No extension primitive, private table
+access, storage format, batching, compression, index, rollup, retention,
+transaction, migration, maintenance, or public batch/SQL contract changed. No
+CI workflow was invoked.
