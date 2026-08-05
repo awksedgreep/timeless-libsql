@@ -468,10 +468,7 @@ fn parse_top_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
             let value = tokens.get(cursor).ok_or_else(|| {
                 LogsqlError::malformed("LogsQL top hits requires a result field name")
             })?;
-            if matches!(value.as_str(), "," | "(" | ")")
-                || value.eq_ignore_ascii_case("hits")
-                || value.eq_ignore_ascii_case("rank")
-            {
+            if matches!(value.as_str(), "," | "(" | ")") {
                 return Err(LogsqlError::malformed(
                     "LogsQL top hits requires a result field name",
                 ));
@@ -489,11 +486,7 @@ fn parse_top_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
                 cursor += 1;
             }
             let name = match tokens.get(cursor) {
-                Some(value)
-                    if !matches!(value.as_str(), "," | "(" | ")")
-                        && !value.eq_ignore_ascii_case("hits")
-                        && !value.eq_ignore_ascii_case("rank") =>
-                {
+                Some(value) if !matches!(value.as_str(), "," | "(" | ")") => {
                     cursor += 1;
                     pipeline_field_name(&parse_first_exact_field(value, "rank", "top")?)?
                 }
@@ -530,10 +523,7 @@ fn parse_top_fields(
         return parse_first_fields(tokens, cursor, "by", "top");
     }
     let mut fields = Vec::new();
-    loop {
-        let Some(token) = tokens.get(*cursor) else {
-            break;
-        };
+    while let Some(token) = tokens.get(*cursor) {
         if token.eq_ignore_ascii_case("hits") || token.eq_ignore_ascii_case("rank") {
             break;
         }
@@ -6196,6 +6186,7 @@ mod tests {
             "* | TOP 2 BY (service, level) HITS AS total RANK AS position",
             "* | top service",
             "* | top 5 service, level hits total rank",
+            "* | top 5 service hits as hits rank as position",
             "* | top by (service,) rank as position hits as total",
             r#"* | top by ("field name", 'other field') hits as `hit count` rank as "row rank""#,
             "* | fields service, level | top 2 by (service) | keep service, hits",

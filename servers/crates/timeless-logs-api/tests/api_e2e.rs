@@ -1347,6 +1347,14 @@ async fn session_seventeen_top_counts_textual_groups_with_bounds_and_durability(
     assert_eq!(
         pipeline_rows(
             &app,
+            r#"numeric_group:="numeric" | top 1 by (first_partition) hits as hits rank as position"#,
+        )
+        .await,
+        [serde_json::json!({"first_partition":"a","hits":"5","position":"1"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
             r#"numeric_group:="numeric" | top 5 numeric_group, first_partition"#,
         )
         .await,

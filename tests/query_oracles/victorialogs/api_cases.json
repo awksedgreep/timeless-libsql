@@ -2377,6 +2377,13 @@
       ]
     },
     {
+      "id": "LQL-P15-top-explicit-default-hits-name",
+      "query": "numeric_group:=numeric | top 1 by (first_partition) hits as hits rank as position",
+      "expected_rows": [
+        {"first_partition": "a", "hits": "5", "position": "1"}
+      ]
+    },
+    {
       "id": "LQL-P15-top-bare-multiple-fields",
       "query": "numeric_group:=numeric | top 5 numeric_group, first_partition",
       "expected_rows": [
