@@ -281,8 +281,9 @@ and `max_of`. `MQL-12` is shipped with pinned plural-histogram argument,
 rank-label, destination, cumulative/`vmrange`, missing-`+Inf`, repair,
 interpolation, computed-NaN, collision, and error behavior; executable
 `SQL-MQL-012`; one shared public bucket read; stable-route isolation; bounded
-work/cancellation; durability; and reopen. Exact-build narrow/wide evidence is
-the remaining Session 15 closeout gate.
+work/cancellation; durability; and reopen. Exact-build narrow/wide evidence
+at commit `81e5034f359de840ff7e02eaa7cbb26477562c0a` confirms identical storage
+work for one and two ranks and closes the final Session 15 gate.
 
 ### Session 16: LogsQL P2 filters
 

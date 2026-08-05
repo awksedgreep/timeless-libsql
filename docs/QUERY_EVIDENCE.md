@@ -2950,3 +2950,60 @@ GET/POST, durability, shutdown, and reopen. No extension primitive, private
 table access, storage format, batching, compression, index, rollup, retention,
 transaction, migration, maintenance, or public batch/SQL contract changed. No
 CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: plural histogram quantiles
+
+The checked-in
+[`2026-08-05_session15_mql_12_histogram_quantiles.json`](evidence/2026-08-05_session15_mql_12_histogram_quantiles.json)
+was captured from exact extension, metrics-server, and logs-server build
+`81e5034f359de840ff7e02eaa7cbb26477562c0a`. It closes `MQL-12` with
+one- and two-rank cumulative-histogram shapes; correctness separately pins
+time-varying ranks, VictoriaMetrics float labels, destination mutation,
+`vmrange`, missing `+Inf`, monotonic/NaN repair, and collision/error behavior.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query | extension frame bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| stable `histogram_quantile`, one family | 1 | 131 | 0.688 | 0.921 | 1.052 | 5 | 4 | 4 | 208 | 128 |
+| `histogram_quantiles`, one rank / one family | 1 | 144 | 0.864 | 1.055 | 1.075 | 10 | 4 | 4 | 208 | 128 |
+| `histogram_quantiles`, two ranks / one family | 2 | 228 | 0.984 | 1.145 | 1.215 | 16 | 4 | 4 | 208 | 128 |
+| stable `histogram_quantile`, 512 families | 512 | 41,450 | 13.025 | 13.741 | 14.083 | 2,049 | 2,048 | 2,048 | 106,496 | 57,360 |
+| `histogram_quantiles`, one rank / 512 families | 512 | 48,120 | 13.793 | 15.572 | 16.353 | 4,609 | 2,048 | 2,048 | 106,496 | 57,360 |
+| `histogram_quantiles`, two ranks / 512 families | 1,024 | 102,699 | 14.040 | 15.449 | 17.523 | 7,170 | 2,048 | 2,048 | 106,496 | 57,360 |
+
+Every MetricsQL shape evaluates the bucket expression exactly once through
+the same public packed-raw query as the stable single-quantile reference.
+One versus two requested ranks has identical candidate chunks, decoded
+points, persisted payload bytes, and packed-frame bytes. Each extra rank adds
+only bounded Rust interpolation, collision checking, result accounting, and
+response output; it never repeats the storage read. The two-rank wide result
+doubles cardinality and response size as expected.
+
+Against the same-run stable reference, one-rank MetricsQL p95 is 14.5% higher
+narrow and 13.3% higher wide. Two-rank p95 is 24.3% higher narrow and 12.4%
+higher wide; the wide ordering between one and two ranks is run noise, while
+the 17.523 ms two-rank p99 honestly records the largest evaluator/response
+tail. The storage counters are byte-identical, so no extension primitive can
+remove a read, decode, frame, or row crossing. Direct SQLite/libSQL users have
+the executable cumulative-bucket foundation in `SQL-MQL-012`; destination,
+rank-label, `vmrange`, repair, and response semantics remain language-owned.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 8.664 ms and the explicit durability barrier took 93.081 ms. Metrics
+storage remained 224,688 payload bytes, 409,600 index bytes, and 1,542,312
+physical database/WAL/SHM bytes. Logs remained 1,088,919 logical and 1,190,496
+physical bytes. Metrics RSS HWM was 51,980 KiB, 1,044 KiB above MQL-10; logs
+HWM was 63,792 KiB, 1,176 KiB below it. Both are whole-process variations and
+neither direction is attributed to the added query shapes.
+
+All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
+cases, and all 120 pinned VictoriaLogs 1.52.0 cases pass. The complete 90-test
+metrics real-extension suite, 60 metrics library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 25-test Rust query
+harness, documentation contracts, and all 79 SQL recipes (110 statements)
+pass locally. Regressions cover all documented semantics plus stable PromQL
+isolation, one shared public bucket read, work/result/response limits,
+deadline cancellation and recovery, GET/POST, durability, shutdown, and
+reopen. No extension primitive, private table access, storage format,
+batching, compression, index, rollup, retention, transaction, migration,
+maintenance, or public batch/SQL contract changed. No CI workflow was
+invoked.
