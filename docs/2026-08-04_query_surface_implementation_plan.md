@@ -327,7 +327,14 @@ pipeline composition; executable `SQL-LOG-016`; and real-extension durability/
 reopen coverage. Exact-build evidence at commit
 `e824450234b6f3cc57faa9d342696b222b3b532b` shows byte-identical public reads
 and confirms that ordinary constant-true SQL is the complete direct-user
-primitive.
+primitive. `LQL-F21` has entered implementation with 15 successful and two
+error pinned `contains_all` cases; exact phrase/word boundaries, static-list
+identity rules, rich typed/nested projection, service/level aliases, logical/
+pipeline composition, strict LQL-F38 deferral, work limits, cancellation,
+durability, and reopen now pass the real extension. Portable SQLite cannot
+reproduce the Unicode-category phrase boundary, so this remains `ROWS`/`API`
+without a misleading SQL or extension primitive; exact-build measurement is
+the remaining shipment gate.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

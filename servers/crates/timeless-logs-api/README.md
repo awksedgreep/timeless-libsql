@@ -49,7 +49,9 @@ typed metadata equality; message word, phrase, word-prefix, phrase-prefix,
 case-sensitive substring, bounded RE2-compatible regexp, case-insensitive,
 full-message exact, start-anchored exact-prefix, and static
 `in(v1, ..., vN)` exact membership; field-independent wildcard no-ops for
-`in`, `contains_any`, and `contains_all`; VictoriaLogs-compatible
+`in`, `contains_any`, and `contains_all`; static case-sensitive
+`contains_all(v1, ..., vN)` with VictoriaLogs phrase boundaries;
+VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
 names; time sort, limit, and

@@ -1101,7 +1101,8 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
                 level: 1,
                 severity: "info".into(),
                 message: "missing".into(),
-                metadata_json: r#"{"case":"missing"}"#.into(),
+                metadata_json:
+                    r#"{"case":"missing","service":"api gateway","unicode":"éalpha beta"}"#.into(),
             },
             LogEntry {
                 ts: 1_811_000_000_000_002,
@@ -1230,6 +1231,45 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
             r#"level:contains_all(*)"#,
             (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
         ),
+        (r#"contains_all(missing)"#, vec![1_811_000_000_000_001]),
+        (r#"case:contains_all(miss, ing)"#, Vec::new()),
+        (r#"probe:contains_all(value)"#, vec![1_811_000_000_000_004]),
+        (r#"probe:contains_all(1, x)"#, vec![1_811_000_000_000_007]),
+        (
+            r#"probe:contains_all(ok, true)"#,
+            vec![1_811_000_000_000_008],
+        ),
+        (
+            r#"nested.leaf:contains_all(ok, true)"#,
+            vec![1_811_000_000_000_008],
+        ),
+        (
+            r#"never:contains_all()"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"never:contains_all("")"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (r#"never:contains_all(value)"#, Vec::new()),
+        (r#"case:contains_all("*")"#, Vec::new()),
+        (
+            r#"case:contains_all("", missing, missing,)"#,
+            vec![1_811_000_000_000_001],
+        ),
+        (
+            r#"level:contains_all(info)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"service:contains_all(api, gateway)"#,
+            vec![1_811_000_000_000_001],
+        ),
+        (
+            r#"unicode:contains_all(éalpha, beta)"#,
+            vec![1_811_000_000_000_001],
+        ),
+        (r#"unicode:contains_all(alpha)"#, Vec::new()),
         (r#"case:in()"#, Vec::new()),
         (
             r#"case:in(missing, string) AND NOT case:in(string)"#,
@@ -1269,6 +1309,17 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
         noop_pipeline_cases,
         ["array", "empty", "false", "missing", "null", "object", "string", "zero"]
     );
+
+    let mut contains_all_pipeline_cases = pipeline_rows(
+        &app,
+        r#"* | filter probe:contains_all(1, x) | fields case | limit 100"#,
+    )
+    .await
+    .into_iter()
+    .map(|row| row["case"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+    contains_all_pipeline_cases.sort();
+    assert_eq!(contains_all_pipeline_cases, ["array"]);
 
     for malformed in [
         "in",
@@ -1310,8 +1361,8 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
     );
 
     for unsupported in [
-        "case:contains_all(missing)",
         "case:contains_any(missing)",
+        "case:contains_all(missing | fields case)",
         "case:contains_any(missing | fields case)",
     ] {
         let response = app
@@ -1357,6 +1408,32 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
         timestamps(&storage, "case:in(missing, string)").await.len(),
         2
     );
+
+    let limited_contains_all = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("case:contains_all(missing) | limit 100"))
+    .await
+    .unwrap();
+    assert_eq!(
+        limited_contains_all.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited_contains_all.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(timestamps(&storage, "contains_all(missing)").await.len(), 1);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

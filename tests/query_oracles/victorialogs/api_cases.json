@@ -532,6 +532,96 @@
       "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
     },
     {
+      "id": "LQL-F21-unqualified-words-and-phrase-all-match",
+      "query": "contains_all(ssh, \"login fail\")",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-inside", "phrase-punctuation", "phrase-space", "phrase-unicode-punctuation"]
+    },
+    {
+      "id": "LQL-F21-word-boundaries-are-case-sensitive",
+      "query": "contains_all(alpha)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F21-uppercase-remains-distinct",
+      "query": "contains_all(ALPHA)",
+      "status": 200,
+      "expected_cases": ["word-case"]
+    },
+    {
+      "id": "LQL-F21-every-value-is-required",
+      "query": "contains_all(before, alpha, after)",
+      "status": 200,
+      "expected_cases": ["word-inside"]
+    },
+    {
+      "id": "LQL-F21-field-scoped-phrases",
+      "query": "case:contains_all(pattern, num)",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal", "pattern-num-hex", "pattern-num-short-hex"]
+    },
+    {
+      "id": "LQL-F21-quoted-comma-is-one-phrase",
+      "query": "contains_all(\"time=10:20:30,123\")",
+      "status": 200,
+      "expected_cases": ["pattern-time"]
+    },
+    {
+      "id": "LQL-F21-empty-list-is-field-independent",
+      "query": "state_group:=\"state\" never_present:contains_all()",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F21-empty-phrase-is-identity",
+      "query": "state_group:=\"state\" never_present:contains_all(\"\")",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F21-empty-phrase-among-values-is-ignored",
+      "query": "case:contains_all(\"\", word, exact)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F21-duplicate-phrases-do-not-change-results",
+      "query": "contains_all(alpha, alpha)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F21-missing-field-with-nonempty-phrase-does-not-match",
+      "query": "state_group:=\"state\" never_present:contains_all(value)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F21-function-name-is-case-insensitive",
+      "query": "case:CoNtAiNs_AlL(word, exact)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F21-trailing-comma-is-accepted",
+      "query": "case:contains_all(word, exact,)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F21-logical-composition",
+      "query": "contains_all(alpha) AND NOT case:=\"word-inside\"",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F21-pipeline-composition",
+      "query": "pattern_group:=\"number\" | filter case:contains_all(pattern, num)",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal", "pattern-num-hex", "pattern-num-short-hex"]
+    },
+    {
       "id": "LQL-F18-empty-field",
       "query": "state_group:=\"state\" probe:\"\"",
       "status": 200,
@@ -1037,6 +1127,20 @@
     {
       "id": "LQL-F20-contains-all-leading-empty-value-is-invalid",
       "query": "contains_all(,*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F21-unseparated-values-are-invalid",
+      "query": "contains_all(alpha beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F21-attached-wildcard-is-invalid",
+      "query": "contains_all(alpha*)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

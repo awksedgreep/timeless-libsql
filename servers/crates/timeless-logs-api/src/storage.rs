@@ -563,6 +563,13 @@ pub enum LogPredicate {
         field: LogField,
         values: Vec<String>,
     },
+    /// VictoriaLogs `contains_all(v1, ..., vN)` semantics over the public
+    /// textual projection of a retained field. Every non-empty value must
+    /// match as a case-sensitive phrase with LogsQL word boundaries.
+    TextualContainsAll {
+        field: LogField,
+        values: Vec<String>,
+    },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
         field: LogField,
@@ -2264,6 +2271,15 @@ fn log_predicate_matches(
                     .is_ok()
             },
         )),
+        LogPredicate::TextualContainsAll { field, values } => {
+            let matched = log_field_projected_matches(field, message, level, metadata, |text| {
+                values
+                    .iter()
+                    .all(|phrase| logsql_phrase_matches(text, phrase))
+            });
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
             field,
             message,
@@ -2323,6 +2339,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::Exact { field, .. }
         | LogPredicate::TextualExact { field, .. }
         | LogPredicate::TextualIn { field, .. }
+        | LogPredicate::TextualContainsAll { field, .. }
         | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
@@ -2977,6 +2994,10 @@ mod tests {
             LogPredicate::TextualIn {
                 field: LogField::Message,
                 values: vec!["other".into(), "request 42".into()],
+            },
+            LogPredicate::TextualContainsAll {
+                field: LogField::Message,
+                values: vec!["request".into(), "42".into()],
             },
             LogPredicate::Regex {
                 field: LogField::Message,

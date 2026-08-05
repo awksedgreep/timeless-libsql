@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 142 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 159 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -155,6 +155,20 @@ separator errors. A quoted `"*"` is an ordinary value, while non-wildcard
 owned by `LQL-F21`, `LQL-F22`, and `LQL-F38`. The behavior is source-audited
 against `parseInValues`, `parseArgsInParensPossibleWildcard`, and
 `filter_noop.go` at the immutable VictoriaLogs commit above.
+
+The fifteen successful and two error `LQL-F21` cases pin static
+`contains_all(...)` semantics independently from the wildcard no-op. Every
+non-empty argument is a case-sensitive phrase with Unicode letter, digit, and
+underscore word boundaries, and every argument must match the same projected
+field value. The cases cover separate word/phrase arguments, field scope,
+quoted commas, case-sensitive values, case-insensitive function names,
+duplicates, a trailing comma, logical/pipeline composition, and strict
+separator/wildcard errors. An empty list or empty-string argument is the
+logical identity and therefore does not inspect the field; a non-empty value
+does not match a missing field. Query-backed values remain the separate
+`LQL-F38` capability. The behavior is source-audited against
+`filter_contains_all.go`, `filter_phrase.go`, `in_values.go`, and `parser.go`
+at the immutable VictoriaLogs commit above.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

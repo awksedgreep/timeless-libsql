@@ -240,14 +240,32 @@ projection used by exact-prefix filters. `in()` matches nothing, a trailing
 comma is accepted, and a quoted `"*"` is literal. Any standalone unquoted `*`
 inside `in`, `contains_any`, or `contains_all` is instead a field-independent
 no-op: it matches every bounded row even when the named field is absent. The
-non-wildcard `contains_all` and `contains_any` filters and query-backed lists
-remain explicitly unsupported rather than silently approximated.
+non-wildcard `contains_any` filter and query-backed lists remain explicitly
+unsupported rather than silently approximated.
+
+`contains_all(v1, ..., vN)` requires every non-empty static argument to match
+the same field as a case-sensitive VictoriaLogs phrase. Letter, digit, and
+underscore characters at either edge require Unicode word boundaries; quoted
+phrases preserve their bytes. Arguments are independent, so
+`contains_all(ssh, "login fail")` permits unrelated bytes between the two
+matches. Duplicates do not change the result, a trailing comma is accepted,
+and `contains_all()` or `contains_all("")` is a field-independent true
+predicate. Missing and null project to empty text, strings retain their bytes,
+and booleans, numbers, arrays, and objects use compact JSON text only while
+matching—the retained metadata type is unchanged.
 
 Direct SQLite/libSQL users can express static membership with parameterized
 `IN` and a field no-op by omitting the field predicate. Executable
 `SQL-LOG-015` and `SQL-LOG-016` document both forms, including existing hidden-
 column pruning for a declared string-only index key. These API constructs do
 not require a private table or new extension primitive.
+
+There is intentionally no `contains_all` SQL recipe. Portable SQLite `LIKE`,
+`GLOB`, and `instr` cannot reproduce the required Unicode-category word
+boundaries, and adding a storage primitive would not avoid the public row
+decode already required for arbitrary rich fields. Direct SQL users can
+compose intentionally looser substring predicates when that is their desired
+contract; those predicates are not labeled LogsQL parity.
 
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and

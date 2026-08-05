@@ -633,14 +633,18 @@ the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`,
 `SQL-MQL-009` through `SQL-MQL-010`, and `SQL-MQL-012` recipes. The LogsQL API
 includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
 exact-prefix matching, and static multi-exact `in(...)` membership over bounded
-public rows while retaining Timeless's rich JSON types. Standalone unquoted
+public rows while retaining Timeless's rich JSON types, plus static
+`contains_all(...)` phrase conjunction over the same rich projection.
+Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
-no-ops; non-wildcard contains values and subqueries remain explicitly deferred.
-Patterns intentionally
-make no inexact `LIKE`/`GLOB` equivalence claim; direct SQLite/libSQL users have
+no-ops; non-wildcard `contains_any` values and subqueries remain explicitly
+deferred. Patterns intentionally make no inexact `LIKE`/`GLOB` equivalence
+claim; direct SQLite/libSQL users have
 executable exact-prefix, parameterized-membership, and constant-true recipes in
 `SQL-LOG-014` through `SQL-LOG-016`, including the existing public posting index
-for declared string-only keys. The extension exposes general SQLite/libSQL primitives and
+for declared string-only keys. `contains_all` remains an honest API-only row:
+portable SQLite does not supply its Unicode phrase-boundary predicate. The
+extension exposes general SQLite/libSQL primitives and
 receives a new query vector only when measurements prove that storage-aware
 pushdown materially avoids reads, decode, copies, or row crossings. Saved
 queries, subscriptions, rules, dashboards, and control-plane state remain

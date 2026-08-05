@@ -696,7 +696,7 @@ pub fn parse_at(
                         append_predicate(&mut spec, exact.predicate(LogField::Message));
                         continue;
                     }
-                    if let Some(predicate) = parse_field_noop_filter(&token)? {
+                    if let Some(predicate) = parse_contains_filter(&token, LogField::Message)? {
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
@@ -1020,16 +1020,29 @@ fn parse_static_value_list(
     Ok(Some(ParsedStaticValueList::Values(values)))
 }
 
-fn parse_field_noop_filter(token: &str) -> Result<Option<LogPredicate>, LogsqlError> {
-    for (function, row) in [("contains_all", "LQL-F21"), ("contains_any", "LQL-F22")] {
-        let Some(parsed) = parse_static_value_list(token, function)? else {
-            continue;
-        };
+fn parse_contains_filter(
+    token: &str,
+    field: LogField,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    if let Some(parsed) = parse_static_value_list(token, "contains_all")? {
+        return Ok(Some(match parsed {
+            ParsedStaticValueList::Noop => LogPredicate::True,
+            ParsedStaticValueList::Values(mut values) => {
+                values.retain(|value| !value.is_empty());
+                if values.is_empty() {
+                    LogPredicate::True
+                } else {
+                    LogPredicate::TextualContainsAll { field, values }
+                }
+            }
+        }));
+    }
+    if let Some(parsed) = parse_static_value_list(token, "contains_any")? {
         return match parsed {
             ParsedStaticValueList::Noop => Ok(Some(LogPredicate::True)),
-            ParsedStaticValueList::Values(_) => Err(LogsqlError::unsupported(format!(
-                "LogsQL {function}(values) is owned by {row} and is not supported yet"
-            ))),
+            ParsedStaticValueList::Values(_) => Err(LogsqlError::unsupported(
+                "LogsQL contains_any(values) is owned by LQL-F22 and is not supported yet",
+            )),
         };
     }
     Ok(None)
@@ -1612,7 +1625,7 @@ fn compile_field_filter(
     if let Some(exact) = parse_multi_exact_filter(value)? {
         return Ok(exact.predicate(field.clone()));
     }
-    if let Some(predicate) = parse_field_noop_filter(value)? {
+    if let Some(predicate) = parse_contains_filter(value, field.clone())? {
         return Ok(predicate);
     }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
@@ -1666,7 +1679,7 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
     if let Some(exact) = parse_multi_exact_filter(atom)? {
         return Ok(exact.predicate(field.clone()));
     }
-    if let Some(predicate) = parse_field_noop_filter(atom)? {
+    if let Some(predicate) = parse_contains_filter(atom, field.clone())? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
@@ -2140,7 +2153,7 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
     } else if let Some(exact) = parse_multi_exact_filter(value)? {
         append_predicate(spec, exact.predicate(log_field(&path)));
         return Ok(());
-    } else if let Some(predicate) = parse_field_noop_filter(value)? {
+    } else if let Some(predicate) = parse_contains_filter(value, log_field(&path))? {
         append_predicate(spec, predicate);
         return Ok(());
     }
@@ -3114,16 +3127,54 @@ mod tests {
             assert!(plan.is_ok(), "{query}: {plan:?}");
         }
 
-        for (query, row) in [
-            ("contains_all(alpha)", "LQL-F21"),
-            ("contains_any(alpha)", "LQL-F22"),
-        ] {
+        {
+            let (query, row) = ("contains_any(alpha)", "LQL-F22");
             let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Unsupported, "{query}");
             assert!(error.message.contains(row), "{query}: {error}");
         }
 
         for malformed in ["contains_any", "contains_any(* alpha)", "contains_all(,*)"] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_sixteen_contains_all_static_grammar_is_complete_and_strict() {
+        for query in [
+            "contains_all(alpha)",
+            r#"contains_all(alpha, "before alpha")"#,
+            "case:contains_all(word, exact)",
+            r#"case:contains_all("", word, exact)"#,
+            "case:contains_all(word, word, exact,)",
+            "never_present:contains_all()",
+            r#"never_present:contains_all("")"#,
+            "level:contains_all(info)",
+            "case:CoNtAiNs_AlL(word, exact)",
+            "contains_all(alpha) AND NOT case:exact(word-inside)",
+            "* | filter case:contains_all(word, exact)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        let subquery = parse_at(
+            "case:contains_all(* | fields case)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(subquery.kind, LogsqlErrorKind::Unsupported);
+        assert!(subquery.message.contains("LQL-F38"), "{subquery}");
+
+        for malformed in [
+            "contains_all",
+            "contains_all(",
+            "contains_all(,alpha)",
+            "contains_all(alpha beta)",
+            "contains_all(alpha*)",
+        ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
         }

@@ -795,6 +795,11 @@ fn predicate_matches(
                     .is_ok()
             }))
         }
+        LogPredicate::TextualContainsAll { field, values } => {
+            Ok(projected_field_matches(row, field, |text| {
+                values.iter().all(|phrase| phrase_matches(text, phrase))
+            }))
+        }
         LogPredicate::ExactPrefix { field, value } => {
             Ok(projected_field_matches(row, field, |text| {
                 text.starts_with(value)
