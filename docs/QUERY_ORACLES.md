@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 179 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 203 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -181,6 +181,19 @@ case-insensitive function names, logical/pipeline composition, and strict
 separator/wildcard errors. Query-backed values remain `LQL-F38`. The behavior
 is source-audited against `filter_contains_any.go`, `filter_phrase.go`,
 `in_values.go`, and `parser.go` at the immutable VictoriaLogs commit above.
+
+The twenty successful and four error `LQL-F23` cases pin
+`json_array_contains_any(...)` over top-level primitive array elements. They
+cover exact strings; shared textual matching for stored numbers and strings;
+decimal and negative numbers; booleans; null; empty lists and empty-string
+elements; ignored nested arrays/objects; scalar/object/missing fields; quoted,
+newline, slash, and Unicode escapes; quoted-star literal versus unquoted-star
+error; case-insensitive function names; trailing commas; bare-name word
+filtering; logical/pipeline composition; and strict separators. The behavior
+is source-audited against `filter_json_array_contains_any.go`, its parser, and
+tests at the immutable VictoriaLogs commit above. Timeless intentionally
+compares decoded retained JSON strings, so a stored Unicode escape matches its
+decoded candidate even though VictoriaLogs' raw-lexeme shortcut does not.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit
@@ -334,6 +347,12 @@ than hidden:
   JSON object `{\"items\":[...],\"missing\":N}`, which is the only supported
   response shape that distinguishes an absent field from a stored null while
   preserving array/object values.
+- Repeated pinned runs showed that VictoriaLogs may reorder the encoded
+  elements returned by `values(field)` as fixture block layout changes, even
+  though duplicates remain present. The oracle therefore compares only the
+  explicitly marked `all_values` array as an unordered multiset, preserving
+  duplicate counts and the surrounding result-row order. Timeless continues
+  to promise its own deterministic input order.
 
 `QSF-063` and `QSF-076` through `QSF-080` record these selected compatibility
 behaviors. The fixture now contains 57 row-query cases, six error cases, and

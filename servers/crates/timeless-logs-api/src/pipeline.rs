@@ -809,6 +809,17 @@ fn predicate_matches(
             ensure_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::JsonArrayContainsAny { field, values } => {
+            let matched = field_json(row, field)
+                .and_then(Value::as_array)
+                .is_some_and(|array| {
+                    array
+                        .iter()
+                        .any(|value| json_array_primitive_in(values, value))
+                });
+            ensure_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => {
             Ok(projected_field_matches(row, field, |text| {
                 text.starts_with(value)
@@ -1119,6 +1130,22 @@ fn ensure_active(cancelled: &AtomicBool) -> Result<(), String> {
     }
 }
 
+fn json_array_primitive_in(values: &[String], value: &Value) -> bool {
+    let matches = |candidate: &str| {
+        values
+            .binary_search_by(|value| value.as_str().cmp(candidate))
+            .is_ok()
+    };
+    match value {
+        Value::Null => matches("null"),
+        Value::Bool(true) => matches("true"),
+        Value::Bool(false) => matches("false"),
+        Value::Number(value) => matches(&value.to_string()),
+        Value::String(value) => matches(value),
+        Value::Array(_) | Value::Object(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1150,6 +1177,10 @@ mod tests {
             },
             LogPredicate::TextualContainsAny {
                 field: LogField::Message,
+                values: vec!["other".into(), "request".into()],
+            },
+            LogPredicate::JsonArrayContainsAny {
+                field: LogField::Metadata(vec!["tags".into()]),
                 values: vec!["other".into(), "request".into()],
             },
         ] {

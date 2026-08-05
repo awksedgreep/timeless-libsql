@@ -342,7 +342,12 @@ true, typed projection, alias, pipeline, strict-error, limit, cancellation,
 durability, and reopen behavior use the same bounded public-row plan. Exact-
 build evidence at commit `61ddbe72416f6858fb546c1fb6ace9c2f88ba3bc`
 records byte-identical storage work and rejects a misleading SQL or extension
-primitive.
+primitive. `LQL-F23` now has twenty successful and four error pinned
+`json_array_contains_any` cases, failing-then-passing parser and real-extension
+regressions, exact top-level primitive membership over retained typed arrays,
+strict list grammar, logical/pipeline composition, limits, cancellation,
+durability, and reopen. Executable `SQL-LOG-017` proves the public JSON1 form;
+exact-build measurement remains the final row exit criterion.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

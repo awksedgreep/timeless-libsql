@@ -263,11 +263,32 @@ remain literal, function names are case-insensitive, and a non-empty list does
 not match a missing field. For example, `contains_any(error, "login failed")`
 matches either phrase; it does not require both.
 
+`field:json_array_contains_any(v1, ..., vN)` selects only a retained JSON
+array and succeeds when any top-level primitive element has the same exact
+textual representation as a static candidate. Decoded strings compare by
+case-sensitive bytes; numbers use their retained semantic JSON spelling;
+booleans compare as `true` or `false`; and JSON null compares as `null`.
+Nested arrays and objects are ignored rather than stringified. Missing fields,
+scalars, objects, and empty arrays do not match. An empty candidate list is
+false, while `json_array_contains_any("")` matches only an actual empty-string
+array element. A trailing comma is accepted, duplicates are irrelevant,
+function names are case-insensitive, a quoted `"*"` is literal, and an
+unquoted `*` is invalid for this function. Query-backed lists remain deferred
+as `LQL-F38`.
+
+Timeless intentionally applies this operation to its retained semantic JSON.
+For example, a stored `"a\u0062"` array element is decoded to `ab` and matches
+the candidate `ab`. The pinned VictoriaLogs implementation compares a raw
+array lexeme in that shortcut and does not make that escaped-spelling match.
+Timeless records this as a stronger typed-data interpretation instead of
+retaining private lexical spellings or mutating storage.
+
 Direct SQLite/libSQL users can express static membership with parameterized
 `IN` and a field no-op by omitting the field predicate. Executable
 `SQL-LOG-015` and `SQL-LOG-016` document both forms, including existing hidden-
-column pruning for a declared string-only index key. These API constructs do
-not require a private table or new extension primitive.
+column pruning for a declared string-only index key. `SQL-LOG-017` uses public
+`json_each` rows for exact top-level JSON-array primitive membership. These API
+constructs do not require a private table or new extension primitive.
 
 There is intentionally no `contains_all` or `contains_any` SQL recipe. Portable
 SQLite `LIKE`, `GLOB`, and `instr` cannot reproduce the required Unicode-

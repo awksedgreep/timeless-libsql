@@ -62,6 +62,15 @@
     {"case": "pattern-nonempty-message", "_msg": "nonempty field", "pattern_group": "empty", "pattern_value": "nonempty"},
     {"case": "pattern-progress", "_msg": "a x nope a x 12 y", "pattern_group": "progress"},
     {"case": "pattern-field", "_msg": "metadata pattern", "pattern_group": "field", "pattern_code": "job-42", "pattern_num": 42},
+    {"case": "json-array-strings", "_msg": "jaca strings", "array_group": "array", "tags": ["prod", "canary", ""]},
+    {"case": "json-array-mixed", "_msg": "jaca mixed", "array_group": "array", "tags": [123, 1.5, -2, true, false, null, "123"]},
+    {"case": "json-array-nested", "_msg": "jaca nested", "array_group": "array", "tags": [{"a": "b"}, ["a"], "leaf"]},
+    {"case": "json-array-scalar", "_msg": "jaca scalar", "array_group": "array", "tags": "prod"},
+    {"case": "json-array-object", "_msg": "jaca object", "array_group": "array", "tags": {"key": "prod"}},
+    {"case": "json-array-empty", "_msg": "jaca empty", "array_group": "array", "tags": []},
+    {"case": "json-array-escaped", "_msg": "jaca escaped", "array_group": "array", "tags": ["a\"b", "a\nb", "a/b", "ab"]},
+    {"case": "json-array-star", "_msg": "jaca star", "array_group": "array", "tags": ["*"]},
+    {"case": "json-array-missing", "_msg": "jaca missing", "array_group": "array"},
     {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
     {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
     {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
@@ -730,6 +739,126 @@
       "expected_cases": ["state-false"]
     },
     {
+      "id": "LQL-F23-string-or-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(prod, dev)",
+      "status": 200,
+      "expected_cases": ["json-array-strings"]
+    },
+    {
+      "id": "LQL-F23-number-and-string-share-textual-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(123)",
+      "status": 200,
+      "expected_cases": ["json-array-mixed"]
+    },
+    {
+      "id": "LQL-F23-decimal-and-negative-number-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(1.5, -2)",
+      "status": 200,
+      "expected_cases": ["json-array-mixed"]
+    },
+    {
+      "id": "LQL-F23-boolean-true-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(true)",
+      "status": 200,
+      "expected_cases": ["json-array-mixed"]
+    },
+    {
+      "id": "LQL-F23-boolean-false-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(false)",
+      "status": 200,
+      "expected_cases": ["json-array-mixed"]
+    },
+    {
+      "id": "LQL-F23-null-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(null)",
+      "status": 200,
+      "expected_cases": ["json-array-mixed"]
+    },
+    {
+      "id": "LQL-F23-empty-list-matches-nothing",
+      "query": "array_group:=\"array\" tags:json_array_contains_any()",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F23-empty-value-matches-only-an-empty-array-element",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(\"\")",
+      "status": 200,
+      "expected_cases": ["json-array-strings"]
+    },
+    {
+      "id": "LQL-F23-nested-arrays-and-objects-are-ignored",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(`{\"a\":\"b\"}`, `[\"a\"]`)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F23-primitive-alongside-nested-values-matches",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(leaf)",
+      "status": 200,
+      "expected_cases": ["json-array-nested"]
+    },
+    {
+      "id": "LQL-F23-scalar-object-and-missing-fields-are-not-arrays",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(prod)",
+      "status": 200,
+      "expected_cases": ["json-array-strings"]
+    },
+    {
+      "id": "LQL-F23-escaped-quote-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(\"a\\\"b\")",
+      "status": 200,
+      "expected_cases": ["json-array-escaped"]
+    },
+    {
+      "id": "LQL-F23-escaped-newline-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(\"a\\nb\")",
+      "status": 200,
+      "expected_cases": ["json-array-escaped"]
+    },
+    {
+      "id": "LQL-F23-slash-and-decoded-string-membership",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(a/b, ab)",
+      "status": 200,
+      "expected_cases": ["json-array-escaped"]
+    },
+    {
+      "id": "LQL-F23-quoted-wildcard-is-a-literal-value",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(\"*\")",
+      "status": 200,
+      "expected_cases": ["json-array-star"]
+    },
+    {
+      "id": "LQL-F23-function-name-is-case-insensitive",
+      "query": "array_group:=\"array\" tags:JsOn_ArRaY_CoNtAiNs_AnY(canary)",
+      "status": 200,
+      "expected_cases": ["json-array-strings"]
+    },
+    {
+      "id": "LQL-F23-trailing-comma-is-accepted",
+      "query": "array_group:=\"array\" tags:json_array_contains_any(canary,)",
+      "status": 200,
+      "expected_cases": ["json-array-strings"]
+    },
+    {
+      "id": "LQL-F23-logical-composition",
+      "query": "array_group:=\"array\" AND (tags:json_array_contains_any(prod) OR tags:json_array_contains_any(leaf))",
+      "status": 200,
+      "expected_cases": ["json-array-nested", "json-array-strings"]
+    },
+    {
+      "id": "LQL-F23-pipeline-composition",
+      "query": "array_group:=\"array\" | filter tags:json_array_contains_any(false, leaf)",
+      "status": 200,
+      "expected_cases": ["json-array-mixed", "json-array-nested"]
+    },
+    {
+      "id": "LQL-F23-bare-function-name-remains-a-word-filter",
+      "query": "json_array_contains_any",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
       "id": "LQL-F18-empty-field",
       "query": "state_group:=\"state\" probe:\"\"",
       "status": 200,
@@ -946,6 +1075,9 @@
         "pattern-time", "pattern-date", "pattern-datetime", "pattern-word-unicode",
         "pattern-word-quoted", "pattern-unknown-literal", "pattern-empty-message",
         "pattern-nonempty-message", "pattern-progress", "pattern-field",
+        "json-array-strings", "json-array-mixed", "json-array-nested",
+        "json-array-scalar", "json-array-object", "json-array-empty",
+        "json-array-escaped", "json-array-star", "json-array-missing",
         "page-0", "page-1", "page-2", "page-3",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
@@ -1102,6 +1234,7 @@
     {
       "id": "LQL-S04-unique-and-ordered-values",
       "query": "state_group:=\"state\" | stats uniq_values(probe) as unique, values(probe) as all_values",
+      "unordered_json_array_fields": ["all_values"],
       "expected_rows": [{
         "unique": "[\"0\",\"false\",\"value\"]",
         "all_values": "[\"\",\"0\",\"value\",\"false\",\"\",\"\"]"
@@ -1263,6 +1396,34 @@
     {
       "id": "LQL-F22-attached-wildcard-is-invalid",
       "query": "contains_any(alpha*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F23-unterminated-list-is-invalid",
+      "query": "tags:json_array_contains_any(",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F23-unseparated-values-are-invalid",
+      "query": "tags:json_array_contains_any(prod dev)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F23-leading-empty-value-is-invalid",
+      "query": "tags:json_array_contains_any(,prod)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F23-unquoted-wildcard-is-invalid",
+      "query": "tags:json_array_contains_any(*)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

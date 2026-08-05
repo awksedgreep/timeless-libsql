@@ -1298,6 +1298,7 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                     "level": severities[index % severities.len()], "service": if index % 4 == 0 { "api" } else { "worker" },
                     "host": format!("h{:02}", index % 64), "status": if index % 8 == 4 { 500 } else { 200 },
                     "context": {"retry": index % 3 == 0, "attempt": index % 5},
+                    "tags": ["query", true],
                 }),
             )?;
         }
@@ -1613,6 +1614,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "contains_any_typed_field_wide",
                 "logs-contains-any-typed-field-wide",
                 "context:contains_any(attempt, absent) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "json_array_contains_any_narrow",
+                "logs-json-array-contains-any-narrow",
+                "host:=\"h00\" AND tags:json_array_contains_any(query, absent) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "json_array_contains_any_wide",
+                "logs-json-array-contains-any-wide",
+                "tags:json_array_contains_any(query, absent) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "json_array_contains_any_primitive_narrow",
+                "logs-json-array-contains-any-primitive-narrow",
+                "host:=\"h00\" AND tags:json_array_contains_any(true, absent) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "json_array_contains_any_primitive_wide",
+                "logs-json-array-contains-any-primitive-wide",
+                "tags:json_array_contains_any(true, absent) | sort by (_time) asc | limit 10000",
                 entries,
                 None,
             ),

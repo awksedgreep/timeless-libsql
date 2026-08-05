@@ -700,6 +700,12 @@ pub fn parse_at(
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
+                    if let Some(predicate) =
+                        parse_json_array_contains_any_filter(&token, LogField::Message)?
+                    {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
                     if let Some(predicate) = parse_case_insensitive_filter(&token)? {
                         append_predicate(&mut spec, predicate);
                         continue;
@@ -1052,6 +1058,71 @@ fn parse_contains_filter(
         }));
     }
     Ok(None)
+}
+
+fn parse_json_array_contains_any_filter(
+    token: &str,
+    field: LogField,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    const FUNCTION: &str = "json_array_contains_any";
+
+    // VictoriaLogs treats the bare function name as an ordinary word filter.
+    // It becomes a function only when the case-insensitive name is followed by
+    // an opening parenthesis.
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    if !token[..open].eq_ignore_ascii_case(FUNCTION) {
+        return Ok(None);
+    }
+    let inner = token[open..]
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| {
+            LogsqlError::malformed(format!("unterminated LogsQL {FUNCTION}() filter"))
+        })?;
+    if contains_top_level(inner, '|')? {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {FUNCTION}() accepts only a static value list"
+        )));
+    }
+
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Ok(Some(LogPredicate::JsonArrayContainsAny {
+            field,
+            values: Vec::new(),
+        }));
+    }
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    if inner.is_empty() {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {FUNCTION}() cannot start with an empty value"
+        )));
+    }
+
+    let mut values = Vec::new();
+    for argument in split_top_level(inner, ',')? {
+        let argument = argument.trim();
+        let value = if let Some(value) = quoted_value(argument)? {
+            value
+        } else {
+            if argument.is_empty()
+                || argument.chars().any(|character| {
+                    character.is_whitespace() || matches!(character, '*' | '(' | ')')
+                })
+            {
+                return Err(LogsqlError::malformed(format!(
+                    "invalid LogsQL {FUNCTION}() value {argument:?}"
+                )));
+            }
+            argument.to_owned()
+        };
+        values.push(value);
+    }
+    values.sort_unstable();
+    values.dedup();
+    Ok(Some(LogPredicate::JsonArrayContainsAny { field, values }))
 }
 
 fn parse_exact_prefix_argument(value: &str) -> Result<Option<String>, LogsqlError> {
@@ -1634,6 +1705,9 @@ fn compile_field_filter(
     if let Some(predicate) = parse_contains_filter(value, field.clone())? {
         return Ok(predicate);
     }
+    if let Some(predicate) = parse_json_array_contains_any_filter(value, field.clone())? {
+        return Ok(predicate);
+    }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
             field: field.clone(),
@@ -1686,6 +1760,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
         return Ok(exact.predicate(field.clone()));
     }
     if let Some(predicate) = parse_contains_filter(atom, field.clone())? {
+        return Ok(predicate);
+    }
+    if let Some(predicate) = parse_json_array_contains_any_filter(atom, field.clone())? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
@@ -2120,9 +2197,14 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
             && !value.starts_with('<')
             && !value.starts_with("range(")
             && !value.starts_with("range[")
-            && !["in", "contains_all", "contains_any"]
-                .iter()
-                .any(|function| is_named_filter_call(value, function))
+            && ![
+                "in",
+                "contains_all",
+                "contains_any",
+                "json_array_contains_any",
+            ]
+            .iter()
+            .any(|function| is_named_filter_call(value, function))
     })
 }
 
@@ -2160,6 +2242,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         append_predicate(spec, exact.predicate(log_field(&path)));
         return Ok(());
     } else if let Some(predicate) = parse_contains_filter(value, log_field(&path))? {
+        append_predicate(spec, predicate);
+        return Ok(());
+    } else if let Some(predicate) = parse_json_array_contains_any_filter(value, log_field(&path))? {
         append_predicate(spec, predicate);
         return Ok(());
     }
@@ -3213,6 +3298,45 @@ mod tests {
             "contains_any(,alpha)",
             "contains_any(alpha beta)",
             "contains_any(alpha*)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_sixteen_json_array_contains_any_grammar_is_typed_and_strict() {
+        for query in [
+            "tags:json_array_contains_any(prod, dev)",
+            r#"tags:json_array_contains_any("", 123, true, null)"#,
+            r#"tags:json_array_contains_any("*")"#,
+            "tags:json_array_contains_any()",
+            "tags:json_array_contains_any(prod,)",
+            "tags:JsOn_ArRaY_CoNtAiNs_AnY(prod)",
+            "tags:json_array_contains_any(prod) OR tags:json_array_contains_any(dev)",
+            "* | filter tags:json_array_contains_any(prod)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            assert!(plan.spec.metadata_exact.is_empty(), "{query}: {plan:?}");
+            assert!(
+                plan.spec.predicate.is_some() || !plan.pipeline.is_empty(),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for word_filter in ["json_array_contains_any", "tags:json_array_contains_any"] {
+            assert!(
+                parse_at(word_filter, TimestampUnit::Microseconds, 0).is_ok(),
+                "{word_filter}"
+            );
+        }
+
+        for malformed in [
+            "tags:json_array_contains_any(",
+            "tags:json_array_contains_any(,prod)",
+            "tags:json_array_contains_any(prod dev)",
+            "tags:json_array_contains_any(*)",
+            "tags:json_array_contains_any(prod | fields tags)",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");

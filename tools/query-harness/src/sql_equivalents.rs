@@ -251,13 +251,13 @@ fn setup(connection: &mut Connection) -> Result<()> {
             1000,
             "error",
             "request timeout",
-            r#"{"service":"api","host":"web-1","deployment":{"region":"us-east"},"duration_ms":12,"nested":{"ok":true,"count":2,"none":null,"empty":""}}"#,
+            r#"{"service":"api","host":"web-1","deployment":{"region":"us-east"},"duration_ms":12,"nested":{"ok":true,"count":2,"none":null,"empty":""},"tags":["prod","",123,true,false,null,{"nested":"ignored"},["ignored"],"a\u0062","*"]}"#,
         ])?;
         insert.execute(params![
             2000,
             "info",
             "request ok",
-            r#"{"service":"api","host":"web-2","deployment":{"region":"us-west"},"duration_ms":4,"nested":{"ok":"true","count":"2","empty":null}}"#,
+            r#"{"service":"api","host":"web-2","deployment":{"region":"us-west"},"duration_ms":4,"nested":{"ok":"true","count":"2","empty":null},"tags":["dev",1.5,-2,"123","a\"b","a\nb","a/b"]}"#,
         ])?;
     }
     transaction.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
@@ -372,10 +372,19 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "message_value_2" => Value::Text("request ok".to_owned()),
         "indexed_value_1" => Value::Text("web-1".to_owned()),
         "indexed_value_2" => Value::Text("web-2".to_owned()),
-        "field_path" => Value::Text("$.deployment.region".to_owned()),
+        "field_path" => Value::Text(
+            if identifier == "SQL-LOG-017" {
+                "$.tags"
+            } else {
+                "$.deployment.region"
+            }
+            .to_owned(),
+        ),
         "field_prefix" => Value::Text("us-".to_owned()),
         "field_value_1" => Value::Text("us-east".to_owned()),
         "field_value_2" => Value::Text("us-west".to_owned()),
+        "array_value_1" => Value::Text("prod".to_owned()),
+        "array_value_2" => Value::Text("absent".to_owned()),
         "empty_path" => Value::Text("$.nested.none".to_owned()),
         "any_path" => Value::Text("$.deployment.region".to_owned()),
         "duration_threshold" => Value::Integer(10),
@@ -1584,6 +1593,8 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         recipe_values("SQL-LOG-015", 2)?,
     ];
     let field_noop_rows = recipe_values("SQL-LOG-016", 0)?;
+    let json_array_rows = recipe_values("SQL-LOG-017", 0)?;
+    let json_array_empty_rows = recipe_values("SQL-LOG-017", 1)?;
     if [
         bounded,
         substring,
@@ -1616,7 +1627,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     if session_twelve_recipe_rows != [1, 1, 2, 2, 1] {
         bail!("Session 12 SQL-LOG recipe results changed: {session_twelve_recipe_rows:?}");
     }
-    if session_thirteen_recipe_rows != [8, 2, 2, 1, 1, 2, 2, 1, 1] {
+    if session_thirteen_recipe_rows != [9, 2, 2, 1, 1, 2, 2, 1, 1] {
         bail!("Session 13 SQL-LOG recipe results changed: {session_thirteen_recipe_rows:?}");
     }
     for (ordinal, rows) in exact_prefix_rows.iter().enumerate() {
@@ -1644,6 +1655,59 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     if field_noop_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
         bail!("SQL-LOG-016 field no-op changed: {field_noop_rows:?}");
     }
+    let json_array_timestamps = json_array_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if json_array_timestamps != [Some(Value::Integer(1000))] || !json_array_empty_rows.is_empty() {
+        bail!(
+            "SQL-LOG-017 primitive or empty-list membership changed: rows={json_array_rows:?} empty={json_array_empty_rows:?}"
+        );
+    }
+    let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
+    let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
+        let mut statement = connection.prepare(&json_array_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-017 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "array_value_1" => Value::Text(first.to_owned()),
+                "array_value_2" => Value::Text(second.to_owned()),
+                "field_path" => Value::Text(path.to_owned()),
+                _ => parameter("SQL-LOG-017", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        Ok(statement
+            .raw_query()
+            .mapped(|row| row.get::<_, i64>(0))
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    };
+    for (first, second, path, expected) in [
+        ("123", "missing", "$.tags", vec![2000, 1000]),
+        ("true", "null", "$.tags", vec![1000]),
+        ("false", "missing", "$.tags", vec![1000]),
+        ("1.5", "-2", "$.tags", vec![2000]),
+        ("", "missing", "$.tags", vec![1000]),
+        ("a/b", "ab", "$.tags", vec![2000, 1000]),
+        ("a\"b", "a\nb", "$.tags", vec![2000]),
+        ("*", "missing", "$.tags", vec![1000]),
+        (
+            r#"{"nested":"ignored"}"#,
+            r#"["ignored"]"#,
+            "$.tags",
+            vec![],
+        ),
+        ("us-east", "missing", "$.deployment.region", vec![]),
+        ("prod", "missing", "$.absent", vec![]),
+    ] {
+        let actual = json_array_timestamps(first, second, path)?;
+        if actual != expected {
+            bail!("SQL-LOG-017 values {first:?}, {second:?} at {path:?} changed: {actual:?}");
+        }
+    }
     let field_names = recipe_values("SQL-LOG-010", 0)?;
     if field_names
         != [
@@ -1655,6 +1719,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             vec![Value::Text("level".into()), Value::Integer(2)],
             vec![Value::Text("nested".into()), Value::Integer(2)],
             vec![Value::Text("service".into()), Value::Integer(2)],
+            vec![Value::Text("tags".into()), Value::Integer(2)],
         ]
     {
         bail!("SQL-LOG-010 field discovery changed: {field_names:?}");
@@ -1876,7 +1941,9 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ],
     )?;
     connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
-    for (identifier, statement_index) in [("SQL-LOG-014", 1), ("SQL-LOG-015", 2)] {
+    for (identifier, statement_index) in
+        [("SQL-LOG-014", 1), ("SQL-LOG-015", 2), ("SQL-LOG-017", 0)]
+    {
         let sql = recipe_sql(identifier, statement_index)?;
         let mut statement = connection
             .prepare(&sql)
@@ -1897,7 +1964,12 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             .raw_query()
             .mapped(|row| row.get::<_, i64>(0))
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        if timestamps != [2000] {
+        let expected = if identifier == "SQL-LOG-017" {
+            [1000]
+        } else {
+            [2000]
+        };
+        if timestamps != expected {
             bail!(
                 "{identifier} applied the result limit before retained-field filtering: {timestamps:?}"
             );
@@ -1944,13 +2016,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 82);
+        assert_eq!(recipes.len(), 83);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            110
+            112
         );
         assert_eq!(
             recipes
@@ -1958,7 +2030,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            116
+            118
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

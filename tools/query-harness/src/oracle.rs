@@ -1347,6 +1347,25 @@ fn victorialogs_error_cases(client: &Client, base: &str, fixture: &Value) -> Res
     Ok(failures)
 }
 
+fn normalize_unordered_json_array_fields(rows: &[Value], fields: &[String]) -> Result<Vec<Value>> {
+    let mut rows = rows.to_vec();
+    for row in &mut rows {
+        let object = row
+            .as_object_mut()
+            .context("VictoriaLogs stats result row must be an object")?;
+        for field in fields {
+            let encoded = object.get(field).and_then(Value::as_str).with_context(|| {
+                format!("VictoriaLogs stats field {field:?} must contain a JSON string")
+            })?;
+            let mut decoded = serde_json::from_str::<Vec<Value>>(encoded)
+                .with_context(|| format!("decode VictoriaLogs stats field {field:?}"))?;
+            decoded.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+            object.insert(field.clone(), Value::Array(decoded));
+        }
+    }
+    Ok(rows)
+}
+
 fn victorialogs_stats_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
     let mut failures = 0;
     for case in object_cases(fixture, "stats_cases")? {
@@ -1363,9 +1382,13 @@ fn victorialogs_stats_cases(client: &Client, base: &str, fixture: &Value) -> Res
             .get("expected_rows")
             .and_then(Value::as_array)
             .context("stats case expected_rows")?;
+        let unordered_fields = sorted_strings(case.get("unordered_json_array_fields"))?;
+        let actual_comparable = normalize_unordered_json_array_fields(&actual, &unordered_fields)?;
+        let expected_comparable =
+            normalize_unordered_json_array_fields(expected, &unordered_fields)?;
         let valid = status == 200
             && content_type.starts_with("application/stream+json")
-            && actual == *expected;
+            && actual_comparable == expected_comparable;
         failures += print_verdict(case, valid, || {
             format!("expected {expected:?}; got {status} {content_type:?} {actual:?}: {body:?}")
         });
@@ -1597,6 +1620,19 @@ mod tests {
                 if let Some(order) = case.get("result_order").and_then(Value::as_str) {
                     assert!(matches!(order, "ordered" | "unordered"));
                 }
+                if let Some(fields) = case.get("unordered_json_array_fields") {
+                    assert_eq!(name, "stats_cases", "{identifier}");
+                    let fields = fields.as_array().unwrap_or_else(|| {
+                        panic!("{identifier}: unordered fields must be an array")
+                    });
+                    let mut unique = BTreeSet::new();
+                    for field in fields {
+                        let field = field.as_str().unwrap_or_else(|| {
+                            panic!("{identifier}: unordered field must be a string")
+                        });
+                        assert!(unique.insert(field), "{identifier}: duplicate {field}");
+                    }
+                }
             }
         }
     }
@@ -1701,6 +1737,24 @@ mod tests {
             )
             .unwrap(),
             ["row"]
+        );
+    }
+
+    #[test]
+    fn victorialogs_stats_normalization_preserves_duplicates_without_inventing_row_order() {
+        let fields = vec!["all_values".to_owned()];
+        let left = vec![json!({"all_values": "[\"\",\"0\",\"\"]"})];
+        let right = vec![json!({"all_values": "[\"\",\"\",\"0\"]"})];
+        assert_eq!(
+            normalize_unordered_json_array_fields(&left, &fields).unwrap(),
+            normalize_unordered_json_array_fields(&right, &fields).unwrap()
+        );
+
+        let mut wrong_row_order = right;
+        wrong_row_order.push(json!({"all_values": "[]"}));
+        assert_ne!(
+            normalize_unordered_json_array_fields(&left, &fields).unwrap(),
+            normalize_unordered_json_array_fields(&wrong_row_order, &fields).unwrap()
         );
     }
 

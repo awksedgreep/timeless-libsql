@@ -1116,37 +1116,45 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
                 level: 1,
                 severity: "info".into(),
                 message: "empty".into(),
-                metadata_json: r#"{"case":"empty","probe":"","nested":{"leaf":""}}"#.into(),
+                metadata_json:
+                    r#"{"case":"empty","probe":"","nested":{"leaf":""},"tags":[]}"#
+                        .into(),
             },
             LogEntry {
                 ts: 1_811_000_000_000_004,
                 level: 1,
                 severity: "info".into(),
                 message: "string".into(),
-                metadata_json: r#"{"case":"string","probe":"value","nested":{"leaf":"value"}}"#
-                    .into(),
+                metadata_json:
+                    r#"{"case":"string","probe":"value","nested":{"leaf":"value"},"tags":["prod",""]}"#
+                        .into(),
             },
             LogEntry {
                 ts: 1_811_000_000_000_005,
                 level: 1,
                 severity: "info".into(),
                 message: "zero".into(),
-                metadata_json: r#"{"case":"zero","probe":0,"nested":{"leaf":0}}"#.into(),
+                metadata_json:
+                    r#"{"case":"zero","probe":0,"nested":{"leaf":0},"tags":[123,true,false,null,"123"]}"#
+                        .into(),
             },
             LogEntry {
                 ts: 1_811_000_000_000_006,
                 level: 1,
                 severity: "info".into(),
                 message: "false".into(),
-                metadata_json: r#"{"case":"false","probe":false,"nested":{"leaf":false}}"#.into(),
+                metadata_json:
+                    r#"{"case":"false","probe":false,"nested":{"leaf":false},"tags":[{"a":"b"},["a"],"leaf"]}"#
+                        .into(),
             },
             LogEntry {
                 ts: 1_811_000_000_000_007,
                 level: 1,
                 severity: "info".into(),
                 message: "array".into(),
-                metadata_json: r#"{"case":"array","probe":[1,"x"],"nested":{"leaf":[1,"x"]}}"#
-                    .into(),
+                metadata_json:
+                    r#"{"case":"array","probe":[1,"x"],"nested":{"leaf":[1,"x"]},"tags":["a\"b","a\nb","a\/b","a\u0062","*"]}"#
+                        .into(),
             },
             LogEntry {
                 ts: 1_811_000_000_000_008,
@@ -1154,7 +1162,7 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
                 severity: "info".into(),
                 message: "object".into(),
                 metadata_json:
-                    r#"{"case":"object","probe":{"ok":true},"nested":{"leaf":{"ok":true}}}"#.into(),
+                    r#"{"case":"object","probe":{"ok":true},"nested":{"leaf":{"ok":true}},"tags":{"key":"prod"}}"#.into(),
             },
         ])
         .await
@@ -1314,6 +1322,37 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
             vec![1_811_000_000_000_001],
         ),
         (r#"unicode:contains_any(alpha)"#, Vec::new()),
+        (
+            r#"tags:json_array_contains_any(prod, absent)"#,
+            vec![1_811_000_000_000_004],
+        ),
+        (
+            r#"tags:json_array_contains_any(123)"#,
+            vec![1_811_000_000_000_005],
+        ),
+        (
+            r#"tags:json_array_contains_any(true, false, null)"#,
+            vec![1_811_000_000_000_005],
+        ),
+        (
+            r#"tags:json_array_contains_any("")"#,
+            vec![1_811_000_000_000_004],
+        ),
+        (
+            r#"tags:json_array_contains_any(leaf)"#,
+            vec![1_811_000_000_000_006],
+        ),
+        (
+            r#"tags:json_array_contains_any(`{"a":"b"}`, `["a"]`)"#,
+            Vec::new(),
+        ),
+        (
+            r#"tags:json_array_contains_any("a\"b", "a\nb", a/b, ab, "*")"#,
+            vec![1_811_000_000_000_007],
+        ),
+        (r#"tags:json_array_contains_any()"#, Vec::new()),
+        (r#"level:json_array_contains_any(info)"#, Vec::new()),
+        (r#"service:json_array_contains_any(api)"#, Vec::new()),
         (r#"case:in()"#, Vec::new()),
         (
             r#"case:in(missing, string) AND NOT case:in(string)"#,
@@ -1376,6 +1415,17 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
     contains_any_pipeline_cases.sort();
     assert_eq!(contains_any_pipeline_cases, ["false", "object"]);
 
+    let mut json_array_pipeline_cases = pipeline_rows(
+        &app,
+        r#"* | filter tags:json_array_contains_any(false, leaf) | fields case | limit 100"#,
+    )
+    .await
+    .into_iter()
+    .map(|row| row["case"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+    json_array_pipeline_cases.sort();
+    assert_eq!(json_array_pipeline_cases, ["false", "zero"]);
+
     for malformed in [
         "in",
         "in(",
@@ -1388,6 +1438,10 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
         "contains_any(value other)",
         "contains_any(value*)",
         "contains_any(* value)",
+        "tags:json_array_contains_any(",
+        "tags:json_array_contains_any(,prod)",
+        "tags:json_array_contains_any(prod other)",
+        "tags:json_array_contains_any(*)",
         "contains_all(,*)",
     ] {
         let response = app
@@ -1521,6 +1575,39 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
     );
     assert_eq!(
         timestamps(&storage, "contains_any(missing, object)")
+            .await
+            .len(),
+        2
+    );
+
+    let limited_json_array = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "tags:json_array_contains_any(prod, leaf) | limit 100",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        limited_json_array.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited_json_array.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        timestamps(&storage, "tags:json_array_contains_any(prod, leaf)")
             .await
             .len(),
         2

@@ -124,6 +124,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-014`](#sql-log-014-exact-prefix) | `LQL-F16` | current foundation | exact case-sensitive start-of-message and retained-text-field prefixes; API owns rich-value textual projection |
 | [`SQL-LOG-015`](#sql-log-015-static-multi-exact-membership) | `LQL-F17` | current foundation | case-sensitive message and retained-text membership with one bound parameter per value; API owns rich-value projection and static-list grammar |
 | [`SQL-LOG-016`](#sql-log-016-field-no-op) | `LQL-F20` | current foundation | exact field-independent true predicate; API owns wildcard-function grammar and composition |
+| [`SQL-LOG-017`](#sql-log-017-json-array-primitive-membership) | `LQL-F23` | current foundation | exact primitive membership in a retained JSON array through public JSON1 rows; API owns function grammar, composition, and semantic-JSON compatibility policy |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5082,6 +5083,77 @@ composition, malformed errors, and the explicit LQL-F21/LQL-F22/LQL-F38
 boundaries. A quoted `"*"` remains an ordinary value and is not this recipe.
 The extension already exposes the exact direct-user operation through ordinary
 bounded row SQL, so no new primitive is warranted.
+
+### SQL-LOG-017: JSON-array primitive membership
+
+For a static two-value list, bind each candidate independently and expand only
+the selected retained JSON array through SQLite/libSQL JSON1:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), candidates(value) AS (
+  VALUES (:array_value_1), (:array_value_2)
+)
+SELECT ts, level, message, metadata
+FROM bounded
+WHERE json_type(metadata, :field_path) = 'array'
+  AND EXISTS (
+    SELECT 1
+    FROM json_each(bounded.metadata, :field_path) AS element
+    JOIN candidates
+      ON CASE element.type
+           WHEN 'text' THEN CAST(element.value AS TEXT)
+           WHEN 'integer' THEN CAST(element.value AS TEXT)
+           WHEN 'real' THEN CAST(element.value AS TEXT)
+           WHEN 'true' THEN 'true'
+           WHEN 'false' THEN 'false'
+           WHEN 'null' THEN 'null'
+         END COLLATE BINARY = candidates.value COLLATE BINARY
+    WHERE element.type IN ('text', 'integer', 'real', 'true', 'false', 'null')
+  )
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+Generate one placeholder per caller-supplied candidate and bind it; never
+interpolate values. The empty-list form is the constant-false predicate:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND 0
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+`:field_path` is a valid SQLite JSON path such as `$.tags`. Bounds use the
+table's configured timestamp unit (milliseconds here), are inclusive, and
+`max_work_entries` bounds public decoding before JSON expansion. Output is
+newest first, and `:limit` applies only after membership. A missing field,
+JSON null, scalar, object, or empty array does not match. Only top-level array
+strings, numbers, booleans, and null participate; nested arrays and objects
+are ignored. String comparison is decoded, byte-exact, and case-sensitive.
+Numbers use JSON1's textual projection, booleans use `true`/`false`, and null
+uses `null`. A bound empty string matches only an actual empty string element,
+and a bound `*` is literal.
+
+This recipe deliberately follows Timeless's retained semantic JSON model:
+JSON string escapes are decoded before comparison, so a stored `"a\u0062"`
+element matches the candidate `ab`. VictoriaLogs currently has a raw-lexeme
+shortcut for this filter that does not make that match; the Rust API records
+the intentional compatibility distinction and otherwise owns case-insensitive
+function parsing, static-list grammar, logical/pipeline composition, limits,
+cancellation, and HTTP errors. Query-backed lists remain deferred `LQL-F38`.
+The bounded public row and JSON1 implementation is sufficient, so no extension
+primitive is warranted.
 
 ## Adding the next recipe
 

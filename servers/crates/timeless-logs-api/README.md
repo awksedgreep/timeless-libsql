@@ -51,7 +51,8 @@ full-message exact, start-anchored exact-prefix, and static
 `in(v1, ..., vN)` exact membership; field-independent wildcard no-ops for
 `in`, `contains_any`, and `contains_all`; static case-sensitive
 `contains_all(v1, ..., vN)` and `contains_any(v1, ..., vN)` with VictoriaLogs
-phrase boundaries;
+phrase boundaries; retained-array primitive membership through
+`json_array_contains_any(v1, ..., vN)`;
 VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
@@ -135,6 +136,18 @@ inspecting the field. Both preserve case, Unicode word boundaries, compact
 rich-value projection, aliases, and logical/pipeline composition. Query-backed
 lists remain explicitly deferred as `LQL-F38`.
 `SQL-LOG-016` shows the direct SQL equivalent: omit the field predicate.
+
+`field:json_array_contains_any(v1, ..., vN)` inspects only a retained JSON
+array. It compares top-level strings, numbers, booleans, and null to the exact
+static candidate text, ignores nested arrays/objects, and returns false for a
+missing field, scalar, object, empty array, or empty candidate list. An empty
+candidate matches only an empty-string element. A quoted star is literal; an
+unquoted star is invalid; a trailing comma is accepted; and the function name
+is case-insensitive. Timeless compares decoded semantic JSON, so escaped stored
+strings compare by their decoded value rather than VictoriaLogs' raw-lexeme
+shortcut. Grammar, composition, limits, and cancellation stay in this Rust
+API. Direct SQLite/libSQL users use public `json_each` through executable
+`SQL-LOG-017`; no extension primitive or storage change is involved.
 
 Double- and single-quoted strings decode VictoriaLogs-compatible Go escapes,
 backtick strings are raw, and quoted field identifiers select one literal

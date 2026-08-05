@@ -577,6 +577,13 @@ pub enum LogPredicate {
         field: LogField,
         values: Vec<String>,
     },
+    /// VictoriaLogs `json_array_contains_any(v1, ..., vN)` over a retained
+    /// typed JSON array. Primitive elements compare by their exact string
+    /// representation; nested arrays and objects never match.
+    JsonArrayContainsAny {
+        field: LogField,
+        values: Vec<String>,
+    },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
         field: LogField,
@@ -2296,6 +2303,21 @@ fn log_predicate_matches(
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::JsonArrayContainsAny { field, values } => {
+            let matched = match field {
+                LogField::Metadata(path) => metadata
+                    .and_then(|value| metadata_path(value, path))
+                    .and_then(JsonValue::as_array)
+                    .is_some_and(|array| {
+                        array
+                            .iter()
+                            .any(|value| json_array_primitive_in(values, value))
+                    }),
+                LogField::Message | LogField::Level => false,
+            };
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
             field,
             message,
@@ -2357,6 +2379,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::TextualIn { field, .. }
         | LogPredicate::TextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
@@ -2574,6 +2597,22 @@ fn logsql_word_matches(value: &str, expected: &str) -> bool {
     value
         .split(|character: char| !logsql_word_char(character))
         .any(|word| word == expected)
+}
+
+fn json_array_primitive_in(values: &[String], value: &JsonValue) -> bool {
+    let matches = |candidate: &str| {
+        values
+            .binary_search_by(|value| value.as_str().cmp(candidate))
+            .is_ok()
+    };
+    match value {
+        JsonValue::Null => matches("null"),
+        JsonValue::Bool(true) => matches("true"),
+        JsonValue::Bool(false) => matches("false"),
+        JsonValue::Number(value) => matches(&value.to_string()),
+        JsonValue::String(value) => matches(value),
+        JsonValue::Array(_) | JsonValue::Object(_) => false,
+    }
 }
 
 fn logsql_prefix_matches(value: &str, prefix: &str, phrase: bool) -> bool {
@@ -3018,6 +3057,10 @@ mod tests {
             },
             LogPredicate::TextualContainsAny {
                 field: LogField::Message,
+                values: vec!["other".into(), "request".into()],
+            },
+            LogPredicate::JsonArrayContainsAny {
+                field: LogField::Metadata(vec!["tags".into()]),
                 values: vec!["other".into(), "request".into()],
             },
             LogPredicate::Regex {
