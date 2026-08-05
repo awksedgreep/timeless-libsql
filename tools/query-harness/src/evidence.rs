@@ -1733,14 +1733,14 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "field_names_narrow",
                 "logs-field-names-narrow",
                 "host:=\"h00\" | field_names",
-                7,
+                8,
                 None,
             ),
             (
                 "field_names_wide",
                 "logs-field-names-wide",
                 "* | field_names",
-                7,
+                8,
                 None,
             ),
             (
