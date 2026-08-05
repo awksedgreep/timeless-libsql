@@ -908,6 +908,179 @@ async fn session_sixteen_pattern_match_filters_match_victorialogs_and_reopen() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_exact_prefix_matches_rich_fields_and_reopens() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("exact-prefix-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(vec![
+            LogEntry {
+                ts: 1_810_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "Processing request 42".into(),
+                metadata_json: r#"{"kind":"processor","attempt":42,"flag":true,"items":[1,"x"],"nested":{"value":true},"empty":"","nullish":null,"unicode":"१२"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_810_000_000_000_002,
+                level: 1,
+                severity: "info".into(),
+                message: "start: Processing request".into(),
+                metadata_json: r#"{"kind":"other"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_810_000_000_000_003,
+                level: 1,
+                severity: "info".into(),
+                message: "processing".into(),
+                metadata_json: "{}".into(),
+            },
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    let queries = [
+        (r#"="Processing request"*"#, vec![1_810_000_000_000_001]),
+        (
+            r#"exact("Processing request 42")"#,
+            vec![1_810_000_000_000_001],
+        ),
+        (r#"=processing"#, vec![1_810_000_000_000_003]),
+        (r#"exact(Processing*)"#, vec![1_810_000_000_000_001]),
+        (r#"kind:="process"*"#, vec![1_810_000_000_000_001]),
+        (r#"attempt:="4"*"#, vec![1_810_000_000_000_001]),
+        (r#"flag:="tr"*"#, vec![1_810_000_000_000_001]),
+        (r#"items:=`[1,"`*"#, vec![1_810_000_000_000_001]),
+        (r#"nested:=`{"value":`*"#, vec![1_810_000_000_000_001]),
+        (
+            r#"missing:=""*"#,
+            vec![
+                1_810_000_000_000_001,
+                1_810_000_000_000_002,
+                1_810_000_000_000_003,
+            ],
+        ),
+        (
+            r#"nullish:=""*"#,
+            vec![
+                1_810_000_000_000_001,
+                1_810_000_000_000_002,
+                1_810_000_000_000_003,
+            ],
+        ),
+        (r#"unicode:="१"*"#, vec![1_810_000_000_000_001]),
+        (
+            r#"="Processing"* AND NOT ="processing"*"#,
+            vec![1_810_000_000_000_001],
+        ),
+    ];
+    for (query, expected) in &queries {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 10;
+        assert_eq!(
+            storage
+                .query(plan.spec)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.ts)
+                .collect::<Vec<_>>(),
+            *expected,
+            "{query}"
+        );
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(&app, r#"* | filter attempt:="4"* | limit 10"#)
+            .await
+            .len(),
+        1
+    );
+    for malformed in ["exact()", "exact(foo, bar)"] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(r#"="Processing"* | limit 10"#))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"="Processing"* | limit 10"#)
+            .await
+            .len(),
+        1
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 10;
+        assert_eq!(
+            reopened
+                .query(plan.spec)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.ts)
+                .collect::<Vec<_>>(),
+            expected,
+            "reopened: {query}"
+        );
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

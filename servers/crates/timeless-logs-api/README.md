@@ -47,7 +47,7 @@ windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
 closed native-unit edges; all eight exact severities; service and arbitrary
 typed metadata equality; message word, phrase, word-prefix, phrase-prefix,
 case-sensitive substring, bounded RE2-compatible regexp, case-insensitive,
-full-message exact, and VictoriaLogs-compatible any/full/prefix/suffix pattern
+full-message exact, start-anchored exact-prefix, and VictoriaLogs-compatible any/full/prefix/suffix pattern
 filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`, `<DATE>`, `<DATETIME>`, and
 `<W>` placeholders and case-insensitive function names; time sort, limit, and
 offset aliases; and exact count with
@@ -95,6 +95,18 @@ zero, false, arrays, and objects. `value_type` names the logical retained JSON
 type (`string`, `uint64`, `int64`, `float64`, `number`, `bool`, `null`,
 `array`, or `object`), not a private block encoding. VictoriaLogs physical
 types such as `const` and `dict` fail explicitly.
+
+Exact filters accept quoted or unquoted `=value` and the equivalent
+case-insensitive `exact(value)` function name. Exact-prefix filters accept
+`="prefix"*`, field-scoped forms, and `exact(prefix*)`. They are
+case-sensitive and anchored at the first field byte; they do not search later
+word boundaries. Strings retain their bytes, while retained numbers,
+booleans, arrays, and objects receive compact JSON text only for these
+upstream textual predicates. Missing and null receive empty text, so an empty
+prefix matches every value. The stored metadata type and bytes are unchanged.
+The direct SQL cookbook gives exact message/text-field forms; full rich-value
+projection, LogsQL composition, limits, cancellation, and error envelopes
+remain API behavior.
 
 Double- and single-quoted strings decode VictoriaLogs-compatible Go escapes,
 backtick strings are raw, and quoted field identifiers select one literal

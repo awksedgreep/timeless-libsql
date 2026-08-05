@@ -653,14 +653,8 @@ pub fn parse_at(
                             "LogsQL logical operator {token:?} is not implemented yet"
                         )));
                     }
-                    if let Some(value) = parse_exact_filter(&token)? {
-                        append_predicate(
-                            &mut spec,
-                            LogPredicate::Exact {
-                                field: LogField::Message,
-                                value,
-                            },
-                        );
+                    if let Some(exact) = parse_exact_filter(&token)? {
+                        append_predicate(&mut spec, exact.predicate(LogField::Message));
                         continue;
                     }
                     if let Some(predicate) = parse_case_insensitive_filter(&token)? {
@@ -839,14 +833,89 @@ pub fn parse_at(
     })
 }
 
-fn parse_exact_filter(token: &str) -> Result<Option<String>, LogsqlError> {
-    let Some(value) = token.strip_prefix('=') else {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParsedExactFilter {
+    Exact(String),
+    Prefix(String),
+}
+
+impl ParsedExactFilter {
+    fn predicate(self, field: LogField) -> LogPredicate {
+        match self {
+            Self::Exact(value) => LogPredicate::TextualExact { field, value },
+            Self::Prefix(value) => LogPredicate::ExactPrefix { field, value },
+        }
+    }
+}
+
+fn parse_exact_filter(token: &str) -> Result<Option<ParsedExactFilter>, LogsqlError> {
+    if let Some(value) = token.strip_prefix('=') {
+        if value.starts_with('=') {
+            return Err(LogsqlError::malformed(
+                "an unquoted LogsQL exact value cannot start with =",
+            ));
+        }
+        return parse_exact_argument(value, "LogsQL exact filter").map(Some);
+    }
+
+    let Some(open) = token.find('(') else {
         return Ok(None);
     };
-    let value = quoted_value(value)?.ok_or_else(|| {
-        LogsqlError::malformed("LogsQL exact message filter requires a quoted value after =")
-    })?;
-    Ok(Some(value))
+    if !token[..open].eq_ignore_ascii_case("exact") {
+        return Ok(None);
+    }
+    let inner = token[open..]
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| LogsqlError::malformed("unterminated LogsQL exact() filter"))?;
+    if inner.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL exact() requires exactly one value",
+        ));
+    }
+    parse_exact_argument(inner, "LogsQL exact() filter").map(Some)
+}
+
+fn parse_exact_prefix_argument(value: &str) -> Result<Option<String>, LogsqlError> {
+    if !value.ends_with('*') {
+        return Ok(None);
+    }
+    match parse_exact_argument(value, "LogsQL exact-prefix filter")? {
+        ParsedExactFilter::Prefix(value) => Ok(Some(value)),
+        ParsedExactFilter::Exact(_) => Ok(None),
+    }
+}
+
+fn parse_exact_argument(value: &str, context: &str) -> Result<ParsedExactFilter, LogsqlError> {
+    if value.is_empty() {
+        return Err(LogsqlError::malformed(format!(
+            "{context} requires a value"
+        )));
+    }
+    if value == "*" {
+        return Ok(ParsedExactFilter::Prefix(String::new()));
+    }
+    if let Some((decoded, consumed)) = parse_quoted_prefix(value)? {
+        return match &value[consumed..] {
+            "" => Ok(ParsedExactFilter::Exact(decoded)),
+            "*" => Ok(ParsedExactFilter::Prefix(decoded)),
+            _ => Err(LogsqlError::malformed(format!(
+                "unexpected characters after {context} value {value:?}"
+            ))),
+        };
+    }
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, ',' | '(' | ')'))
+    {
+        return Err(LogsqlError::malformed(format!(
+            "{context} requires exactly one value"
+        )));
+    }
+    if let Some(prefix) = value.strip_suffix('*') {
+        return Ok(ParsedExactFilter::Prefix(prefix.to_owned()));
+    }
+    Ok(ParsedExactFilter::Exact(value.to_owned()))
 }
 
 fn parse_case_insensitive_filter(token: &str) -> Result<Option<LogPredicate>, LogsqlError> {
@@ -1355,6 +1424,12 @@ fn compile_field_filter(
     typed: bool,
 ) -> Result<LogPredicate, LogsqlError> {
     if typed {
+        if let Some(value) = parse_exact_prefix_argument(value)? {
+            return Ok(LogPredicate::ExactPrefix {
+                field: field.clone(),
+                value,
+            });
+        }
         let expected = parse_metadata_value(value, true)?;
         return Ok(match (field, expected) {
             (LogField::Message | LogField::Level, Value::String(value)) => LogPredicate::Exact {
@@ -1371,6 +1446,9 @@ fn compile_field_filter(
                 value,
             },
         });
+    }
+    if let Some(exact) = parse_exact_filter(value)? {
+        return Ok(exact.predicate(field.clone()));
     }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
@@ -1417,11 +1495,8 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
             }
         });
     }
-    if let Some(value) = parse_exact_filter(atom)? {
-        return Ok(LogPredicate::Exact {
-            field: field.clone(),
-            value,
-        });
+    if let Some(exact) = parse_exact_filter(atom)? {
+        return Ok(exact.predicate(field.clone()));
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
         return Ok(predicate_for_field(predicate, field));
@@ -1856,6 +1931,21 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
     let field = &token[..operator];
     let value = &token[operator + operator_width..];
     let path = parse_field_path(field)?;
+    if typed {
+        if let Some(value) = parse_exact_prefix_argument(value)? {
+            append_predicate(
+                spec,
+                LogPredicate::ExactPrefix {
+                    field: log_field(&path),
+                    value,
+                },
+            );
+            return Ok(());
+        }
+    } else if let Some(exact) = parse_exact_filter(value)? {
+        append_predicate(spec, exact.predicate(log_field(&path)));
+        return Ok(());
+    }
     if !typed {
         if let Some(matcher) = parse_pattern_match_filter(value)? {
             append_predicate(
@@ -2013,6 +2103,7 @@ fn log_field(path: &[String]) -> LogField {
 fn metadata_operator(token: &str) -> Option<(usize, bool)> {
     let mut quote = None;
     let mut escaped = false;
+    let mut parenthesis_depth = 0usize;
     for (index, character) in token.char_indices() {
         if let Some(delimiter) = quote {
             if escaped {
@@ -2026,7 +2117,11 @@ fn metadata_operator(token: &str) -> Option<(usize, bool)> {
         }
         if matches!(character, '"' | '\'' | '`') {
             quote = Some(character);
-        } else if character == ':' {
+        } else if character == '(' {
+            parenthesis_depth = parenthesis_depth.saturating_add(1);
+        } else if character == ')' {
+            parenthesis_depth = parenthesis_depth.saturating_sub(1);
+        } else if character == ':' && parenthesis_depth == 0 {
             return Some((index, token[index + 1..].starts_with('=')));
         }
     }
@@ -2615,9 +2710,11 @@ mod tests {
     }
 
     #[test]
-    fn session_twelve_exact_message_filter_requires_an_explicit_quoted_value() {
+    fn session_sixteen_exact_filter_accepts_pinned_quoted_unquoted_and_function_forms() {
         assert!(parse_at(r#"="alpha""#, TimestampUnit::Microseconds, 0).is_ok());
-        assert!(parse_at("=alpha", TimestampUnit::Microseconds, 0).is_err());
+        assert!(parse_at("=alpha", TimestampUnit::Microseconds, 0).is_ok());
+        assert!(parse_at("exact(alpha)", TimestampUnit::Microseconds, 0).is_ok());
+        assert!(parse_at("==alpha", TimestampUnit::Microseconds, 0).is_err());
     }
 
     #[test]
@@ -2738,6 +2835,31 @@ mod tests {
                 LogsqlErrorKind::Malformed,
                 "{malformed}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn session_sixteen_exact_prefix_grammar_is_strict_and_composable() {
+        for query in [
+            r#"="alpha"*"#,
+            r#"case:="pattern-"*"#,
+            r#"probe:=""*"#,
+            r#"=alpha"#,
+            r#"exact(alpha*)"#,
+            r#"ExAcT(alpha*)"#,
+            r#"exact(*)"#,
+            r#"field:exact(alpha*)"#,
+            r#"exact(alpha)"#,
+            r#"="alpha"* AND NOT ="alphas"*"#,
+            r#"* | filter field:="prefix"*"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        for malformed in ["exact()", "exact(foo, bar)", "exact(foo *)"] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
         }
     }
 

@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 98 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 114 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -121,6 +121,17 @@ numeric stringification; one simple unquoted compound token; and exact
 one-argument errors. The matcher
 behavior is also source-audited at VictoriaLogs commit
 `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+
+The eleven successful and two error `LQL-F16` cases pin case-sensitive,
+start-anchored exact-prefix matching for messages and fields; lack of word-
+boundary behavior; arbitrary UTF-8; logical composition; numeric and boolean
+textual projection; empty-prefix matching across missing, null, empty, and
+non-empty values; the equivalent case-insensitive `exact(value*)` function
+name; and strict one-argument errors. Two companion `LQL-F15` cases correct
+the earlier grammar gap by pinning `exact(value)` and unquoted `=value` exact
+forms. The behavior is source-audited against `filter_exact_prefix.go`,
+`filter_exact.go`, and `parser.go` at the same immutable VictoriaLogs commit;
+a companion error case rejects ambiguous unquoted `==value` syntax.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

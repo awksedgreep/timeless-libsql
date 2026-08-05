@@ -548,6 +548,18 @@ pub enum LogPredicate {
         field: LogField,
         value: String,
     },
+    /// VictoriaLogs `=value`/`exact(value)` semantics over the public textual
+    /// projection of a retained field. This remains distinct from Timeless's
+    /// typed exact predicate, which compares JSON types without stringifying.
+    TextualExact {
+        field: LogField,
+        value: String,
+    },
+    /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
+    ExactPrefix {
+        field: LogField,
+        value: String,
+    },
     TypedExact {
         field: LogField,
         value: JsonValue,
@@ -2226,6 +2238,20 @@ fn log_predicate_matches(
         LogPredicate::Exact { field, value } => {
             Ok(log_field_text(field, message, level, metadata).is_some_and(|text| text == value))
         }
+        LogPredicate::TextualExact { field, value } => Ok(log_field_projected_matches(
+            field,
+            message,
+            level,
+            metadata,
+            |text| text == value,
+        )),
+        LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
+            field,
+            message,
+            level,
+            metadata,
+            |text| text.starts_with(value),
+        )),
         LogPredicate::TypedExact { field, value } => {
             Ok(log_field_value(field, message, level, metadata)
                 .is_some_and(|actual| actual.equals_json(value)))
@@ -2276,6 +2302,8 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::Prefix { field, .. }
         | LogPredicate::Substring { field, .. }
         | LogPredicate::Exact { field, .. }
+        | LogPredicate::TextualExact { field, .. }
+        | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
         | LogPredicate::AnyValue { field }
@@ -2465,13 +2493,25 @@ fn log_field_pattern_matches(
     metadata: Option<&JsonValue>,
     matcher: &PatternMatcher,
 ) -> bool {
+    log_field_projected_matches(field, message, level, metadata, |text| {
+        matcher.matches(text)
+    })
+}
+
+fn log_field_projected_matches(
+    field: &LogField,
+    message: &str,
+    level: &str,
+    metadata: Option<&JsonValue>,
+    predicate: impl FnOnce(&str) -> bool,
+) -> bool {
     match field {
-        LogField::Message => matcher.matches(message),
-        LogField::Level => matcher.matches(level),
+        LogField::Message => predicate(message),
+        LogField::Level => predicate(level),
         LogField::Metadata(path) => match metadata.and_then(|value| metadata_path(value, path)) {
-            None | Some(JsonValue::Null) => matcher.matches(""),
-            Some(JsonValue::String(value)) => matcher.matches(value),
-            Some(value) => matcher.matches(&value.to_string()),
+            None | Some(JsonValue::Null) => predicate(""),
+            Some(JsonValue::String(value)) => predicate(value),
+            Some(value) => predicate(&value.to_string()),
         },
     }
 }
@@ -3004,6 +3044,50 @@ mod tests {
             log_predicate_matches(&missing, 0, "message", "info", Some(&metadata), &cancelled,)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn exact_prefix_textually_matches_rich_values_missing_and_null() {
+        let metadata = serde_json::json!({
+            "n": 42,
+            "flag": true,
+            "list": [1, "x"],
+            "nested": {"value": true},
+            "nullish": null,
+            "unicode": "१२"
+        });
+        let cancelled = AtomicBool::new(false);
+        for (path, prefix) in [
+            ("n", "4"),
+            ("flag", "tr"),
+            ("list", "[1,"),
+            ("nested", r#"{"value":"#),
+            ("unicode", "१"),
+            ("nullish", ""),
+            ("missing", ""),
+        ] {
+            let predicate = LogPredicate::ExactPrefix {
+                field: LogField::Metadata(vec![path.into()]),
+                value: prefix.into(),
+            };
+            assert!(
+                log_predicate_matches(
+                    &predicate,
+                    0,
+                    "message",
+                    "info",
+                    Some(&metadata),
+                    &cancelled,
+                )
+                .unwrap(),
+                "{path}: {prefix:?}"
+            );
+        }
+        assert_eq!(metadata["n"], 42);
+        assert_eq!(metadata["flag"], true);
+        assert!(metadata["list"].is_array());
+        assert!(metadata["nested"].is_object());
+        assert!(metadata["nullish"].is_null());
     }
 
     #[test]

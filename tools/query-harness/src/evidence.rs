@@ -1344,6 +1344,10 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         let host_numeric_matches = (0..entries)
             .filter(|index| index % 64 == 0 && matches!(index % 5, 2 | 3))
             .count();
+        let typed_exact_prefix_matches = (0..entries).filter(|index| index % 5 == 1).count();
+        let host_typed_exact_prefix_matches = (0..entries)
+            .filter(|index| index % 64 == 0 && index % 5 == 1)
+            .count();
         for (key, name, expression, expected, expected_total) in [
             (
                 "narrow",
@@ -1476,6 +1480,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "logs-exact-wide-absent",
                 "=\"query contract event absent\" | limit 10000",
                 0,
+                None,
+            ),
+            (
+                "exact_prefix_narrow",
+                "logs-exact-prefix-narrow",
+                "host:=\"h00\" AND =\"query contract\"* | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "exact_prefix_wide",
+                "logs-exact-prefix-wide",
+                "=\"query contract\"* | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "exact_prefix_typed_field_narrow",
+                "logs-exact-prefix-typed-field-narrow",
+                "host:=\"h00\" AND context.attempt:=\"1\"* | sort by (_time) asc | limit 10000",
+                host_typed_exact_prefix_matches,
+                None,
+            ),
+            (
+                "exact_prefix_typed_field_wide",
+                "logs-exact-prefix-typed-field-wide",
+                "context.attempt:=\"1\"* | sort by (_time) asc | limit 10000",
+                typed_exact_prefix_matches,
                 None,
             ),
             (

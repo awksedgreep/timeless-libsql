@@ -310,6 +310,84 @@
       "expected_cases": ["word-exact"]
     },
     {
+      "id": "LQL-F15-exact-function-alias",
+      "query": "exact(alpha)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F15-unquoted-exact-operator",
+      "query": "=alpha",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F16-message-start-not-word-boundary",
+      "query": "=\"alpha\"*",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-suffix"]
+    },
+    {
+      "id": "LQL-F16-message-is-case-sensitive-and-start-anchored",
+      "query": "=\"ssh: login\"*",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-suffix", "phrase-unicode-punctuation"]
+    },
+    {
+      "id": "LQL-F16-field-scoped",
+      "query": "case:=\"pattern-num\"*",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal", "pattern-num-hex", "pattern-num-short-hex"]
+    },
+    {
+      "id": "LQL-F16-numeric-textual-projection",
+      "query": "numeric_group:=\"numeric\" n:=\"2\"*",
+      "status": 200,
+      "expected_cases": ["numeric-two", "numeric-decimal"]
+    },
+    {
+      "id": "LQL-F16-boolean-textual-projection",
+      "query": "state_group:=\"state\" probe:=\"f\"*",
+      "status": 200,
+      "expected_cases": ["state-false"]
+    },
+    {
+      "id": "LQL-F16-empty-prefix-includes-missing-null-empty-and-values",
+      "query": "state_group:=\"state\" probe:=\"\"*",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F16-arbitrary-utf8",
+      "query": "case:=\"pattern-word-unicode\" pattern_nd:=\"१\"*",
+      "status": 200,
+      "expected_cases": ["pattern-word-unicode"]
+    },
+    {
+      "id": "LQL-F16-logical-composition",
+      "query": "=\"alpha\"* AND NOT =\"alphas\"*",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F16-exact-function-prefix-alias",
+      "query": "exact(alpha*)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-suffix"]
+    },
+    {
+      "id": "LQL-F16-exact-function-name-is-case-insensitive",
+      "query": "ExAcT(alpha*)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-suffix"]
+    },
+    {
+      "id": "LQL-F16-exact-function-empty-prefix",
+      "query": "state_group:=\"state\" probe:exact(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
       "id": "LQL-F18-empty-field",
       "query": "state_group:=\"state\" probe:\"\"",
       "status": 200,
@@ -766,6 +844,27 @@
     {
       "id": "LQL-F11-multiple-arguments-are-invalid",
       "query": "pattern_match(\"x\", \"y\")",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F16-exact-function-empty-argument-is-invalid",
+      "query": "exact()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F16-exact-function-multiple-arguments-are-invalid",
+      "query": "exact(foo, bar)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F15-unquoted-leading-operator-is-invalid",
+      "query": "==foo",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

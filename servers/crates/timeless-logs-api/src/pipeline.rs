@@ -785,6 +785,14 @@ fn predicate_matches(
         LogPredicate::Exact { field, value } => {
             Ok(field_text(row, field).is_some_and(|text| text == value))
         }
+        LogPredicate::TextualExact { field, value } => {
+            Ok(projected_field_matches(row, field, |text| text == value))
+        }
+        LogPredicate::ExactPrefix { field, value } => {
+            Ok(projected_field_matches(row, field, |text| {
+                text.starts_with(value)
+            }))
+        }
         LogPredicate::TypedExact { field, value } => {
             Ok(field_json(row, field).is_some_and(|actual| json_equal(actual, value)))
         }
@@ -821,14 +829,22 @@ fn predicate_matches(
             Ok(matched)
         }
         LogPredicate::PatternMatch { field, matcher } => {
-            let matched = match field_json(row, field) {
-                None | Some(Value::Null) => matcher.matches(""),
-                Some(Value::String(value)) => matcher.matches(value),
-                Some(value) => matcher.matches(&value.to_string()),
-            };
+            let matched = projected_field_matches(row, field, |text| matcher.matches(text));
             ensure_active(cancelled)?;
             Ok(matched)
         }
+    }
+}
+
+fn projected_field_matches(
+    row: &Value,
+    field: &LogField,
+    predicate: impl FnOnce(&str) -> bool,
+) -> bool {
+    match field_json(row, field) {
+        None | Some(Value::Null) => predicate(""),
+        Some(Value::String(value)) => predicate(value),
+        Some(value) => predicate(&value.to_string()),
     }
 }
 

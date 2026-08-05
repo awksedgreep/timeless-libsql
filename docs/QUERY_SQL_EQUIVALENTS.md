@@ -121,6 +121,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-011`](#sql-log-011-current-row-filter-and-empty-counts) | `LQL-P08`, `LQL-S02` | current foundation | bounded current-row any-value filter plus exact missing/null/empty counts |
 | [`SQL-LOG-012`](#sql-log-012-typed-unique-values-and-counts) | `LQL-P04`, `LQL-S03`, `LQL-S04` | current foundation | type-tagged exact unique counts, values, hits, and ordered presence states |
 | [`SQL-LOG-013`](#sql-log-013-numeric-aggregates-median-and-rates) | `LQL-S05`, `LQL-S06`, `LQL-S08` | current foundation | numeric-only ordinary SQL aggregates, median, and explicit-window rates |
+| [`SQL-LOG-014`](#sql-log-014-exact-prefix) | `LQL-F16` | current foundation | exact case-sensitive start-of-message and retained-text-field prefixes; API owns rich-value textual projection |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -4910,6 +4911,65 @@ integer values for `min`/`max`, then uses documented binary64 arithmetic for
 mixed or fractional `sum`, `avg`, `median`, and rates. Empty `avg`, `min`,
 `max`, and `median` results are JSON null in the Rust API because JSON has no
 portable NaN literal.
+
+### SQL-LOG-014: exact prefix
+
+The default-field LogsQL query `="prefix"*` is an ordinary case-sensitive,
+start-anchored comparison over the public `message` column:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND substr(message, 1, length(:message_prefix))
+      = :message_prefix COLLATE BINARY
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+For a dynamic metadata path known to contain retained strings, use
+`json_type` so missing and JSON null project to the same empty text used by an
+exact-prefix predicate while stored strings retain their decoded bytes:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts DESC
+  LIMIT :limit
+), projected AS (
+  SELECT *,
+    CASE
+      WHEN json_type(metadata, :field_path) IS NULL THEN ''
+      WHEN json_type(metadata, :field_path) = 'null' THEN ''
+      WHEN json_type(metadata, :field_path) = 'text'
+        THEN json_extract(metadata, :field_path)
+      ELSE NULL
+    END AS field_text
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM projected
+WHERE substr(field_text, 1, length(:field_prefix))
+      = :field_prefix COLLATE BINARY
+ORDER BY ts DESC;
+```
+
+The first statement is exact for the default message field, including an
+empty prefix. The second is exact for retained strings plus the documented
+missing/null empty projection. SQLite and libSQL do not promise the same
+textual formatting as `serde_json` for every floating-point, array, and object
+value, so this recipe does not pretend to cover those types. The Rust API
+projects retained numbers, booleans, arrays, and objects to compact JSON only
+for this predicate, preserves their stored types, applies the same rule to
+`exact(value*)`, and owns LogsQL parsing, logical/pipeline composition,
+cancellation, limits, and error envelopes. Both statements decode bounded
+public rows; neither justifies an extension primitive.
 
 ## Adding the next recipe
 
