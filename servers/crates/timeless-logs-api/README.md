@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P09 LQL-Q01 LQL-Q07 LQL-Q08 LQL-S01 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P09 LQL-Q01 LQL-Q07 LQL-Q08 LQL-S01 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -246,6 +246,16 @@ retains freed pages until vacuum/reuse: Rust's physical file remained 477.9MB
 versus Elixir's 223.9MB block-plus-index footprint after drain. The stats
 intentionally distinguish logical compressed payload from database file
 high-water.
+
+The release-grade Session 12 LogsQL evidence uses the same 8,192-entry rich
+fixture and unchanged four raw blocks. Across word, prefix, substring, regexp,
+case-insensitive, exact, empty, any-value, numeric, logical-value-type, and
+boolean queries, indexed-narrow p95 spans 2.115–2.903ms and full decoded p95
+spans 15.653–28.732ms. Narrow plans consider one block/1,024 entries; wide
+plans consider four/8,192. Physical database/WAL/SHM bytes remain exactly
+1,190,496. Whole-process HWM is 58,500KiB, 4,252KiB above the Session 10 run;
+that measured increase is retained in `QSF-075` rather than attributed to a
+storage optimization.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

@@ -58,29 +58,29 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `LQL-F06` | exact `level:<severity>` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | All eight stored severities are valid. |
 | `LQL-F07` | exact `service:<value>` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 | Honor semantic service aliases used by storage. |
 | `LQL-F08` | quoted message phrase | shipped | yes | `ROWS` | `API` | P0 | Exact case-sensitive phrase bytes plus Unicode letter/digit/underscore word boundaries match the pinned VictoriaLogs oracle. The existing case-insensitive Timeless substring primitive remains separate. |
-| `LQL-F09` | word filter | in progress | no | `ROWS` | `API` | P1 | Case-sensitive Unicode letter/digit/underscore boundaries pass the pinned oracle; bounded decode remains the honest plan. |
-| `LQL-F10` | prefix filter | in progress | no | `ROWS` | `API` | P1 | Word and phrase prefixes share the pinned boundary semantics; no measured index contract is claimed. |
+| `LQL-F09` | word filter | shipped | no | `ROWS` | `API` | P1 | Case-sensitive Unicode letter/digit/underscore boundaries pass the pinned oracle; bounded decode remains the honest plan. |
+| `LQL-F10` | prefix filter | shipped | no | `ROWS` | `API` | P1 | Word and phrase prefixes share the pinned boundary semantics; no measured index contract is claimed. |
 | `LQL-F11` | pattern-match filter | missing | no | `ROWS` | `API` | P2 | Preserve upstream wildcard/capture semantics. |
-| `LQL-F12` | substring filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-007-case-sensitive-message-substring)) | in progress | partial | `ROWS`, `SQL` | `API` | P1 | Case-sensitive literal UTF-8 substring matches the pinned oracle and remains distinct from the established case-insensitive engine predicate. |
-| `LQL-F13` | regexp filter | in progress | no | `ROWS` | `API` | P1 | Bounded RE2-compatible Rust regex uses a 1 MiB compiled-size limit and observes cancellation and decoded-row work before returning matches. |
-| `LQL-F14` | case-insensitive filter | in progress | no | `ROWS` | `API` | P1 | `i(word)`, `i("phrase")`, and `i(prefix*)` use pinned Unicode case behavior over bounded public rows. |
-| `LQL-F15` | exact filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-008-exact-empty-and-any-value-predicates)) | in progress | partial | `ROWS`, `SQL` | `API` | P1 | Full-message exactness and exact typed metadata equality remain distinct from word matching. |
+| `LQL-F12` | substring filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-007-case-sensitive-message-substring)) | shipped | partial | `ROWS`, `SQL` | `API` | P1 | Case-sensitive literal UTF-8 substring matches the pinned oracle and remains distinct from the established case-insensitive engine predicate. |
+| `LQL-F13` | regexp filter | shipped | no | `ROWS` | `API` | P1 | Bounded RE2-compatible Rust regex uses a 1 MiB compiled-size limit and observes cancellation and decoded-row work before returning matches. |
+| `LQL-F14` | case-insensitive filter | shipped | no | `ROWS` | `API` | P1 | `i(word)`, `i("phrase")`, and `i(prefix*)` use pinned Unicode case behavior over bounded public rows. |
+| `LQL-F15` | exact filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-008-exact-empty-and-any-value-predicates)) | shipped | partial | `ROWS`, `SQL` | `API` | P1 | Full-message exactness and exact typed metadata equality remain distinct from word matching. |
 | `LQL-F16` | exact-prefix filter | missing | no | `ROWS` | `API` | P2 | Decode-first candidate. |
 | `LQL-F17` | multi-exact filter | missing | no | `ROWS` | `API` | P2 | Plan indexed values as a posting-list union where possible. |
-| `LQL-F18` | empty-value filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-008-exact-empty-and-any-value-predicates)) | in progress | no | `ROWS`, `SQL` | `API` | P1 | `field:("")` provides compatible missing/null/empty behavior; legacy and typed exact forms preserve each retained state. |
-| `LQL-F19` | any-value filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-008-exact-empty-and-any-value-predicates)) | in progress | no | `ROWS`, `SQL` | `API` | P1 | Present non-null typed values include zero, false, arrays, and objects; only the empty string is excluded. |
+| `LQL-F18` | empty-value filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-008-exact-empty-and-any-value-predicates)) | shipped | no | `ROWS`, `SQL` | `API` | P1 | `field:("")` provides compatible missing/null/empty behavior; legacy and typed exact forms preserve each retained state. |
+| `LQL-F19` | any-value filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-008-exact-empty-and-any-value-predicates)) | shipped | no | `ROWS`, `SQL` | `API` | P1 | Present non-null typed values include zero, false, arrays, and objects; only the empty string is excluded. |
 | `LQL-F20` | field no-op filter | missing | no | `ROWS` | `API` | P2 | Parser/evaluator behavior only. |
 | `LQL-F21` | `contains_all` | missing | no | `ROWS` | `API` | P2 | Decode-first; no extension primitive until measured. |
 | `LQL-F22` | `contains_any` | missing | no | `ROWS` | `API` | P2 | Decode-first; no extension primitive until measured. |
 | `LQL-F23` | `json_array_contains_any` | missing | no | `ROWS` | `API` | P2 | Operate on retained typed metadata, not flattened strings. |
-| `LQL-F24` | numeric range/comparison filter | in progress | no | `ROWS` | `API` | P1 | Typed `>`, `>=`, `<`, `<=`, and all open/closed ranges preserve full integer/float ordering; numeric strings are never coerced. |
+| `LQL-F24` | numeric range/comparison filter | shipped | no | `ROWS` | `API` | P1 | Typed `>`, `>=`, `<`, `<=`, and all open/closed ranges preserve full integer/float ordering; numeric strings are never coerced. |
 | `LQL-F25` | IPv4 range filter | missing | no | `ROWS` | `API` | P2 | API transform over retained value. |
 | `LQL-F26` | IPv6 range filter | missing | no | `ROWS` | `API` | P2 | API transform over retained value. |
 | `LQL-F27` | string-range filter | missing | no | `ROWS` | `API` | P2 | Pin byte/Unicode collation semantics. |
 | `LQL-F28` | length-range filter | missing | no | `ROWS` | `API` | P2 | Define byte versus codepoint length from upstream. |
-| `LQL-F29` | `value_type(...)` filter | in progress | no | `ROWS` | `API` | P1 | Exposes retained logical JSON types; VictoriaLogs physical block-encoding names fail explicitly rather than leaking private storage. |
+| `LQL-F29` | `value_type(...)` filter | shipped | no | `ROWS` | `API` | P1 | Exposes retained logical JSON types; VictoriaLogs physical block-encoding names fail explicitly rather than leaking private storage. |
 | `LQL-F30` | `eq_field`, `le_field`, `lt_field` | missing | no | `ROWS` | `API` | P2 | Same-row typed comparisons after bounded decode. |
-| `LQL-F31` | logical `AND`, `OR`, `NOT`, parentheses ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-009-boolean-composition)) | in progress | no | `ROWS`, `SQL` | `API` | P1 | `NOT` > `AND` > `OR`; safe top-level indexed conjuncts prune before bounded decode, while no predicate below `OR`/`NOT` is pushed. |
+| `LQL-F31` | logical `AND`, `OR`, `NOT`, parentheses ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-009-boolean-composition)) | shipped | no | `ROWS`, `SQL` | `API` | P1 | `NOT` > `AND` > `OR`; safe top-level indexed conjuncts prune before bounded decode, while no predicate below `OR`/`NOT` is pushed. |
 | `LQL-F32` | searching multiple fields/prefix field sets | missing | no | `ROWS` | `API` | P2 | Field expansion belongs in planner, not storage schema mutation. |
 | `LQL-F33` | day-range filter | missing | no | `ROWS` | `API` | P2 | Normalize timezone explicitly. |
 | `LQL-F34` | week-range filter | missing | no | `ROWS` | `API` | P2 | Normalize timezone explicitly. |

@@ -2266,3 +2266,53 @@ bit-preserving stale-marker ingress and marker-aware selectors/windows exist.
 matching the pinned oracle; neither disposition performs storage work. No
 extension, storage format, batching, compression, index, rollup, retention,
 transaction, migration, or public batch/SQL contract changed.
+
+## Session 12 LogsQL P1 filters and logic
+
+The checked-in
+[`2026-08-04_session12_logsql_p1.json`](evidence/2026-08-04_session12_logsql_p1.json)
+was captured from exact extension, metrics-server, and logs-server build
+`647b43627d0da45083a7107d78e9848a3961fe6d`. It measures every shipped Session
+12 filter in both an indexed-host narrow shape and a full 8,192-entry decoded
+shape over the same typed rich-log fixture.
+
+| filter | narrow rows | narrow p50/p95/p99 ms | wide rows | wide p50/p95/p99 ms |
+|---|---:|---:|---:|---:|
+| word | 128 | 2.070 / 2.275 / 2.384 | 8,192 | 22.832 / 25.029 / 27.446 |
+| prefix | 128 | 2.274 / 2.759 / 3.230 | 8,192 | 21.962 / 25.446 / 26.965 |
+| substring | 128 | 1.895 / 2.817 / 3.069 | 8,192 | 21.255 / 23.404 / 25.170 |
+| regexp | 128 | 2.009 / 2.268 / 2.756 | 8,192 | 22.073 / 24.616 / 25.433 |
+| case-insensitive | 128 | 2.159 / 2.420 / 2.638 | 8,192 | 21.249 / 22.949 / 28.368 |
+| exact | 1 | 1.856 / 2.115 / 2.619 | 0 | 14.011 / 15.653 / 15.841 |
+| empty | 128 | 2.178 / 2.903 / 3.071 | 8,192 | 24.725 / 28.732 / 29.427 |
+| any value | 128 | 2.153 / 2.440 / 2.944 | 8,192 | 26.066 / 28.099 / 29.061 |
+| numeric range | 51 | 1.970 / 2.228 / 2.644 | 3,276 | 20.470 / 21.671 / 21.892 |
+| logical value type | 128 | 2.160 / 2.699 / 2.965 | 8,192 | 25.502 / 27.131 / 27.762 |
+| boolean composition | 128 | 2.160 / 2.349 / 2.433 | 8,192 | 23.756 / 25.498 / 26.194 |
+
+Every indexed-host query selects one candidate block and charges 1,024
+decoded entries; every full query selects all four blocks and charges exactly
+8,192. The dedicated logical-pushdown regression is more selective: its safe
+`service:="api"` conjunct reduces an 8,192-entry expression to one candidate
+block and exactly 410 decoded rows before evaluating the `OR` branch. No atom
+below `OR` or `NOT` is pushed. Exact response cardinality and bytes, cumulative
+candidate/decoded/matched/returned work, payload bytes, response bytes, and
+p50/p95/p99 for all 22 shapes are retained in the JSON artifact.
+
+All 8,192 entries completed durably with zero queued work. One-request
+admission took 9.693ms and the explicit durability barrier took 20.411ms;
+those are preserved as latency samples, not claimed as throughput changes.
+Storage is byte-identical to Session 10: 1,088,919 logical block bytes,
+1,126,400 SQLite page bytes, 1,190,496 physical database/WAL/SHM bytes, four
+raw blocks, zero compressed blocks, and a 16,384-byte index. Whole-process RSS
+HWM was 58,500KiB, 4,252KiB (7.84%) above Session 10 after 22 additional query
+shapes; `QSF-075` records and accepts the bounded increase.
+
+All 64 pinned VictoriaLogs 1.52.0 applicable cases, all 14 real-extension log
+API/flush/optimize/reopen/backup tests, all 32 LogsQL/storage unit tests, and
+all 64 executable SQL recipes pass. The findings pin upstream differences for
+typed empty/any predicates, numeric-string coercion and integers beyond 2^53,
+and physical versus logical `value_type`. Regex cancellation, the inclusive
+work cap, parser ambiguities, and safe logical pushdown each have regressions.
+No authoritative batching, block format, compression, index, retention,
+transaction, migration, maintenance, or public extension contract changed.
