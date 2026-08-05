@@ -106,6 +106,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-MQL-006`](#sql-mql-006-range-aggregates) | `MQL-06` | current foundation | slot-indexed full-grid average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, implicit windows, duplicate outputs, limits, cancellation, and envelopes |
 | [`SQL-MQL-007`](#sql-mql-007-running-aggregates) | `MQL-07` | current foundation | slot-indexed cumulative average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, packed missing/NaN semantics, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-009`](#sql-mql-009-request-step-relative-durations) | `MQL-09` | current foundation | exact request-step multiplication for public windows, subquery timing, and signed offsets; API owns MetricsQL duration grammar, millisecond composition, saturation, limits, cancellation, and envelopes |
+| [`SQL-MQL-010`](#sql-mql-010-query-context-values) | `MQL-10` | current foundation | exact request start, end, and step projection in seconds over a bounded evaluation grid; API owns MetricsQL grammar, scalar/vector composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -4122,6 +4123,62 @@ errors. No private table or new extension primitive is involved.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-009`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_step_relative_durations_match_victoriametrics_and_reopen`.
+
+### SQL-MQL-010: query-context values
+
+MetricsQL exposes the current request's start, end, and positive step as
+floating-point Unix seconds. Direct SQLite/libSQL users can bind the same
+request context and project it over an inclusive millisecond evaluation grid:
+
+```sql
+WITH RECURSIVE
+request(start_ms, end_ms, step_ms) AS (
+  VALUES (
+    CAST(:start_ms AS INTEGER),
+    CAST(:end_ms AS INTEGER),
+    CAST(:step_ms AS INTEGER)
+  )
+),
+evaluation(ts_ms) AS (
+  SELECT start_ms
+  FROM request
+  WHERE start_ms <= end_ms AND step_ms > 0
+  UNION ALL
+  SELECT evaluation.ts_ms + request.step_ms
+  FROM evaluation, request
+  WHERE evaluation.ts_ms + request.step_ms <= request.end_ms
+)
+SELECT evaluation.ts_ms,
+       request.start_ms / 1000.0 AS start_seconds,
+       request.end_ms / 1000.0 AS end_seconds,
+       request.step_ms / 1000.0 AS step_seconds
+FROM evaluation, request
+ORDER BY evaluation.ts_ms;
+```
+
+Bind `:start_ms`, `:end_ms`, and `:step_ms` in the Rust API's native
+millisecond request unit. For an instant query, bind start and end to the same
+evaluation timestamp; `step_ms` is still the positive request step. Negative
+pre-epoch bounds and subsecond steps retain their exact integer-millisecond
+inputs before conversion to binary64 seconds. A range with start after end or
+a non-positive step emits no SQL rows; the Rust API rejects those request
+parameters before planning.
+
+The values are request metadata, so this statement intentionally performs no
+storage read. Compose its bound values with any public metrics recipe when a
+selector is also required; that selector retains its documented bounds,
+ordering, missing-value, and metric-name behavior. The Rust API owns the
+case-insensitive zero-argument `start()`/`end()`/`step()` grammar, scalar and
+vector response types, expression composition, result/work/response limits,
+cancellation, and HTTP errors. It rejects `start_timestamp()` and `range()` as
+unsupported MetricsQL functions. Stable PromQL remains independently
+feature-gated, and direct selector modifiers `@ start()` and `@ end()` retain
+their established PromQL semantics. No extension syntax, private table, or
+new storage primitive is involved.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-010`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_query_context_matches_victoriametrics_and_reopens`.
 
 ## LogsQL foundations and equivalents
 

@@ -110,9 +110,62 @@
       "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
       "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
       "expected_values": [14, 16, 18]
+    },
+    {
+      "id": "MQL-10-start-is-the-range-request-start",
+      "query": "time() - start()",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "1s"},
+      "expected_values": [0, 1, 2, 3, 4]
+    },
+    {
+      "id": "MQL-10-end-is-the-range-request-end",
+      "query": "end() - time()",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "1s"},
+      "expected_values": [4, 3, 2, 1, 0]
+    },
+    {
+      "id": "MQL-10-step-is-the-subsecond-request-step",
+      "query": "step()",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 3000, "step": "1500ms"},
+      "expected_values": [1.5, 1.5, 1.5]
+    },
+    {
+      "id": "MQL-10-context-function-names-are-case-insensitive",
+      "query": "START() - start() + END() - end() + STEP() - step()",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_values": [0, 0, 0]
     }
   ],
   "operator_cases": [
+    {
+      "id": "MQL-10-instant-start-is-the-evaluation-time",
+      "query": "start()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_value_offsets_ms": [30000]
+    },
+    {
+      "id": "MQL-10-instant-end-is-the-evaluation-time",
+      "query": "end()",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_value_offsets_ms": [30000]
+    },
+    {
+      "id": "MQL-10-instant-step-honors-the-request-parameter",
+      "query": "step()",
+      "evaluation_offset_ms": 30000,
+      "step": "1500ms",
+      "expected_metric": {},
+      "expected_values": [1.5]
+    },
+    {
+      "id": "MQL-10-context-scalars-compose-as-vectors",
+      "query": "vector(start() - end())",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [0]
+    },
     {
       "id": "MQL-01-default-fills-filtered-and-missing-grid-points",
       "query": "(oracle_mql_cpu > 2) default 0",
@@ -1433,6 +1486,46 @@
       "status": 422,
       "error_type": "422",
       "error_contains": "duplicate output timeseries"
+    },
+    {
+      "id": "MQL-10-start-requires-zero-arguments",
+      "query": "start(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected number of args; got 1; want 0"
+    },
+    {
+      "id": "MQL-10-end-requires-zero-arguments",
+      "query": "end(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected number of args; got 1; want 0"
+    },
+    {
+      "id": "MQL-10-step-requires-zero-arguments",
+      "query": "step(1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected number of args; got 1; want 0"
+    },
+    {
+      "id": "MQL-10-start-timestamp-is-unsupported",
+      "query": "start_timestamp()",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unsupported function \"start_timestamp\""
+    },
+    {
+      "id": "MQL-10-range-is-unsupported",
+      "query": "range()",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unsupported function \"range\""
     }
   ],
   "error_cases": [

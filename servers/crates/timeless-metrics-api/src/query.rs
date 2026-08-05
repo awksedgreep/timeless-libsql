@@ -1637,7 +1637,7 @@ pub(crate) fn metricsql_instant_request(params: &Params) -> Result<ReadRequest, 
         return Err("step must be positive".into());
     }
     let (lookback, max_lookback) = metricsql_lookbacks(params)?;
-    let plan = metricsql::lower_with_max_lookback(query, lookback, step, max_lookback)
+    let plan = metricsql::lower_with_max_lookback(query, lookback, step, max_lookback, time, time)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     Ok(ReadRequest::Prometheus {
         query: query.to_owned(),
@@ -1687,7 +1687,7 @@ pub(crate) fn metricsql_range_request(params: &Params) -> Result<ReadRequest, St
         step,
         PromQueryLimits::default().max_points_per_series,
     )?;
-    let plan = metricsql::lower_with_max_lookback(query, lookback, step, max_lookback)
+    let plan = metricsql::lower_with_max_lookback(query, lookback, step, max_lookback, start, stop)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     match plan.value_type() {
         PromValueType::Matrix => {

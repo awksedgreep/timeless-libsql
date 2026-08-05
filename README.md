@@ -625,9 +625,11 @@ VictoriaMetrics scrape/carry-in semantics, plus complete-grid
 `range_avg/min/max/sum` with pinned slot-index, missing-value, name, collision,
 and IEEE behavior, plus cumulative `running_avg/min/max/sum` with pinned carry
 and computed-NaN behavior, plus request-step-relative direct/subquery windows,
-resolutions, signed offsets, and adaptive `0i` rollups; direct SQL users retain
+resolutions, signed offsets, and adaptive `0i` rollups, plus request-owned
+`start()`/`end()`/`step()` context values with explicit unsupported-function
+errors; direct SQL users retain
 the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`
-and `SQL-MQL-009` recipes. The
+and `SQL-MQL-009` through `SQL-MQL-010` recipes. The
 extension exposes general SQLite/libSQL primitives and receives a new query
 vector only when measurements prove that storage-aware pushdown materially
 avoids reads, decode, copies, or row crossings. Saved queries, subscriptions,

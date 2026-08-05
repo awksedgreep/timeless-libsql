@@ -271,7 +271,11 @@ offsets, exact float/truncation/saturation rules, collision-free zero/extrema
 lowering, adaptive direct/subquery rollups, executable `SQL-MQL-009`, one
 public extension read, exact-build evidence, stable-route isolation, limits,
 cancellation, durability, and reopen. The remaining rows continue in their
-listed order; `MQL-11`
+listed order. `MQL-10` now has pinned range/instant request-context values,
+case/arity/unsupported-function behavior, scalar/vector composition,
+executable `SQL-MQL-010`, real-extension limit/cancellation/reopen coverage,
+and stable-route isolation; exact-build benchmark evidence is the remaining
+row exit gate. `MQL-11`
 is already corrected to deferred because the pinned oracle rejects `min_of`
 and `max_of`.
 

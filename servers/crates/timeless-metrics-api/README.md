@@ -227,6 +227,15 @@ from being confused with this zero marker. Limits, cancellation, one-public-
 read behavior, GET/POST, durability, and reopen use the existing query
 contract.
 
+The MetricsQL routes also expose case-insensitive, zero-argument `start()`,
+`end()`, and `step()` request-context functions. Range start/end and instant
+evaluation time are returned as floating-point Unix seconds; `step()` retains
+subsecond request precision. The values compose with scalars and vectors, and
+pure context expressions perform no extension read. Pinned VictoriaMetrics
+rejects `start_timestamp()` and `range()`, so Timeless rejects them explicitly
+too. Existing direct selector `@ start()`/`@ end()` modifiers and the stable
+PromQL feature gates remain unchanged.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding
@@ -245,6 +254,8 @@ and
 [`SQL-MQL-007`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-007-running-aggregates)
 and
 [`SQL-MQL-009`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-009-request-step-relative-durations)
+and
+[`SQL-MQL-010`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-010-query-context-values)
 recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
 envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
 `422`. Limits and cancellation continue to use Timeless's existing execution

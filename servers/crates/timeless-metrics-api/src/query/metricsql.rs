@@ -160,7 +160,18 @@ struct LowerContext<'a> {
 
 #[cfg(test)]
 fn lower(input: &str, lookback: i64, step: i64) -> Result<PromPlan, String> {
-    lower_with_max_lookback(input, lookback, step, lookback)
+    lower_with_context(input, lookback, step, 1_000_000, 1_004_000)
+}
+
+#[cfg(test)]
+fn lower_with_context(
+    input: &str,
+    lookback: i64,
+    step: i64,
+    query_start: i64,
+    query_end: i64,
+) -> Result<PromPlan, String> {
+    lower_with_max_lookback(input, lookback, step, lookback, query_start, query_end)
 }
 
 pub(super) fn lower_with_max_lookback(
@@ -168,16 +179,19 @@ pub(super) fn lower_with_max_lookback(
     lookback: i64,
     step: i64,
     max_lookback: i64,
+    query_start: i64,
+    query_end: i64,
 ) -> Result<PromPlan, String> {
     if step <= 0 {
         return Err("MetricsQL request step must be positive".into());
     }
+    let context_rewritten = rewrite_query_context_functions(input, query_start, query_end, step)?;
     for attempt in 0..64_i64 {
         let zero_marker = i64::from(u32::MAX) - attempt * 3;
         let max_marker = zero_marker - 1;
         let min_marker = zero_marker - 2;
         let rewritten = rewrite_step_relative_durations(
-            input,
+            &context_rewritten,
             step,
             StepDurationMarkers {
                 zero: zero_marker,
@@ -225,6 +239,140 @@ pub(super) fn lower_with_max_lookback(
         return Ok(plan);
     }
     Err("MetricsQL query exhausted collision-free zero-duration markers".into())
+}
+
+fn rewrite_query_context_functions(
+    input: &str,
+    query_start: i64,
+    query_end: i64,
+    step: i64,
+) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut copied = 0_usize;
+    let mut index = 0_usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if delimiter != b'`' && escaped {
+                escaped = false;
+            } else if delimiter != b'`' && byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'#' => {
+                comment = true;
+                index += 1;
+            }
+            b'"' | b'\'' | b'`' => {
+                quote = Some(byte);
+                index += 1;
+            }
+            _ if is_ident_start(byte) => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && is_ident_continue(bytes[index]) {
+                    index += 1;
+                }
+                let name = &input[start..index];
+                let normalized = name.to_ascii_lowercase();
+                if !matches!(
+                    normalized.as_str(),
+                    "start" | "end" | "step" | "start_timestamp" | "range"
+                ) {
+                    continue;
+                }
+                let open = skip_space_and_comments(input, index);
+                if bytes.get(open) != Some(&b'(') {
+                    continue;
+                }
+                let close = matching_paren(input, open)?;
+                if matches!(normalized.as_str(), "start" | "end")
+                    && follows_at_modifier(input, start)
+                {
+                    index = close + 1;
+                    continue;
+                }
+                if matches!(normalized.as_str(), "start_timestamp" | "range") {
+                    return Err(format!("unsupported function {name:?}"));
+                }
+                let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
+                if !arguments.is_empty() {
+                    return Err(format!(
+                        "unexpected number of args; got {}; want 0",
+                        arguments.len()
+                    ));
+                }
+                let millis = match normalized.as_str() {
+                    "start" => query_start,
+                    "end" => query_end,
+                    "step" => step,
+                    _ => unreachable!("guarded MetricsQL query-context function"),
+                };
+                let (replacement_start, replacement_end) =
+                    if matches!(normalized.as_str(), "start" | "end") {
+                        parenthesized_at_modifier(input, start, close + 1)
+                            .unwrap_or((start, close + 1))
+                    } else {
+                        (start, close + 1)
+                    };
+                output.push_str(&input[copied..replacement_start]);
+                output.push_str(&(millis as f64 / 1_000.0).to_string());
+                copied = replacement_end;
+                index = replacement_end;
+            }
+            _ => index += 1,
+        }
+    }
+    output.push_str(&input[copied..]);
+    Ok(output)
+}
+
+fn follows_at_modifier(input: &str, before: usize) -> bool {
+    let bytes = input.as_bytes();
+    let before = skip_metricsql_trivia_backward(input, before);
+    before > 0 && bytes[before - 1] == b'@'
+}
+
+fn parenthesized_at_modifier(
+    input: &str,
+    call_start: usize,
+    call_end: usize,
+) -> Option<(usize, usize)> {
+    let bytes = input.as_bytes();
+    let mut replacement_start = call_start;
+    let mut replacement_end = call_end;
+    loop {
+        let before = skip_metricsql_trivia_backward(input, replacement_start);
+        let Some(open) = before.checked_sub(1).filter(|open| bytes[*open] == b'(') else {
+            break;
+        };
+        if skip_space_and_comments(input, open + 1) != replacement_start {
+            break;
+        }
+        let close = skip_space_and_comments(input, replacement_end);
+        if bytes.get(close) != Some(&b')') {
+            break;
+        }
+        replacement_start = open;
+        replacement_end = close + 1;
+    }
+    follows_at_modifier(input, replacement_start).then_some((replacement_start, replacement_end))
 }
 
 struct StepDurationRewrite {
@@ -3994,6 +4142,79 @@ mod tests {
         ] {
             assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
         }
+    }
+
+    #[test]
+    fn query_context_functions_use_only_the_metricsql_request_context() {
+        assert!(matches!(
+            lower_with_context("start()", 300_000, 1_500, -500, 4_000).unwrap(),
+            PromPlan::Scalar(value) if value == -0.5
+        ));
+        assert!(matches!(
+            lower_with_context("end()", 300_000, 1_500, -500, 4_000).unwrap(),
+            PromPlan::Scalar(value) if value == 4.0
+        ));
+        assert!(matches!(
+            lower_with_context("step()", 300_000, 1_500, -500, 4_000).unwrap(),
+            PromPlan::Scalar(value) if value == 1.5
+        ));
+        assert!(matches!(
+            lower_with_context("START() - start()", 300_000, 1_500, -500, 4_000).unwrap(),
+            PromPlan::Binary(_)
+        ));
+
+        assert_eq!(
+            rewrite_query_context_functions(
+                "time() @ start() + START() + step() # end()\n + end() + label_set(vector(0), \"note\", \"start()\")",
+                1_000_000,
+                1_004_000,
+                2_000,
+            )
+            .unwrap(),
+            "time() @ start() + 1000 + 2 # end()\n + 1004 + label_set(vector(0), \"note\", \"start()\")"
+        );
+        assert_eq!(
+            rewrite_query_context_functions("start # request boundary\n ()", 1_500, 4_000, 2_000)
+                .unwrap(),
+            "1.5"
+        );
+
+        let PromPlan::MetricsDynamicRollup(at_start) =
+            lower("cpu @ start()", 300_000, 2_000).unwrap()
+        else {
+            panic!("implicit selector rollup expected")
+        };
+        assert_eq!(at_start.selector.timing.at, Some(SelectorAt::Start));
+        let PromPlan::MetricsDynamicRollup(parenthesized_at) =
+            lower_with_context("cpu @ (start())", 300_000, 2_000, 1_000, 4_000).unwrap()
+        else {
+            panic!("parenthesized anchor rollup expected")
+        };
+        assert_eq!(
+            parenthesized_at.selector.timing.at,
+            Some(SelectorAt::Timestamp(1_000))
+        );
+
+        assert_eq!(
+            lower("start(1)", 300_000, 2_000).unwrap_err(),
+            "unexpected number of args; got 1; want 0"
+        );
+        assert_eq!(
+            lower("end(1)", 300_000, 2_000).unwrap_err(),
+            "unexpected number of args; got 1; want 0"
+        );
+        assert_eq!(
+            lower("step(1)", 300_000, 2_000).unwrap_err(),
+            "unexpected number of args; got 1; want 0"
+        );
+        assert_eq!(
+            lower("start_timestamp()", 300_000, 2_000).unwrap_err(),
+            "unsupported function \"start_timestamp\""
+        );
+        assert_eq!(
+            lower("range()", 300_000, 2_000).unwrap_err(),
+            "unsupported function \"range\""
+        );
     }
 
     #[test]

@@ -155,7 +155,12 @@ running-aggregate cases and three errors. It pins cumulative average/minimum/
 maximum/sum, slot-indexed arithmetic, missing and stale carry, computed-NaN
 omission, overflow, infinity, signed zero, scalar/expression composition,
 case/trailing-comma grammar, unconditional name removal, arity, and duplicate
-outputs. The fixture now contains 151 MetricsQL cases in total.
+outputs. The `MQL-10` corpus adds eight successful request-context cases and
+five errors. It pins range and instant `start()`/`end()`/`step()` values,
+subsecond request steps, pre-epoch bounds, case-insensitive names,
+scalar/vector composition, zero-argument arity, and explicit rejection of
+`start_timestamp()` and `range()`. The fixture now contains 164 MetricsQL
+cases in total.
 Timeless compares exact result labels, timestamp grids, and float values while
 retaining its documented HTTP 400 `bad_data` envelope in place of
 VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
@@ -206,6 +211,14 @@ query-context functions `start()`, `end()`, and `step()`, but rejects
 `min_of()` and `max_of()`; those names are not stable MetricsQL functions in
 the pinned tier. The matrix records those dispositions instead of turning a
 previous planning assumption into a compatibility claim.
+
+For `MQL-10`, the pinned source implementation returns request start, end,
+and step milliseconds divided by 1,000. Range queries therefore expose the
+complete request bounds at every evaluation step; instant start and end both
+equal the evaluation timestamp while instant step remains the explicit
+request parameter. Timeless implements the same values in the Rust MetricsQL
+planner. The language syntax does not enter SQLite, and the stable PromQL
+endpoint retains its separate feature-gate behavior.
 
 The following Timeless compatibility choices intentionally differ from the
 pinned VictoriaLogs wire/storage model and are asserted on both sides rather

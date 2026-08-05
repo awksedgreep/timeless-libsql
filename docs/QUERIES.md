@@ -1632,6 +1632,41 @@ subquery recipes in
 [`SQL-MQL-009`](QUERY_SQL_EQUIVALENTS.md#sql-mql-009-request-step-relative-durations);
 adaptive zero-window rollups reuse `SQL-MQL-005`.
 
+### MetricsQL query-context values
+
+The explicit MetricsQL routes expose three case-insensitive, zero-argument
+functions whose values come only from the current request:
+
+```text
+start()
+end()
+step()
+query_contract_cpu + (start() - start())
+```
+
+`start()` and `end()` return the range request's inclusive bounds as
+floating-point Unix seconds. For an instant query, both equal its evaluation
+timestamp. `step()` returns the positive request step in seconds, including a
+subsecond step such as `1.5`. Negative pre-epoch request bounds remain
+negative. The values compose as scalar expressions; MetricsQL's established
+scalar-to-vector behavior determines the outer result envelope.
+
+Each function requires exactly zero arguments. `start_timestamp()` and
+`range()` are not supported by pinned VictoriaMetrics 1.148.0 and fail
+explicitly rather than being treated as aliases. Stable PromQL continues to
+feature-gate its similarly named functions. Existing selector modifiers
+`@ start()` and `@ end()` retain their stable PromQL meaning on both routes;
+the MetricsQL context lowering does not reinterpret their direct form.
+
+Pure context expressions perform no extension query. Composition with a
+selector performs the selector's one existing bounded public read. All work,
+result, response, deadline, cancellation, GET/POST, shutdown, and reopen
+contracts remain unchanged. No MetricsQL grammar or request state enters the
+extension. Direct SQLite/libSQL users can bind the same request context with
+the executable
+[`SQL-MQL-010`](QUERY_SQL_EQUIVALENTS.md#sql-mql-010-query-context-values)
+recipe.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

@@ -1342,6 +1342,47 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         }
     }
 
+    let context_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-010")
+        .context("SQL-MQL-010 recipe")?;
+    if context_recipe.statements.len() != 1 {
+        bail!("SQL-MQL-010 must retain one parameterized context statement");
+    }
+    let mut context_statement = connection.prepare(&context_recipe.statements[0])?;
+    for index in 1..=context_statement.parameter_count() {
+        let name = context_statement
+            .parameter_name(index)
+            .context("SQL-MQL-010 parameter must be named")?
+            .trim_start_matches(':');
+        let value = match name {
+            "start_ms" => Value::Integer(-500),
+            "end_ms" => Value::Integer(2_500),
+            "step_ms" => Value::Integer(1_500),
+            _ => parameter("SQL-MQL-010", name),
+        };
+        context_statement.raw_bind_parameter(index, value)?;
+    }
+    let context_rows = context_statement
+        .raw_query()
+        .mapped(|row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let expected_context_rows = [
+        (-500_i64, -0.5_f64, 2.5_f64, 1.5_f64),
+        (1_000_i64, -0.5_f64, 2.5_f64, 1.5_f64),
+        (2_500_i64, -0.5_f64, 2.5_f64, 1.5_f64),
+    ];
+    if context_rows != expected_context_rows {
+        bail!("SQL-MQL-010 request context changed: {context_rows:?}");
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1765,13 +1806,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 77);
+        assert_eq!(recipes.len(), 78);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            102
+            103
         );
         assert_eq!(
             recipes
@@ -1779,7 +1820,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            108
+            109
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

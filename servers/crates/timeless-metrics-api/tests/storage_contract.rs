@@ -14133,6 +14133,274 @@ async fn session_fifteen_metricsql_step_relative_durations_match_victoriametrics
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_query_context_matches_victoriametrics_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fifteen_metricsql_context.db");
+    let base = 1_785_909_500_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        64,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    storage
+        .submit_named_batch(
+            named_series_batch(
+                "mql_context",
+                &[(base, 1.0), (base + 2, 2.0), (base + 4, 3.0)],
+            ),
+            3,
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    for (query, expected) in [
+        (
+            "time() - start()",
+            serde_json::json!([[base, "0"], [base + 2, "2"], [base + 4, "4"]]),
+        ),
+        (
+            "end() - time()",
+            serde_json::json!([[base, "4"], [base + 2, "2"], [base + 4, "0"]]),
+        ),
+        (
+            "step()",
+            serde_json::json!([[base, "2"], [base + 2, "2"], [base + 4, "2"]]),
+        ),
+        (
+            "START() - start() + END() - end() + STEP() - step()",
+            serde_json::json!([[base, "0"], [base + 2, "0"], [base + 4, "0"]]),
+        ),
+    ] {
+        let response = mql_query_range(&app, query, base, base + 4, 2).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            response.1["data"]["result"][0]["values"], expected,
+            "{query}"
+        );
+    }
+
+    let millisecond_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "step()")
+        .append_pair("start", &base.to_string())
+        .append_pair("end", &(base + 3).to_string())
+        .append_pair("step", "1500ms")
+        .finish();
+    let millisecond = get_json(
+        &app,
+        &format!("/metricsql/api/v1/query_range?{millisecond_params}"),
+    )
+    .await;
+    assert_eq!(millisecond.0, StatusCode::OK, "{}", millisecond.1);
+    assert_eq!(
+        millisecond.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1.5"], [base as f64 + 1.5, "1.5"], [base + 3, "1.5"]])
+    );
+
+    for query in ["start()", "end()"] {
+        let params = form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", query)
+            .append_pair("time", &format!("{base}.5"))
+            .append_pair("step", "1500ms")
+            .finish();
+        let response = get_json(&app, &format!("/metricsql/api/v1/query?{params}")).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], "vector");
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            response.1["data"]["result"][0]["value"],
+            serde_json::json!([base as f64 + 0.5, format!("{base}.5")]),
+            "{query}"
+        );
+    }
+    let instant_step_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "step()")
+        .append_pair("time", &base.to_string())
+        .append_pair("step", "1500ms")
+        .finish();
+    let instant_step = get_json(
+        &app,
+        &format!("/metricsql/api/v1/query?{instant_step_params}"),
+    )
+    .await;
+    assert_eq!(instant_step.0, StatusCode::OK, "{}", instant_step.1);
+    assert_eq!(instant_step.1["data"]["result"][0]["value"][1], "1.5");
+
+    let pre_epoch_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "start()")
+        .append_pair("time", "-0.5")
+        .finish();
+    let pre_epoch = get_json(&app, &format!("/metricsql/api/v1/query?{pre_epoch_params}")).await;
+    assert_eq!(pre_epoch.0, StatusCode::OK, "{}", pre_epoch.1);
+    assert_eq!(
+        pre_epoch.1["data"]["result"][0]["value"],
+        serde_json::json!([-0.5, "-0.5"])
+    );
+
+    let composed =
+        mql_query_range(&app, "mql_context + (start() - start())", base, base + 4, 2).await;
+    assert_eq!(composed.0, StatusCode::OK, "{}", composed.1);
+    assert_eq!(
+        composed.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base + 2, "2"], [base + 4, "3"]])
+    );
+    let at_start = mql_query_range(&app, "mql_context @ start()", base, base + 4, 2).await;
+    assert_eq!(at_start.0, StatusCode::OK, "{}", at_start.1);
+    assert_eq!(
+        at_start.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base + 2, "1"], [base + 4, "1"]])
+    );
+
+    for (query, diagnostic) in [
+        ("start(1)", "unexpected number of args; got 1; want 0"),
+        ("end(1)", "unexpected number of args; got 1; want 0"),
+        ("step(1)", "unexpected number of args; got 1; want 0"),
+        (
+            "start_timestamp()",
+            "unsupported function \"start_timestamp\"",
+        ),
+        ("range()", "unsupported function \"range\""),
+    ] {
+        let response = mql_query(&app, query, base).await;
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "{query}: {}",
+            response.1
+        );
+        assert_eq!(response.1["errorType"], "bad_data");
+        assert!(
+            response.1["error"].as_str().unwrap().contains(diagnostic),
+            "{query}: {}",
+            response.1
+        );
+    }
+    for query in ["start()", "end()", "step()"] {
+        assert_eq!(
+            prom_query(&app, query, base).await.0,
+            StatusCode::BAD_REQUEST,
+            "stable PromQL must reject {query}"
+        );
+    }
+
+    let stats_before = storage.stats().await.unwrap();
+    assert_eq!(
+        mql_query_range(&app, "time() - start()", base, base + 4, 2)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let stats_after_context = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after_context.extension_raw_batch_query_count
+            - stats_before.extension_raw_batch_query_count
+            + stats_after_context.extension_window_batch_query_count
+            - stats_before.extension_window_batch_query_count,
+        0,
+        "pure query context must not read storage"
+    );
+    assert_eq!(
+        mql_query_range(&app, "mql_context + (start() - start())", base, base + 4, 2,)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let stats_after_composed = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after_composed.extension_raw_batch_query_count
+            - stats_after_context.extension_raw_batch_query_count
+            + stats_after_composed.extension_window_batch_query_count
+            - stats_after_context.extension_window_batch_query_count,
+        1,
+        "context composition must retain the child's one public read"
+    );
+
+    let result_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_result_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query_range(&result_limited, "step()", base, base + 4, 2).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("result-point limit of 2"));
+
+    let deadline_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            deadline: std::time::Duration::from_nanos(1),
+            ..PromQueryLimits::default()
+        },
+    );
+    let timed_out = mql_query_range(
+        &deadline_limited,
+        "time() - start()",
+        base,
+        base + 10_999,
+        1,
+    )
+    .await;
+    assert_eq!(timed_out.0, StatusCode::GATEWAY_TIMEOUT, "{}", timed_out.1);
+    assert_eq!(
+        mql_query_range(&app, "step()", base, base + 4, 2).await.0,
+        StatusCode::OK
+    );
+
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query_range",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "step()")
+            .append_pair("start", &base.to_string())
+            .append_pair("end", &(base + 4).to_string())
+            .append_pair("step", "2")
+            .finish(),
+    )
+    .await;
+    assert_eq!(
+        posted,
+        mql_query_range(&app, "step()", base, base + 4, 2).await
+    );
+
+    drop((deadline_limited, result_limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 64, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query_range(&reopened_app, "step()", base, base + 4, 2).await,
+        posted
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
