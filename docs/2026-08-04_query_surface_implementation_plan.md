@@ -305,11 +305,14 @@ typed-field pattern costs. A single non-reproduced rich-block decoder failure
 is retained honestly in `QSF-112`; the exact 8,192-entry stress regression now
 covers 48 full reads across both readers, raw storage, reopen, and compression,
 and future failed evidence runs preserve their database and server log. The
-`LQL-F16` implementation is in progress with pinned operator/function grammar,
-start anchoring, rich-value projection, empty-prefix behavior, executable
-`SQL-LOG-014`, and real-extension durability/reopen coverage. Its exact-build
-performance evidence and final shipped disposition remain the exit gate. The
-remaining rows continue in their listed order.
+`LQL-F16` is shipped with 13 pinned exact-prefix cases, three companion exact-
+grammar corrections, operator/function forms, start anchoring, rich-value
+projection, empty-prefix behavior, strict errors, logical/pipeline composition,
+work limits, executable `SQL-LOG-014`, and real-extension durability/reopen
+coverage. Exact-build evidence at commit
+`e169a9d310890f72e07f98b002e8cefea84eaeb7` records narrow/wide message and
+typed-field costs with storage work unchanged. The remaining rows continue in
+their listed order.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

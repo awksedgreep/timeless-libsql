@@ -3062,3 +3062,50 @@ pass locally. No extension primitive, private table access, storage format,
 batching, compression, index, rollup, retention, transaction, migration,
 maintenance, or public batch/SQL contract changed. No CI workflow was
 invoked.
+
+## Session 16 LogsQL P2 progress: exact-prefix matching
+
+The checked-in
+[`2026-08-05_session16_lql_f16_exact_prefix.json`](evidence/2026-08-05_session16_lql_f16_exact_prefix.json)
+was captured from exact extension, metrics-server, and logs-server build
+`e169a9d310890f72e07f98b002e8cefea84eaeb7`. It closes `LQL-F16` with
+case-sensitive, start-anchored message and nested typed-field shapes.
+Correctness separately pins operator and function forms, absence of word-
+boundary searching, arbitrary UTF-8, strict errors, compact rich-value
+projection without storage mutation, empty-prefix behavior, logical/pipeline
+composition, limits, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| message exact-prefix, indexed host | 128 | 21,826 | 1.919 | 2.103 | 2.326 | 1 | 1,024 | 132,676 | 128 |
+| message exact-prefix, full fixture | 8,192 | 1,424,639 | 20.829 | 21.985 | 24.625 | 4 | 8,192 | 1,088,919 | 8,192 |
+| nested numeric exact-prefix, indexed host | 25 | 4,264 | 1.744 | 1.935 | 2.037 | 1 | 1,024 | 132,676 | 128 |
+| nested numeric exact-prefix, full fixture | 1,639 | 285,036 | 17.631 | 18.252 | 18.539 | 4 | 8,192 | 1,088,919 | 8,192 |
+
+The message form is 7.6% below the same-run word filter at narrow p95 and
+0.2% above it at wide p95; its storage work and result cardinality are
+identical. It is also 1.8%/9.1% below the same-run pattern matcher and
+16.4%/7.9% below regexp narrow/wide p95. These differences are bounded API
+predicate cost and run variation, not block pruning. The nested numeric shape
+uses the same storage read but emits 80% fewer rows, so its lower latency is
+not evidence of a hidden typed-prefix index. Ordinary `SQL-LOG-014` covers
+message and retained-text prefixes. No storage-read, decode, allocation, or
+row-crossing saving justifies a new extension primitive.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+9.166 ms and the explicit durability barrier took 20.208 ms. Logs storage
+remained four raw blocks, 1,088,919 logical bytes, and 1,190,496 physical
+database/WAL/SHM bytes. Logs RSS HWM was 65,912 KiB, 1,100 KiB above the
+preceding capture. Metrics storage remained byte-identical and its HWM was
+53,684 KiB, 200 KiB lower. Both are whole-process variations and neither is
+attributed to exact-prefix matching.
+
+All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
+cases, and all 114 pinned VictoriaLogs 1.52.0 cases pass. The complete 18-test
+logs real-extension suite, 41 logs library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 28-test Rust query
+harness, documentation contracts, and all 80 SQL recipes (112 statements)
+pass locally. No extension primitive, private table access, storage format,
+batching, compression, index, rollup, retention, transaction, migration,
+maintenance, or public batch/SQL contract changed. No CI workflow was
+invoked.
