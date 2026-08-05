@@ -2715,3 +2715,61 @@ cancellation, flush, shutdown, durability, and reopen. No extension primitive,
 private table access, storage format, batching, compression, index, rollup,
 retention, transaction, migration, maintenance, or public batch/SQL contract
 changed. No CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: complete-grid range aggregates
+
+The checked-in
+[`2026-08-05_session15_mql_06_range_aggregates.json`](evidence/2026-08-05_session15_mql_06_range_aggregates.json)
+was captured from exact extension, metrics-server, and logs-server build
+`45e29395ab68a1deddd34ec689abc713909c2a09`. It closes `MQL-06` with
+complete-request-grid average and sum shapes; the same correctness suite also
+pins `range_min` and `range_max`.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query | extension frame bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `range_avg`, exact host / four steps | 4 | 197 | 0.824 | 0.996 | 1.057 | 12 | 1 | 32 | 131 | 540 |
+| `range_avg`, 512 series / four steps | 2,048 | 71,714 | 4.766 | 5.359 | 6.925 | 6,144 | 512 | 16,384 | 53,831 | 268,304 |
+| `range_sum`, exact host / four steps | 4 | 193 | 0.919 | 1.090 | 1.190 | 12 | 1 | 32 | 131 | 540 |
+| `range_sum`, 512 series / four steps | 2,048 | 69,066 | 4.769 | 5.121 | 5.815 | 6,144 | 512 | 16,384 | 53,831 | 268,304 |
+
+Every shape evaluates one retained MetricsQL selector grid through one public
+packed-raw query. The narrow paths read one chunk and 32 stored points; the
+wide paths read 512 chunks and 16,384 stored points. The complete-grid fold
+and repeated final value add no second storage query. Existing cumulative work
+accounting charges the child points, reduction steps, and generated result:
+12 points for the four-step narrow shape and 6,144 for the 2,048-point wide
+shape. Result, response, deadline, and cancellation limits therefore bound the
+entire operation rather than only its child selector.
+
+The same-run MetricsQL selector measured 0.943 ms narrow and 4.180 ms wide
+p95. `range_avg` is 5.5% and 28.2% above those references; `range_sum` is
+15.5% and 22.5% above. Candidate chunks, decoded points, persisted payload
+bytes, and packed-frame bytes are identical, so the difference is bounded
+Rust grid reduction, fill, collision checking, and response encoding rather
+than storage-read amplification. The wide average retained a 6.925 ms
+p99/max observation. These results do not justify an extension primitive:
+the executable public-SQL recipe exposes the row-visible complete-grid fold,
+while MetricsQL's missing-slot, name, collision, and response semantics remain
+language-owned composition.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 8.239 ms and the explicit durability barrier took 88.322 ms. Metrics
+storage remained 224,688 payload bytes, 409,600 index bytes, and 1,542,312
+physical database/WAL/SHM bytes. Logs remained 1,088,919 logical and 1,190,496
+physical bytes. Metrics RSS HWM was 50,108 KiB, 1,336 KiB below MQL-05; logs
+HWM was 64,572 KiB, 120 KiB above it. Both are whole-process variations and
+neither direction is attributed to the four added query shapes.
+
+All 528 pinned Prometheus 3.13.2 cases and all 116 pinned VictoriaMetrics
+1.148.0 cases pass. The complete 86-test metrics real-extension suite, 55
+metrics library tests, both complete Rust workspaces, clippy with warnings
+denied, formatting, the 25-test Rust query harness, documentation contracts,
+and all 75 SQL recipes (105 statements) pass locally. Regressions cover
+leading NaN and later missing slots, incremental average, ordinary sum,
+later-operand extrema ties, signed zero, complete-grid fill, name removal,
+`keep_metric_names`, duplicate outputs, scalar/expression composition, case
+and trailing-comma syntax, stable PromQL isolation, GET/POST, work/result
+limits, deadline cancellation and recovery, shutdown, durability, and reopen.
+No extension primitive, private table access, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed. No CI workflow was invoked.
