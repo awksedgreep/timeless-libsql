@@ -1102,7 +1102,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let rows = [json!({"n": f64::MAX}), json!({"n": f64::MAX})];
         assert_eq!(
-            median(&rows, &[field.clone()], 2, &cancelled).unwrap(),
+            median(&rows, std::slice::from_ref(&field), 2, &cancelled).unwrap(),
             json!(f64::MAX)
         );
         assert!(median(&rows, &[field], 1, &cancelled)

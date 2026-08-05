@@ -211,6 +211,11 @@ Exit: field names/values, keep/filter, counts, unique values, numeric
 aggregates, rates, and projection preserve field types and deterministic output;
 all public SQL foundations execute in CLI regressions.
 
+Outcome: shipped all eleven rows with 75 pinned VictoriaLogs cases, 15
+real-extension log API regressions, and executable `SQL-LOG-010` through
+`SQL-LOG-013`. The implementation preserves rich typed values and uses bounded
+Rust API composition over public extension rows without changing storage.
+
 ### Session 14: stable PromQL P2 completion
 
 Rows: `PQL-S10`, `PQL-S14`, `PQL-S15`, `PQL-F19`, `PQL-F20`,

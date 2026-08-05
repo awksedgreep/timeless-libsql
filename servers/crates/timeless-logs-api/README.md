@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P09 LQL-Q01 LQL-Q07 LQL-Q08 LQL-S01 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -284,6 +284,16 @@ plans consider four/8,192. Physical database/WAL/SHM bytes remain exactly
 1,190,496. Whole-process HWM is 58,500KiB, 4,252KiB above the Session 10 run;
 that measured increase is retained in `QSF-075` rather than attributed to a
 storage optimization.
+
+Session 13 retains that fixture and storage layout while adding typed field
+discovery, projection, ordered filtering, unique/value statistics, numeric
+aggregates, median, and rates. Indexed-narrow p95 spans 2.246–4.007ms; full
+8,192-entry p95 spans 22.360–31.108ms. Narrow plans consider one block/1,024
+entries and wide plans four blocks/8,192 entries. Physical database/WAL/SHM
+bytes remain exactly 1,190,496. Whole-process HWM is 64,068KiB, 5,568KiB above
+Session 12 after 18 additional typed query shapes; `QSF-081` records the
+bounded increase and the decision to keep composition in the Rust API rather
+than add a storage primitive without evidence of avoidable direct-user work.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

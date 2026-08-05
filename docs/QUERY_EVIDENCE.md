@@ -2316,3 +2316,54 @@ and physical versus logical `value_type`. Regex cancellation, the inclusive
 work cap, parser ambiguities, and safe logical pushdown each have regressions.
 No authoritative batching, block format, compression, index, retention,
 transaction, migration, maintenance, or public extension contract changed.
+
+## Session 13 LogsQL P1 discovery and statistics
+
+The checked-in
+[`2026-08-04_session13_logsql_p1_stats.json`](evidence/2026-08-04_session13_logsql_p1_stats.json)
+was captured from exact extension and signal-server build
+`3269a36c5654934cb9482144b6cb675bc29bdf14`. It measures all shipped Session
+13 typed discovery, projection, ordered-filter, value-statistics, numeric, and
+rate surfaces over the unchanged 8,192-entry rich-log fixture.
+
+| operation | narrow rows | narrow p50/p95/p99 ms | wide rows | wide p50/p95/p99 ms |
+|---|---:|---:|---:|---:|
+| `field_values` | 5 | 2.047 / 2.291 / 2.390 | 5 | 21.048 / 23.127 / 25.583 |
+| `field_names` | 7 | 2.229 / 2.406 / 2.453 | 7 | 22.685 / 25.886 / 25.962 |
+| typed projection | 128 | 2.175 / 2.515 / 3.344 | 8,192 | 23.350 / 26.037 / 27.644 |
+| ordered pipeline filter | 51 | 2.133 / 2.698 / 2.777 | 3,276 | 21.952 / 23.100 / 23.691 |
+| field counts | 1 | 2.045 / 2.246 / 2.672 | 1 | 21.048 / 22.360 / 24.410 |
+| unique counts | 1 | 2.144 / 2.411 / 2.470 | 1 | 23.422 / 25.970 / 26.601 |
+| typed values | 1 | 2.203 / 2.356 / 2.472 | 1 | 22.213 / 31.108 / 38.778 |
+| numeric aggregates | 1 | 2.243 / 4.007 / 4.182 | 1 | 24.194 / 25.228 / 26.380 |
+| rates | 1 | 2.112 / 2.418 / 2.685 | 1 | 23.363 / 26.684 / 29.512 |
+
+Every narrow query selects one candidate block, decodes 1,024 entries, and
+reads 132,676 extension payload bytes. Every wide query selects all four
+blocks, decodes 8,192 entries exactly once, and reads the 1,088,919-byte
+fixture payload. The artifact retains exact response bytes, result
+cardinality, cumulative matched/returned rows, reader-permit timing, and all
+50-iteration nanosecond distributions. `typed values` returns one aggregate
+row whose wide response is 16,440 bytes; projection returns 809,898 response
+bytes. Those materially different response shapes explain why cardinality
+alone is not used as a cost proxy.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+9.946ms and the explicit durability barrier took 23.116ms. Storage remains
+byte-identical to Sessions 10 and 12: 1,088,919 logical block bytes, 1,126,400
+SQLite page bytes, 1,190,496 physical database/WAL/SHM bytes, four raw blocks,
+zero compressed blocks, and a 16,384-byte index. Whole-process RSS HWM was
+64,068KiB, 5,568KiB (9.52%) above Session 12 after 18 additional shapes;
+`QSF-081` preserves that measured cost without claiming a storage speedup.
+
+All 75 pinned VictoriaLogs 1.52.0 applicable cases, all 15 real-extension log
+API/flush/optimize/reopen/backup tests, all 36 LogsQL/storage unit tests, and
+all 68 executable SQL recipes (92 statements) pass. The oracle fixture pins
+intentional differences for rich typed values, missing/null/empty identity,
+numeric-string coercion, stream-field synthesis, value envelopes, and hash
+identity. Regressions additionally pin operator `limit 0`, independent result
+and work caps, ordered projection/filter semantics, exact integers beyond
+2^53, overflow-safe finite median, independently bounded median state,
+cancellation, durability, and reader reuse. No batching, block format,
+compression, index, retention, transaction, migration, maintenance, or public
+extension contract changed.
