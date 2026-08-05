@@ -403,6 +403,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "length_max" => Value::Integer(7),
         "day_start_ns" => Value::Integer(0),
         "day_end_ns" => Value::Integer(60_000_000_000),
+        "week_start_day" => Value::Integer(0),
+        "week_end_day" => Value::Integer(6),
         "start_inclusive" => Value::Integer(1),
         "end_inclusive" => Value::Integer(0),
         "offset_ns" => Value::Integer(0),
@@ -1624,6 +1626,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let field_compare_rows = recipe_values("SQL-LOG-021", 0)?;
     let field_prefix_rows = recipe_values("SQL-LOG-022", 0)?;
     let day_range_rows = recipe_values("SQL-LOG-023", 0)?;
+    let week_range_rows = recipe_values("SQL-LOG-024", 0)?;
     if [
         bounded,
         substring,
@@ -1734,6 +1737,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if day_range_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
         bail!("SQL-LOG-023 UTC day-range selection changed: {day_range_rows:?}");
+    }
+    let week_range_timestamps = week_range_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if week_range_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
+        bail!("SQL-LOG-024 UTC week-range selection changed: {week_range_rows:?}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2394,6 +2404,116 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             bail!("SQL-LOG-023 day range {start}..{end} offset {offset} changed: {actual:?}");
         }
     }
+
+    const SUNDAY_MS: i64 = 1_798_934_400_000;
+    const HOUR_MS: i64 = 3_600_000;
+    const DAY_MS: i64 = 24 * HOUR_MS;
+    for (ts, case) in [
+        (-4 * DAY_MS, "week-pre-epoch-sun"),
+        (SUNDAY_MS + 12 * HOUR_MS, "week-sun"),
+        (SUNDAY_MS + 23 * HOUR_MS + HOUR_MS / 2, "week-sun-late"),
+        (SUNDAY_MS + DAY_MS + HOUR_MS / 2, "week-mon-early"),
+        (SUNDAY_MS + DAY_MS + 12 * HOUR_MS, "week-mon"),
+        (SUNDAY_MS + 2 * DAY_MS + 12 * HOUR_MS, "week-tue"),
+        (SUNDAY_MS + 3 * DAY_MS + 12 * HOUR_MS, "week-wed"),
+        (SUNDAY_MS + 4 * DAY_MS + 12 * HOUR_MS, "week-thu"),
+        (SUNDAY_MS + 5 * DAY_MS + 12 * HOUR_MS, "week-fri"),
+        (SUNDAY_MS + 6 * DAY_MS + 12 * HOUR_MS, "week-sat"),
+    ] {
+        connection.execute(
+            "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+            params![
+                ts,
+                "info",
+                "week fixture",
+                format!(r#"{{"case":"{case}"}}"#)
+            ],
+        )?;
+    }
+    connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
+    let week_range_sql = recipe_sql("SQL-LOG-024", 0)?;
+    let week_range_timestamps = |week_start_day: i64,
+                                 week_end_day: i64,
+                                 offset_ns: i64,
+                                 start_ms: i64,
+                                 end_ms: i64|
+     -> Result<Vec<i64>> {
+        let mut statement = connection.prepare(&week_range_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-024 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "week_start_day" => Value::Integer(week_start_day),
+                "week_end_day" => Value::Integer(week_end_day),
+                "offset_ns" => Value::Integer(offset_ns),
+                "start_ms" => Value::Integer(start_ms),
+                "end_ms" => Value::Integer(end_ms),
+                _ => parameter("SQL-LOG-024", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        Ok(statement
+            .raw_query()
+            .mapped(|row| row.get::<_, i64>(0))
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    };
+    let week_end = SUNDAY_MS + 6 * DAY_MS + 12 * HOUR_MS;
+    for (start, end, offset, lower, upper, expected) in [
+        (
+            1,
+            5,
+            0,
+            SUNDAY_MS,
+            week_end,
+            vec![
+                SUNDAY_MS + 5 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + 4 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + 3 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + 2 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + DAY_MS + HOUR_MS / 2,
+            ],
+        ),
+        (
+            0,
+            6,
+            0,
+            SUNDAY_MS,
+            week_end,
+            vec![
+                SUNDAY_MS + 6 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + 5 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + 4 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + 3 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + 2 * DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + DAY_MS + HOUR_MS / 2,
+                SUNDAY_MS + 23 * HOUR_MS + HOUR_MS / 2,
+                SUNDAY_MS + 12 * HOUR_MS,
+            ],
+        ),
+        (5, 1, 0, SUNDAY_MS, week_end, vec![]),
+        (
+            1,
+            1,
+            5_400_000_000_000,
+            SUNDAY_MS,
+            week_end,
+            vec![
+                SUNDAY_MS + DAY_MS + 12 * HOUR_MS,
+                SUNDAY_MS + DAY_MS + HOUR_MS / 2,
+                SUNDAY_MS + 23 * HOUR_MS + HOUR_MS / 2,
+            ],
+        ),
+        (0, 0, 0, -4 * DAY_MS, -4 * DAY_MS, vec![-4 * DAY_MS]),
+    ] {
+        let actual = week_range_timestamps(start, end, offset, lower, upper)?;
+        if actual != expected {
+            bail!("SQL-LOG-024 week range {start}..{end} offset {offset} changed: {actual:?}");
+        }
+    }
     Ok(())
 }
 
@@ -2435,13 +2555,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 89);
+        assert_eq!(recipes.len(), 90);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            118
+            119
         );
         assert_eq!(
             recipes
@@ -2449,7 +2569,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            124
+            125
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

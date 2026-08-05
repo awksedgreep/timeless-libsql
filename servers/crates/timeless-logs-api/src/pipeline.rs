@@ -15,7 +15,7 @@ use crate::logsql::{
     logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, PipelineField, PipelineOp,
     StatsExpression, StatsKind,
 };
-use crate::storage::{day_range_matches, QueryRow};
+use crate::storage::{day_range_matches, week_range_matches, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
 
 #[derive(Clone, Copy)]
@@ -992,6 +992,23 @@ fn predicate_matches_resolved(
                 )
             }))
         }
+        LogPredicate::WeekRange {
+            start_day,
+            end_day,
+            offset_ns,
+        } => {
+            let timestamp = row
+                .get("_time")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| match timestamp_unit {
+                    TimestampUnit::Milliseconds => value.timestamp_millis(),
+                    TimestampUnit::Microseconds => value.timestamp_micros(),
+                });
+            Ok(timestamp.is_some_and(|timestamp| {
+                week_range_matches(timestamp, timestamp_unit, *start_day, *end_day, *offset_ns)
+            }))
+        }
         LogPredicate::Regex { field, regex } => {
             let matched =
                 field_text(row, resolved_field!(field)).is_some_and(|text| regex.is_match(text));
@@ -1037,7 +1054,8 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::Not(_)
         | LogPredicate::FieldCompare { .. }
         | LogPredicate::Timestamp { .. }
-        | LogPredicate::DayRange { .. } => return None,
+        | LogPredicate::DayRange { .. }
+        | LogPredicate::WeekRange { .. } => return None,
     };
     match field {
         LogField::FieldPrefix(prefix) => Some(prefix),
@@ -1477,6 +1495,11 @@ mod tests {
                 end_ns: 86_400_000_000_000 - 1,
                 start_inclusive: true,
                 end_inclusive: true,
+                offset_ns: 0,
+            },
+            LogPredicate::WeekRange {
+                start_day: 0,
+                end_day: 6,
                 offset_ns: 0,
             },
         ] {

@@ -423,6 +423,30 @@ and HTTP envelopes remain in the Rust API. The repeated daily predicate cannot
 independently prune an arbitrary absolute time range, and ordinary SQL already
 receives the timestamp, so no extension primitive or storage change is added.
 
+`_time:week_range[start, end] offset duration` filters by a repeated UTC
+weekday interval. Weekday names are case-insensitive and accept either short
+(`Sun` through `Sat`) or full English spellings. Sunday is the beginning of
+the linear range and Saturday is the end. Brackets are normalized before
+comparison: an open start advances one weekday and an open end retreats one
+weekday, both modulo seven. A resulting start above the end is valid and
+empty; ranges do not otherwise wrap across the week boundary.
+
+This preserves VictoriaLogs' edge cases. `[Sun,Sun)` and `(Sat,Sun)` normalize
+to the full week, `[Mon,Mon]` selects Monday, and `[Mon,Mon)` is empty. The
+optional signed compound offset is added to UTC before weekday selection.
+Timeless uses deterministic UTC when it is omitted rather than inheriting the
+server process's local timezone. Pipeline filters read the current projected
+`_time`; removing that field earlier makes the predicate false.
+
+`SQL-LOG-024` gives direct SQLite/libSQL users the executable public-row
+operation with millisecond/microsecond unit parameters, Euclidean pre-epoch
+day handling, signed multi-day offsets, and explicit normalized weekday
+bounds. LogsQL weekday/bracket/duration grammar, logical and pipeline
+composition, errors, limits, cancellation, and envelopes remain in the Rust
+API. The predicate cannot independently prune an arbitrary absolute timestamp
+window, and ordinary SQL already receives the timestamp, so no extension
+primitive or storage-format change is added.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

@@ -72,6 +72,28 @@ pub(crate) fn day_range_matches(
     })
 }
 
+pub(crate) fn week_range_matches(
+    timestamp: i64,
+    timestamp_unit: TimestampUnit,
+    start_day: u8,
+    end_day: u8,
+    offset_ns: i64,
+) -> bool {
+    if start_day > end_day || end_day > 6 {
+        return false;
+    }
+    let nanoseconds_per_unit = match timestamp_unit {
+        TimestampUnit::Milliseconds => 1_000_000_i128,
+        TimestampUnit::Microseconds => 1_000_i128,
+    };
+    let adjusted_ns = i128::from(timestamp) * nanoseconds_per_unit + i128::from(offset_ns);
+    // Unix epoch 1970-01-01 was Thursday (4 with Sunday numbered zero).
+    // Euclidean division preserves the civil weekday for pre-epoch values.
+    let days_since_epoch = adjusted_ns.div_euclid(NANOSECONDS_PER_DAY);
+    let weekday = (days_since_epoch + 4).rem_euclid(7) as u8;
+    weekday >= start_day && weekday <= end_day
+}
+
 #[derive(Clone, Debug)]
 pub struct LogEntry {
     pub ts: i64,
@@ -718,6 +740,13 @@ pub enum LogPredicate {
         end_ns: i64,
         start_inclusive: bool,
         end_inclusive: bool,
+        offset_ns: i64,
+    },
+    /// VictoriaLogs `_time:week_range` semantics over the UTC weekday, with
+    /// Sunday numbered zero. Open brackets are normalized by the parser.
+    WeekRange {
+        start_day: u8,
+        end_day: u8,
         offset_ns: i64,
     },
     Regex {
@@ -2736,6 +2765,17 @@ fn log_predicate_matches_resolved(
             *end_inclusive,
             *offset_ns,
         )),
+        LogPredicate::WeekRange {
+            start_day,
+            end_day,
+            offset_ns,
+        } => Ok(week_range_matches(
+            timestamp,
+            timestamp_unit,
+            *start_day,
+            *end_day,
+            *offset_ns,
+        )),
         LogPredicate::Regex { field, regex } => {
             let matched = log_field_text(resolved_field!(field), message, level, metadata)
                 .is_some_and(|text| regex.is_match(text));
@@ -2786,7 +2826,8 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::Not(_)
         | LogPredicate::FieldCompare { .. }
         | LogPredicate::Timestamp { .. }
-        | LogPredicate::DayRange { .. } => return None,
+        | LogPredicate::DayRange { .. }
+        | LogPredicate::WeekRange { .. } => return None,
     };
     match field {
         LogField::FieldPrefix(prefix) => Some(prefix),
@@ -2864,9 +2905,10 @@ fn metadata_prefix_predicate_matches(
 
 fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
     match predicate {
-        LogPredicate::True | LogPredicate::Timestamp { .. } | LogPredicate::DayRange { .. } => {
-            false
-        }
+        LogPredicate::True
+        | LogPredicate::Timestamp { .. }
+        | LogPredicate::DayRange { .. }
+        | LogPredicate::WeekRange { .. } => false,
         LogPredicate::And(predicates) | LogPredicate::Or(predicates) => {
             predicates.iter().any(predicate_references_metadata)
         }
@@ -3673,6 +3715,11 @@ mod tests {
                 end_inclusive: true,
                 offset_ns: 0,
             },
+            LogPredicate::WeekRange {
+                start_day: 0,
+                end_day: 6,
+                offset_ns: 0,
+            },
             LogPredicate::Regex {
                 field: LogField::Message,
                 regex: regex::Regex::new("request").unwrap(),
@@ -3745,6 +3792,55 @@ mod tests {
             10 * hour,
             true,
             true,
+            0,
+        ));
+    }
+
+    #[test]
+    fn week_range_uses_native_precision_explicit_offsets_and_euclidean_days() {
+        const HOUR_NS: i64 = 3_600_000_000_000;
+        const DAY_US: i64 = 86_400_000_000;
+        const SUNDAY_US: i64 = 1_798_934_400_000_000;
+        assert!(week_range_matches(
+            SUNDAY_US + 12 * HOUR_NS / 1_000,
+            TimestampUnit::Microseconds,
+            0,
+            0,
+            0,
+        ));
+        assert!(week_range_matches(
+            (SUNDAY_US + DAY_US + 12 * HOUR_NS / 1_000) / 1_000,
+            TimestampUnit::Milliseconds,
+            1,
+            1,
+            0,
+        ));
+        assert!(week_range_matches(
+            SUNDAY_US + 23 * HOUR_NS / 1_000 + HOUR_NS / 2 / 1_000,
+            TimestampUnit::Microseconds,
+            1,
+            1,
+            HOUR_NS,
+        ));
+        assert!(week_range_matches(
+            SUNDAY_US + DAY_US + HOUR_NS / 2 / 1_000,
+            TimestampUnit::Microseconds,
+            0,
+            0,
+            -HOUR_NS,
+        ));
+        assert!(week_range_matches(
+            -4 * DAY_US,
+            TimestampUnit::Microseconds,
+            0,
+            0,
+            0,
+        ));
+        assert!(!week_range_matches(
+            SUNDAY_US,
+            TimestampUnit::Microseconds,
+            5,
+            1,
             0,
         ));
     }

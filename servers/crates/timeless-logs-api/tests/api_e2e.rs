@@ -3448,6 +3448,244 @@ async fn session_sixteen_day_ranges_use_explicit_utc_offsets_and_reopen() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_week_ranges_use_explicit_utc_offsets_and_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("week-range-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    const SUNDAY_US: i64 = 1_798_934_400_000_000;
+    const HOUR_US: i64 = 3_600_000_000;
+    const DAY_US: i64 = 24 * HOUR_US;
+    storage
+        .ingest(
+            [
+                (SUNDAY_US + 12 * HOUR_US, "week-sun"),
+                (SUNDAY_US + 23 * HOUR_US + HOUR_US / 2, "week-sun-late"),
+                (SUNDAY_US + DAY_US + HOUR_US / 2, "week-mon-early"),
+                (SUNDAY_US + DAY_US + 12 * HOUR_US, "week-mon"),
+                (SUNDAY_US + 2 * DAY_US + 12 * HOUR_US, "week-tue"),
+                (SUNDAY_US + 3 * DAY_US + 12 * HOUR_US, "week-wed"),
+                (SUNDAY_US + 4 * DAY_US + 12 * HOUR_US, "week-thu"),
+                (SUNDAY_US + 5 * DAY_US + 12 * HOUR_US, "week-fri"),
+                (SUNDAY_US + 6 * DAY_US + 12 * HOUR_US, "week-sat"),
+            ]
+            .into_iter()
+            .map(|(ts, case)| LogEntry {
+                ts,
+                level: 1,
+                severity: "info".into(),
+                message: "week fixture".into(),
+                metadata_json: format!(r#"{{"case":"{case}","week_group":"week"}}"#),
+            })
+            .collect(),
+        )
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn cases(storage: &Storage, query: &str) -> Vec<String> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap()["case"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    let all = vec![
+        "week-sun",
+        "week-sun-late",
+        "week-mon-early",
+        "week-mon",
+        "week-tue",
+        "week-wed",
+        "week-thu",
+        "week-fri",
+        "week-sat",
+    ];
+    let weekdays = vec![
+        "week-mon-early",
+        "week-mon",
+        "week-tue",
+        "week-wed",
+        "week-thu",
+        "week-fri",
+    ];
+    let queries = [
+        ("_time:week_range[Mon, Fri]", weekdays.clone()),
+        (
+            "_time:week_range(Sun, Sat] offset 0h",
+            vec![
+                "week-mon-early",
+                "week-mon",
+                "week-tue",
+                "week-wed",
+                "week-thu",
+                "week-fri",
+                "week-sat",
+            ],
+        ),
+        (
+            "_time:week_range[Sun, Sat) offset 0h",
+            vec![
+                "week-sun",
+                "week-sun-late",
+                "week-mon-early",
+                "week-mon",
+                "week-tue",
+                "week-wed",
+                "week-thu",
+                "week-fri",
+            ],
+        ),
+        ("_time:week_range(Sun, Sat) offset 0h", weekdays.clone()),
+        ("_time:week_range[Sun, Sat] offset 0h", all.clone()),
+        ("_time:week_range[Fri, Mon] offset 0h", Vec::new()),
+        ("_time:week_range[Sun, Sun) offset 0h", all.clone()),
+        ("_time:week_range(Sat, Sun) offset 0h", all),
+        (
+            "_time:week_range[Mon, Mon] offset 0h",
+            vec!["week-mon-early", "week-mon"],
+        ),
+        ("_time:week_range[Mon, Mon) offset 0h", Vec::new()),
+        ("_time:WEEK_RANGE[Monday, Friday] offset 0h", weekdays),
+        (
+            "_time:week_range[Mon, Mon] offset 1h30m",
+            vec!["week-sun-late", "week-mon-early", "week-mon"],
+        ),
+        (
+            "_time:week_range[Sun, Sun] offset -1h",
+            vec!["week-sun", "week-sun-late", "week-mon-early"],
+        ),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(cases(&storage, query).await, *expected, "{query}");
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "_time:week_range[Mon, Fri] offset 0h | filter week_group:=\"week\" | fields case",
+        )
+        .await
+        .into_iter()
+        .map(|row| row["case"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>(),
+        [
+            "week-mon-early",
+            "week-mon",
+            "week-tue",
+            "week-wed",
+            "week-thu",
+            "week-fri",
+        ]
+    );
+    assert!(
+        pipeline_rows(
+            &app,
+            "* | fields _msg | filter _time:week_range[Mon, Fri] offset 0h",
+        )
+        .await
+        .is_empty(),
+        "pipeline week_range must observe the current projected row"
+    );
+
+    for malformed in [
+        "_time:week_range",
+        "_time:week_range[foo, Fri]",
+        "_time:week_range[Mon, bar]",
+        "_time:week_range[mom, Wed]",
+        "_time:week_range[Mon Fri]",
+        "_time:week_range[Mon, Fri",
+        "_time:week_range[Mon, Fri] offset",
+        "_time:week_range[Mon, Fri] offset nope",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "_time:week_range[Mon, Fri] offset 0h | limit 100",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        cases(&storage, "_time:week_range[Mon, Fri]").await,
+        [
+            "week-mon-early",
+            "week-mon",
+            "week-tue",
+            "week-wed",
+            "week-thu",
+            "week-fri",
+        ],
+        "the reader must remain reusable after a bounded-work rejection"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(cases(&reopened, query).await, expected, "reopened: {query}");
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

@@ -654,6 +654,11 @@ compound offsets over UTC; an omitted offset is deterministic UTC rather than
 ambient process-local time. Direct users can run the native-unit public-row
 equivalent in `SQL-LOG-023`. Exact-build p95 is 3.697/37.123 ms narrow/wide
 with the same public block, entry, and byte reads as equal-cardinality filters.
+Week-range filtering adds case-insensitive short/full English weekdays,
+open/closed Sunday-through-Saturday ranges, and the same explicit signed UTC
+offset policy. `SQL-LOG-024` gives direct users the Euclidean native-timestamp
+equivalent, including pre-epoch dates and bracket-wrap edges; exact-build
+evidence remains pending.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

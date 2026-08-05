@@ -266,6 +266,23 @@ envelopes. Exact-build p95 is 3.697/37.123 ms narrow/wide versus
 four blocks and 1,024/8,192 entries, so the result does not justify an
 extension primitive.
 
+Week ranges use `_time:week_range[start, end] offset duration`. Short and full
+English weekday names are case-insensitive; Sunday through Saturday are a
+linear zero-through-six interval. Open brackets advance/retreat their bound
+modulo seven, so `[Sun,Sun)` and `(Sat,Sun)` select the full week while
+`[Mon,Mon)` is empty. Other inverted ranges are valid and empty. The offset is
+added to UTC before weekday selection, and an omitted offset is deterministic
+UTC rather than ambient process-local time.
+
+The storage-row evaluator computes the civil weekday from the native integer
+timestamp using Euclidean day arithmetic, preserving pre-epoch dates without
+allocating a date object. Pipeline filters parse the current projected RFC3339
+`_time`; removal by an earlier `fields` pipe makes the predicate false.
+`SQL-LOG-024` exposes the millisecond/microsecond public-row foundation,
+normalized bracket inputs, and signed offset operation. The Rust API owns
+weekday/bracket/duration grammar, composition, errors, limits, cancellation,
+and envelopes. Exact-build evidence remains pending before `LQL-F34` ships.
+
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept
 `="prefix"*`, field-scoped forms, and `exact(prefix*)`. They are

@@ -422,6 +422,15 @@ exact-build evidence at commit
 `aa7bc3001dfb354faccf2c2c2d4f3197b9391d6d` records narrow/wide day-range
 evaluation with byte-identical public reads. It closes the row without an
 extension primitive or storage-contract change.
+`LQL-F34` now has fifteen successful and eight error pinned week-range cases,
+failing-then-passing parser and real-extension regressions, short/full
+case-insensitive weekdays, exact open/closed bracket normalization, the
+Sunday-through-Saturday non-wrapping interval, full-week and valid-empty edge
+cases, signed compound offsets, current-row pipelines, work limits,
+cancellation, durability, and reopen. Timeless deliberately makes an omitted
+offset mean UTC. Executable `SQL-LOG-024` proves the native-unit public-row
+foundation including Euclidean pre-epoch weekdays. Exact-build narrow/wide
+evidence remains before the row is shipped.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

@@ -429,11 +429,14 @@ than hidden:
 selected compatibility behaviors. `LQL-F33` adds deterministic UTC-time
 fixture rows and fifteen successful plus eight error cases for open/closed day
 ranges, compact clocks, fixed signed offsets, full-day/equal/inverted bounds,
-pipeline composition, and strict grammar. The pinned oracle container runs in
-UTC; Timeless selects UTC explicitly when the query omits an offset rather than
-copying VictoriaLogs' mutable process-local default. The fixture now contains
-267 row-query cases, 80 error cases, and twelve statistics/pipeline cases; the
-fixture now contains 359 cases in total. Phrase, escape,
+pipeline composition, and strict grammar. `LQL-F34` adds deterministic
+weekday rows and fifteen successful plus eight error cases for open/closed
+Sunday-through-Saturday ranges, fixed signed offsets, bracket-wrap edges,
+valid empty ranges, pipeline composition, and strict grammar. The pinned
+oracle container runs in UTC; Timeless selects UTC explicitly when either
+query omits an offset rather than copying VictoriaLogs' mutable process-local
+default. The fixture now contains 282 row-query cases, 88 error cases, and
+twelve statistics/pipeline cases; the fixture now contains 382 cases in total. Phrase, escape,
 identifier,
 filtering, ordering, cardinality, pipeline-order, limit-zero, and rate-window
 semantics remain exact to the pinned oracle where the retained Timeless

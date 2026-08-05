@@ -131,6 +131,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-021`](#sql-log-021-same-row-textual-field-comparison) | `LQL-F30` | current foundation | exact textual equality and explicit bytewise fallback ordering over two public-row fields; API owns VictoriaLogs math-value detection, `_time` rendering, grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-022`](#sql-log-022-prefix-selected-field-set) | `LQL-F32` | current foundation | row-local exact-string matching over canonical special fields and recursively flattened metadata leaf names selected by a literal prefix; API owns LogsQL filter semantics, rich projection, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-023`](#sql-log-023-utc-day-range-with-explicit-offset) | `LQL-F33` | current foundation | exact UTC time-of-day bracket filtering with an explicit fixed offset over native public timestamps; API owns LogsQL clock/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
+| [`SQL-LOG-024`](#sql-log-024-utc-week-range-with-explicit-offset) | `LQL-F34` | current foundation | exact Sunday-through-Saturday UTC weekday filtering with an explicit fixed offset over native public timestamps; API owns LogsQL weekday/bracket/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5591,6 +5592,79 @@ parsing, logical and current-row pipeline composition, work/result/response
 limits, cancellation, and HTTP envelopes remain API behavior. The repeated
 daily predicate cannot narrow an arbitrary absolute timestamp window by
 itself. Ordinary SQL already receives the necessary public timestamp, so an
+extension primitive would not avoid block reads, decode, allocation, copy, or
+row crossing.
+
+### SQL-LOG-024: UTC week range with explicit offset
+
+Number Sunday through Saturday as zero through six. Bind `:week_start_day`
+and `:week_end_day` after applying bracket normalization: increment an open
+start modulo seven and decrement an open end modulo seven. Bind `:offset_ns`
+to the fixed duration added to UTC before weekday selection. Millisecond
+tables use `:timestamp_scale_ns = 1000000` and
+`:units_per_day = 86400000`; microsecond tables use `1000` and
+`86400000000`.
+
+```sql
+WITH
+bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), split AS (
+  SELECT
+    bounded.*,
+    ts / :units_per_day
+      - CASE WHEN ts % :units_per_day < 0 THEN 1 ELSE 0 END
+      AS epoch_day,
+    ((ts % :units_per_day + :units_per_day) % :units_per_day)
+      * :timestamp_scale_ns AS timestamp_day_ns,
+    :offset_ns / 86400000000000
+      - CASE WHEN :offset_ns % 86400000000000 < 0 THEN 1 ELSE 0 END
+      AS offset_days,
+    ((:offset_ns % 86400000000000) + 86400000000000)
+      % 86400000000000 AS offset_day_ns
+  FROM bounded
+), evaluated AS (
+  SELECT
+    split.*,
+    (
+      (
+        epoch_day + offset_days
+        + (timestamp_day_ns + offset_day_ns) / 86400000000000
+        + 4
+      ) % 7 + 7
+    ) % 7 AS utc_weekday
+  FROM split
+)
+SELECT ts, level, message, metadata
+FROM evaluated
+WHERE :week_start_day <= :week_end_day
+  AND utc_weekday >= :week_start_day
+  AND utc_weekday <= :week_end_day
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+The linear interval never wraps from Saturday to Sunday; a normalized start
+above the normalized end is valid and empty. Bracket normalization retains
+VictoriaLogs' edge behavior: `[Sun,Sun)` becomes zero through six (the full
+week), while `[Mon,Mon)` becomes one through zero (empty), and `(Sat,Sun)`
+also becomes the full week. The Euclidean day calculation is explicit because
+SQLite integer division truncates toward zero; the recipe therefore preserves
+pre-epoch weekdays and signed multi-day offsets. Bounds and timestamps remain
+in the table's native unit, the weekday bounds are inclusive after
+normalization, and output order is descending timestamp order.
+
+The Rust API accepts case-insensitive short and full English weekday names,
+parses brackets and VictoriaLogs signed compound durations, and deliberately
+uses UTC when the offset is omitted rather than reading mutable process-local
+timezone state. It also owns logical and current-row pipeline composition,
+errors, work/result/response limits, cancellation, and HTTP envelopes. A
+weekly predicate cannot independently narrow an arbitrary absolute timestamp
+window. The public row already contains the necessary timestamp, so an
 extension primitive would not avoid block reads, decode, allocation, copy, or
 row crossing.
 

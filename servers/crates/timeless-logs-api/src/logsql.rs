@@ -670,7 +670,7 @@ pub fn parse_at(
                 }
                 LogsqlTerm::Token(token) if token.starts_with("_time:") => {
                     let window = required_logsql_value(&token, "_time:")?;
-                    if let Some(predicate) = parse_day_range_filter(&window)? {
+                    if let Some(predicate) = parse_repeating_time_range_filter(&window)? {
                         append_predicate(&mut spec, predicate);
                     } else {
                         apply_time_filter(&mut spec, &window, timestamp_unit, query_now)?;
@@ -2354,7 +2354,7 @@ fn lex_logical_tokens(input: &str) -> Result<Vec<LogicalToken>, LogsqlError> {
         }
         push_logical_atom(&mut tokens, &input[start..index])?;
     }
-    combine_day_range_offset_tokens(tokens)
+    combine_repeating_time_range_offset_tokens(tokens)
 }
 
 fn is_time_range_prefix(prefix: &str) -> bool {
@@ -2369,15 +2369,16 @@ fn is_time_range_prefix(prefix: &str) -> bool {
             .is_some_and(|suffix| suffix.eq_ignore_ascii_case(":range"))
 }
 
-fn is_day_range_atom(atom: &str) -> bool {
-    atom.strip_prefix("_time:").is_some_and(|value| {
+fn repeating_time_range_name(atom: &str) -> Option<&str> {
+    let value = atom.strip_prefix("_time:")?;
+    ["day_range", "week_range"].into_iter().find(|function| {
         value
-            .get(.."day_range".len())
-            .is_some_and(|name| name.eq_ignore_ascii_case("day_range"))
+            .get(..function.len())
+            .is_some_and(|name| name.eq_ignore_ascii_case(function))
     })
 }
 
-fn combine_day_range_offset_tokens(
+fn combine_repeating_time_range_offset_tokens(
     tokens: Vec<LogicalToken>,
 ) -> Result<Vec<LogicalToken>, LogsqlError> {
     let mut combined = Vec::with_capacity(tokens.len());
@@ -2388,23 +2389,24 @@ fn combine_day_range_offset_tokens(
             index += 1;
             continue;
         };
-        if is_day_range_atom(atom)
-            && matches!(tokens.get(index + 1), Some(LogicalToken::Atom(offset)) if offset.eq_ignore_ascii_case("offset"))
-        {
-            let (duration, consumed) = match (tokens.get(index + 2), tokens.get(index + 3)) {
-                (Some(LogicalToken::Atom(duration)), _) => (duration.clone(), 3),
-                (Some(LogicalToken::Not), Some(LogicalToken::Atom(duration))) => {
-                    (format!("-{duration}"), 4)
-                }
-                _ => {
-                    return Err(LogsqlError::malformed(
-                        "LogsQL day_range offset requires one duration",
-                    ))
-                }
-            };
-            combined.push(LogicalToken::Atom(format!("{atom} offset {duration}")));
-            index += consumed;
-            continue;
+        if let Some(function) = repeating_time_range_name(atom) {
+            if matches!(tokens.get(index + 1), Some(LogicalToken::Atom(offset)) if offset.eq_ignore_ascii_case("offset"))
+            {
+                let (duration, consumed) = match (tokens.get(index + 2), tokens.get(index + 3)) {
+                    (Some(LogicalToken::Atom(duration)), _) => (duration.clone(), 3),
+                    (Some(LogicalToken::Not), Some(LogicalToken::Atom(duration))) => {
+                        (format!("-{duration}"), 4)
+                    }
+                    _ => {
+                        return Err(LogsqlError::malformed(format!(
+                            "LogsQL {function} offset requires one duration"
+                        )))
+                    }
+                };
+                combined.push(LogicalToken::Atom(format!("{atom} offset {duration}")));
+                index += consumed;
+                continue;
+            }
         }
         combined.push(tokens[index].clone());
         index += 1;
@@ -2649,7 +2651,7 @@ fn compile_logical_atom(
     if atom.starts_with("_time:") {
         let mut spec = QuerySpec::default();
         let value = required_logsql_value(atom, "_time:")?;
-        if let Some(predicate) = parse_day_range_filter(&value)? {
+        if let Some(predicate) = parse_repeating_time_range_filter(&value)? {
             return Ok(predicate);
         }
         apply_time_filter(&mut spec, &value, timestamp_unit, query_now)?;
@@ -3223,7 +3225,7 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
         raw_terms.push(current);
     }
 
-    let raw_terms = combine_day_range_offset_terms(raw_terms)?;
+    let raw_terms = combine_repeating_time_range_offset_terms(raw_terms)?;
     let mut terms = Vec::with_capacity(raw_terms.len());
     for raw in raw_terms {
         if let Some((message, consumed)) = parse_quoted_prefix(&raw)? {
@@ -3237,22 +3239,27 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
     Ok(terms)
 }
 
-fn combine_day_range_offset_terms(raw_terms: Vec<String>) -> Result<Vec<String>, LogsqlError> {
+fn combine_repeating_time_range_offset_terms(
+    raw_terms: Vec<String>,
+) -> Result<Vec<String>, LogsqlError> {
     let mut combined = Vec::with_capacity(raw_terms.len());
     let mut index = 0usize;
     while index < raw_terms.len() {
         let term = &raw_terms[index];
-        if is_day_range_atom(term)
-            && raw_terms
+        if let Some(function) = repeating_time_range_name(term) {
+            if raw_terms
                 .get(index + 1)
                 .is_some_and(|value| value.eq_ignore_ascii_case("offset"))
-        {
-            let duration = raw_terms.get(index + 2).ok_or_else(|| {
-                LogsqlError::malformed("LogsQL day_range offset requires one duration")
-            })?;
-            combined.push(format!("{term} offset {duration}"));
-            index += 3;
-            continue;
+            {
+                let duration = raw_terms.get(index + 2).ok_or_else(|| {
+                    LogsqlError::malformed(format!(
+                        "LogsQL {function} offset requires one duration"
+                    ))
+                })?;
+                combined.push(format!("{term} offset {duration}"));
+                index += 3;
+                continue;
+            }
         }
         combined.push(term.clone());
         index += 1;
@@ -3803,6 +3810,34 @@ fn parse_duration_ms(value: &str) -> Option<i64> {
     count.checked_mul(multiplier)
 }
 
+fn parse_repeating_time_range_filter(value: &str) -> Result<Option<LogPredicate>, LogsqlError> {
+    if let Some(predicate) = parse_day_range_filter(value)? {
+        return Ok(Some(predicate));
+    }
+    parse_week_range_filter(value)
+}
+
+fn parse_repeating_time_range_offset(suffix: &str, function: &str) -> Result<i64, LogsqlError> {
+    if suffix.is_empty() {
+        // Deterministic compatibility choice: an omitted offset means UTC,
+        // not the process's mutable local timezone.
+        return Ok(0);
+    }
+    let mut words = suffix.split_whitespace();
+    let keyword = words.next().unwrap_or_default();
+    let duration = words.next().ok_or_else(|| {
+        LogsqlError::malformed(format!("LogsQL {function} offset requires one duration"))
+    })?;
+    if !keyword.eq_ignore_ascii_case("offset") || words.next().is_some() {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected text after LogsQL {function}: {suffix:?}"
+        )));
+    }
+    parse_victorialogs_human_duration(duration).ok_or_else(|| {
+        LogsqlError::malformed(format!("invalid LogsQL {function} offset {duration:?}"))
+    })
+}
+
 fn parse_day_range_filter(value: &str) -> Result<Option<LogPredicate>, LogsqlError> {
     const FUNCTION: &str = "day_range";
     const NANOSECONDS_PER_MINUTE: i64 = 60_000_000_000;
@@ -3859,25 +3894,7 @@ fn parse_day_range_filter(value: &str) -> Result<Option<LogPredicate>, LogsqlErr
     }
 
     let suffix = remainder[close_index + close.len_utf8()..].trim();
-    let offset_ns = if suffix.is_empty() {
-        // Deterministic compatibility choice: an omitted offset means UTC,
-        // not the process's mutable local timezone.
-        0
-    } else {
-        let mut words = suffix.split_whitespace();
-        let keyword = words.next().unwrap_or_default();
-        let duration = words.next().ok_or_else(|| {
-            LogsqlError::malformed("LogsQL day_range offset requires one duration")
-        })?;
-        if !keyword.eq_ignore_ascii_case("offset") || words.next().is_some() {
-            return Err(LogsqlError::malformed(format!(
-                "unexpected text after LogsQL day_range: {suffix:?}"
-            )));
-        }
-        parse_victorialogs_human_duration(duration).ok_or_else(|| {
-            LogsqlError::malformed(format!("invalid LogsQL day_range offset {duration:?}"))
-        })?
-    };
+    let offset_ns = parse_repeating_time_range_offset(suffix, FUNCTION)?;
     Ok(Some(LogPredicate::DayRange {
         start_ns,
         end_ns,
@@ -3885,6 +3902,77 @@ fn parse_day_range_filter(value: &str) -> Result<Option<LogPredicate>, LogsqlErr
         end_inclusive,
         offset_ns,
     }))
+}
+
+fn parse_week_range_filter(value: &str) -> Result<Option<LogPredicate>, LogsqlError> {
+    const FUNCTION: &str = "week_range";
+
+    let Some(name) = value.get(..FUNCTION.len()) else {
+        return Ok(None);
+    };
+    if !name.eq_ignore_ascii_case(FUNCTION) {
+        return Ok(None);
+    }
+    let remainder = &value[FUNCTION.len()..];
+    let Some(open) = remainder.chars().next() else {
+        return Err(LogsqlError::malformed(
+            "LogsQL week_range requires '[' or '(' and two bounds",
+        ));
+    };
+    if !matches!(open, '[' | '(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL week_range must start with '[' or '('",
+        ));
+    }
+    let Some((close_relative, close)) = remainder[open.len_utf8()..]
+        .char_indices()
+        .find(|(_, character)| matches!(character, ']' | ')'))
+    else {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL week_range filter",
+        ));
+    };
+    let close_index = open.len_utf8() + close_relative;
+    let inner = &remainder[open.len_utf8()..close_index];
+    let (start, end) = inner
+        .split_once(',')
+        .ok_or_else(|| LogsqlError::malformed("LogsQL week_range requires exactly two bounds"))?;
+    if end.contains(',') {
+        return Err(LogsqlError::malformed(
+            "LogsQL week_range accepts exactly two bounds",
+        ));
+    }
+    let mut start_day = parse_weekday(start.trim()).ok_or_else(|| {
+        LogsqlError::malformed(format!("invalid LogsQL week_range start {start:?}"))
+    })?;
+    let mut end_day = parse_weekday(end.trim())
+        .ok_or_else(|| LogsqlError::malformed(format!("invalid LogsQL week_range end {end:?}")))?;
+    if open == '(' {
+        start_day = (start_day + 1) % 7;
+    }
+    if close == ')' {
+        end_day = (end_day + 6) % 7;
+    }
+    let suffix = remainder[close_index + close.len_utf8()..].trim();
+    let offset_ns = parse_repeating_time_range_offset(suffix, FUNCTION)?;
+    Ok(Some(LogPredicate::WeekRange {
+        start_day,
+        end_day,
+        offset_ns,
+    }))
+}
+
+fn parse_weekday(value: &str) -> Option<u8> {
+    match value.to_ascii_lowercase().as_str() {
+        "sun" | "sunday" => Some(0),
+        "mon" | "monday" => Some(1),
+        "tue" | "tuesday" => Some(2),
+        "wed" | "wednesday" => Some(3),
+        "thu" | "thursday" => Some(4),
+        "fri" | "friday" => Some(5),
+        "sat" | "saturday" => Some(6),
+        _ => None,
+    }
 }
 
 fn parse_day_clock_ns(value: &str) -> Option<i64> {
@@ -4990,6 +5078,42 @@ mod tests {
             "_time:day_range[10:00, 12:00",
             "_time:day_range[10:00, 12:00] offset",
             "_time:day_range[10:00, 12:00] offset nope",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_sixteen_week_range_grammar_is_complete_and_strict() {
+        for query in [
+            "_time:week_range[Mon, Fri] offset 0h",
+            "_time:week_range(Sun, Sat) offset 2h",
+            "_time:WEEK_RANGE[Monday, Friday] offset -2h",
+            "_time:week_range[Sun, Sun) offset 1h30m",
+            "_time:week_range[Mon, Fri]",
+            "_time:week_range[Mon, Fri] offset 0h AND level:=error",
+            "* | filter _time:week_range[Mon, Fri] offset 0h",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error:?}"));
+            assert!(
+                format!("{plan:?}").contains("WeekRange"),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for malformed in [
+            "_time:week_range",
+            "_time:week_range[foo, Fri]",
+            "_time:week_range[Mon, bar]",
+            "_time:week_range[mom, Wed]",
+            "_time:week_range[Mon Fri]",
+            "_time:week_range[Mon, Fri",
+            "_time:week_range[Mon, Fri] offset",
+            "_time:week_range[Mon, Fri] offset nope",
         ] {
             assert!(
                 parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),

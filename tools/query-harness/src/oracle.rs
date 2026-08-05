@@ -9,7 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, NaiveTime, SecondsFormat, TimeZone, Timelike, Utc};
+use chrono::{
+    Datelike, Duration as ChronoDuration, NaiveTime, SecondsFormat, TimeZone, Timelike, Utc,
+    Weekday,
+};
 use clap::Args;
 use regex::Regex;
 use reqwest::blocking::{Client, Response};
@@ -1416,7 +1419,7 @@ fn victorialogs_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Re
         "-p".to_owned(),
         format!("127.0.0.1:{port}:9428"),
         oracle.image.clone(),
-        "-retentionPeriod=1d".to_owned(),
+        "-retentionPeriod=30d".to_owned(),
     ];
     let output = command_output(runtime, &args, Duration::from_secs(180))?;
     if !output.status.success() {
@@ -1462,24 +1465,61 @@ fn victorialogs_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Re
             .map(|value| value.as_i64().context("time_offset_us must be an integer"))
             .transpose()?
             .unwrap_or(position as i64);
-        let oracle_time = row
+        let utc_time_of_day = row
             .remove("utc_time_of_day")
-            .map(|value| -> Result<i64> {
+            .map(|value| -> Result<NaiveTime> {
                 let value = value
                     .as_str()
                     .context("utc_time_of_day must be an HH:MM:SS.ffffff string")?;
-                let time = NaiveTime::parse_from_str(value, "%H:%M:%S%.f")
-                    .with_context(|| format!("invalid utc_time_of_day {value:?}"))?;
-                let base = Utc
-                    .timestamp_micros(base_us)
-                    .single()
-                    .context("VictoriaLogs base timestamp is outside UTC range")?;
-                Ok(Utc
-                    .from_utc_datetime(&base.date_naive().and_time(time))
-                    .timestamp_micros())
+                NaiveTime::parse_from_str(value, "%H:%M:%S%.f")
+                    .with_context(|| format!("invalid utc_time_of_day {value:?}"))
             })
-            .transpose()?
-            .unwrap_or_else(|| base_us.saturating_add(offset_us));
+            .transpose()?;
+        let utc_weekday = row
+            .remove("utc_weekday")
+            .map(|value| -> Result<Weekday> {
+                let value = value
+                    .as_str()
+                    .context("utc_weekday must be an English weekday name")?;
+                match value.to_ascii_lowercase().as_str() {
+                    "sun" | "sunday" => Ok(Weekday::Sun),
+                    "mon" | "monday" => Ok(Weekday::Mon),
+                    "tue" | "tuesday" => Ok(Weekday::Tue),
+                    "wed" | "wednesday" => Ok(Weekday::Wed),
+                    "thu" | "thursday" => Ok(Weekday::Thu),
+                    "fri" | "friday" => Ok(Weekday::Fri),
+                    "sat" | "saturday" => Ok(Weekday::Sat),
+                    _ => bail!("invalid utc_weekday {value:?}"),
+                }
+            })
+            .transpose()?;
+        let oracle_time = if utc_time_of_day.is_some() || utc_weekday.is_some() {
+            let base = Utc
+                .timestamp_micros(base_us)
+                .single()
+                .context("VictoriaLogs base timestamp is outside UTC range")?;
+            let mut date = base.date_naive();
+            if let Some(weekday) = utc_weekday {
+                let days_back = (base.weekday().num_days_from_sunday() as i64
+                    - weekday.num_days_from_sunday() as i64)
+                    .rem_euclid(7);
+                date = date
+                    .checked_sub_signed(ChronoDuration::days(days_back))
+                    .context("utc_weekday date is outside the supported range")?;
+            }
+            let time = utc_time_of_day.unwrap_or_else(|| base.time());
+            let mut timestamp = Utc
+                .from_utc_datetime(&date.and_time(time))
+                .timestamp_micros();
+            if utc_weekday.is_some() && timestamp > base_us {
+                timestamp = timestamp
+                    .checked_sub(7 * 24 * 60 * 60 * 1_000_000)
+                    .context("utc_weekday timestamp underflow")?;
+            }
+            timestamp
+        } else {
+            base_us.saturating_add(offset_us)
+        };
         row.insert("oracle_time".to_owned(), json!(oracle_time));
         ndjson.push_str(&serde_json::to_string(&row)?);
         ndjson.push('\n');

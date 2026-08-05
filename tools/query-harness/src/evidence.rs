@@ -1831,6 +1831,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "week_range_narrow",
+                "logs-week-range-narrow",
+                "host:=\"h00\" AND _time:week_range[Fri, Fri] offset 0h | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "week_range_wide",
+                "logs-week-range-wide",
+                "_time:week_range[Fri, Fri] offset 0h | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
                 "empty_narrow",
                 "logs-empty-narrow",
                 "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",

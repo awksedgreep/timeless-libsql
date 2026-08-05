@@ -124,7 +124,16 @@
     {"case": "day-start", "_msg": "day start", "day_group": "day", "utc_time_of_day": "10:00:00.000000"},
     {"case": "day-middle", "_msg": "day middle", "day_group": "day", "utc_time_of_day": "11:00:00.123456"},
     {"case": "day-end", "_msg": "day end", "day_group": "day", "utc_time_of_day": "12:00:00.000000"},
-    {"case": "day-after", "_msg": "clock high", "day_group": "day", "utc_time_of_day": "12:00:00.000001"}
+    {"case": "day-after", "_msg": "clock high", "day_group": "day", "utc_time_of_day": "12:00:00.000001"},
+    {"case": "week-sun", "_msg": "week Sunday", "week_group": "week", "utc_weekday": "Sun", "utc_time_of_day": "12:00:00.000000"},
+    {"case": "week-sun-late", "_msg": "week Sunday late", "week_group": "week", "utc_weekday": "Sun", "utc_time_of_day": "23:30:00.000000"},
+    {"case": "week-mon-early", "_msg": "week Monday early", "week_group": "week", "utc_weekday": "Mon", "utc_time_of_day": "00:30:00.000000"},
+    {"case": "week-mon", "_msg": "week Monday", "week_group": "week", "utc_weekday": "Mon", "utc_time_of_day": "12:00:00.000000"},
+    {"case": "week-tue", "_msg": "week Tuesday", "week_group": "week", "utc_weekday": "Tue", "utc_time_of_day": "12:00:00.000000"},
+    {"case": "week-wed", "_msg": "week Wednesday", "week_group": "week", "utc_weekday": "Wed", "utc_time_of_day": "12:00:00.000000"},
+    {"case": "week-thu", "_msg": "week Thursday", "week_group": "week", "utc_weekday": "Thu", "utc_time_of_day": "12:00:00.000000"},
+    {"case": "week-fri", "_msg": "week Friday", "week_group": "week", "utc_weekday": "Fri", "utc_time_of_day": "12:00:00.000000"},
+    {"case": "week-sat", "_msg": "week Saturday", "week_group": "week", "utc_weekday": "Sat", "utc_time_of_day": "12:00:00.000000"}
   ],
   "query_cases": [
     {
@@ -1818,6 +1827,96 @@
       "query": "_time:day_range[10:00, 12:00] offset 0h | filter day_group:=\"day\"",
       "status": 200,
       "expected_cases": ["day-start", "day-middle", "day-end"]
+    },
+    {
+      "id": "LQL-F34-omitted-offset-uses-oracle-utc-environment",
+      "query": "week_group:=\"week\" _time:week_range[Mon, Fri]",
+      "status": 200,
+      "expected_cases": ["week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri"]
+    },
+    {
+      "id": "LQL-F34-open-start-excludes-sunday",
+      "query": "week_group:=\"week\" _time:week_range(Sun, Sat] offset 0h",
+      "status": 200,
+      "expected_cases": ["week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri", "week-sat"]
+    },
+    {
+      "id": "LQL-F34-open-end-excludes-saturday",
+      "query": "week_group:=\"week\" _time:week_range[Sun, Sat) offset 0h",
+      "status": 200,
+      "expected_cases": ["week-sun", "week-sun-late", "week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri"]
+    },
+    {
+      "id": "LQL-F34-open-bounds-exclude-weekend",
+      "query": "week_group:=\"week\" _time:week_range(Sun, Sat) offset 0h",
+      "status": 200,
+      "expected_cases": ["week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri"]
+    },
+    {
+      "id": "LQL-F34-closed-full-week",
+      "query": "week_group:=\"week\" _time:week_range[Sun, Sat] offset 0h",
+      "status": 200,
+      "expected_cases": ["week-sun", "week-sun-late", "week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri", "week-sat"]
+    },
+    {
+      "id": "LQL-F34-inverted-range-does-not-wrap",
+      "query": "week_group:=\"week\" _time:week_range[Fri, Mon] offset 0h",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F34-open-sunday-end-wraps-to-full-week",
+      "query": "week_group:=\"week\" _time:week_range[Sun, Sun) offset 0h",
+      "status": 200,
+      "expected_cases": ["week-sun", "week-sun-late", "week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri", "week-sat"]
+    },
+    {
+      "id": "LQL-F34-open-saturday-start-wraps-to-full-week",
+      "query": "week_group:=\"week\" _time:week_range(Sat, Sun) offset 0h",
+      "status": 200,
+      "expected_cases": ["week-sun", "week-sun-late", "week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri", "week-sat"]
+    },
+    {
+      "id": "LQL-F34-equal-closed-bounds-select-one-weekday",
+      "query": "week_group:=\"week\" _time:week_range[Mon, Mon] offset 0h",
+      "status": 200,
+      "expected_cases": ["week-mon-early", "week-mon"]
+    },
+    {
+      "id": "LQL-F34-equal-half-open-bounds-are-empty",
+      "query": "week_group:=\"week\" _time:week_range[Mon, Mon) offset 0h",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F34-case-insensitive-full-weekday-names",
+      "query": "week_group:=\"week\" _time:WeEk_RaNgE[mOnDaY, fRiDaY] offset 0h",
+      "status": 200,
+      "expected_cases": ["week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri"]
+    },
+    {
+      "id": "LQL-F34-positive-compound-offset-shifts-forward",
+      "query": "week_group:=\"week\" _time:week_range[Mon, Mon] offset 1h30m",
+      "status": 200,
+      "expected_cases": ["week-sun-late", "week-mon-early", "week-mon"]
+    },
+    {
+      "id": "LQL-F34-negative-offset-shifts-backward",
+      "query": "week_group:=\"week\" _time:week_range[Sun, Sun] offset -1h",
+      "status": 200,
+      "expected_cases": ["week-sun", "week-sun-late", "week-mon-early"]
+    },
+    {
+      "id": "LQL-F34-sunday-only",
+      "query": "week_group:=\"week\" _time:week_range[Sun, Sun] offset 0h",
+      "status": 200,
+      "expected_cases": ["week-sun", "week-sun-late"]
+    },
+    {
+      "id": "LQL-F34-pipeline-composition",
+      "query": "_time:week_range[Mon, Fri] offset 0h | filter week_group:=\"week\"",
+      "status": 200,
+      "expected_cases": ["week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri"]
     }
   ],
   "stats_cases": [
@@ -2483,6 +2582,62 @@
     {
       "id": "LQL-F33-day-range-rejects-invalid-offset",
       "query": "_time:day_range[10:00, 12:00] offset nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-requires-bounds",
+      "query": "_time:week_range",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-rejects-invalid-start",
+      "query": "_time:week_range[foo, Fri]",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-rejects-invalid-end",
+      "query": "_time:week_range[Mon, bar]",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-rejects-near-miss-weekday",
+      "query": "_time:week_range[mom, Wed]",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-requires-comma",
+      "query": "_time:week_range[Mon Fri]",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-requires-closing-brace",
+      "query": "_time:week_range[Mon, Fri",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-offset-requires-duration",
+      "query": "_time:week_range[Mon, Fri] offset",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F34-week-range-rejects-invalid-offset",
+      "query": "_time:week_range[Mon, Fri] offset nope",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
