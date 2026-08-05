@@ -1859,6 +1859,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "delete_narrow",
+                "logs-delete-narrow",
+                "host:=\"h00\" AND query | delete context.*, range_key | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "delete_wide",
+                "logs-delete-wide",
+                "query | delete context.*, range_key | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
                 "empty_narrow",
                 "logs-empty-narrow",
                 "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",
