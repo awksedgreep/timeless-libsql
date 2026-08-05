@@ -497,3 +497,17 @@ top-k processor in VictoriaLogs v1.52.0. The fixture now contains 296
 row-query cases, 120 error cases, and 55 statistics/pipeline cases: 471 cases
 total, all passing against the immutable image.
 The fixture now contains 471 cases.
+
+`LQL-P15` adds ten successful statistics/pipeline cases and eight error cases.
+They pin default-ten and explicit limits, parenthesized and bare multi-field
+lists, frequency-descending and bytewise-key tie order, `hits [as]` and
+`rank [as]` string fields, collision-safe result names, case-insensitive
+keywords, current-pipeline filter/projection composition, and empty input.
+Missing, JSON null, and empty values share one empty-text group whose field is
+omitted from stream JSON; numbers and strings use their textual projection.
+Source audit confirms the immutable VictoriaLogs v1.52.0 implementation counts
+all unique field vectors in bounded state, retains only the requested top
+groups, and orders equal counts by encoded key. The fixture now contains 296
+row-query cases, 128 error cases, and 65 statistics/pipeline cases: 489 cases
+total, all passing against the immutable image.
+The fixture now contains 489 cases.

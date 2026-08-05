@@ -2360,6 +2360,78 @@
       "id": "LQL-P14-last-empty-input",
       "query": "case:=last-missing | last 3 by (case)",
       "expected_rows": []
+    },
+    {
+      "id": "LQL-P15-top-frequency-and-key-order",
+      "query": "numeric_group:=numeric | top by (first_partition)",
+      "expected_rows": [
+        {"first_partition": "a", "hits": "5"},
+        {"first_partition": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P15-top-limit-hits-and-rank-aliases",
+      "query": "numeric_group:=numeric | top 1 by (first_partition) hits as total rank as position",
+      "expected_rows": [
+        {"first_partition": "a", "total": "5", "position": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P15-top-bare-multiple-fields",
+      "query": "numeric_group:=numeric | top 5 numeric_group, first_partition",
+      "expected_rows": [
+        {"numeric_group": "numeric", "first_partition": "a", "hits": "5"},
+        {"numeric_group": "numeric", "first_partition": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P15-top-textual-values-and-empty-coalescing",
+      "query": "numeric_group:=numeric | top 8 by (n)",
+      "expected_rows": [
+        {"hits": "2"},
+        {"n": "-2", "hits": "1"},
+        {"n": "0", "hits": "1"},
+        {"n": "10", "hits": "1"},
+        {"n": "2", "hits": "1"},
+        {"n": "2.5", "hits": "1"},
+        {"n": "3", "hits": "1"},
+        {"n": "9007199254740993", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P15-top-hits-name-avoids-selected-field",
+      "query": "numeric_group:=numeric | top by (hits)",
+      "expected_rows": [{"hitss": "9"}]
+    },
+    {
+      "id": "LQL-P15-top-rank-name-avoids-selected-field",
+      "query": "numeric_group:=numeric | top by (rank) rank",
+      "expected_rows": [{"hits": "9", "ranks": "1"}]
+    },
+    {
+      "id": "LQL-P15-top-composes-after-filter",
+      "query": "numeric_group:=numeric | filter first_partition:=a | top by (first_partition) hits as count",
+      "expected_rows": [{"first_partition": "a", "count": "5"}]
+    },
+    {
+      "id": "LQL-P15-top-composes-before-projection",
+      "query": "numeric_group:=numeric | top 2 by (first_partition) rank | fields first_partition, hits, rank",
+      "expected_rows": [
+        {"first_partition": "a", "hits": "5", "rank": "1"},
+        {"first_partition": "b", "hits": "4", "rank": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P15-top-command-and-modifiers-are-case-insensitive",
+      "query": "numeric_group:=numeric | TOP 1 BY (first_partition) HITS AS total RANK AS position",
+      "expected_rows": [
+        {"first_partition": "a", "total": "5", "position": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P15-top-empty-input",
+      "query": "case:=top-missing | top 3 by (case)",
+      "expected_rows": []
     }
   ],
   "error_cases": [
@@ -3199,6 +3271,62 @@
     {
       "id": "LQL-P14-last-rejects-trailing-token",
       "query": "* | last by (case) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-requires-fields",
+      "query": "* | top",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-rejects-zero",
+      "query": "* | top 0 by (case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-rejects-nonnumeric-limit",
+      "query": "* | top nope by (case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-requires-by-fields",
+      "query": "* | top by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-rejects-wildcard-field",
+      "query": "* | top by (case*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-requires-hits-name",
+      "query": "* | top by (case) hits",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-requires-rank-name-after-as",
+      "query": "* | top by (case) rank as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P15-top-rejects-trailing-token",
+      "query": "* | top by (case) trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

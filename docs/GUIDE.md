@@ -315,6 +315,14 @@ for the reverse numeric form. LogsQL `last` reverses the complete `first`
 order—including each field's selected direction—and shares the same bounded
 partition/rank implementation.
 
+For the most frequent values of a public log field, use executable
+[`SQL-LOG-029`](QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count).
+It maps missing/null to empty text, groups a bounded public JSON path, orders
+hits descending with a deterministic bytewise tie-break, and emits hits/rank
+as text. The Rust LogsQL API adds optional `by`, parenthesized or bare
+multi-field grouping, `hits [as]` and `rank [as]`, collision-safe names,
+current-row composition, hard state/result limits, cancellation, and errors.
+
 Generic tables default to epoch milliseconds. The release Rust logs server
 declares microseconds and binds every timestamp and work guard in that native
 unit. Inspect `timeless_capabilities()` before depending on an additive query

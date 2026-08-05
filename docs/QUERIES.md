@@ -627,6 +627,44 @@ Executable
 provides the corresponding descending window-rank statement and documents the
 same boundary.
 
+## Bounded LogsQL `top`
+
+The Rust logs API implements frequency ranking over the current pipeline row:
+
+```text
+* | top by (service)
+* | top 5 service, level hits as total rank as position
+* | filter level:=error | top 10 by (service) rank
+```
+
+The default limit is ten. `by` is optional; fields may be a parenthesized or
+bare comma-separated exact list. `hits [as] field` renames the required string
+hit count, while `rank [as] field` adds a one-based string rank. Default or
+explicit result names gain trailing `s` characters until they no longer
+collide with a selected field. Commands and modifiers are case-insensitive;
+zero/fractional limits, empty/wildcard fields, missing names, unseparated
+fields, and trailing tokens fail before storage work.
+
+Every selected value uses the LogsQL textual projection. Missing, JSON null,
+and empty strings therefore share one empty group; its selected field is
+omitted from response JSON while hits/rank remain. Strings are unquoted and
+numbers, booleans, arrays, and objects use their retained textual forms. A
+multi-field vector is framed structurally, so different tuples cannot collide.
+Groups order by hits descending and then projected key ascending. The output
+is a summary and does not mutate or flatten stored rich metadata.
+
+Input rows and unique groups are bounded by `max_work_rows`; retained keys and
+group/sort state are charged to `max_response_bytes`; the requested output is
+bounded by `max_result_rows`; and cancellation is checked during grouping,
+sorting, and assembly. The operation reads only the public log rowset.
+
+Executable
+[`SQL-LOG-029`](QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count)
+provides the single-field public `GROUP BY`, deterministic ordering, and
+window-rank equivalent. Multi-field query grammar, current-row composition,
+name collision policy, limits, cancellation, and HTTP envelopes remain API
+behavior. No new extension primitive or private storage access is required.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

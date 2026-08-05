@@ -93,7 +93,7 @@ run variation; source preprocessing neither amplifies nor reduces storage work.
 
 The ordered pipeline also accepts `field_values`, `field_names`,
 `fields`/`keep`, `filter`/`where`, `stats`, `query_stats`, and bounded
-`first`/`last`.
+`first`/`last`/`top`.
 Projection
 accepts exact dotted paths, top-level prefixes, and `*`; a later filter
 observes the projected row, not the original one. Field discovery is
@@ -514,6 +514,27 @@ gives direct users the exact bounded numeric window-rank foundation and
 documents why default SQLite collation is not full LogsQL natural ordering.
 [`SQL-LOG-028`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)
 is the executable reverse-order counterpart.
+
+LogsQL `top` groups one or more exact fields from the current pipeline row,
+orders groups by hit count descending and textual key ascending, and emits
+only the selected summary fields:
+
+```text
+service:="api" | top by (level)
+* | top 5 service, level hits as total rank as position
+```
+
+The default is ten. Parenthesized and bare comma-separated lists are accepted;
+`by` and `as` are optional. Missing, null, and empty values share an empty-text
+group whose field is omitted from JSON. Selected values, hits, and optional
+one-based rank are strings, matching VictoriaLogs summary semantics while the
+stored rich source remains unchanged. Result names are made collision-safe
+against selected fields. Work, unique group count, retained key/sort state,
+result rows, response bytes, and cancellation use the existing query limits.
+Executable
+[`SQL-LOG-029`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count)
+provides the public single-field `GROUP BY`/window-rank foundation. No
+extension primitive or private table is used.
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for

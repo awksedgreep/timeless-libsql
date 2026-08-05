@@ -408,6 +408,180 @@ fn parse_last_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     parse_first_last_spec(segment, "last").map(PipelineOp::Last)
 }
 
+fn parse_top_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "top")?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL top pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("top") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL top pipe, not {command:?}"
+        )));
+    }
+
+    let mut cursor = 1usize;
+    let mut limit = 10usize;
+    if tokens.get(cursor).is_some_and(|token| {
+        token
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit() || matches!(character, '+' | '-'))
+    }) {
+        let value = &tokens[cursor];
+        limit = value.parse::<usize>().map_err(|_| {
+            LogsqlError::malformed(format!(
+                "LogsQL top requires a positive integer limit, not {value:?}"
+            ))
+        })?;
+        if limit == 0 {
+            return Err(LogsqlError::malformed(
+                "LogsQL top limit must be greater than zero",
+            ));
+        }
+        cursor += 1;
+    }
+
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("by"))
+    {
+        cursor += 1;
+    }
+    let by_fields = parse_top_fields(&tokens, &mut cursor)?;
+    if by_fields.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL top requires at least one exact field",
+        ));
+    }
+
+    let mut hits_field = "hits".to_owned();
+    let mut rank_field = None;
+    while let Some(token) = tokens.get(cursor) {
+        if token.eq_ignore_ascii_case("hits") {
+            cursor += 1;
+            if tokens
+                .get(cursor)
+                .is_some_and(|token| token.eq_ignore_ascii_case("as"))
+            {
+                cursor += 1;
+            }
+            let value = tokens.get(cursor).ok_or_else(|| {
+                LogsqlError::malformed("LogsQL top hits requires a result field name")
+            })?;
+            if matches!(value.as_str(), "," | "(" | ")")
+                || value.eq_ignore_ascii_case("hits")
+                || value.eq_ignore_ascii_case("rank")
+            {
+                return Err(LogsqlError::malformed(
+                    "LogsQL top hits requires a result field name",
+                ));
+            }
+            hits_field = pipeline_field_name(&parse_first_exact_field(value, "hits", "top")?)?;
+            cursor += 1;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("rank") {
+            cursor += 1;
+            let explicit_as = tokens
+                .get(cursor)
+                .is_some_and(|token| token.eq_ignore_ascii_case("as"));
+            if explicit_as {
+                cursor += 1;
+            }
+            let name = match tokens.get(cursor) {
+                Some(value)
+                    if !matches!(value.as_str(), "," | "(" | ")")
+                        && !value.eq_ignore_ascii_case("hits")
+                        && !value.eq_ignore_ascii_case("rank") =>
+                {
+                    cursor += 1;
+                    pipeline_field_name(&parse_first_exact_field(value, "rank", "top")?)?
+                }
+                _ if explicit_as => {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL top rank as requires a result field name",
+                    ))
+                }
+                _ => "rank".to_owned(),
+            };
+            rank_field = Some(name);
+            continue;
+        }
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL top token {token:?}"
+        )));
+    }
+
+    hits_field = unique_top_result_name(hits_field, &by_fields);
+    rank_field = rank_field.map(|name| unique_top_result_name(name, &by_fields));
+    Ok(PipelineOp::Top(TopSpec {
+        limit,
+        by_fields,
+        hits_field,
+        rank_field,
+    }))
+}
+
+fn parse_top_fields(
+    tokens: &[String],
+    cursor: &mut usize,
+) -> Result<Vec<PipelineField>, LogsqlError> {
+    if tokens.get(*cursor).is_some_and(|token| token == "(") {
+        return parse_first_fields(tokens, cursor, "by", "top");
+    }
+    let mut fields = Vec::new();
+    loop {
+        let Some(token) = tokens.get(*cursor) else {
+            break;
+        };
+        if token.eq_ignore_ascii_case("hits") || token.eq_ignore_ascii_case("rank") {
+            break;
+        }
+        if matches!(token.as_str(), "," | "(" | ")") {
+            return Err(LogsqlError::malformed(
+                "LogsQL top requires a field after each comma",
+            ));
+        }
+        fields.push(parse_first_exact_field(token, "by", "top")?);
+        *cursor += 1;
+        match tokens.get(*cursor).map(String::as_str) {
+            Some(",") => {
+                *cursor += 1;
+                if tokens.get(*cursor).is_none_or(|token| {
+                    token == ","
+                        || token.eq_ignore_ascii_case("hits")
+                        || token.eq_ignore_ascii_case("rank")
+                }) {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL top requires a field after each comma",
+                    ));
+                }
+            }
+            Some(token)
+                if token.eq_ignore_ascii_case("hits") || token.eq_ignore_ascii_case("rank") =>
+            {
+                break;
+            }
+            Some(token) => {
+                return Err(LogsqlError::malformed(format!(
+                    "unexpected LogsQL top field token {token:?}; expected ','"
+                )))
+            }
+            None => break,
+        }
+    }
+    Ok(fields)
+}
+
+fn unique_top_result_name(mut name: String, by_fields: &[PipelineField]) -> String {
+    while by_fields.iter().any(
+        |field| matches!(field, PipelineField::Exact { name: field_name, .. } if field_name == &name),
+    ) {
+        name.push('s');
+    }
+    name
+}
+
 fn parse_first_last_spec(segment: &str, operation: &str) -> Result<FirstSpec, LogsqlError> {
     let tokens = lex_first_pipe(segment, operation)?;
     let Some(command) = tokens.first() else {
@@ -514,6 +688,10 @@ fn is_first_pipe(segment: &str) -> bool {
 
 fn is_last_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "last")
+}
+
+fn is_top_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "top")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -933,6 +1111,14 @@ pub(crate) struct FirstSpec {
     pub rank_field: Option<PipelineField>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TopSpec {
+    pub limit: usize,
+    pub by_fields: Vec<PipelineField>,
+    pub hits_field: String,
+    pub rank_field: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -956,6 +1142,7 @@ pub(crate) enum PipelineOp {
     QueryStats,
     First(FirstSpec),
     Last(FirstSpec),
+    Top(TopSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1297,6 +1484,10 @@ pub fn parse_at(
                 pipeline.push(parse_last_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
+            _ if is_top_pipe(segment) => {
+                pipeline.push(parse_top_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
             _ => {
                 return Err(LogsqlError::unsupported(format!(
@@ -1325,6 +1516,7 @@ pub fn parse_at(
                 | PipelineOp::QueryStats
                 | PipelineOp::First(_)
                 | PipelineOp::Last(_)
+                | PipelineOp::Top(_)
         )
     });
     let implicit_result_limit =
@@ -5991,6 +6183,69 @@ mod tests {
             "* | last partition by (*)",
             "* | last rank as",
             "* | last by (case) trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_top_grammar_is_complete_and_strict() {
+        for query in [
+            "* | top by (service)",
+            "* | TOP 2 BY (service, level) HITS AS total RANK AS position",
+            "* | top service",
+            "* | top 5 service, level hits total rank",
+            "* | top by (service,) rank as position hits as total",
+            r#"* | top by ("field name", 'other field') hits as `hit count` rank as "row rank""#,
+            "* | fields service, level | top 2 by (service) | keep service, hits",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+        }
+
+        let plan = parse_at(
+            "* | top 2 by (service, level) hits as total rank as position",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::Top(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected top plan: {plan:?}");
+        };
+        assert_eq!(spec.limit, 2);
+        assert_eq!(spec.by_fields.len(), 2);
+        assert_eq!(spec.hits_field, "total");
+        assert_eq!(spec.rank_field.as_deref(), Some("position"));
+
+        let collisions = parse_at(
+            "* | top by (hits, rank) rank",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::Top(spec)] = collisions.pipeline.as_slice() else {
+            panic!("unexpected collision plan: {collisions:?}");
+        };
+        assert_eq!(spec.hits_field, "hitss");
+        assert_eq!(spec.rank_field.as_deref(), Some("ranks"));
+
+        for malformed in [
+            "* | top",
+            "* | top 0 by (case)",
+            "* | top -1 by (case)",
+            "* | top 1.5 by (case)",
+            "* | top nope by (case)",
+            "* | top by",
+            "* | top by ()",
+            "* | top by (case*)",
+            "* | top case level",
+            "* | top case,",
+            "* | top by (case) hits",
+            "* | top by (case) rank as",
+            "* | top by (case) trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

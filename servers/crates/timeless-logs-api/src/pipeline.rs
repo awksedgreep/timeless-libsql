@@ -17,7 +17,7 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind,
+    FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind, TopSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -176,6 +176,7 @@ pub(crate) fn execute(
             ))],
             PipelineOp::First(spec) => first(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Last(spec) => last(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::Top(spec) => top(rows, spec, execution.limits, execution.cancelled)?,
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -422,6 +423,119 @@ fn ensure_first_state_bytes(used: usize, limit: usize, operation: &str) -> Resul
     } else {
         Ok(())
     }
+}
+
+fn top(
+    rows: Vec<Value>,
+    spec: &TopSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    if spec.limit > limits.max_result_rows {
+        return Err(format!(
+            "LogsQL top exceeds max_result_rows={}",
+            limits.max_result_rows
+        ));
+    }
+    if rows.len() > limits.max_state_items {
+        return Err(format!(
+            "LogsQL top exceeds max_work_rows={}",
+            limits.max_state_items
+        ));
+    }
+    ensure_active(cancelled)?;
+    let mut state_bytes = size_of::<BTreeMap<Vec<String>, u64>>();
+    let mut groups = BTreeMap::<Vec<String>, u64>::new();
+    for (index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        let mut key = Vec::with_capacity(spec.by_fields.len());
+        for field in &spec.by_fields {
+            let PipelineField::Exact { path, .. } = field else {
+                return Err("LogsQL top by field is not exact".into());
+            };
+            key.push(projected_text(field_value(row, path)).into_owned());
+        }
+        if let Some(hits) = groups.get_mut(&key) {
+            *hits = hits.saturating_add(1);
+            continue;
+        }
+        if groups.len() == limits.max_state_items {
+            return Err(format!(
+                "LogsQL top state exceeds max_work_rows={}",
+                limits.max_state_items
+            ));
+        }
+        let key_bytes = key.iter().try_fold(0usize, |total, value| {
+            total
+                .checked_add(value.len())
+                .ok_or_else(|| "LogsQL top state size overflow".to_string())
+        })?;
+        state_bytes = state_bytes
+            .checked_add(size_of::<Vec<String>>())
+            .and_then(|bytes| {
+                spec.by_fields
+                    .len()
+                    .checked_mul(size_of::<String>())
+                    .and_then(|strings| bytes.checked_add(strings))
+            })
+            .and_then(|bytes| bytes.checked_add(size_of::<u64>()))
+            .and_then(|bytes| bytes.checked_add(key_bytes))
+            .ok_or_else(|| "LogsQL top state size overflow".to_string())?;
+        ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "top")?;
+        groups.insert(key, 1);
+    }
+
+    let group_count = groups.len();
+    state_bytes = state_bytes
+        .checked_add(
+            group_count
+                .checked_mul(size_of::<(Vec<String>, u64)>())
+                .ok_or_else(|| "LogsQL top state size overflow".to_string())?,
+        )
+        .ok_or_else(|| "LogsQL top state size overflow".to_string())?;
+    ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "top")?;
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    let comparisons = Cell::new(0usize);
+    let cancelled_during_sort = Cell::new(false);
+    groups.sort_by(|(left_key, left_hits), (right_key, right_hits)| {
+        let count = comparisons.get().wrapping_add(1);
+        comparisons.set(count);
+        if count & 255 == 0 && cancelled.load(AtomicOrdering::Acquire) {
+            cancelled_during_sort.set(true);
+            return left_key.cmp(right_key);
+        }
+        right_hits
+            .cmp(left_hits)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    if cancelled_during_sort.get() {
+        return Err("LogsQL pipeline cancelled".into());
+    }
+    groups.truncate(spec.limit);
+
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, (values, hits))| {
+            check_periodically(cancelled, index)?;
+            let mut row = Map::new();
+            for (field, value) in spec.by_fields.iter().zip(values) {
+                let PipelineField::Exact { name, .. } = field else {
+                    return Err("LogsQL top by field is not exact".into());
+                };
+                // VictoriaLogs' stream JSON omits empty fields. Missing, null,
+                // and empty values still share the counted empty-text group.
+                if !value.is_empty() {
+                    row.insert(name.clone(), Value::String(value));
+                }
+            }
+            row.insert(spec.hits_field.clone(), Value::String(hits.to_string()));
+            if let Some(rank_field) = &spec.rank_field {
+                row.insert(rank_field.clone(), Value::String((index + 1).to_string()));
+            }
+            Ok(Value::Object(row))
+        })
+        .collect()
 }
 
 fn first_row_comparison(
@@ -2224,6 +2338,86 @@ mod tests {
                 json!({"case":"huge","group":"a","n":9007199254740993u64}),
                 json!({"case":"missing","group":"a"})
             ]
+        );
+    }
+
+    #[test]
+    fn top_counts_textual_groups_orders_ties_and_bounds_state() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: vec![name.to_owned()],
+            name: name.to_owned(),
+        };
+        let rows = vec![
+            json!({"group":"b","value":2}),
+            json!({"group":"a","value":"2"}),
+            json!({"group":"a","value":null}),
+            json!({"group":"a"}),
+            json!({"group":"b","value":10}),
+            json!({"group":"b","value":10}),
+        ];
+        let spec = TopSpec {
+            limit: 10,
+            by_fields: vec![exact("group"), exact("value")],
+            hits_field: "total".into(),
+            rank_field: Some("position".into()),
+        };
+        let cancelled = AtomicBool::new(false);
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        assert_eq!(
+            top(rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [
+                json!({"group":"a","total":"2","position":"1"}),
+                json!({"group":"b","value":"10","total":"2","position":"2"}),
+                json!({"group":"a","value":"2","total":"1","position":"3"}),
+                json!({"group":"b","value":"2","total":"1","position":"4"}),
+            ]
+        );
+
+        assert!(top(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_items: 3,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_work_rows=3"));
+        assert!(top(
+            rows.clone(),
+            &TopSpec {
+                limit: 3,
+                ..spec.clone()
+            },
+            PipelineLimits {
+                max_result_rows: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_result_rows=2"));
+        assert!(top(
+            rows,
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_response_bytes=1"));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            top(Vec::new(), &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
         );
     }
 

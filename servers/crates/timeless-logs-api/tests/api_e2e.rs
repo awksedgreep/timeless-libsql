@@ -1274,6 +1274,253 @@ async fn session_seventeen_last_inverts_first_with_same_bounds_and_durability() 
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_top_counts_textual_groups_with_bounds_and_durability() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("top-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let rows = [
+        ("numeric-missing", "a", None),
+        ("numeric-null", "a", Some("null")),
+        ("numeric-negative", "b", Some("-2")),
+        ("numeric-zero", "b", Some("0")),
+        ("numeric-two", "a", Some("2")),
+        ("numeric-decimal", "a", Some("2.5")),
+        ("numeric-string", "b", Some(r#""3""#)),
+        ("numeric-ten", "b", Some("10")),
+        ("numeric-huge", "a", Some("9007199254740993")),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (case, partition, n))| {
+        let mut metadata = serde_json::json!({
+            "case": case,
+            "numeric_group": "numeric",
+            "first_partition": partition,
+            "nested": {"case": case},
+        });
+        if let Some(n) = n {
+            metadata["n"] = serde_json::from_str(n).unwrap();
+        }
+        LogEntry {
+            ts: 1_800_000_000_000_000 + index as i64,
+            level: 1,
+            severity: "info".into(),
+            message: case.replace('-', " "),
+            metadata_json: serde_json::to_string(&metadata).unwrap(),
+        }
+    })
+    .collect();
+    storage.ingest(rows).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | top by (first_partition)"#,
+        )
+        .await,
+        [
+            serde_json::json!({"first_partition":"a","hits":"5"}),
+            serde_json::json!({"first_partition":"b","hits":"4"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | TOP 1 BY (first_partition) HITS AS total RANK AS position"#,
+        )
+        .await,
+        [serde_json::json!({"first_partition":"a","total":"5","position":"1"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | top 5 numeric_group, first_partition"#,
+        )
+        .await,
+        [
+            serde_json::json!({"numeric_group":"numeric","first_partition":"a","hits":"5"}),
+            serde_json::json!({"numeric_group":"numeric","first_partition":"b","hits":"4"}),
+        ]
+    );
+    let values = pipeline_rows(&app, r#"numeric_group:="numeric" | top 8 by (n)"#).await;
+    assert_eq!(
+        values,
+        [
+            serde_json::json!({"hits":"2"}),
+            serde_json::json!({"n":"-2","hits":"1"}),
+            serde_json::json!({"n":"0","hits":"1"}),
+            serde_json::json!({"n":"10","hits":"1"}),
+            serde_json::json!({"n":"2","hits":"1"}),
+            serde_json::json!({"n":"2.5","hits":"1"}),
+            serde_json::json!({"n":"3","hits":"1"}),
+            serde_json::json!({"n":"9007199254740993","hits":"1"}),
+        ]
+    );
+    assert!(values[0].get("n").is_none());
+    assert!(values.iter().all(|row| row["hits"].is_string()));
+    assert_eq!(
+        pipeline_rows(&app, r#"numeric_group:="numeric" | top by (hits)"#).await,
+        [serde_json::json!({"hitss":"9"})]
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"numeric_group:="numeric" | top by (rank) rank"#,).await,
+        [serde_json::json!({"hits":"9","ranks":"1"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | filter first_partition:="a" | top by (first_partition) hits as count"#,
+        )
+        .await,
+        [serde_json::json!({"first_partition":"a","count":"5"})]
+    );
+    assert!(
+        pipeline_rows(&app, r#"case:="top-missing" | top 3 by (case)"#)
+            .await
+            .is_empty()
+    );
+
+    for malformed in [
+        "* | top",
+        "* | top 0 by (case)",
+        "* | top nope by (case)",
+        "* | top by",
+        "* | top by (case*)",
+        "* | top by (case) hits",
+        "* | top by (case) rank as",
+        "* | top by (case) trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 4,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | top by (n)"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | top 3 by (n)"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | top 2 by (n)"#,
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason);
+    }
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | top 1 by (first_partition)"#,
+        )
+        .await,
+        [serde_json::json!({"first_partition":"a","hits":"5"})],
+        "the reader remains reusable after every top limit rejection"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | top by (first_partition)"#,
+        )
+        .await,
+        [
+            serde_json::json!({"first_partition":"a","hits":"5"}),
+            serde_json::json!({"first_partition":"b","hits":"4"}),
+        ]
+    );
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"numeric_group:="numeric" | top 2 by (first_partition) rank"#,
+        )
+        .await,
+        [
+            serde_json::json!({"first_partition":"a","hits":"5","rank":"1"}),
+            serde_json::json!({"first_partition":"b","hits":"4","rank":"2"}),
+        ]
+    );
+    reopened.shutdown().await.unwrap();
+
+    let conn = Connection::open(database).unwrap();
+    unsafe {
+        conn.load_extension_enable().unwrap();
+        conn.load_extension(&extension, None::<&str>).unwrap();
+    }
+    conn.load_extension_disable().unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT json_extract(metadata, '$.first_partition') AS partition, \
+                    count(*) AS hits \
+               FROM logs \
+              WHERE json_extract(metadata, '$.numeric_group') = 'numeric' \
+              GROUP BY partition \
+              ORDER BY hits DESC, partition ASC \
+              LIMIT 10",
+        )
+        .unwrap();
+    let sql_groups = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(sql_groups, [("a".into(), 5), ("b".into(), 4)]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {

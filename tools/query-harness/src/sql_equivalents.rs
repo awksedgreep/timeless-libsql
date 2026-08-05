@@ -357,8 +357,10 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "sort_path" => Value::Text("$.duration_ms".to_owned()),
         "tie_path" => Value::Text("$.host".to_owned()),
         "partition_path" => Value::Text("$.service".to_owned()),
+        "group_path" => Value::Text("$.host".to_owned()),
         "first_count" => Value::Integer(1),
         "last_count" => Value::Integer(1),
+        "top_count" => Value::Integer(10),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
@@ -1640,6 +1642,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let query_stats_rows = recipe_values("SQL-LOG-026", 1)?;
     let first_rows = recipe_values("SQL-LOG-027", 0)?;
     let last_rows = recipe_values("SQL-LOG-028", 0)?;
+    let top_rows = recipe_values("SQL-LOG-029", 0)?;
     if [
         bounded,
         substring,
@@ -1860,6 +1863,22 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         || last_metadata.pointer("/nested/empty") != Some(&serde_json::json!(""))
     {
         bail!("SQL-LOG-028 retained metadata changed: {last_metadata}");
+    }
+    if top_rows
+        != [
+            vec![
+                Value::Text("web-1".into()),
+                Value::Text("1".into()),
+                Value::Text("1".into()),
+            ],
+            vec![
+                Value::Text("web-2".into()),
+                Value::Text("1".into()),
+                Value::Text("2".into()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-029 top frequency result changed: {top_rows:?}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2671,13 +2690,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 94);
+        assert_eq!(recipes.len(), 95);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            124
+            125
         );
         assert_eq!(
             recipes
@@ -2685,7 +2704,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            130
+            131
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

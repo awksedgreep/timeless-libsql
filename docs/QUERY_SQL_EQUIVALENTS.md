@@ -136,6 +136,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-026`](#sql-log-026-request-local-log-query-statistics) | `LQL-P12` | current foundation | single-use report for the immediately preceding successful public log scan on the same SQLite connection; API owns LogsQL syntax, complete logical predicates, pipeline duration, result strings, limits, cancellation, and envelopes |
 | [`SQL-LOG-027`](#sql-log-027-first-numeric-rows-per-partition) | `LQL-P13` | current foundation | bounded numeric top-k per textual partition through a window rank; API owns LogsQL natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-028`](#sql-log-028-last-numeric-rows-per-partition) | `LQL-P14` | current foundation | bounded reverse numeric top-k per textual partition through a window rank; API owns LogsQL direction inversion, natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
+| [`SQL-LOG-029`](#sql-log-029-top-values-by-hit-count) | `LQL-P15` | current foundation | bounded frequency groups and deterministic string hits/rank over one public JSON path; API owns multi-field/current-row grammar, collision naming, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5943,6 +5944,72 @@ table would save a block read or decode.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_last_inverts_first_with_same_bounds_and_durability`.
+
+### SQL-LOG-029: top values by hit count
+
+Bind `:group_path` as a SQLite JSON path and use the table's native timestamp
+unit. This statement groups one retained public field by the LogsQL textual
+projection, orders the most frequent value first with a deterministic bytewise
+tie-break, and returns both hit count and one-based rank as TEXT:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT
+    CASE
+      WHEN json_type(metadata, :group_path) IS NULL
+        OR json_type(metadata, :group_path) = 'null' THEN ''
+      WHEN json_type(metadata, :group_path) = 'true' THEN 'true'
+      WHEN json_type(metadata, :group_path) = 'false' THEN 'false'
+      ELSE CAST(json_extract(metadata, :group_path) AS TEXT)
+    END AS group_value
+  FROM bounded
+), grouped AS (
+  SELECT group_value, count(*) AS hits
+  FROM projected
+  GROUP BY group_value
+), ranked AS (
+  SELECT
+    group_value,
+    hits,
+    row_number() OVER (ORDER BY hits DESC, group_value ASC) AS position
+  FROM grouped
+)
+SELECT
+  group_value,
+  CAST(hits AS TEXT) AS hits,
+  CAST(position AS TEXT) AS rank
+FROM ranked
+WHERE position <= :top_count
+ORDER BY position
+LIMIT :max_result_rows;
+```
+
+Missing and JSON null share the empty-text group; strings remain unquoted;
+numbers use their retained SQLite textual representation; booleans are
+`true`/`false`; and retained arrays/objects use JSON text. Equal hit counts use
+ascending SQLite byte order. `:top_count`, `:max_work_entries`, and
+`:max_result_rows` must be positive. The recipe returns an explicit empty
+`group_value` column; VictoriaLogs stream JSON and the Rust API omit that
+field from the result object while still returning its hits and rank.
+
+The Rust API owns case-insensitive `top`, optional `by`, parenthesized and bare
+multi-field lists, default ten, `hits [as]`, `rank [as]`, collision-safe result
+names, current-pipeline-row composition, strict errors, state/work/result/
+response limits, cancellation, and HTTP envelopes. It groups multiple values
+with unambiguous vector keys and preserves the stored rich source; summary
+values are strings because that is the LogsQL result contract. All required
+values already cross the public bounded row interface, so neither private
+tables nor a new extension primitive would avoid storage work.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_top_counts_textual_groups_with_bounds_and_durability`.
 
 ## Adding the next recipe
 

@@ -526,6 +526,7 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                         limit, ..
                     })
                     | crate::logsql::PipelineOp::Last(crate::logsql::FirstSpec { limit, .. })
+                    | crate::logsql::PipelineOp::Top(crate::logsql::TopSpec { limit, .. })
                         if *limit > limits.max_result_rows =>
                     {
                         return Err(("max_result_rows", limits.max_result_rows));

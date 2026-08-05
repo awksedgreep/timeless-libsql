@@ -751,6 +751,13 @@ Partitioned/ranked `last` measures 3.060/46.268 ms narrow/wide p95 versus
 3.290/44.012 ms for same-run `first` controls. Its -7.0%/+5.1% p95 variation
 and -9.8%/+3.9% internal API variation follow byte-identical public storage
 reads and retain the same no-new-primitive verdict.
+The bounded `top` pipeline groups one or more exact current-row fields by
+their LogsQL textual projection, orders frequency descending with a stable
+key tie-break, and emits string `hits` plus optional string `rank`. Missing,
+null, and empty values share the omitted empty-text group. Executable
+`SQL-LOG-029` gives direct SQLite/libSQL users the public `GROUP BY` and window
+rank foundation; multi-field grammar, collision naming, limits, cancellation,
+and HTTP envelopes remain Rust API work.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally
