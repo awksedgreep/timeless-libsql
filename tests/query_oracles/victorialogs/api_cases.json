@@ -1243,6 +1243,7 @@
     {
       "id": "LQL-S04-values-zero-limit-means-unbounded",
       "query": "state_group:=\"state\" | stats values(probe) limit 0 as all_values",
+      "unordered_json_array_fields": ["all_values"],
       "expected_rows": [{
         "all_values": "[\"\",\"0\",\"value\",\"false\",\"\",\"\"]"
       }]

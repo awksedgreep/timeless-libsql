@@ -346,8 +346,11 @@ primitive. `LQL-F23` now has twenty successful and four error pinned
 `json_array_contains_any` cases, failing-then-passing parser and real-extension
 regressions, exact top-level primitive membership over retained typed arrays,
 strict list grammar, logical/pipeline composition, limits, cancellation,
-durability, and reopen. Executable `SQL-LOG-017` proves the public JSON1 form;
-exact-build measurement remains the final row exit criterion.
+durability, and reopen. Executable `SQL-LOG-017` proves the public JSON1 form.
+Exact-build evidence at commit
+`075d166e962482d2be3aa7622250b13c9dd51768` records narrow/wide string and
+boolean membership with byte-identical same-run public reads and closes the
+row without an extension primitive.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

@@ -3301,3 +3301,57 @@ harness, documentation contracts, and all 82 SQL recipes (116 statements)
 pass locally. No private table, extension primitive, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed. No CI workflow was invoked.
+
+## Session 16 LogsQL P2 progress: JSON-array primitive membership
+
+The checked-in
+[`2026-08-05_session16_lql_f23_json_array_contains_any.json`](evidence/2026-08-05_session16_lql_f23_json_array_contains_any.json)
+was captured from exact extension, metrics-server, and logs-server build
+`075d166e962482d2be3aa7622250b13c9dd51768`. It closes `LQL-F23` with strict
+`json_array_contains_any(...)` membership over top-level retained JSON
+primitives. Correctness separately pins strings, numbers, booleans, null,
+empty list/value behavior, nested-value exclusion, non-array fields, escapes,
+quoted/unquoted stars, aliases, logical/pipeline composition, malformed
+errors, work limits, cancellation, durability, and reopen. Timeless's decoded
+semantic-JSON distinction from VictoriaLogs' raw-lexeme shortcut is explicit.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| string `tags:json_array_contains_any(query, absent)`, indexed host | 128 | 24,642 | 2.238 | 2.416 | 2.475 | 1 | 1,024 | 155,204 | 128 |
+| string `tags:json_array_contains_any(query, absent)`, full fixture | 8,192 | 1,604,863 | 30.333 | 33.611 | 33.788 | 4 | 8,192 | 1,269,143 | 8,192 |
+| boolean `tags:json_array_contains_any(true, absent)`, indexed host | 128 | 24,642 | 2.231 | 2.447 | 2.482 | 1 | 1,024 | 155,204 | 128 |
+| boolean `tags:json_array_contains_any(true, absent)`, full fixture | 8,192 | 1,604,863 | 29.961 | 33.549 | 34.581 | 4 | 8,192 | 1,269,143 | 8,192 |
+
+Array-membership p95 is within 2.0% of the same-run word query when indexed
+narrow and 16.1–16.3% above it over all 8,192 rows. It is 11.0–12.2% below the
+non-equivalent phrase `contains_any` query narrow and 4.5–4.7% above it wide.
+Every equal-cardinality comparison reads the same public blocks, entries, and
+payload bytes and emits the same response bytes. The measured wide difference
+is bounded array/type inspection after decode, not storage amplification.
+
+Direct SQLite/libSQL users receive the exact retained-type operation through
+executable `SQL-LOG-017`, which applies public `json_each` to a bounded `logs`
+read, filters top-level primitive types, binds every candidate, and applies
+the result limit after membership. Its regressions cover every primitive,
+decoded escapes, nested/scalar/missing values, empty lists, and post-filter
+limits. This ordinary SQL foundation plus unchanged storage work rejects a
+new extension primitive under the documented gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+10.162 ms and the explicit durability barrier took 24.293 ms. Adding the
+two-element `tags` field to every evidence row increased logical payload and
+wide response size by exactly 180,224 bytes; logs storage is four raw blocks,
+1,269,143 logical bytes, and 1,371,776 physical database/WAL/SHM bytes. Logs
+RSS HWM was 71,996 KiB, 7,392 KiB above LQL-F22 after four additional full-
+response shapes and wider rows; metrics HWM was 50,732 KiB, 1,552 KiB lower.
+Both are retained as whole-process variation, and metrics storage is byte-
+identical.
+
+All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
+cases, and all 203 pinned VictoriaLogs 1.52.0 cases pass. The complete 19-test
+logs real-extension suite, 47 logs library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 29-test Rust query
+harness, documentation contracts, and all 83 SQL recipes (118 statements)
+pass locally. No private table, extension primitive, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed. No CI workflow was invoked.

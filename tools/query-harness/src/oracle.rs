@@ -1620,19 +1620,6 @@ mod tests {
                 if let Some(order) = case.get("result_order").and_then(Value::as_str) {
                     assert!(matches!(order, "ordered" | "unordered"));
                 }
-                if let Some(fields) = case.get("unordered_json_array_fields") {
-                    assert_eq!(name, "stats_cases", "{identifier}");
-                    let fields = fields.as_array().unwrap_or_else(|| {
-                        panic!("{identifier}: unordered fields must be an array")
-                    });
-                    let mut unique = BTreeSet::new();
-                    for field in fields {
-                        let field = field.as_str().unwrap_or_else(|| {
-                            panic!("{identifier}: unordered field must be a string")
-                        });
-                        assert!(unique.insert(field), "{identifier}: duplicate {field}");
-                    }
-                }
             }
         }
     }
@@ -1686,6 +1673,22 @@ mod tests {
                 );
                 if let Some(order) = case.get("result_order").and_then(Value::as_str) {
                     assert!(matches!(order, "ordered" | "unordered"));
+                }
+                let unordered_fields = sorted_strings(case.get("unordered_json_array_fields"))
+                    .unwrap_or_else(|error| panic!("{identifier}: {error}"));
+                if !unordered_fields.is_empty() {
+                    assert_eq!(name, "stats_cases", "{identifier}");
+                }
+                let query = case
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if query.contains("values(probe)") && query.contains("as all_values") {
+                    assert_eq!(
+                        unordered_fields,
+                        ["all_values"],
+                        "{identifier}: every upstream values(probe) result must preserve duplicates without claiming order"
+                    );
                 }
             }
         }

@@ -354,9 +354,10 @@ than hidden:
   duplicate counts and the surrounding result-row order. Timeless continues
   to promise its own deterministic input order.
 
-`QSF-063` and `QSF-076` through `QSF-080` record these selected compatibility
-behaviors. The fixture now contains 57 row-query cases, six error cases, and
-twelve statistics/pipeline cases (75 total). Phrase, escape, identifier,
+`QSF-063`, `QSF-076` through `QSF-080`, and `QSF-125` record these selected
+compatibility behaviors. The fixture now contains 168 row-query cases, 23
+error cases, and twelve statistics/pipeline cases (203 total). Phrase, escape,
+identifier,
 filtering, ordering, cardinality, pipeline-order, limit-zero, and rate-window
 semantics remain exact to the pinned oracle where the retained Timeless
 storage model applies.
