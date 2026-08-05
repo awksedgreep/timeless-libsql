@@ -3577,3 +3577,61 @@ documentation contracts, all 86 SQL recipes (121 statements), and the full
 primitive, storage format, batching, compression, index, rollup, retention,
 transaction, migration, maintenance, or public batch/SQL contract changed.
 No CI workflow was modified or invoked.
+
+## Session 16 LogsQL P2 progress: same-row field comparisons
+
+The checked-in
+[`2026-08-05_session16_lql_f30_field_comparisons.json`](evidence/2026-08-05_session16_lql_f30_field_comparisons.json)
+was captured from exact extension, metrics-server, and logs-server build
+`afd7804edb5d438a3aa400b1f358a0e287b648ae`. It closes `LQL-F30` with exact
+same-row textual equality and VictoriaLogs math-value-or-bytewise ordering.
+Correctness separately pins missing/null/empty and rich projections, exact
+retained integers beyond 2^53, decimal/base-zero/duration/byte-size/RFC3339/
+IPv4 math values, quoted/message/service/nested/right-`_time` fields, aliases,
+logical/pipeline composition, strict errors, work limits, cancellation,
+durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `range_key:eq_field(range_key)`, indexed host | 128 | 34,677 | 2.954 | 3.311 | 3.849 | 1 | 1,024 | 235,778 | 128 |
+| `range_key:eq_field(range_key)`, full fixture | 8,192 | 2,249,775 | 41.398 | 43.262 | 43.369 | 4 | 8,192 | 1,914,055 | 8,192 |
+| numeric `context.attempt:lt_field(status)`, indexed host | 128 | 34,677 | 2.925 | 3.332 | 3.419 | 1 | 1,024 | 235,778 | 128 |
+| numeric `context.attempt:lt_field(status)`, full fixture | 8,192 | 2,249,775 | 41.496 | 44.726 | 45.952 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Exact equality p95 is 8.3% below the same-run word query at narrow
+cardinality and 0.3% above it over the full fixture. Exact retained-number
+ordering is 7.7% below/3.7% above that word comparison. Every equal-
+cardinality shape reads the same public blocks, entries, and bytes and returns
+the same public rows. The difference is bounded projection/comparison after
+decode, not storage amplification.
+
+Executable `SQL-LOG-021` exposes complete retained-model equality and the
+exact bytewise ordering fallback with public `logs` rows and JSON1. Its
+numeric projection uses JSON `->`, not `json_extract()`, so adjacent unsigned
+64-bit values above `i64::MAX` remain distinguishable. The Rust API owns the
+VictoriaLogs math-value branch, grammar, composition, limits, cancellation,
+and response semantics. VictoriaLogs flattens ingested objects before
+filtering; Timeless preserves the complete object and compact-projects a
+selected parent only for the predicate. Both operands already cross the same
+decoded row, so an extension primitive would not remove a measured block
+read, decode, allocation, copy, or row crossing and is rejected by the
+documented primitive gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+15.355 ms and the explicit durability barrier took 38.909 ms. The fixture,
+wire bytes, and storage are byte-identical to LQL-F28: four raw blocks,
+1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM bytes. Logs
+RSS HWM was 91,788 KiB, 244 KiB above LQL-F28; metrics HWM was 53,472 KiB, 136
+KiB lower. Both are retained as whole-process variation rather than
+attributed to the predicates.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 314
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 24-test logs real-
+extension suite, 52 logs library tests, both complete Rust workspaces, Clippy
+with warnings denied, formatting, the 29-test Rust query harness,
+documentation contracts, and all 87 SQL recipes (122 statements) pass
+locally. The executable SQL command is the Rust harness used by CLI section
+45. No private table, extension primitive, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed. No CI workflow was modified or invoked.

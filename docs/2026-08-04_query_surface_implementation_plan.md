@@ -395,8 +395,10 @@ nested/right-`_time` fields, strict errors, aliases, logical/pipeline
 composition, work limits, cancellation, durability, and reopen. Executable
 `SQL-LOG-021` proves complete retained-model equality plus the bytewise
 ordering fallback and documents why language-specific math parsing remains in
-the Rust API. Exact-build evidence is the remaining row-specific exit item;
-the implementation changes no extension or storage contract.
+the Rust API. Exact-build evidence at commit
+`afd7804edb5d438a3aa400b1f358a0e287b648ae` records narrow/wide equality and
+exact retained-number ordering with byte-identical public reads and closes the
+row without an extension primitive or storage-contract change.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 
