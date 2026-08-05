@@ -680,6 +680,303 @@ async fn session_seventeen_query_stats_is_request_local_durable_and_direct_sql_v
         .contains("no unconsumed"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_first_is_typed_partitioned_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("first-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let rows = [
+        ("numeric-missing", "a", None),
+        ("numeric-null", "a", Some("null")),
+        ("numeric-negative", "b", Some("-2")),
+        ("numeric-zero", "b", Some("0")),
+        ("numeric-two", "a", Some("2")),
+        ("numeric-decimal", "a", Some("2.5")),
+        ("numeric-string", "b", Some(r#""3""#)),
+        ("numeric-ten", "b", Some("10")),
+        ("numeric-huge", "a", Some("9007199254740993")),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (case, partition, n))| {
+        let mut metadata = serde_json::json!({
+            "case": case,
+            "numeric_group": "numeric",
+            "first_partition": partition,
+            "nested": {"case": case},
+        });
+        if let Some(n) = n {
+            metadata["n"] = serde_json::from_str(n).unwrap();
+        }
+        LogEntry {
+            ts: 1_800_000_000_000_000 + index as i64,
+            level: 1,
+            severity: "info".into(),
+            message: case.replace('-', " "),
+            metadata_json: serde_json::to_string(&metadata).unwrap(),
+        }
+    })
+    .collect();
+    storage.ingest(rows).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let cases = |rows: &[serde_json::Value]| {
+        rows.iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let ascending = pipeline_rows(&app, r#"numeric_group:="numeric" | first 5 by (n, case)"#).await;
+    assert_eq!(
+        cases(&ascending),
+        [
+            "numeric-missing",
+            "numeric-null",
+            "numeric-negative",
+            "numeric-zero",
+            "numeric-two",
+        ]
+    );
+    assert!(ascending[0].get("n").is_none());
+    assert!(ascending[1]["n"].is_null());
+    assert_eq!(ascending[2]["n"], -2);
+    assert_eq!(ascending[4]["n"], 2);
+
+    let descending = pipeline_rows(
+        &app,
+        r#"numeric_group:="numeric" | FIRST 3 (n DeSc, case) | fields case"#,
+    )
+    .await;
+    assert_eq!(
+        cases(&descending),
+        ["numeric-huge", "numeric-ten", "numeric-string"]
+    );
+
+    let partitioned = pipeline_rows(
+        &app,
+        r#"numeric_group:="numeric" | first 2 by (n, case) partition by (first_partition) rank as position | fields case, first_partition, position"#,
+    )
+    .await;
+    assert_eq!(
+        partitioned,
+        [
+            serde_json::json!({"case":"numeric-missing","first_partition":"a","position":"1"}),
+            serde_json::json!({"case":"numeric-null","first_partition":"a","position":"2"}),
+            serde_json::json!({"case":"numeric-negative","first_partition":"b","position":"1"}),
+            serde_json::json!({"case":"numeric-zero","first_partition":"b","position":"2"}),
+        ]
+    );
+    assert_eq!(
+        cases(
+            &pipeline_rows(
+                &app,
+                r#"case:in(numeric-two, numeric-ten) | first | fields case"#,
+            )
+            .await
+        ),
+        ["numeric-two"]
+    );
+    assert_eq!(
+        cases(
+            &pipeline_rows(
+                &app,
+                r#"case:in(numeric-two, numeric-ten) | delete _time | first | fields case"#,
+            )
+            .await
+        ),
+        ["numeric-ten"]
+    );
+    assert_eq!(
+        cases(
+            &pipeline_rows(
+                &app,
+                r#"numeric_group:="numeric" | filter n:>0 | first 2 by (n desc, case) | fields case"#,
+            )
+            .await
+        ),
+        ["numeric-huge", "numeric-ten"]
+    );
+    assert_eq!(
+        cases(
+            &pipeline_rows(
+                &app,
+                r#"numeric_group:="numeric" | first 2 by (_time desc) | fields case"#,
+            )
+            .await
+        ),
+        ["numeric-huge", "numeric-ten"]
+    );
+    assert!(
+        pipeline_rows(&app, r#"case:="first-missing" | first 3 by (case)"#,)
+            .await
+            .is_empty()
+    );
+
+    for malformed in [
+        "* | first 0",
+        "* | first nope",
+        "* | first by",
+        "* | first by (case*)",
+        "* | first partition by",
+        "* | first partition by (*)",
+        "* | first rank as",
+        "* | first by (case) trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 4,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"numeric_group:="numeric" | first 2 by (n, case)"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let result_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 2,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"numeric_group:="numeric" | first 3 by (n, case)"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(result_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let state_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_response_bytes: 64,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"numeric_group:="numeric" | first 2 by (n, case)"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(state_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(state_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_response_bytes",
+            "limit": 64
+        })
+    );
+    assert_eq!(
+        cases(
+            &pipeline_rows(
+                &app,
+                r#"numeric_group:="numeric" | first 2 by (n, case) | fields case"#,
+            )
+            .await
+        ),
+        ["numeric-missing", "numeric-null"]
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    assert_eq!(
+        cases(
+            &pipeline_rows(
+                &app,
+                r#"numeric_group:="numeric" | first 3 by (n desc, case) | fields case"#,
+            )
+            .await
+        ),
+        ["numeric-huge", "numeric-ten", "numeric-string"]
+    );
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        cases(
+            &pipeline_rows(
+                &router(reopened.clone()),
+                r#"numeric_group:="numeric" | first 5 by (n, case) | fields case"#,
+            )
+            .await
+        ),
+        [
+            "numeric-missing",
+            "numeric-null",
+            "numeric-negative",
+            "numeric-zero",
+            "numeric-two",
+        ]
+    );
+    reopened.shutdown().await.unwrap();
+
+    let conn = Connection::open(database).unwrap();
+    unsafe {
+        conn.load_extension_enable().unwrap();
+        conn.load_extension(&extension, None::<&str>).unwrap();
+    }
+    conn.load_extension_disable().unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT json_extract(metadata, '$.case') \
+               FROM logs \
+              WHERE json_extract(metadata, '$.numeric_group') = 'numeric' \
+              ORDER BY CAST(json_extract(metadata, '$.n') AS REAL), \
+                       json_extract(metadata, '$.case') \
+              LIMIT 5",
+        )
+        .unwrap();
+    let sql_cases = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        sql_cases,
+        [
+            "numeric-missing",
+            "numeric-null",
+            "numeric-negative",
+            "numeric-zero",
+            "numeric-two",
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {

@@ -92,7 +92,8 @@ run. Both paths read exactly one/four blocks, 1,024/8,192 entries, and
 run variation; source preprocessing neither amplifies nor reduces storage work.
 
 The ordered pipeline also accepts `field_values`, `field_names`,
-`fields`/`keep`, `filter`/`where`, `stats`, and `query_stats`. Projection
+`fields`/`keep`, `filter`/`where`, `stats`, `query_stats`, and bounded `first`.
+Projection
 accepts exact dotted paths, top-level prefixes, and `*`; a later filter
 observes the projected row, not the original one. Field discovery is
 deterministic and top-level:
@@ -477,6 +478,34 @@ message, and rich metadata slots, while `TimestampsRead` counts timestamps.
 A preceding pipeline `limit` does not undo work already performed by the eager
 bounded scan. The complete direct-user contract and executable mapping are in
 [`SQL-LOG-026`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics).
+
+LogsQL `first` accepts an optional positive count, parenthesized exact sort
+fields with per-field `asc`/`desc`, optional partition fields, and an optional
+string rank field:
+
+```text
+service:="api" | first 10 by (status desc, _time)
+* | first 3 by (duration, _time) partition by (service) rank as position
+```
+
+The default count is one. Missing and null values project to empty text. The
+sort chain matches pinned VictoriaLogs exact signed/unsigned integers,
+RFC3339 times, numeric/duration/byte values, and natural UTF-8 order. Rank
+restarts in every partition, partitions use deterministic encoded-key order,
+and original public-row order breaks otherwise equal keys. With no `by`, the
+operation compares the current pipeline schema, so preceding projection or
+deletion is observable. Timeless retains rich JSON response types instead of
+flattening them to strings.
+
+The complete input is bounded by `max_work_rows`, output by
+`max_result_rows`, and retained sort/partition/index state by
+`max_response_bytes`; state overflow returns the same explicit HTTP 422
+`query_limit` envelope and leaves the reader reusable. Cancellation covers
+key construction, sorting, and output. The implementation reads only public
+rows and changes no extension or storage contract. Executable
+[`SQL-LOG-027`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)
+gives direct users the exact bounded numeric window-rank foundation and
+documents why default SQLite collation is not full LogsQL natural ordering.
 
 Malformed LogsQL returns JSON HTTP 400 with `invalid_query` and
 `malformed_logsql`; recognized but unsupported syntax returns JSON HTTP 422

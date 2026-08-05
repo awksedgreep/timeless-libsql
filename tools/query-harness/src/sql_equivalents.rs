@@ -354,6 +354,11 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "delete_path" => Value::Text("$.service".to_owned()),
         "delete_path_1" => Value::Text("$.deployment.region".to_owned()),
         "delete_path_2" => Value::Text("$.duration_ms".to_owned()),
+        "sort_path" => Value::Text("$.duration_ms".to_owned()),
+        "tie_path" => Value::Text("$.host".to_owned()),
+        "partition_path" => Value::Text("$.service".to_owned()),
+        "first_count" => Value::Integer(1),
+        "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
         "output_labels_json" => Value::Text(r#"{"case":"late","service":"api"}"#.to_owned()),
@@ -1632,6 +1637,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let delete_rows = recipe_values("SQL-LOG-025", 0)?;
     let query_stats_scan = recipe_values("SQL-LOG-026", 0)?;
     let query_stats_rows = recipe_values("SQL-LOG-026", 1)?;
+    let first_rows = recipe_values("SQL-LOG-027", 0)?;
     if [
         bounded,
         substring,
@@ -1810,6 +1816,27 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         || text_u64(13)? == 0
     {
         bail!("SQL-LOG-026 request-local report changed: {query_stats:?}");
+    }
+    let [first_row] = first_rows.as_slice() else {
+        bail!("SQL-LOG-027 first-per-partition result changed: {first_rows:?}");
+    };
+    if first_row.len() != 5
+        || first_row[0] != Value::Integer(2000)
+        || first_row[1] != Value::Text("info".to_owned())
+        || first_row[2] != Value::Text("request ok".to_owned())
+        || first_row[4] != Value::Text("1".to_owned())
+    {
+        bail!("SQL-LOG-027 first-per-partition row changed: {first_row:?}");
+    }
+    let Value::Text(first_metadata) = &first_row[3] else {
+        bail!("SQL-LOG-027 metadata is not retained JSON text: {first_row:?}");
+    };
+    let first_metadata: serde_json::Value = serde_json::from_str(first_metadata)?;
+    if first_metadata.pointer("/duration_ms") != Some(&serde_json::json!(4))
+        || first_metadata.pointer("/service") != Some(&serde_json::json!("api"))
+        || first_metadata.pointer("/nested/empty") != Some(&serde_json::Value::Null)
+    {
+        bail!("SQL-LOG-027 retained metadata changed: {first_metadata}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2621,13 +2648,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 92);
+        assert_eq!(recipes.len(), 93);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            122
+            123
         );
         assert_eq!(
             recipes
@@ -2635,7 +2662,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            128
+            129
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

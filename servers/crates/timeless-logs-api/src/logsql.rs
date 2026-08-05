@@ -5,6 +5,7 @@
 //! silently drops a term or pipe it does not understand.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::fmt;
 use std::net::IpAddr;
 
@@ -399,6 +400,290 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
     })
 }
 
+fn parse_first_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment)?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL first pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("first") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL first pipe, not {command:?}"
+        )));
+    }
+    let mut cursor = 1usize;
+    let mut limit = 1usize;
+    if tokens.get(cursor).is_some_and(|token| {
+        token != "("
+            && !token.eq_ignore_ascii_case("by")
+            && !token.eq_ignore_ascii_case("partition")
+            && !token.eq_ignore_ascii_case("rank")
+    }) {
+        let value = &tokens[cursor];
+        limit = value.parse::<usize>().map_err(|_| {
+            LogsqlError::malformed(format!(
+                "LogsQL first requires a positive integer limit, not {value:?}"
+            ))
+        })?;
+        if limit == 0 {
+            return Err(LogsqlError::malformed(
+                "LogsQL first limit must be greater than zero",
+            ));
+        }
+        cursor += 1;
+    }
+
+    let mut by_fields = Vec::new();
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("by"))
+    {
+        cursor += 1;
+        by_fields = parse_first_sort_fields(&tokens, &mut cursor)?;
+    } else if tokens.get(cursor).is_some_and(|token| token == "(") {
+        by_fields = parse_first_sort_fields(&tokens, &mut cursor)?;
+    }
+
+    let mut partition_by = Vec::new();
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("partition"))
+    {
+        cursor += 1;
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("by"))
+        {
+            cursor += 1;
+        }
+        partition_by = parse_first_fields(&tokens, &mut cursor, "partition")?;
+    }
+
+    let mut rank_field = None;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("rank"))
+    {
+        cursor += 1;
+        let explicit_as = tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("as"));
+        if explicit_as {
+            cursor += 1;
+        }
+        let field = match tokens.get(cursor) {
+            Some(token) if token != "," && token != "(" && token != ")" => {
+                cursor += 1;
+                parse_first_exact_field(token, "rank")?
+            }
+            _ if explicit_as => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL first rank as requires a field name",
+                ))
+            }
+            _ => parse_first_exact_field("rank", "rank")?,
+        };
+        rank_field = Some(field);
+    }
+
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL first token {token:?}"
+        )));
+    }
+    Ok(PipelineOp::First(FirstSpec {
+        limit,
+        by_fields,
+        partition_by,
+        rank_field,
+    }))
+}
+
+fn is_first_pipe(segment: &str) -> bool {
+    let Some(command) = segment.get(.."first".len()) else {
+        return false;
+    };
+    command.eq_ignore_ascii_case("first")
+        && segment["first".len()..]
+            .chars()
+            .next()
+            .is_none_or(|character| character.is_whitespace() || character == '(')
+}
+
+fn lex_first_pipe(segment: &str) -> Result<Vec<String>, LogsqlError> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in segment.chars() {
+        if let Some(delimiter) = quote {
+            current.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => {
+                quote = Some(character);
+                current.push(character);
+            }
+            '(' | ')' | ',' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                tokens.push(character.to_string());
+            }
+            _ if character.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if quote.is_some() {
+        return Err(LogsqlError::malformed(
+            "unterminated quoted field in LogsQL first pipe",
+        ));
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+fn parse_first_sort_fields(
+    tokens: &[String],
+    cursor: &mut usize,
+) -> Result<Vec<PipelineSortField>, LogsqlError> {
+    if tokens.get(*cursor).is_none_or(|token| token != "(") {
+        return Err(LogsqlError::malformed(
+            "LogsQL first by requires parenthesized fields",
+        ));
+    }
+    *cursor += 1;
+    let mut fields = Vec::new();
+    loop {
+        match tokens.get(*cursor).map(String::as_str) {
+            Some(")") => {
+                *cursor += 1;
+                return Ok(fields);
+            }
+            Some(",") | None => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL first by requires a field after each comma",
+                ))
+            }
+            Some(token) => {
+                let field = parse_first_exact_field(token, "sort")?;
+                *cursor += 1;
+                let descending = match tokens.get(*cursor).map(String::as_str) {
+                    Some(direction) if direction.eq_ignore_ascii_case("desc") => {
+                        *cursor += 1;
+                        true
+                    }
+                    Some(direction) if direction.eq_ignore_ascii_case("asc") => {
+                        *cursor += 1;
+                        false
+                    }
+                    _ => false,
+                };
+                fields.push(PipelineSortField { field, descending });
+                match tokens.get(*cursor).map(String::as_str) {
+                    Some(")") => {
+                        *cursor += 1;
+                        return Ok(fields);
+                    }
+                    Some(",") => {
+                        *cursor += 1;
+                        if tokens.get(*cursor).is_some_and(|token| token == ")") {
+                            *cursor += 1;
+                            return Ok(fields);
+                        }
+                    }
+                    Some(token) => {
+                        return Err(LogsqlError::malformed(format!(
+                            "unexpected LogsQL first by token {token:?}; expected ',' or ')'"
+                        )))
+                    }
+                    None => {
+                        return Err(LogsqlError::malformed(
+                            "unterminated LogsQL first by fields",
+                        ))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_first_fields(
+    tokens: &[String],
+    cursor: &mut usize,
+    clause: &str,
+) -> Result<Vec<PipelineField>, LogsqlError> {
+    if tokens.get(*cursor).is_none_or(|token| token != "(") {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL first {clause} requires parenthesized fields"
+        )));
+    }
+    *cursor += 1;
+    let mut fields = Vec::new();
+    loop {
+        match tokens.get(*cursor).map(String::as_str) {
+            Some(")") => {
+                *cursor += 1;
+                return Ok(fields);
+            }
+            Some(",") | None => {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL first {clause} requires a field after each comma"
+                )))
+            }
+            Some(token) => {
+                fields.push(parse_first_exact_field(token, clause)?);
+                *cursor += 1;
+                match tokens.get(*cursor).map(String::as_str) {
+                    Some(")") => {
+                        *cursor += 1;
+                        return Ok(fields);
+                    }
+                    Some(",") => {
+                        *cursor += 1;
+                        if tokens.get(*cursor).is_some_and(|token| token == ")") {
+                            *cursor += 1;
+                            return Ok(fields);
+                        }
+                    }
+                    Some(token) => {
+                        return Err(LogsqlError::malformed(format!(
+                            "unexpected LogsQL first {clause} token {token:?}; expected ',' or ')'"
+                        )))
+                    }
+                    None => {
+                        return Err(LogsqlError::malformed(format!(
+                            "unterminated LogsQL first {clause} fields"
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_first_exact_field(value: &str, clause: &str) -> Result<PipelineField, LogsqlError> {
+    match parse_pipeline_field(value, false)? {
+        field @ PipelineField::Exact { .. } => Ok(field),
+        PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
+            "LogsQL first {clause} requires an exact field"
+        ))),
+    }
+}
+
 fn parse_pipeline_field(value: &str, allow_wildcard: bool) -> Result<PipelineField, LogsqlError> {
     let value = strip_optional_field_parentheses(value)?;
     if allow_wildcard && value == "*" {
@@ -610,6 +895,20 @@ pub(crate) struct StatsExpression {
     pub limit: Option<usize>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PipelineSortField {
+    pub field: PipelineField,
+    pub descending: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FirstSpec {
+    pub limit: usize,
+    pub by_fields: Vec<PipelineSortField>,
+    pub partition_by: Vec<PipelineField>,
+    pub rank_field: Option<PipelineField>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -631,6 +930,7 @@ pub(crate) enum PipelineOp {
     Filter(LogPredicate),
     Stats(Vec<StatsExpression>),
     QueryStats,
+    First(FirstSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -964,6 +1264,10 @@ pub fn parse_at(
                 pipeline.push(PipelineOp::QueryStats);
                 has_session_thirteen_pipeline = true;
             }
+            _ if is_first_pipe(segment) => {
+                pipeline.push(parse_first_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
             _ => {
                 return Err(LogsqlError::unsupported(format!(
@@ -990,6 +1294,7 @@ pub fn parse_at(
                 | PipelineOp::FieldNames { .. }
                 | PipelineOp::Stats(_)
                 | PipelineOp::QueryStats
+                | PipelineOp::First(_)
         )
     });
     let implicit_result_limit =
@@ -1691,6 +1996,123 @@ pub(crate) fn logsql_field_comparison(left: &str, right: &str, operator: FieldCo
             }
         }
     }
+}
+
+/// VictoriaLogs' `sort`/`first` value order: exact signed integer, exact
+/// unsigned integer, RFC3339 timestamp, general math value, then natural UTF-8
+/// byte order. This is deliberately separate from field-comparison ordering,
+/// which also recognizes IPv4 addresses before its bytewise fallback.
+pub(crate) fn logsql_sort_comparison(left: &str, right: &str) -> Ordering {
+    if left == right {
+        return Ordering::Equal;
+    }
+    if let (Some(left), Some(right)) = (
+        parse_victorialogs_sort_i64(left),
+        parse_victorialogs_sort_i64(right),
+    ) {
+        return left.cmp(&right);
+    }
+    if let (Some(left), Some(right)) = (
+        parse_victorialogs_uint(left),
+        parse_victorialogs_uint(right),
+    ) {
+        return left.cmp(&right);
+    }
+    if let (Some(left), Some(right)) = (
+        parse_victorialogs_timestamp(left),
+        parse_victorialogs_timestamp(right),
+    ) {
+        return left.cmp(&right);
+    }
+    if let (Some(left), Some(right)) = (
+        parse_victorialogs_sort_number(left),
+        parse_victorialogs_sort_number(right),
+    ) {
+        if let Some(ordering) = left.partial_cmp(&right) {
+            return ordering;
+        }
+    }
+    natural_comparison(left.as_bytes(), right.as_bytes())
+}
+
+fn parse_victorialogs_sort_i64(value: &str) -> Option<i64> {
+    let (negative, unsigned) = value
+        .strip_prefix('-')
+        .map_or((false, value), |value| (true, value));
+    let magnitude = parse_victorialogs_uint(unsigned)?;
+    if negative {
+        if magnitude == 1u64 << 63 {
+            Some(i64::MIN)
+        } else {
+            i64::try_from(magnitude).ok().map(|value| -value)
+        }
+    } else {
+        i64::try_from(magnitude).ok()
+    }
+}
+
+fn parse_victorialogs_sort_number(value: &str) -> Option<f64> {
+    parse_victorialogs_decimal(value)
+        .or_else(|| parse_victorialogs_human_duration(value).map(|value| value as f64))
+        .or_else(|| parse_victorialogs_human_bytes(value).map(|value| value as f64))
+        .or_else(|| {
+            is_likely_math_number(value)
+                .then(|| parse_go_number(value))
+                .flatten()
+        })
+        .filter(|value| !value.is_nan())
+}
+
+fn natural_comparison(mut left: &[u8], mut right: &[u8]) -> Ordering {
+    loop {
+        let common = left.len().min(right.len());
+        let mut index = 0usize;
+        while index < common {
+            let left_byte = left[index];
+            let right_byte = right[index];
+            let left_digit = left_byte.is_ascii_digit();
+            let right_digit = right_byte.is_ascii_digit();
+            match (left_digit, right_digit) {
+                (true, true) => break,
+                (true, false) => return Ordering::Less,
+                (false, true) => return Ordering::Greater,
+                (false, false) if left_byte != right_byte => return left_byte.cmp(&right_byte),
+                (false, false) => index += 1,
+            }
+        }
+        left = &left[index..];
+        right = &right[index..];
+        if left.is_empty() || right.is_empty() {
+            return left.len().cmp(&right.len());
+        }
+
+        let left_digits = left.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        let right_digits = right
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        let left_number = parse_natural_u64(&left[..left_digits]);
+        let right_number = parse_natural_u64(&right[..right_digits]);
+        let (Some(left_number), Some(right_number)) = (left_number, right_number) else {
+            return left.cmp(right);
+        };
+        match left_number.cmp(&right_number) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match left_digits.cmp(&right_digits) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        left = &left[left_digits..];
+        right = &right[right_digits..];
+    }
+}
+
+fn parse_natural_u64(digits: &[u8]) -> Option<u64> {
+    digits.iter().try_fold(0u64, |value, digit| {
+        value.checked_mul(10)?.checked_add(u64::from(*digit - b'0'))
+    })
 }
 
 fn parse_logsql_math_number(value: &str) -> Option<f64> {
@@ -5455,6 +5877,75 @@ mod tests {
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
             assert_eq!(error.message, "LogsQL query_stats accepts no arguments");
         }
+    }
+
+    #[test]
+    fn session_seventeen_first_grammar_is_complete_and_strict() {
+        for query in [
+            "* | first",
+            "* | FIRST 2 (n DeSc, case)",
+            "* | first by (n asc, case desc)",
+            "* | first by ()",
+            "* | first by (case,)",
+            "* | first 2 by (n, case) partition by (group, zone) rank as position",
+            "* | first partition (group) rank",
+            "* | fields case, n | first by (n) | keep case",
+            r#"* | first by ("field name") partition by ('group name') rank as `row rank`"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+        }
+
+        let plan = parse_at(
+            "* | first 2 by (n desc, case) partition by (group) rank as position",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::First(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected first plan: {plan:?}");
+        };
+        assert_eq!(spec.limit, 2);
+        assert_eq!(spec.by_fields.len(), 2);
+        assert!(spec.by_fields[0].descending);
+        assert!(!spec.by_fields[1].descending);
+        assert_eq!(spec.partition_by.len(), 1);
+        assert!(matches!(
+            &spec.rank_field,
+            Some(PipelineField::Exact { name, .. }) if name == "position"
+        ));
+
+        for malformed in [
+            "* | first 0",
+            "* | first nope",
+            "* | first by",
+            "* | first by (case*)",
+            "* | first by (,case)",
+            "* | first partition by",
+            "* | first partition by (*)",
+            "* | first rank as",
+            "* | first by (case) trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_first_sort_order_matches_victorialogs_coercions() {
+        let less = |left, right| logsql_sort_comparison(left, right) == Ordering::Less;
+        assert!(less("-2", "0"));
+        assert!(less("2", "10"));
+        assert!(less("9007199254740992", "9007199254740993"));
+        assert!(less("500ms", "1s"));
+        assert!(less("1000B", "1KiB"));
+        assert!(less("2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z"));
+        assert!(less("file2", "file10"));
+        assert!(less("2x", "alpha"));
+        assert!(less("é2", "é10"));
+        assert_eq!(logsql_sort_comparison("same", "same"), Ordering::Equal);
     }
 
     #[test]

@@ -33,15 +33,15 @@
     {"case": "state-string", "_msg": "state string", "state_group": "state", "probe": "value"},
     {"case": "state-zero", "_msg": "state zero", "state_group": "state", "probe": 0},
     {"case": "state-false", "_msg": "state false", "state_group": "state", "probe": false},
-    {"case": "numeric-missing", "_msg": "numeric missing", "numeric_group": "numeric"},
-    {"case": "numeric-null", "_msg": "numeric null", "numeric_group": "numeric", "n": null},
-    {"case": "numeric-negative", "_msg": "numeric negative", "numeric_group": "numeric", "n": -2},
-    {"case": "numeric-zero", "_msg": "numeric zero", "numeric_group": "numeric", "n": 0},
-    {"case": "numeric-two", "_msg": "numeric two", "numeric_group": "numeric", "n": 2},
-    {"case": "numeric-decimal", "_msg": "numeric decimal", "numeric_group": "numeric", "n": 2.5},
-    {"case": "numeric-string", "_msg": "numeric string", "numeric_group": "numeric", "n": "3"},
-    {"case": "numeric-ten", "_msg": "numeric ten", "numeric_group": "numeric", "n": 10},
-    {"case": "numeric-huge", "_msg": "numeric huge", "numeric_group": "numeric", "n": 9007199254740993},
+    {"case": "numeric-missing", "_msg": "numeric missing", "numeric_group": "numeric", "first_partition": "a"},
+    {"case": "numeric-null", "_msg": "numeric null", "numeric_group": "numeric", "first_partition": "a", "n": null},
+    {"case": "numeric-negative", "_msg": "numeric negative", "numeric_group": "numeric", "first_partition": "b", "n": -2},
+    {"case": "numeric-zero", "_msg": "numeric zero", "numeric_group": "numeric", "first_partition": "b", "n": 0},
+    {"case": "numeric-two", "_msg": "numeric two", "numeric_group": "numeric", "first_partition": "a", "n": 2},
+    {"case": "numeric-decimal", "_msg": "numeric decimal", "numeric_group": "numeric", "first_partition": "a", "n": 2.5},
+    {"case": "numeric-string", "_msg": "numeric string", "numeric_group": "numeric", "first_partition": "b", "n": "3"},
+    {"case": "numeric-ten", "_msg": "numeric ten", "numeric_group": "numeric", "first_partition": "b", "n": 10},
+    {"case": "numeric-huge", "_msg": "numeric huge", "numeric_group": "numeric", "first_partition": "a", "n": 9007199254740993},
     {"case": "pattern-anchor-any", "_msg": "before x 10 y after", "pattern_group": "anchor"},
     {"case": "pattern-anchor-full", "_msg": "x 10 y", "pattern_group": "anchor"},
     {"case": "pattern-anchor-prefix", "_msg": "x 10 y after", "pattern_group": "anchor"},
@@ -2224,6 +2224,74 @@
       "id": "LQL-P12-query-stats-is-one-row-for-later-pipes",
       "query": "* | query_stats | keep RowsFound | count() as rows",
       "expected_rows": [{"rows": "1"}]
+    },
+    {
+      "id": "LQL-P13-first-default-all-fields",
+      "query": "case:in(numeric-two, numeric-ten) | first | fields case",
+      "expected_rows": [{"case": "numeric-two"}]
+    },
+    {
+      "id": "LQL-P13-first-natural-ascending-limit",
+      "query": "numeric_group:=numeric | first 5 by (n, case) | fields case, n",
+      "expected_rows": [
+        {"case": "numeric-missing"},
+        {"case": "numeric-null"},
+        {"case": "numeric-negative", "n": "-2"},
+        {"case": "numeric-zero", "n": "0"},
+        {"case": "numeric-two", "n": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P13-first-per-field-descending",
+      "query": "numeric_group:=numeric | first 3 by (n desc, case) | fields case, n",
+      "expected_rows": [
+        {"case": "numeric-huge", "n": "9007199254740993"},
+        {"case": "numeric-ten", "n": "10"},
+        {"case": "numeric-string", "n": "3"}
+      ]
+    },
+    {
+      "id": "LQL-P13-first-partition-and-custom-rank",
+      "query": "numeric_group:=numeric | first 2 by (n, case) partition by (first_partition) rank as position | fields case, first_partition, position",
+      "expected_rows": [
+        {"case": "numeric-missing", "first_partition": "a", "position": "1"},
+        {"case": "numeric-null", "first_partition": "a", "position": "2"},
+        {"case": "numeric-negative", "first_partition": "b", "position": "1"},
+        {"case": "numeric-zero", "first_partition": "b", "position": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P13-first-default-rank",
+      "query": "numeric_group:=numeric | first 2 by (case) rank | fields case, rank",
+      "expected_rows": [
+        {"case": "numeric-decimal", "rank": "1"},
+        {"case": "numeric-huge", "rank": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P13-first-time-descending",
+      "query": "page_group:=page | first 2 by (_time desc) | fields case",
+      "expected_rows": [{"case": "page-3"}, {"case": "page-2"}]
+    },
+    {
+      "id": "LQL-P13-first-composes-between-pipes",
+      "query": "numeric_group:=numeric | filter n:>0 | first 2 by (n desc, case) | fields case",
+      "expected_rows": [{"case": "numeric-huge"}, {"case": "numeric-ten"}]
+    },
+    {
+      "id": "LQL-P13-first-default-observes-prior-delete",
+      "query": "case:in(numeric-two, numeric-ten) | delete _time | first | fields case",
+      "expected_rows": [{"case": "numeric-ten"}]
+    },
+    {
+      "id": "LQL-P13-first-default-observes-prior-projection-order",
+      "query": "case:in(numeric-two, numeric-ten) | fields case, n | first | fields case",
+      "expected_rows": [{"case": "numeric-ten"}]
+    },
+    {
+      "id": "LQL-P13-first-empty-input",
+      "query": "case:=first-missing | first 3 by (case)",
+      "expected_rows": []
     }
   ],
   "error_cases": [
@@ -2951,6 +3019,62 @@
     {
       "id": "LQL-P12-query-stats-rejects-numeric-argument",
       "query": "* | query_stats 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-rejects-zero",
+      "query": "* | first 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-rejects-nonnumeric-limit",
+      "query": "* | first nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-requires-by-fields",
+      "query": "* | first by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-rejects-wildcard-sort-field",
+      "query": "* | first by (case*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-requires-partition-fields",
+      "query": "* | first partition by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-rejects-wildcard-partition-field",
+      "query": "* | first partition by (*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-requires-rank-name-after-as",
+      "query": "* | first rank as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P13-first-rejects-trailing-token",
+      "query": "* | first by (case) trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

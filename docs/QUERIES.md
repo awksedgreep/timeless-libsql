@@ -570,6 +570,52 @@ VictoriaLogs per-column byte accounting. The Rust LogsQL API owns query
 grammar, typed post-filter `RowsFound`, pipeline duration/composition, string
 result values, limits, cancellation, and HTTP envelopes.
 
+## Bounded LogsQL `first`
+
+The Rust logs API implements the VictoriaLogs-compatible pipeline forms:
+
+```text
+* | first
+* | first 10 by (status desc, _time)
+* | first 3 by (duration, _time) partition by (service, host)
+    rank as position
+```
+
+`N` defaults to one and must be positive. `by` is optional before the
+parenthesized exact-field list; each field may specify `asc` or `desc`.
+`partition [by] (...)` creates independent groups, and `rank [as] field`
+inserts a one-based string rank that restarts in every partition (`rank`
+defaults the field name to `rank`). Empty field lists and a trailing comma are
+accepted where the pinned upstream grammar accepts them. Wildcard fields,
+invalid counts, missing names, and trailing tokens fail before storage work.
+
+Missing and JSON null project to empty text. Sort coercion follows pinned
+VictoriaLogs order: exact signed integer, exact unsigned integer, RFC3339
+timestamp, numeric/duration/byte value, then natural UTF-8 byte order. Sort
+directions apply per field. Partition keys use length-framed textual values
+and partitions have deterministic encoded-key order. Equal sort keys use the
+original public-row order as Timeless's stable tie-break because upstream does
+not promise an equal-key order. With no `by` fields, `first` observes the
+current pipeline schema: a preceding `fields` or `delete` changes the encoded
+row used for comparison. Timeless preserves numbers, booleans, arrays,
+objects, nulls, and nested metadata in its response rather than flattening
+them to strings.
+
+The operation consumes only bounded public `timeless_logs` rows. Input and
+output are capped by `max_work_rows` and `max_result_rows`; sort keys,
+partitions, indexes, and selected rows are charged to the existing
+`max_response_bytes` memory budget. Cancellation is observed while keys are
+built, comparisons run, and output is assembled. No private table or new
+extension primitive is used.
+
+Direct SQLite/libSQL users can implement bounded per-partition numeric
+selection with `row_number()` over public rows. Executable
+[`SQL-LOG-027`](QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)
+includes the parameterized statement, timestamp units, order, missing/null,
+rank-type, and result-bound contract. It deliberately does not claim full
+LogsQL natural collation or exact cross-type integer coercion from ordinary
+SQLite `REAL`.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

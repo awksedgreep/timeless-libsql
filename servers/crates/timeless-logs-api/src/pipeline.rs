@@ -4,8 +4,11 @@
 //! virtual table. It contains no extension syntax and cannot access storage
 //! shadow tables.
 
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Instant;
 
@@ -13,8 +16,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
-    logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, PipelineField, PipelineOp,
-    StatsExpression, StatsKind,
+    logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
+    FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -23,6 +26,7 @@ use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
 pub(crate) struct PipelineLimits {
     pub max_result_rows: usize,
     pub max_state_items: usize,
+    pub max_state_bytes: usize,
 }
 
 pub(crate) struct PipelineExecution<'a> {
@@ -170,6 +174,7 @@ pub(crate) fn execute(
                     .as_nanos()
                     .min(u64::MAX as u128) as u64,
             ))],
+            PipelineOp::First(spec) => first(rows, spec, execution.limits, execution.cancelled)?,
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -212,6 +217,277 @@ fn query_stats(report: LogQueryExecutionReport, query_duration_ns: u64) -> Map<S
     insert("BytesProcessedUncompressedValues", 0);
     insert("QueryDurationNsecs", query_duration_ns);
     result
+}
+
+enum FirstSortKeys<'a> {
+    Explicit(Vec<Vec<Cow<'a, str>>>),
+    AllFields(Vec<String>),
+}
+
+fn first(
+    rows: Vec<Value>,
+    spec: &FirstSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    if rows.len() > limits.max_state_items {
+        return Err(format!(
+            "LogsQL first exceeds max_work_rows={}",
+            limits.max_state_items
+        ));
+    }
+    ensure_active(cancelled)?;
+    let mut state_bytes = rows
+        .len()
+        .checked_mul(size_of::<usize>())
+        .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+    ensure_first_state_bytes(state_bytes, limits.max_state_bytes)?;
+
+    let sort_keys = if spec.by_fields.is_empty() {
+        let mut keys = Vec::with_capacity(rows.len());
+        state_bytes = state_bytes
+            .checked_add(
+                rows.len()
+                    .checked_mul(size_of::<String>())
+                    .ok_or_else(|| "LogsQL first state size overflow".to_string())?,
+            )
+            .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+        for (index, row) in rows.iter().enumerate() {
+            check_periodically(cancelled, index)?;
+            let key = all_fields_sort_key(row)?;
+            state_bytes = state_bytes
+                .checked_add(key.len())
+                .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes)?;
+            keys.push(key);
+        }
+        FirstSortKeys::AllFields(keys)
+    } else {
+        let projection_count = rows
+            .len()
+            .checked_mul(spec.by_fields.len())
+            .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+        state_bytes = state_bytes
+            .checked_add(
+                rows.len()
+                    .checked_mul(size_of::<Vec<Cow<'_, str>>>())
+                    .and_then(|bytes| {
+                        projection_count
+                            .checked_mul(size_of::<Cow<'_, str>>())
+                            .and_then(|projections| bytes.checked_add(projections))
+                    })
+                    .ok_or_else(|| "LogsQL first state size overflow".to_string())?,
+            )
+            .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+        ensure_first_state_bytes(state_bytes, limits.max_state_bytes)?;
+        let mut keys = Vec::with_capacity(rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            check_periodically(cancelled, index)?;
+            let mut key = Vec::with_capacity(spec.by_fields.len());
+            for field in &spec.by_fields {
+                let value = match &field.field {
+                    PipelineField::Exact { path, .. } => field_value(row, path),
+                    PipelineField::Prefix { .. } | PipelineField::All => {
+                        return Err("LogsQL first sort field is not exact".into())
+                    }
+                };
+                let value = projected_text(value);
+                if let Cow::Owned(value) = &value {
+                    state_bytes = state_bytes
+                        .checked_add(value.len())
+                        .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+                    ensure_first_state_bytes(state_bytes, limits.max_state_bytes)?;
+                }
+                key.push(value);
+            }
+            keys.push(key);
+        }
+        FirstSortKeys::Explicit(keys)
+    };
+
+    let mut groups = BTreeMap::<Vec<u8>, Vec<usize>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        let key = partition_key(row, &spec.partition_by)?;
+        match groups.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                state_bytes = state_bytes
+                    .checked_add(entry.key().len())
+                    .and_then(|bytes| bytes.checked_add(size_of::<Vec<usize>>()))
+                    .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+                ensure_first_state_bytes(state_bytes, limits.max_state_bytes)?;
+                entry.insert(vec![index]);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().push(index);
+            }
+        }
+    }
+
+    let selected_count = groups.values().try_fold(0usize, |total, indices| {
+        total
+            .checked_add(indices.len().min(spec.limit))
+            .ok_or_else(|| "LogsQL first result size overflow".to_string())
+    })?;
+    if selected_count > limits.max_result_rows {
+        return Err(format!(
+            "LogsQL first exceeds max_result_rows={}",
+            limits.max_result_rows
+        ));
+    }
+    state_bytes = state_bytes
+        .checked_add(
+            selected_count
+                .checked_mul(size_of::<(usize, usize)>())
+                .ok_or_else(|| "LogsQL first state size overflow".to_string())?,
+        )
+        .ok_or_else(|| "LogsQL first state size overflow".to_string())?;
+    ensure_first_state_bytes(state_bytes, limits.max_state_bytes)?;
+    let mut selected = Vec::<(usize, usize)>::with_capacity(selected_count);
+    for indices in groups.values_mut() {
+        ensure_active(cancelled)?;
+        let comparisons = Cell::new(0usize);
+        let cancelled_during_sort = Cell::new(false);
+        indices.sort_unstable_by(|left, right| {
+            let count = comparisons.get().wrapping_add(1);
+            comparisons.set(count);
+            if count & 255 == 0 && cancelled.load(AtomicOrdering::Acquire) {
+                cancelled_during_sort.set(true);
+                return left.cmp(right);
+            }
+            first_row_comparison(*left, *right, &sort_keys, spec).then_with(|| left.cmp(right))
+        });
+        if cancelled_during_sort.get() {
+            return Err("LogsQL pipeline cancelled".into());
+        }
+        let keep = indices.len().min(spec.limit);
+        selected.extend(
+            indices[..keep]
+                .iter()
+                .enumerate()
+                .map(|(rank, index)| (*index, rank + 1)),
+        );
+    }
+    ensure_active(cancelled)?;
+    drop(groups);
+    drop(sort_keys);
+
+    let mut rows = rows.into_iter().map(Some).collect::<Vec<_>>();
+    selected
+        .into_iter()
+        .enumerate()
+        .map(|(position, (index, rank))| {
+            check_periodically(cancelled, position)?;
+            let mut row = rows[index]
+                .take()
+                .ok_or_else(|| "LogsQL first selected a row twice".to_string())?;
+            if let Some(PipelineField::Exact { path, .. }) = &spec.rank_field {
+                let object = row
+                    .as_object_mut()
+                    .ok_or_else(|| "LogsQL pipeline row is not a JSON object".to_string())?;
+                insert_path(object, path, Value::String(rank.to_string()))?;
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+fn ensure_first_state_bytes(used: usize, limit: usize) -> Result<(), String> {
+    if used > limit {
+        Err(format!(
+            "LogsQL first exceeds max_response_bytes={limit} state budget"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn first_row_comparison(
+    left: usize,
+    right: usize,
+    keys: &FirstSortKeys<'_>,
+    spec: &FirstSpec,
+) -> Ordering {
+    match keys {
+        FirstSortKeys::AllFields(keys) => logsql_sort_comparison(&keys[left], &keys[right]),
+        FirstSortKeys::Explicit(keys) => {
+            for (index, field) in spec.by_fields.iter().enumerate() {
+                let mut ordering =
+                    logsql_sort_comparison(keys[left][index].as_ref(), keys[right][index].as_ref());
+                if field.descending {
+                    ordering = ordering.reverse();
+                }
+                if !ordering.is_eq() {
+                    return ordering;
+                }
+            }
+            Ordering::Equal
+        }
+    }
+}
+
+fn partition_key(row: &Value, fields: &[PipelineField]) -> Result<Vec<u8>, String> {
+    let mut key = Vec::new();
+    for field in fields {
+        let PipelineField::Exact { path, .. } = field else {
+            return Err("LogsQL first partition field is not exact".into());
+        };
+        let value = projected_text(field_value(row, path));
+        append_varuint(&mut key, value.len() as u64);
+        key.extend_from_slice(value.as_bytes());
+    }
+    Ok(key)
+}
+
+fn append_varuint(output: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        output.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+fn all_fields_sort_key(row: &Value) -> Result<String, String> {
+    let object = row
+        .as_object()
+        .ok_or_else(|| "LogsQL pipeline row is not a JSON object".to_string())?;
+    let mut key = String::new();
+    if let Some(value) = object.get("_time") {
+        append_all_fields_sort_value(&mut key, "_time", value)?;
+    }
+    for (name, value) in object {
+        if name != "_time" {
+            append_all_fields_sort_value(&mut key, name, value)?;
+        }
+    }
+    Ok(key)
+}
+
+fn append_all_fields_sort_value(
+    output: &mut String,
+    name: &str,
+    value: &Value,
+) -> Result<(), String> {
+    output.push_str(
+        &serde_json::to_string(name)
+            .map_err(|error| format!("encode LogsQL first field name: {error}"))?,
+    );
+    output.push(':');
+    let value = projected_text(Some(value));
+    output.push_str(
+        &serde_json::to_string(value.as_ref())
+            .map_err(|error| format!("encode LogsQL first field value: {error}"))?,
+    );
+    output.push(',');
+    Ok(())
+}
+
+fn projected_text(value: Option<&Value>) -> Cow<'_, str> {
+    match value {
+        None | Some(Value::Null) => Cow::Borrowed(""),
+        Some(Value::String(value)) => Cow::Borrowed(value),
+        Some(value) => Cow::Owned(serde_json::to_string(value).unwrap_or_default()),
+    }
 }
 
 fn field_values(
@@ -1772,6 +2048,7 @@ mod tests {
                 limits: PipelineLimits {
                     max_result_rows: 10,
                     max_state_items: 10,
+                    max_state_bytes: 10_000,
                 },
                 cancelled: &cancelled,
                 query_started: Instant::now(),
@@ -1782,5 +2059,114 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["RowsFound"], json!("1"));
         assert_eq!(rows[0]["ValuesRead"], json!("3"));
+    }
+
+    #[test]
+    fn first_uses_victorialogs_natural_order_and_resets_partition_rank() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: vec![name.to_owned()],
+            name: name.to_owned(),
+        };
+        let rows = vec![
+            json!({"case":"missing","group":"a"}),
+            json!({"case":"null","group":"a","n":null}),
+            json!({"case":"two","group":"a","n":2}),
+            json!({"case":"huge","group":"a","n":9007199254740993u64}),
+            json!({"case":"negative","group":"b","n":-2}),
+            json!({"case":"zero","group":"b","n":0}),
+            json!({"case":"text","group":"b","n":"3"}),
+        ];
+        let cancelled = AtomicBool::new(false);
+        let result = first(
+            rows,
+            &FirstSpec {
+                limit: 2,
+                by_fields: vec![
+                    crate::logsql::PipelineSortField {
+                        field: exact("n"),
+                        descending: false,
+                    },
+                    crate::logsql::PipelineSortField {
+                        field: exact("case"),
+                        descending: false,
+                    },
+                ],
+                partition_by: vec![exact("group")],
+                rank_field: Some(exact("position")),
+            },
+            PipelineLimits {
+                max_result_rows: 10,
+                max_state_items: 10,
+                max_state_bytes: 10_000,
+            },
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            [
+                json!({"case":"missing","group":"a","position":"1"}),
+                json!({"case":"null","group":"a","n":null,"position":"2"}),
+                json!({"case":"negative","group":"b","n":-2,"position":"1"}),
+                json!({"case":"zero","group":"b","n":0,"position":"2"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn first_observes_cancellation_and_state_and_result_bounds() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: vec![name.to_owned()],
+            name: name.to_owned(),
+        };
+        let spec = FirstSpec {
+            limit: 2,
+            by_fields: vec![crate::logsql::PipelineSortField {
+                field: exact("n"),
+                descending: false,
+            }],
+            partition_by: vec![exact("group")],
+            rank_field: None,
+        };
+        let rows = vec![
+            json!({"group":"a","n":1}),
+            json!({"group":"a","n":2}),
+            json!({"group":"b","n":1}),
+            json!({"group":"b","n":2}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        assert_eq!(
+            first(rows.clone(), &spec, limits, &AtomicBool::new(true)).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+        let state_error = first(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+        let result_error = first(
+            rows,
+            &spec,
+            PipelineLimits {
+                max_result_rows: 3,
+                ..limits
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(result_error.contains("max_result_rows=3"), "{result_error}");
     }
 }

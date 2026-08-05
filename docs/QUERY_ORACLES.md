@@ -468,3 +468,19 @@ dependent. Both products report actual work; `QSF-150` records the selected
 compatibility profile. The fixture now contains 296 row-query cases, 104 error
 cases, and 35 statistics/pipeline cases; the fixture now contains 435 cases in
 total.
+
+`LQL-P13` adds ten successful statistics/pipeline cases and eight error cases
+for default and explicit counts, natural ascending order, per-field descending
+order, partition-local rank strings, default rank naming, RFC3339 time order,
+filter composition, current-schema no-`by` behavior after deletion and
+projection, empty input, and strict count/field/partition/rank/tail grammar.
+Source audit pins the coercion chain to exact signed integer, exact unsigned
+integer, RFC3339 timestamp, general numeric/duration/byte value, and finally
+natural UTF-8 byte order. A controlled live probe pins rank reset per
+partition and encoded partition-key order. Equal-key order is not an upstream
+contract; Timeless deliberately uses original public-row order as a stable
+tie-break. VictoriaLogs flattens values to strings, while Timeless retains its
+rich JSON response types. The fixture now contains 296 row-query cases, 112
+error cases, and 45 statistics/pipeline cases: 453 cases total, all passing
+against the immutable VictoriaLogs v1.52.0 image.
+The fixture now contains 453 cases.

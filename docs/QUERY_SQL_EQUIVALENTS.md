@@ -134,6 +134,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-024`](#sql-log-024-utc-week-range-with-explicit-offset) | `LQL-F34` | current foundation | exact Sunday-through-Saturday UTC weekday filtering with an explicit fixed offset over native public timestamps; API owns LogsQL weekday/bracket/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-025`](#sql-log-025-delete-exact-retained-metadata-fields) | `LQL-P07` | current foundation | exact deletion of retained metadata paths with public JSON1; API owns aliases, prefixes, special fields, empty-parent/row pruning, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-026`](#sql-log-026-request-local-log-query-statistics) | `LQL-P12` | current foundation | single-use report for the immediately preceding successful public log scan on the same SQLite connection; API owns LogsQL syntax, complete logical predicates, pipeline duration, result strings, limits, cancellation, and envelopes |
+| [`SQL-LOG-027`](#sql-log-027-first-numeric-rows-per-partition) | `LQL-P13` | current foundation | bounded numeric top-k per textual partition through a window rank; API owns LogsQL natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5798,6 +5799,77 @@ It currently executes the complete bounded API rowset eagerly, so a preceding
 cancel parallel storage workers after a limit; its reported work is scheduling
 dependent. Both products report work actually performed. Language parsing,
 result/response limits, cancellation, and HTTP errors remain API behavior.
+
+### SQL-LOG-027: first numeric rows per partition
+
+Bind `:sort_path`, `:tie_path`, and `:partition_path` as SQLite JSON paths.
+The timestamp bounds use the table's native unit. This statement returns the
+first `:first_count` rows in every textual partition and emits the rank as
+TEXT, matching LogsQL's public rank value type:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), ranked AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    COALESCE(CAST(json_extract(metadata, :partition_path) AS TEXT), '')
+      AS partition_value,
+    row_number() OVER (
+      PARTITION BY
+        COALESCE(CAST(json_extract(metadata, :partition_path) AS TEXT), '')
+      ORDER BY
+        CAST(json_extract(metadata, :sort_path) AS REAL),
+        COALESCE(CAST(json_extract(metadata, :tie_path) AS TEXT), ''),
+        ts,
+        level,
+        message,
+        metadata
+    ) AS partition_rank
+  FROM bounded
+)
+SELECT
+  ts,
+  level,
+  message,
+  metadata,
+  CAST(partition_rank AS TEXT) AS rank
+FROM ranked
+WHERE partition_rank <= :first_count
+ORDER BY partition_value, partition_rank
+LIMIT :max_result_rows;
+```
+
+This is exact for a sort path whose present values are JSON numbers or
+numeric strings representable by SQLite `REAL`; missing and JSON null both
+project to SQL NULL and sort before those values, and `:tie_path` makes equal
+sort values deterministic. The partition projection maps missing and null to
+the same empty string, ranks restart at one inside each partition, partitions
+and rows are deterministic, and retained metadata types are unchanged.
+`:first_count`, `:max_work_entries`, and `:max_result_rows` must be positive.
+
+The Rust API implements the complete LogsQL operation. It compares exact
+signed and unsigned integers before floating point, recognizes RFC3339 times,
+durations and byte sizes, applies VictoriaLogs natural UTF-8 ordering, permits
+per-field `asc`/`desc`, reads nested rich paths, and implements the no-`by`
+form over the current pipeline row schema. It also owns quoted grammar,
+partition-key framing, rank insertion, strict errors, state/work/result/
+response limits, cancellation, and HTTP envelopes. SQLite has no built-in
+VictoriaLogs natural collation, so arbitrary textual sort values are not
+claimed by this numeric recipe. The bounded public rows already contain all
+required values; no extension primitive or private table would save a block
+read or decode.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_first_is_typed_partitioned_bounded_and_durable`.
 
 ## Adding the next recipe
 

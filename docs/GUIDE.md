@@ -300,6 +300,16 @@ clears it. Use
 [`SQL-LOG-026`](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)
 for every column and the LogsQL-compatible string mapping.
 
+For the first few rows in each textual partition, direct SQLite/libSQL callers
+can apply `row_number() over (partition by ... order by ...)` to a bounded
+public `logs` scan. Use executable
+[`SQL-LOG-027`](QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)
+for the complete parameterized numeric recipe. The Rust LogsQL API adds exact
+integer and VictoriaLogs natural ordering, current-row pipeline composition,
+rich paths, per-field direction, rank insertion, strict errors, cancellation,
+and state/result limits; ordinary SQLite collation is not presented as an
+equivalent for those language semantics.
+
 Generic tables default to epoch milliseconds. The release Rust logs server
 declares microseconds and binds every timestamp and work guard in that native
 unit. Inspect `timeless_capabilities()` before depending on an additive query

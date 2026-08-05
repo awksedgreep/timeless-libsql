@@ -729,6 +729,16 @@ logical post-filter cardinality and actual Timeless block/entry/payload work;
 it does not fabricate unavailable per-column storage files. Executable
 `SQL-LOG-026` documents every native counter, concurrency and invalidation
 rule, and the complete LogsQL mapping.
+The bounded `first` pipeline selects an optional positive number of rows by
+exact fields with per-field direction, optional partitioning, and an optional
+one-based string rank. Its coercion chain covers exact signed/unsigned
+integers, RFC3339 times, numeric/duration/byte values, and VictoriaLogs natural
+UTF-8 order; the no-`by` form observes the current projected/deleted row
+schema. Timeless retains rich JSON values, caps input/result/state with the
+existing query limits, and performs all language composition over public rows.
+Executable `SQL-LOG-027` gives embedded users the bounded numeric
+`row_number()` foundation without claiming that SQLite `REAL` or its default
+collation implements the complete LogsQL order.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

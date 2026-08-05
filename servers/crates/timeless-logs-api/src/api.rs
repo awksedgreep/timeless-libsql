@@ -289,6 +289,7 @@ async fn pipeline_response(
             PipelineLimits {
                 max_result_rows: limits.max_result_rows,
                 max_state_items: limits.max_work_rows,
+                max_state_bytes: limits.max_response_bytes,
             },
         ),
     )
@@ -491,6 +492,18 @@ fn query_execution_error(error: String) -> Response<Body> {
     {
         return query_limit_error("max_work_rows", limit);
     }
+    if let Some(limit) = error
+        .split("max_response_bytes=")
+        .nth(1)
+        .and_then(|value| {
+            value
+                .split(|character: char| !character.is_ascii_digit())
+                .next()
+        })
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return query_limit_error("max_response_bytes", limit);
+    }
     server_error(error)
 }
 
@@ -508,7 +521,10 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                     crate::logsql::PipelineOp::Limit(limit)
                     | crate::logsql::PipelineOp::FieldValues {
                         limit: Some(limit), ..
-                    } if *limit > limits.max_result_rows => {
+                    }
+                    | crate::logsql::PipelineOp::First(crate::logsql::FirstSpec {
+                        limit, ..
+                    }) if *limit > limits.max_result_rows => {
                         return Err(("max_result_rows", limits.max_result_rows));
                     }
                     crate::logsql::PipelineOp::Offset(offset) if *offset > limits.max_work_rows => {

@@ -514,6 +514,20 @@ the pre-optimization cost and `QSF-152` records the accepted result. No
 storage format or maintenance contract changed.
 Session 17 continues with `LQL-P13`.
 
+`LQL-P13` implements VictoriaLogs-compatible `first [N] [by] (...)`, optional
+`partition [by] (...)`, and optional `rank [as] field` as bounded Rust API
+composition over public rich rows. Ten successful and eight error oracle
+cases pin the complete applicable grammar, coercion order, current-schema
+no-`by` behavior, partition-local string ranks, composition, and empty input.
+`SQL-LOG-027` gives direct SQLite/libSQL users an executable bounded numeric
+window-rank foundation and states where ordinary SQLite lacks VictoriaLogs'
+exact integer and natural-text semantics. State, work, result, response,
+cancellation, optimize, shutdown, and reopen behavior are pinned without a
+new extension primitive, private-table access, or storage-contract change.
+`QSF-153` records the semantic boundary. Final exact-build evidence and the
+row verdict are recorded in `QSF-154`.
+Session 17 continues with `LQL-P14`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,
