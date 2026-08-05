@@ -481,6 +481,19 @@ response without touching storage. Reconsider only after the versioned
 per-field accounting and stream/location prerequisites in `QSF-147` exist.
 Session 17 continues with `LQL-P11`.
 
+`LQL-P11` is deferred after source audit and a controlled probe of the pinned
+VictoriaLogs image. Upstream `blocks_count` counts opaque non-empty
+`blockResult` batches at its exact pipeline position: two selected stream
+blocks return `{"blocks_count":"2"}`, an exact missing filter returns no row,
+an earlier `limit 1` returns `{"blocks_count":"1"}`, and `as name` or a bare
+name changes the string-valued output field. Timeless aggregate/cumulative
+stats cannot reproduce that request-local result safely under concurrency,
+and the bounded Rust pipeline intentionally discards private physical block
+identity after rows cross the public extension. `QSF-148` records the required
+request-scoped lineage contract. The parser and real-extension HTTP path pin a
+422 unsupported-capability response before storage work. Session 17 continues
+with `LQL-P12`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

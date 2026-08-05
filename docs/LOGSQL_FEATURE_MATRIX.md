@@ -113,7 +113,7 @@ extension.
 | `LQL-P08` | `filter` / `where` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-011-current-row-filter-and-empty-counts)) | shipped | no | `SQL` | `API` | P1 |
 | `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | shipped | partial | `COUNT`, `SQL` | `API` | P0 |
 | `LQL-P10` | `block_stats` | deferred | no | none | `DEFER` | DEFER |
-| `LQL-P11` | `blocks_count` | missing | no | `STATS` | `EXT` | P2 |
+| `LQL-P11` | `blocks_count` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P12` | `query_stats` | missing | no | `STATS` | `API` | P2 |
 | `LQL-P13` | `first` | missing | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P14` | `last` | missing | no | `ROWS`, `SQL` | `API` | P2 |
@@ -166,6 +166,21 @@ Reconsider this row only after a versioned public per-field physical-accounting
 contract exists across every readable codec, with a stored stream identity,
 an honest SQLite block-location policy, bounded/cancellable enumeration, and
 direct-user utility. See `QSF-147`.
+
+`LQL-P11` is also deliberately deferred, for a different reason. VictoriaLogs
+increments one count for every non-empty internal `blockResult` reaching the
+pipe after all preceding filters and transforms. It returns a string-valued
+alias row, returns no row for an empty query, and changes when an earlier
+`limit` changes the processing batches. This is neither the persisted `blocks`
+total nor the cumulative `query_candidate_blocks` counter in
+`timeless_stats('logs')`. Timeless pipelines currently expose bounded rows but
+do not expose or retain request-scoped block lineage through filter,
+pagination, discovery, or aggregation transforms. Reconsider only after a
+public, request-owned execution-batch lineage/report contract defines
+persisted and buffered sources at every pipeline stage, remains correct under
+concurrency/transactions/optimize/reopen, and demonstrates direct SQLite or
+libSQL utility. Global stats deltas and private block IDs are explicitly not
+acceptable substitutes. See `QSF-148`.
 
 Session 13's typed pipe contract is intentionally more faithful than the
 flattened VictoriaLogs store. `field_values` uses deterministic type-tag order

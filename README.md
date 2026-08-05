@@ -452,6 +452,11 @@ public SQL equivalent today; use `timeless_stats('logs')` for aggregate
 operational accounting and consult the
 [LogsQL matrix](docs/LOGSQL_FEATURE_MATRIX.md) for the exact deferred
 prerequisite. Private shadow tables are not a supported workaround.
+Likewise, the `blocks` row is the current persisted total—not LogsQL
+`| blocks_count`, whose upstream value counts request-local processing batches
+after preceding pipeline stages. Timeless does not currently expose that
+lineage, and subtracting cumulative `query_candidate_blocks` values is unsafe
+when queries overlap.
 
 For worked recipes — reset-corrected counter math in pure SQL, top-k
 per bucket, cross-metric joins, IQR/σ outlier exclusion, gap-fill

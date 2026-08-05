@@ -5367,6 +5367,10 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
             "* | block_stats",
             "unsupported LogsQL pipeline \"block_stats\"",
         ),
+        (
+            "* | blocks_count",
+            "unsupported LogsQL pipeline \"blocks_count\"",
+        ),
     ] {
         let unsupported = default_app
             .clone()

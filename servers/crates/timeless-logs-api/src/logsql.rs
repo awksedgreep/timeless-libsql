@@ -4373,6 +4373,7 @@ mod tests {
         for unsupported in [
             "level:error | unpack_json",
             "* | block_stats",
+            "* | blocks_count",
             "level:error or level:critical",
             "_time:5q",
             "level:made-up",
@@ -4388,6 +4389,13 @@ mod tests {
         assert_eq!(
             block_stats.message,
             "unsupported LogsQL pipeline \"block_stats\""
+        );
+
+        let blocks_count = parse("* | blocks_count", TimestampUnit::Microseconds).unwrap_err();
+        assert_eq!(blocks_count.kind, LogsqlErrorKind::Unsupported);
+        assert_eq!(
+            blocks_count.message,
+            "unsupported LogsQL pipeline \"blocks_count\""
         );
     }
 
