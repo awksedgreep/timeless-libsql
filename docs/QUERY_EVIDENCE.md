@@ -2831,3 +2831,65 @@ limits, deadline cancellation and recovery, GET/POST, durability, shutdown,
 and reopen. No extension primitive, private table access, storage format,
 batching, compression, index, rollup, retention, transaction, migration,
 maintenance, or public batch/SQL contract changed. No CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: request-step-relative durations
+
+The checked-in
+[`2026-08-05_session15_mql_09_step_relative_durations.json`](evidence/2026-08-05_session15_mql_09_step_relative_durations.json)
+was captured from exact extension, metrics-server, and logs-server build
+`b2b1f8610894dbd2271d24b7b224f2551c443a7d`. It closes `MQL-09` with
+finite request-step windows, request-step offsets, and adaptive zero-window
+rate shapes. The correctness suite separately pins subquery windows and
+resolutions, decimal and compound arithmetic, signed saturation, and all
+documented lexical boundaries.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query | extension frame bytes/query | extension points returned/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `[5i]` count, exact host / four steps | 4 | 185 | 0.444 | 0.715 | 0.786 | 1 | 32 | 131 | 73 | 4 |
+| `[5i]` count, 512 series / four steps | 2,048 | 63,806 | 2.922 | 3.168 | 3.271 | 512 | 16,384 | 53,831 | 37,376 | 2,048 |
+| `offset 5i`, exact host / four steps | 4 | 221 | 0.590 | 0.822 | 0.879 | 1 | 32 | 131 | 460 | 27 |
+| `offset 5i`, 512 series / four steps | 2,048 | 83,984 | 3.290 | 3.579 | 4.188 | 512 | 16,384 | 53,831 | 227,344 | 16,384 |
+| adaptive `rate(...[0i])`, exact host / four steps | 4 | 193 | 0.603 | 0.781 | 0.811 | 1 | 32 | 131 | 540 | 32 |
+| adaptive `rate(...[0i])`, 512 series / four steps | 2,048 | 67,902 | 3.299 | 3.692 | 3.729 | 512 | 16,384 | 53,831 | 268,304 | 16,384 |
+
+Every shape performs exactly one public extension query. Finite ranges use the
+existing packed window reduction; offsets and adaptive zero windows use the
+existing bounded packed-raw plan. The wide finite-window shape has exactly the
+same candidate chunks, decoded points, persisted payload bytes, and packed
+frame bytes as the same-run stable `count_over_time` shape. Its 3.168 ms p95
+is 1.0% below the stable shape's 3.201 ms, while dropping the metric name
+reduces the response by 2,048 bytes. This is parity within run variation, not
+a speed claim.
+
+The wide request-step offset measured 3.579 ms p95 versus 3.474 ms for the
+same-run implicit `default_rollup`, a 3.0% difference. Both make one raw read;
+the offset's shifted selection returns a 227,344-byte frame rather than
+268,304 bytes and its response is 20 bytes smaller. The adaptive zero-window
+rate measured 3.692 ms p95 versus 3.654 ms for the semantically equivalent
+window-less rate, a 1.0% difference with byte-identical result, response,
+candidate, decode, payload, frame, and returned-point counts. None of these
+measurements shows avoidable storage amplification or justifies an extension
+primitive.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 7.349 ms and the explicit durability barrier took 88.318 ms. Metrics
+storage remained 224,688 payload bytes, 409,600 index bytes, and 1,542,312
+physical database/WAL/SHM bytes. Logs remained 1,088,919 logical and 1,190,496
+physical bytes. Metrics RSS HWM was 50,196 KiB, 1,988 KiB below MQL-07; logs
+HWM was 64,468 KiB, 140 KiB above it. Both are whole-process variations and
+neither direction is attributed to these query shapes.
+
+All 528 pinned Prometheus 3.13.2 cases, all 151 pinned VictoriaMetrics 1.148.0
+cases, and all 120 pinned VictoriaLogs 1.52.0 cases pass. The complete 88-test
+metrics real-extension suite, 57 metrics library tests, both complete Rust
+workspaces, clippy with warnings denied, formatting, the 25-test Rust query
+harness, documentation contracts, and all 77 SQL recipes (108 statements)
+pass locally. Regressions cover direct and subquery request-step windows and
+resolutions, decimal/compound/case/millisecond arithmetic, inherited negative
+offsets, collision-free zero/extrema markers, exact signed saturation,
+adaptive selector/subquery zero windows, comments and strings, bare `i`,
+stable PromQL isolation, one public read, result/deadline limits, cancellation
+recovery, GET/POST, durability, shutdown, and reopen. No extension primitive,
+private table access, storage format, batching, compression, index, rollup,
+retention, transaction, migration, maintenance, or public batch/SQL contract
+changed. No CI workflow was invoked.
