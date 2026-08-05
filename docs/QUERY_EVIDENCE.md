@@ -2534,3 +2534,59 @@ The complete 82-test metrics real-extension suite, 51 metrics library/binary
 unit tests, both complete Rust workspaces, clippy with warnings denied,
 formatting, the 24-test Rust query harness, documentation contracts, and all
 71 SQL recipes (97 statements) pass locally. No CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: union and alias
+
+The checked-in
+[`2026-08-05_session15_mql_03_union_alias.json`](evidence/2026-08-05_session15_mql_03_union_alias.json)
+was captured from exact extension, metrics-server, and logs-server build
+`b56cf052def2d499d55380b87022533fd736c8f3`. It closes `MQL-03` with
+independent alias and union shapes over the same public float-series grid.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query | intermediate work/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `alias`, exact host | 1 | 166 | 0.467 | 0.826 | 1.000 | 1 | 32 | 131 | 1 |
+| `alias`, 512 series / four steps | 2,048 | 85,028 | 4.851 | 5.116 | 5.477 | 512 | 16,384 | 53,831 | 2,048 |
+| two-branch `union`, exact host | 2 | 274 | 0.890 | 1.003 | 1.043 | 2 | 64 | 262 | 4 |
+| two-branch `union`, 1,024 series / four steps | 4,096 | 172,042 | 12.316 | 13.076 | 14.692 | 1,024 | 32,768 | 107,662 | 8,192 |
+
+Alias performs exactly the same candidate-chunk, decode, returned-point,
+payload, and frame work as the same-run `keep_metric_names` transform. Its
+wide p95 was 5.1% higher (5.116 versus 4.866 ms) while returning 1,024 more
+bytes; its narrow p95 was 6.8% lower. Both differences are retained as run
+variance rather than a speed claim. The generated name and every retained
+label map are charged incrementally to the existing response limit, so the
+bounded result does not depend on the final encoder noticing excessive label
+fan-out.
+
+The union shape deliberately evaluates two independently named public-grid
+branches and returns both. It therefore performs exactly twice the alias
+shape's storage work and returns twice as many points. Its wide p95 is 2.56x
+the alias p95, its response is 2.02x as large, and its intermediate accounting
+is 4x because the two child aliases and the union's retained output are each
+bounded. These measurements do not justify an extension primitive: a generic
+union may contain unrelated plans, while a future Rust planner optimization
+for provably identical subexpressions would be language composition rather
+than a new storage contract. No common-subexpression speedup is claimed here.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 8.507 ms and the explicit durability barrier took 96.020 ms. Metrics
+storage is byte-identical to the preceding capture: 224,688 payload bytes,
+409,600 index bytes, and 1,542,312 physical database/WAL/SHM bytes. Logs remain
+1,088,919 logical and 1,190,496 physical bytes. Metrics RSS HWM was 53,028 KiB,
+288 KiB (0.55%) above the preceding capture; logs HWM was 63,976 KiB, 344 KiB
+lower. These whole-process measurements are not attributed to a single query
+node.
+
+All 528 pinned Prometheus 3.13.2 cases and all 47 pinned VictoriaMetrics
+1.148.0 cases pass. The complete 83-test metrics real-extension suite, 53
+metrics library/binary tests, both complete Rust workspaces, clippy with
+warnings denied, formatting, the 24-test Rust query harness, documentation
+contracts, and all 72 SQL recipes (100 statements) pass locally. Regressions
+cover duplicate identities, first-branch precedence, scalar collisions,
+zero/single/trailing-comma forms, case behavior, stable PromQL isolation,
+GET/POST, instant/range, limits, cancellation, flush, shutdown, reopen, and
+reader reuse after a rejected label fan-out. No extension primitive, private
+table access, storage format, batching, compression, index, rollup, retention,
+transaction, migration, maintenance, or public batch/SQL contract changed. No
+CI workflow was invoked.
