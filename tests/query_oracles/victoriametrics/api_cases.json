@@ -170,6 +170,72 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {},
       "expected_values": [1]
+    },
+    {
+      "id": "MQL-02-transform-retains-each-input-metric-name",
+      "query": "abs({__name__=~\"oracle_keep_a|oracle_keep_b\"}) keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        },
+        {
+          "metric": {"__name__": "oracle_keep_b", "host": "shared", "job": "oracle"},
+          "value": 3
+        }
+      ]
+    },
+    {
+      "id": "MQL-02-rollup-retains-the-source-metric-name",
+      "query": "rate(oracle_step[5s]) keep_metric_names",
+      "evaluation_offset_ms": 20000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_step", "job": "oracle"},
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "MQL-02-scalar-binary-retains-each-input-metric-name",
+      "query": "({__name__=~\"oracle_keep_a|oracle_keep_b\"} / 10) keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 0.2
+        },
+        {
+          "metric": {"__name__": "oracle_keep_b", "host": "shared", "job": "oracle"},
+          "value": 0.3
+        }
+      ]
+    },
+    {
+      "id": "MQL-02-vector-binary-matches-on-metric-name",
+      "query": "(oracle_keep_a + oracle_keep_b) keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "expected_results": []
+    },
+    {
+      "id": "MQL-02-explicit-on-still-matches-on-metric-name",
+      "query": "(oracle_keep_a + on(host) oracle_keep_b) keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared"},
+          "value": 5
+        }
+      ]
+    },
+    {
+      "id": "MQL-02-nested-transform-keeps-identities-until-aggregation",
+      "query": "sum(abs({__name__=~\"oracle_keep_a|oracle_keep_b\"}) keep_metric_names)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {}, "value": 5}
+      ]
     }
   ],
   "operator_error_cases": [
@@ -196,6 +262,30 @@
       "status": 422,
       "error_type": "422",
       "error_contains": "bool modifier cannot be applied to"
+    },
+    {
+      "id": "MQL-02-bare-selector-rejects-modifier",
+      "query": "oracle_keep_a keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unparsed data left"
+    },
+    {
+      "id": "MQL-02-aggregation-rejects-modifier",
+      "query": "sum(oracle_keep_a) keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unparsed data left"
+    },
+    {
+      "id": "MQL-02-unary-rejects-modifier",
+      "query": "-oracle_keep_a keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unparsed data left"
     }
   ],
   "error_cases": [

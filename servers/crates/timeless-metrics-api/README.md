@@ -125,8 +125,9 @@ define `start_timestamp`. The stable endpoint preserves those exact failures,
 while selector modifiers `@ start()` and `@ end()` remain supported. Their
 MetricsQL forms are tracked separately rather than silently broadening the
 PromQL endpoint.
-The explicitly named MetricsQL routes currently add `default`, `if`, and
-`ifnot`. They preserve the left series identity, operate step by step, accept
+The explicitly named MetricsQL routes currently add `default`, `if`, `ifnot`,
+and the operation-level `keep_metric_names` modifier. The conditional
+operators preserve the left series identity, operate step by step, accept
 `on(...)` and `ignoring(...)`, and treat an RHS scalar as a nameless vector
 broadcast. A `default` can therefore fill gaps left by a filtered comparison,
 including a series whose comparison produced no values. MetricsQL scalar
@@ -134,10 +135,20 @@ instant results are nameless vectors, matching VictoriaMetrics rather than
 the PromQL scalar envelope. Join modifiers accepted by VictoriaMetrics on
 these set-style operators do not rewrite the contributing left labels.
 
+`keep_metric_names` follows a supported transform, rollup, or binary
+operation. It preserves each input name during the operation, so multi-name
+transforms do not collapse into duplicate nameless label sets. Default binary
+matching becomes metric-name-aware; explicit `on(...)` still selects only its
+listed labels and preserves the left name in the result. Bare selectors,
+unary expressions, aggregations, and repeated modifiers fail explicitly.
+Nested modified operations remain valid inputs to an aggregate.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding
 [`SQL-MQL-001`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-001-default-if-and-ifnot)
+and
+[`SQL-MQL-002`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-002-keep_metric_names)
 recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
 envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
 `422`. Limits and cancellation continue to use Timeless's existing execution

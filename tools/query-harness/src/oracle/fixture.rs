@@ -574,5 +574,7 @@ pub(super) fn prometheus_remote_write(timestamp_ms: i64) -> Vec<u8> {
         &[(2.0, 610_000)],
         &[("host", "c")],
     );
+    request.series("oracle_keep_a", &[(2.0, 30_000)], &[("host", "shared")]);
+    request.series("oracle_keep_b", &[(3.0, 30_000)], &[("host", "shared")]);
     snappy_literal(&request.encoded)
 }

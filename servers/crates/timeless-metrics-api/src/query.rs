@@ -387,6 +387,7 @@ pub(crate) enum ReadRequest {
 pub(crate) enum PromPlan {
     Scalar(f64),
     String(String),
+    KeepMetricNames(Box<PromPlan>),
     Unary(Box<PromPlan>),
     Function(PromFunctionPlan),
     LabelReplace(PromLabelReplacePlan),
@@ -1183,29 +1184,39 @@ enum PromVectorCardinality {
 }
 
 impl PromVectorMatching {
-    fn key(&self, labels: &BTreeMap<String, String>) -> PromMatchingKey {
+    fn key(&self, labels: &BTreeMap<String, String>, keep_metric_names: bool) -> PromMatchingKey {
         match self {
             Self::Default => labels
                 .iter()
-                .filter(|(name, _)| name.as_str() != "__name__")
+                .filter(|(name, _)| keep_metric_names || name.as_str() != "__name__")
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
+            // `on(...)` remains an explicit matching projection in
+            // VictoriaMetrics; keep_metric_names affects the result labels,
+            // not the labels selected by the modifier.
             Self::On(names) => names
                 .iter()
                 .map(|name| (name.clone(), labels.get(name).cloned().unwrap_or_default()))
                 .collect(),
             Self::Ignoring(names) => labels
                 .iter()
-                .filter(|(name, _)| name.as_str() != "__name__" && !names.contains(*name))
+                .filter(|(name, _)| {
+                    (keep_metric_names || name.as_str() != "__name__") && !names.contains(*name)
+                })
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
         }
     }
 
-    fn project_one_to_one_result(&self, labels: &mut BTreeMap<String, String>) {
+    fn project_one_to_one_result(
+        &self,
+        labels: &mut BTreeMap<String, String>,
+        keep_metric_names: bool,
+    ) {
         match self {
             Self::Default => {}
-            Self::On(names) => labels.retain(|name, _| names.contains(name)),
+            Self::On(names) => labels
+                .retain(|name, _| names.contains(name) || keep_metric_names && name == "__name__"),
             Self::Ignoring(names) => labels.retain(|name, _| !names.contains(name)),
         }
     }
@@ -1368,7 +1379,7 @@ impl PromPlan {
             Self::Scalar(_) => PromValueType::Scalar,
             Self::String(_) => PromValueType::String,
             Self::RangeSelector { .. } | Self::Subquery(_) => PromValueType::Matrix,
-            Self::Unary(inner) => inner.value_type(),
+            Self::KeepMetricNames(inner) | Self::Unary(inner) => inner.value_type(),
             Self::Function(_) => PromValueType::Vector,
             Self::LabelReplace(_) => PromValueType::Vector,
             Self::LabelJoin(_) => PromValueType::Vector,
@@ -1868,7 +1879,9 @@ fn attach_promql_plan_source_positions(
     };
     match plan {
         PromPlan::Scalar(_) | PromPlan::String(_) | PromPlan::Time => {}
-        PromPlan::Unary(inner) => attach_promql_plan_source_positions(inner, calls)?,
+        PromPlan::KeepMetricNames(inner) | PromPlan::Unary(inner) => {
+            attach_promql_plan_source_positions(inner, calls)?
+        }
         PromPlan::Function(function) => {
             attach_promql_plan_source_positions(&mut function.inner, calls)?;
             for parameter in &mut function.parameters {
@@ -4366,6 +4379,20 @@ fn execute_prometheus(
             execute_prometheus_scalar(*value, start, stop, step, instant, limits, cancelled)
         }
         PromPlan::String(value) => execute_prometheus_string(value, start, instant, limits),
+        PromPlan::KeepMetricNames(inner) => execute_prometheus_keep_metric_names(
+            conn,
+            features,
+            inner,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
         PromPlan::Unary(inner) => execute_prometheus_unary(
             conn,
             features,
@@ -4392,6 +4419,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::LabelReplace(label_replace) => execute_prometheus_label_replace(
@@ -4477,6 +4505,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::Calendar(calendar) => execute_prometheus_calendar(
@@ -4491,6 +4520,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::HistogramQuantile(histogram) => execute_prometheus_histogram_quantile(
@@ -4505,6 +4535,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::HistogramFraction(histogram) => execute_prometheus_histogram_fraction(
@@ -4519,6 +4550,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::MetricsBinary(binary) => metricsql::execute_binary(
@@ -4533,6 +4565,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
@@ -4547,6 +4580,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::Aggregate(aggregate) => execute_prometheus_aggregate(
@@ -4589,6 +4623,7 @@ fn execute_prometheus(
             query_end,
             limits,
             annotations,
+            false,
             cancelled,
         ),
         PromPlan::RangeSelector { selector, window } => execute_prometheus_range_selector(
@@ -4619,6 +4654,161 @@ fn execute_prometheus(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn execute_prometheus_keep_metric_names(
+    conn: &Connection,
+    features: QueryFeatures,
+    plan: &PromPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    match plan {
+        PromPlan::Function(function) => execute_prometheus_function(
+            conn,
+            features,
+            function,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::Timestamp(timestamp) => execute_prometheus_timestamp(
+            conn,
+            features,
+            timestamp,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::Calendar(calendar) => execute_prometheus_calendar(
+            conn,
+            features,
+            calendar,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::HistogramQuantile(histogram) => execute_prometheus_histogram_quantile(
+            conn,
+            features,
+            histogram,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::HistogramFraction(histogram) => execute_prometheus_histogram_fraction(
+            conn,
+            features,
+            histogram,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::MetricsBinary(binary) => metricsql::execute_binary(
+            conn,
+            features,
+            binary,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::Binary(binary) => execute_prometheus_binary(
+            conn,
+            features,
+            binary,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::RangeReduction(range) => execute_prometheus_range_reduction_plan(
+            conn,
+            features,
+            range,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            true,
+            cancelled,
+        ),
+        // Functions that already retain their input labels, or return a
+        // scalar/nameless result, need no alternate storage or execution path.
+        _ => execute_prometheus(
+            conn,
+            features,
+            plan,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_prometheus_range_reduction_plan(
     conn: &Connection,
     features: QueryFeatures,
@@ -4631,6 +4821,7 @@ fn execute_prometheus_range_reduction_plan(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let (parameters, parameter_frame_bytes, parameter_intermediate_points) =
@@ -4700,6 +4891,7 @@ fn execute_prometheus_range_reduction_plan(
                 range.op,
                 instant,
                 limits,
+                keep_metric_names,
                 cancelled,
             )?
         }
@@ -4719,6 +4911,7 @@ fn execute_prometheus_range_reduction_plan(
             limits,
             annotations,
             annotation_position,
+            keep_metric_names,
             cancelled,
         )?,
         PromRangeInput::Subquery(subquery) => execute_prometheus_range_subquery(
@@ -4736,6 +4929,7 @@ fn execute_prometheus_range_reduction_plan(
             limits,
             annotations,
             annotation_position,
+            keep_metric_names,
             cancelled,
         )?,
     };
@@ -5428,6 +5622,7 @@ fn execute_prometheus_function(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -5494,7 +5689,9 @@ fn execute_prometheus_function(
     };
     for item in &mut series {
         check_cancelled(cancelled)?;
-        item.labels.remove("__name__");
+        if !keep_metric_names {
+            item.labels.remove("__name__");
+        }
         let mut values = Vec::with_capacity(parameters.len());
         let mut write_index = 0;
         for read_index in 0..item.points.len() {
@@ -5556,6 +5753,7 @@ fn execute_prometheus_histogram_quantile(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -5657,9 +5855,11 @@ fn execute_prometheus_histogram_quantile(
     let mut output = Vec::with_capacity(groups.len());
     for (mut labels, steps) in groups {
         check_cancelled(cancelled)?;
-        // The metric name separates bucket families while grouping but every
-        // histogram_quantile result is nameless.
-        labels.remove("__name__");
+        // The metric name separates bucket families while grouping. PromQL
+        // drops it; MetricsQL can explicitly retain it.
+        if !keep_metric_names {
+            labels.remove("__name__");
+        }
         let mut points = Vec::with_capacity(steps.len());
         for (timestamp, buckets) in steps {
             check_cancelled(cancelled)?;
@@ -5706,6 +5906,7 @@ fn execute_prometheus_histogram_fraction(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -5826,7 +6027,9 @@ fn execute_prometheus_histogram_fraction(
     let mut output = Vec::with_capacity(groups.len());
     for (mut labels, steps) in groups {
         check_cancelled(cancelled)?;
-        labels.remove("__name__");
+        if !keep_metric_names {
+            labels.remove("__name__");
+        }
         let mut points = Vec::with_capacity(steps.len());
         for (timestamp, buckets) in steps {
             check_cancelled(cancelled)?;
@@ -6657,6 +6860,7 @@ fn execute_prometheus_timestamp(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     if let PromPlan::Selector { selector, lookback } = timestamp.inner.as_ref() {
@@ -6674,6 +6878,7 @@ fn execute_prometheus_timestamp(
             limits,
             cancelled,
             true,
+            keep_metric_names,
         )?;
         output.intermediate_points = output.points;
         enforce_intermediate_work(output.intermediate_points, limits)?;
@@ -6710,7 +6915,9 @@ fn execute_prometheus_timestamp(
     };
     for item in &mut series {
         check_cancelled(cancelled)?;
-        item.labels.remove("__name__");
+        if !keep_metric_names {
+            item.labels.remove("__name__");
+        }
         for (evaluation_time, value) in &mut item.points {
             check_cancelled(cancelled)?;
             *value = *evaluation_time as f64 / 1_000.0;
@@ -6739,6 +6946,7 @@ fn execute_prometheus_calendar(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -6771,7 +6979,9 @@ fn execute_prometheus_calendar(
     };
     for item in &mut series {
         check_cancelled(cancelled)?;
-        item.labels.remove("__name__");
+        if !keep_metric_names {
+            item.labels.remove("__name__");
+        }
         for (_, value) in &mut item.points {
             check_cancelled(cancelled)?;
             *value = calendar.op.apply(*value);
@@ -6800,6 +7010,7 @@ fn execute_prometheus_binary(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -6850,6 +7061,7 @@ fn execute_prometheus_binary(
         &binary.cardinality,
         lhs,
         rhs,
+        keep_metric_names,
         cancelled,
     )?;
     encode_prometheus_intermediate(
@@ -6869,13 +7081,21 @@ fn apply_prometheus_binary(
     cardinality: &PromVectorCardinality,
     lhs: IntermediateValue,
     rhs: IntermediateValue,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<IntermediateValue, String> {
     if op.is_set() {
         return match (lhs, rhs) {
-            (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => Ok(
-                IntermediateValue::Vector(apply_set_vectors(op, matching, lhs, rhs, cancelled)?),
-            ),
+            (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => {
+                Ok(IntermediateValue::Vector(apply_set_vectors(
+                    op,
+                    matching,
+                    lhs,
+                    rhs,
+                    keep_metric_names,
+                    cancelled,
+                )?))
+            }
             _ => Err("PromQL set operators require instant-vector operands".into()),
         };
     }
@@ -6903,6 +7123,7 @@ fn apply_prometheus_binary(
                 vector,
                 scalar,
                 false,
+                keep_metric_names,
                 cancelled,
             )?))
         }
@@ -6913,6 +7134,7 @@ fn apply_prometheus_binary(
                 vector,
                 scalar,
                 true,
+                keep_metric_names,
                 cancelled,
             )?))
         }
@@ -6924,6 +7146,7 @@ fn apply_prometheus_binary(
                 cardinality,
                 lhs,
                 rhs,
+                keep_metric_names,
                 cancelled,
             )?))
         }
@@ -6935,16 +7158,17 @@ fn apply_set_vectors(
     matching: &PromVectorMatching,
     lhs: Vec<IntermediateSeries>,
     rhs: Vec<IntermediateSeries>,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<Vec<IntermediateSeries>, String> {
     debug_assert!(op.is_set());
     let lhs_keys: Vec<_> = lhs
         .iter()
-        .map(|series| matching.key(&series.labels))
+        .map(|series| matching.key(&series.labels, keep_metric_names))
         .collect();
     let rhs_keys: Vec<_> = rhs
         .iter()
-        .map(|series| matching.key(&series.labels))
+        .map(|series| matching.key(&series.labels, keep_metric_names))
         .collect();
     let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
     let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
@@ -7030,12 +7254,13 @@ fn apply_scalar_to_vector(
     mut vector: Vec<IntermediateSeries>,
     scalar: Vec<(i64, f64)>,
     scalar_is_lhs: bool,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<Vec<IntermediateSeries>, String> {
     let scalar: BTreeMap<_, _> = scalar.into_iter().collect();
     for series in &mut vector {
         check_cancelled(cancelled)?;
-        if op.is_arithmetic() || return_bool {
+        if !keep_metric_names && (op.is_arithmetic() || return_bool) {
             series.labels.remove("__name__");
         }
         let mut output = Vec::with_capacity(series.points.len());
@@ -7087,15 +7312,16 @@ fn apply_vector_vectors(
     cardinality: &PromVectorCardinality,
     lhs: Vec<IntermediateSeries>,
     rhs: Vec<IntermediateSeries>,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<Vec<IntermediateSeries>, String> {
     let lhs_keys: Vec<_> = lhs
         .iter()
-        .map(|series| matching.key(&series.labels))
+        .map(|series| matching.key(&series.labels, keep_metric_names))
         .collect();
     let rhs_keys: Vec<_> = rhs
         .iter()
-        .map(|series| matching.key(&series.labels))
+        .map(|series| matching.key(&series.labels, keep_metric_names))
         .collect();
     let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
     let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
@@ -7184,6 +7410,7 @@ fn apply_vector_vectors(
                     return_bool,
                     matching,
                     cardinality,
+                    keep_metric_names,
                 );
                 if !step_output_labels.insert(labels.clone()) {
                     return Err(
@@ -7210,13 +7437,16 @@ fn vector_result_labels(
     return_bool: bool,
     matching: &PromVectorMatching,
     cardinality: &PromVectorCardinality,
+    keep_metric_names: bool,
 ) -> BTreeMap<String, String> {
     let mut labels = base_labels.clone();
-    if op.is_arithmetic() {
+    if !keep_metric_names && op.is_arithmetic() {
         labels.remove("__name__");
     }
     match cardinality {
-        PromVectorCardinality::OneToOne => matching.project_one_to_one_result(&mut labels),
+        PromVectorCardinality::OneToOne => {
+            matching.project_one_to_one_result(&mut labels, keep_metric_names)
+        }
         PromVectorCardinality::ManyToOne(include) | PromVectorCardinality::OneToMany(include) => {
             for name in include {
                 match one_labels.get(name).filter(|value| !value.is_empty()) {
@@ -7233,7 +7463,7 @@ fn vector_result_labels(
             unreachable!("set operators retain contributing labels")
         }
     }
-    if return_bool {
+    if !keep_metric_names && return_bool {
         labels.remove("__name__");
     }
     labels
@@ -7542,6 +7772,7 @@ fn execute_prometheus_range_subquery(
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
     annotation_position: usize,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let effective_start = subquery
@@ -7594,7 +7825,7 @@ fn execute_prometheus_range_subquery(
     for mut series in intermediate {
         check_cancelled(cancelled)?;
         let metric = series.labels.get("__name__").cloned();
-        if !op.retains_metric_name() {
+        if !keep_metric_names && !op.retains_metric_name() {
             series.labels.remove("__name__");
         }
         let item_start = body.len();
@@ -8281,6 +8512,7 @@ fn execute_prometheus_selector(
         limits,
         cancelled,
         false,
+        false,
     )
 }
 
@@ -8299,6 +8531,7 @@ fn execute_prometheus_selector_value(
     limits: PromQueryLimits,
     cancelled: &AtomicBool,
     source_timestamp: bool,
+    keep_metric_name: bool,
 ) -> Result<ReadOutput, String> {
     let selection_start = selector
         .timing
@@ -8350,7 +8583,7 @@ fn execute_prometheus_selector_value(
             comma(&mut body, emitted);
             write_prometheus_item_prefix(
                 &mut body,
-                (!source_timestamp).then_some(metric.as_str()),
+                (!source_timestamp || keep_metric_name).then_some(metric.as_str()),
                 &meta.labels,
                 instant,
                 limits,
@@ -8432,6 +8665,7 @@ fn execute_prometheus_window(
     op: PromRangeOp,
     instant: bool,
     limits: PromQueryLimits,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let native_op = op
@@ -8480,7 +8714,13 @@ fn execute_prometheus_window(
         let decoded = decode_window_batch(&buckets)?;
         let item_start = body.len();
         comma(&mut body, emitted);
-        write_prometheus_item_prefix(&mut body, None, &labels, instant, limits)?;
+        write_prometheus_item_prefix(
+            &mut body,
+            (keep_metric_names || op.retains_metric_name()).then_some(metric),
+            &labels,
+            instant,
+            limits,
+        )?;
         enforce_prometheus_output(&body, points, limits)?;
         let mut item_points = 0_u64;
         for index in 0..decoded.len() {
@@ -8540,6 +8780,7 @@ fn execute_prometheus_range_raw(
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
     annotation_position: usize,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let selection_start = selector
@@ -8593,7 +8834,7 @@ fn execute_prometheus_range_raw(
             comma(&mut body, emitted);
             write_prometheus_item_prefix(
                 &mut body,
-                op.retains_metric_name().then_some(metric.as_str()),
+                (keep_metric_names || op.retains_metric_name()).then_some(metric.as_str()),
                 &meta.labels,
                 instant,
                 limits,

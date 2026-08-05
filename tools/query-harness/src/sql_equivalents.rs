@@ -695,6 +695,63 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         }
     }
 
+    let keep_names_sql = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-002")
+        .context("SQL-MQL-002 recipe")?
+        .statements
+        .first()
+        .context("SQL-MQL-002 statement")?;
+    let mut statement = connection.prepare(keep_names_sql)?;
+    for index in 1..=statement.parameter_count() {
+        let name = statement
+            .parameter_name(index)
+            .context("SQL-MQL-002 parameter must be named")?
+            .trim_start_matches(':');
+        statement.raw_bind_parameter(index, parameter("SQL-MQL-002", name))?;
+    }
+    let rows = statement
+        .raw_query()
+        .mapped(|row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let expected = [
+        (
+            "cpu",
+            r#"{"host":"web-1","service":"api"}"#,
+            100_i64,
+            10.0_f64,
+        ),
+        (
+            "cpu",
+            r#"{"host":"web-1","service":"api"}"#,
+            110_i64,
+            30.0_f64,
+        ),
+        (
+            "cpu",
+            r#"{"host":"web-2","service":"api"}"#,
+            100_i64,
+            20.0_f64,
+        ),
+        (
+            "cpu",
+            r#"{"host":"web-2","service":"api"}"#,
+            110_i64,
+            20.0_f64,
+        ),
+    ]
+    .map(|(name, labels, ts, value)| (name.to_owned(), labels.to_owned(), ts, value));
+    if rows != expected {
+        bail!("SQL-MQL-002 keep_metric_names changed: {rows:?}");
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1118,13 +1175,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 70);
+        assert_eq!(recipes.len(), 71);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            90
+            91
         );
         assert_eq!(
             recipes
@@ -1132,7 +1189,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            96
+            97
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -79,6 +79,16 @@ fn lower_expr(
     if input.is_empty() {
         return Err("no expression found in input".into());
     }
+    if let Some(inner) = trailing_keep_metric_names(input)? {
+        let plan = lower_expr(inner, context, depth + 1)?;
+        if !supports_keep_metric_names(&plan, inner) {
+            return Err(
+                "MetricsQL keep_metric_names can be applied only to a function or binary operator"
+                    .into(),
+            );
+        }
+        return Ok(PromPlan::KeepMetricNames(Box::new(plan)));
+    }
     if let Some(binary) = root_binary(input)? {
         let lhs = input[..binary.start].trim();
         let (matching, rhs) = parse_matching_prefix(&input[binary.end..])?;
@@ -100,6 +110,142 @@ fn lower_expr(
     let mut plan = lower_promql(&rewritten, context.lookback)?;
     replace_placeholders(&mut plan, &mut context.placeholders)?;
     Ok(plan)
+}
+
+fn supports_keep_metric_names(plan: &PromPlan, input: &str) -> bool {
+    match plan {
+        PromPlan::Function(_)
+        | PromPlan::LabelReplace(_)
+        | PromPlan::LabelJoin(_)
+        | PromPlan::Absent(_)
+        | PromPlan::Sort(_)
+        | PromPlan::Conversion(_)
+        | PromPlan::Time
+        | PromPlan::Timestamp(_)
+        | PromPlan::Calendar(_)
+        | PromPlan::HistogramQuantile(_)
+        | PromPlan::HistogramFraction(_)
+        | PromPlan::MetricsBinary(_)
+        | PromPlan::Binary(_)
+        | PromPlan::RangeReduction(_) => true,
+        // pi() lowers to a scalar, but it remains a function expression in
+        // MetricsQL. Numeric literals must not acquire the modifier.
+        PromPlan::Scalar(_) => looks_like_function_call(input),
+        PromPlan::String(_)
+        | PromPlan::KeepMetricNames(_)
+        | PromPlan::Unary(_)
+        | PromPlan::Aggregate(_)
+        | PromPlan::Selector { .. }
+        | PromPlan::RangeSelector { .. }
+        | PromPlan::Subquery(_) => false,
+    }
+}
+
+fn looks_like_function_call(input: &str) -> bool {
+    let at = skip_space_and_comments(input, 0);
+    let Some((_, end)) = read_identifier(input, at) else {
+        return false;
+    };
+    let open = skip_space_and_comments(input, end);
+    input.as_bytes().get(open) == Some(&b'(')
+        && matching_paren(input, open)
+            .ok()
+            .is_some_and(|close| !has_code(&input[close + 1..]))
+}
+
+fn trailing_keep_metric_names(input: &str) -> Result<Option<&str>, String> {
+    let bytes = input.as_bytes();
+    let mut parens = 0_i32;
+    let mut brackets = 0_i32;
+    let mut braces = 0_i32;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut candidate = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if delimiter != b'`' && escaped {
+                escaped = false;
+            } else if delimiter != b'`' && byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'#' => {
+                comment = true;
+                index += 1;
+            }
+            b'"' | b'\'' | b'`' => {
+                quote = Some(byte);
+                index += 1;
+            }
+            b'(' => {
+                parens += 1;
+                index += 1;
+            }
+            b')' => {
+                parens -= 1;
+                if parens < 0 {
+                    return Err("unexpected closing parenthesis in MetricsQL expression".into());
+                }
+                index += 1;
+            }
+            b'[' => {
+                brackets += 1;
+                index += 1;
+            }
+            b']' => {
+                brackets -= 1;
+                if brackets < 0 {
+                    return Err("unexpected closing bracket in MetricsQL expression".into());
+                }
+                index += 1;
+            }
+            b'{' => {
+                braces += 1;
+                index += 1;
+            }
+            b'}' => {
+                braces -= 1;
+                if braces < 0 {
+                    return Err("unexpected closing brace in MetricsQL expression".into());
+                }
+                index += 1;
+            }
+            _ if parens == 0 && brackets == 0 && braces == 0 && is_ident_start(byte) => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && is_ident_continue(bytes[index]) {
+                    index += 1;
+                }
+                if input[start..index].eq_ignore_ascii_case("keep_metric_names") {
+                    candidate = Some((start, index));
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    if quote.is_some() {
+        return Err("unterminated string in MetricsQL expression".into());
+    }
+    if parens != 0 || brackets != 0 || braces != 0 {
+        return Err("unbalanced delimiter in MetricsQL expression".into());
+    }
+    Ok(candidate
+        .and_then(|(start, end)| (!has_code(&input[end..])).then(|| input[..start].trim_end())))
 }
 
 #[derive(Clone, Copy)]
@@ -446,7 +592,10 @@ fn contains_custom_word(input: &str) -> bool {
                 while index < bytes.len() && is_ident_continue(bytes[index]) {
                     index += 1;
                 }
-                if BinaryOp::parse(&input[start..index].to_ascii_lowercase()).is_some() {
+                let word = &input[start..index];
+                if BinaryOp::parse(&word.to_ascii_lowercase()).is_some()
+                    || word.eq_ignore_ascii_case("keep_metric_names")
+                {
                     return true;
                 }
             }
@@ -535,7 +684,9 @@ fn replace_placeholders(
     }
     match plan {
         PromPlan::Scalar(_) | PromPlan::String(_) | PromPlan::Time => {}
-        PromPlan::Unary(inner) => replace_placeholders(inner, placeholders)?,
+        PromPlan::KeepMetricNames(inner) | PromPlan::Unary(inner) => {
+            replace_placeholders(inner, placeholders)?
+        }
         PromPlan::Function(function) => {
             replace_placeholders(&mut function.inner, placeholders)?;
             for parameter in &mut function.parameters {
@@ -683,6 +834,7 @@ pub(super) fn execute_binary(
     query_end: i64,
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -771,7 +923,7 @@ pub(super) fn execute_binary(
         lhs = merge_comparison_candidates(lhs, candidates.series, cancelled)?;
     }
     enforce_intermediate_work(intermediate_points, limits)?;
-    let output = apply_binary(binary, lhs, rhs, cancelled)?;
+    let output = apply_binary(binary, lhs, rhs, keep_metric_names, cancelled)?;
     encode_prometheus_intermediate(
         IntermediateValue::Vector(output),
         instant,
@@ -877,6 +1029,7 @@ fn execute_comparison_with_candidates(
         &comparison.cardinality,
         lhs,
         rhs,
+        false,
         cancelled,
     )?;
     let output = encode_prometheus_intermediate(
@@ -904,11 +1057,11 @@ fn vector_comparison_candidates(
 ) -> Result<Vec<IntermediateSeries>, String> {
     let lhs_keys: Vec<_> = lhs
         .iter()
-        .map(|series| comparison.matching.key(&series.labels))
+        .map(|series| comparison.matching.key(&series.labels, false))
         .collect();
     let rhs_keys: Vec<_> = rhs
         .iter()
-        .map(|series| comparison.matching.key(&series.labels))
+        .map(|series| comparison.matching.key(&series.labels, false))
         .collect();
     let mut lhs_groups: BTreeMap<&PromMatchingKey, Vec<usize>> = BTreeMap::new();
     for (index, key) in lhs_keys.iter().enumerate() {
@@ -969,6 +1122,7 @@ fn vector_comparison_candidates(
                 false,
                 &comparison.matching,
                 &comparison.cardinality,
+                false,
             );
             output.entry(labels).or_insert_with(Vec::new);
         }
@@ -1016,6 +1170,7 @@ fn apply_binary(
     binary: &BinaryPlan,
     lhs: Vec<IntermediateSeries>,
     rhs: Vec<IntermediateSeries>,
+    keep_metric_names: bool,
     cancelled: &AtomicBool,
 ) -> Result<Vec<IntermediateSeries>, String> {
     if binary.op == BinaryOp::Default && lhs.is_empty() {
@@ -1033,7 +1188,7 @@ fn apply_binary(
     let mut right_by_key: BTreeMap<PromMatchingKey, BTreeMap<i64, f64>> = BTreeMap::new();
     for series in &rhs {
         check_cancelled(cancelled)?;
-        let key = metricsql_matching_key(&binary.matching, &series.labels);
+        let key = metricsql_matching_key(&binary.matching, &series.labels, keep_metric_names);
         let values = right_by_key.entry(key).or_default();
         for (timestamp, value) in &series.points {
             if !value.is_nan() {
@@ -1045,7 +1200,7 @@ fn apply_binary(
     let mut output = Vec::with_capacity(lhs.len());
     for mut series in lhs {
         check_cancelled(cancelled)?;
-        let key = metricsql_matching_key(&binary.matching, &series.labels);
+        let key = metricsql_matching_key(&binary.matching, &series.labels, keep_metric_names);
         let right = right_by_key.get(&key).or(scalar_rhs.as_ref());
         let mut points: BTreeMap<i64, f64> = series
             .points
@@ -1083,10 +1238,9 @@ fn apply_binary(
 fn metricsql_matching_key(
     matching: &PromVectorMatching,
     labels: &BTreeMap<String, String>,
+    keep_metric_names: bool,
 ) -> PromMatchingKey {
-    let mut labels = labels.clone();
-    labels.remove("__name__");
-    matching.key(&labels)
+    matching.key(labels, keep_metric_names)
 }
 
 fn strip_nan_points(mut series: Vec<IntermediateSeries>) -> Vec<IntermediateSeries> {
@@ -1130,5 +1284,56 @@ mod tests {
             PromPlan::Selector { .. }
         ));
         assert!(lower("if + 1", 300_000, 10_000).is_ok());
+    }
+
+    #[test]
+    fn keep_metric_names_wraps_functions_and_binary_operators() {
+        let transform = lower("abs(cpu) keep_metric_names", 300_000, 10_000).unwrap();
+        assert!(matches!(
+            transform,
+            PromPlan::KeepMetricNames(inner) if matches!(*inner, PromPlan::Function(_))
+        ));
+
+        let binary = lower("(cpu / 10) keep_metric_names", 300_000, 10_000).unwrap();
+        assert!(matches!(
+            binary,
+            PromPlan::KeepMetricNames(inner) if matches!(*inner, PromPlan::Binary(_))
+        ));
+
+        let nested = lower(
+            "sum(abs({__name__=~\"cpu|memory\"}) keep_metric_names)",
+            300_000,
+            10_000,
+        )
+        .unwrap();
+        let PromPlan::Aggregate(aggregate) = nested else {
+            panic!("aggregate expected")
+        };
+        assert!(matches!(*aggregate.inner, PromPlan::KeepMetricNames(_)));
+    }
+
+    #[test]
+    fn keep_metric_names_rejects_non_function_targets_and_repetition() {
+        for query in [
+            "cpu keep_metric_names",
+            "sum(cpu) keep_metric_names",
+            "-cpu keep_metric_names",
+            "abs(cpu) keep_metric_names keep_metric_names",
+        ] {
+            let error = lower(query, 300_000, 10_000).unwrap_err();
+            assert!(
+                error.contains("function or binary operator"),
+                "{query}: {error}"
+            );
+        }
+        assert!(matches!(
+            lower(
+                r#"abs(keep_metric_names_total{note="keep_metric_names"})"#,
+                300_000,
+                10_000,
+            )
+            .unwrap(),
+            PromPlan::Function(_)
+        ));
     }
 }

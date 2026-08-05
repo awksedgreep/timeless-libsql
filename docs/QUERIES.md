@@ -1318,6 +1318,38 @@ the storage-visible mechanics with the executable public-grid statements in
 The API remains responsible for precedence, implicit scalar vectors, label
 policy, response envelopes, limits, and cancellation.
 
+### Retaining metric names in MetricsQL
+
+The MetricsQL routes accept `keep_metric_names` after a supported transform,
+rollup, or binary operation:
+
+```text
+abs({__name__=~"cpu_usage|memory_usage"}) keep_metric_names
+rate(http_requests_total[5m]) keep_metric_names
+(cpu_usage / 100) keep_metric_names
+sum(abs({__name__=~"cpu_usage|memory_usage"}) keep_metric_names)
+```
+
+This is an operation modifier. It retains each contributing input metric name
+during evaluation; it does not guess or restore a name after the result has
+already collapsed. Multiple input names can therefore remain distinct through
+a transform. Default binary matching also includes the metric name while the
+modifier is active. An explicit `on(host)` still matches only `host`, then
+retains the left metric name in the result. This distinction matches pinned
+VictoriaMetrics 1.148.0.
+
+Bare selectors, unary expressions, and aggregations cannot carry the trailing
+modifier and fail explicitly. An aggregate may consume a nested modified
+operation, as in the final example, and then applies its normal nameless output
+policy. The stable PromQL routes reject the syntax. Limits, cancellation,
+GET/form-POST behavior, durability, and reopen use the existing bounded Rust
+execution path.
+
+SQLite/libSQL does not need a new query primitive: direct users retain the
+public metric identity as an ordinary selected column. The executable
+[`SQL-MQL-002`](QUERY_SQL_EQUIVALENTS.md#sql-mql-002-keep_metric_names)
+recipe shows the exact form and the name-aware/`on(...)` join distinction.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

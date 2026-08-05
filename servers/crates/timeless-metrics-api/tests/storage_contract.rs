@@ -11955,6 +11955,195 @@ async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_re
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_keep_metric_names_matches_victoriametrics_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fifteen_metricsql_keep_names.db");
+    let base = 1_785_901_638_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "mql_keep_a{{host=\"shared\"}} -2 {}\n",
+            "mql_keep_b{{host=\"shared\"}} 3 {}\n",
+            "mql_keep_counter 1 {}\n",
+            "mql_keep_counter 2 {}\n",
+            "mql_keep_counter 3 {}\n",
+            "mql_keep_counter 4 {}\n",
+            "mql_keep_counter 5 {}\n",
+            "mql_keep_counter 6 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        (base - 5) * 1_000,
+        (base - 4) * 1_000,
+        (base - 3) * 1_000,
+        (base - 2) * 1_000,
+        (base - 1) * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let transform = mql_query(
+        &app,
+        "abs({__name__=~\"mql_keep_a|mql_keep_b\"}) keep_metric_names",
+        base,
+    )
+    .await;
+    assert_eq!(transform.0, StatusCode::OK, "{}", transform.1);
+    assert_eq!(
+        transform.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "mql_keep_a", "host": "shared"},
+                "value": [base, "2"]
+            },
+            {
+                "metric": {"__name__": "mql_keep_b", "host": "shared"},
+                "value": [base, "3"]
+            }
+        ])
+    );
+
+    let rollup = mql_query(&app, "rate(mql_keep_counter[5s]) keep_metric_names", base).await;
+    assert_eq!(rollup.0, StatusCode::OK, "{}", rollup.1);
+    assert_eq!(
+        rollup.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_keep_counter"},
+            "value": [base, "1"]
+        }])
+    );
+
+    let scalar_binary = mql_query(
+        &app,
+        "({__name__=~\"mql_keep_a|mql_keep_b\"} / 10) keep_metric_names",
+        base,
+    )
+    .await;
+    assert_eq!(scalar_binary.0, StatusCode::OK, "{}", scalar_binary.1);
+    assert_eq!(
+        scalar_binary.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "mql_keep_a", "host": "shared"},
+                "value": [base, "-0.2"]
+            },
+            {
+                "metric": {"__name__": "mql_keep_b", "host": "shared"},
+                "value": [base, "0.3"]
+            }
+        ])
+    );
+    let name_aware = mql_query(&app, "(mql_keep_a + mql_keep_b) keep_metric_names", base).await;
+    assert_eq!(name_aware.0, StatusCode::OK, "{}", name_aware.1);
+    assert_eq!(name_aware.1["data"]["result"], serde_json::json!([]));
+    let explicit_on = mql_query(
+        &app,
+        "(mql_keep_a + on(host) mql_keep_b) keep_metric_names",
+        base,
+    )
+    .await;
+    assert_eq!(explicit_on.0, StatusCode::OK, "{}", explicit_on.1);
+    assert_eq!(
+        explicit_on.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_keep_a", "host": "shared"},
+            "value": [base, "1"]
+        }])
+    );
+    let nested = mql_query(
+        &app,
+        "sum(abs({__name__=~\"mql_keep_a|mql_keep_b\"}) keep_metric_names)",
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base, "5"]}])
+    );
+
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "abs(mql_keep_a) keep_metric_names")
+            .append_pair("time", &base.to_string())
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted.0, StatusCode::OK, "{}", posted.1);
+    assert_eq!(
+        posted.1["data"]["result"][0]["metric"]["__name__"],
+        "mql_keep_a"
+    );
+
+    let stable = prom_query(&app, "abs(mql_keep_a) keep_metric_names", base).await;
+    assert_eq!(stable.0, StatusCode::BAD_REQUEST, "{}", stable.1);
+    for query in [
+        "mql_keep_a keep_metric_names",
+        "sum(mql_keep_a) keep_metric_names",
+        "-mql_keep_a keep_metric_names",
+        "abs(mql_keep_a) keep_metric_names keep_metric_names",
+    ] {
+        let invalid = mql_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query(
+        &limited,
+        "abs({__name__=~\"mql_keep_a|mql_keep_b\"}) keep_metric_names",
+        base,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 16, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query(
+            &reopened_app,
+            "abs({__name__=~\"mql_keep_a|mql_keep_b\"}) keep_metric_names",
+            base,
+        )
+        .await,
+        transform
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

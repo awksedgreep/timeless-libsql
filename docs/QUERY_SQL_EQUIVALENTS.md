@@ -99,6 +99,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-055`](#sql-prom-055-atan2) | `PQL-O08` | current foundation | bounded SQLite `atan2(Y,X)` over scalar/vector or label-matched vectors; API owns Go-compatible last-bit rounding, types, names, matching errors, limits, and envelopes |
 | [`SQL-PROM-056`](#sql-prom-056-histogram_fraction-over-classic-buckets) | `PQL-H02` | current foundation | bounded classic-bucket grouping and linear CDF interpolation; API owns strict bounds, scalar ASTs, IEEE values, names, limits, cancellation, and envelopes |
 | [`SQL-MQL-001`](#sql-mql-001-default-if-and-ifnot) | `MQL-01` | current foundation | bounded gap filling and step-local label membership; API owns MetricsQL syntax, implicit scalar vectors, full label/name policy, limits, cancellation, and envelopes |
+| [`SQL-MQL-002`](#sql-mql-002-keep_metric_names) | `MQL-02` | current foundation | carry the public metric-name column through ordinary SQL transforms; API owns modifier grammar, operation eligibility, name-aware matching, collisions, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -3413,6 +3414,53 @@ the public grid has already performed the bounded storage read and decode.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-001`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_reopen`.
+
+### SQL-MQL-002: `keep_metric_names`
+
+The public grid accepts one explicit metric name at a time and returns its
+labels separately. A direct SQLite/libSQL user preserves that identity simply
+by carrying the bound name through the transform instead of discarding it:
+
+```sql
+WITH input(name, labels, ts, value) AS MATERIALIZED (
+  SELECT :metric, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT name, labels, ts, abs(value) AS value
+FROM input
+ORDER BY name, labels, ts;
+```
+
+`:metric` is the exact stored metric name. `:filter_json` is public matcher
+JSON or NULL. All timestamps use the metrics table's native unit; `:start`
+and `:end` are inclusive evaluation bounds, `:step` is positive, and
+`:lookback` is open-left and closed-right. `name` and `labels` remain SQL TEXT,
+`ts` remains INTEGER, and the transform result is REAL (or NULL under
+SQLite's ordinary numeric rules). Ordering is deterministic by the complete
+identity and timestamp. A missing input sample produces no grid row; this
+statement never fabricates a metric name for a scalar or absent result.
+
+For a default binary match, include `lhs.name = rhs.name` beside the desired
+label comparisons. For `on(host)`, compare only the projected `host` values
+and still select `lhs.name`; this is the pinned VictoriaMetrics exception in
+which explicit `on(...)` controls matching while the modifier preserves the
+left result name. `ignoring(...)` retains the metric name in the ordinary
+comparison key unless it is explicitly projected away by API semantics.
+
+This is an exact direct-SQL identity technique, not a claim that SQLite parses
+the MetricsQL modifier. The Rust MetricsQL API owns which function and binary
+nodes may carry it, nested AST composition, duplicate-labelset detection,
+metric-name-aware default matching, response shaping, limits, cancellation,
+and diagnostics. No extension primitive is warranted because the name is
+already a public input/output identity and preserving it performs no
+additional storage read or decode.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-002`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_keep_metric_names_matches_victoriametrics_and_reopens`.
 
 ## LogsQL foundations and equivalents
 
