@@ -2369,3 +2369,65 @@ and work caps, ordered projection/filter semantics, exact integers beyond
 cancellation, durability, and reader reuse. No batching, block format,
 compression, index, retention, transaction, migration, maintenance, or public
 extension contract changed.
+
+## Session 14 stable PromQL P2 completion
+
+The checked-in
+[`2026-08-04_session14_promql_p2.json`](evidence/2026-08-04_session14_promql_p2.json)
+was captured from exact extension, metrics-server, and logs-server build
+`066fb2bba87b79fb7763c4a15fdc11f10aed282b`. It measures the three shipped
+rows: quoted UTF-8 metric/label names (`PQL-S14`), comments (`PQL-S15`), and
+classic-bucket `histogram_fraction` (`PQL-H02`).
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| quoted exact series | 1 | 172 | 0.571 | 0.801 | 0.822 | 1 | 32 | 131 |
+| quoted metric, 512 series / four steps | 2,048 | 88,100 | 3.134 | 3.600 | 4.753 | 512 | 16,384 | 53,831 |
+| commented exact selector | 1 | 164 | 0.548 | 0.751 | 0.796 | 1 | 32 | 131 |
+| commented selector, 512 series / four steps | 2,048 | 84,004 | 3.299 | 3.615 | 4.340 | 512 | 16,384 | 53,831 |
+| classic fraction, one family | 1 | 134 | 0.649 | 1.410 | 2.291 | 4 | 4 | 208 |
+| classic fraction, 512 families | 512 | 45,322 | 12.775 | 14.935 | 16.111 | 2,048 | 2,048 | 106,496 |
+
+Quoted names and comments do not amplify storage work. Their narrow and wide
+shapes perform exactly the same candidate-chunk, decode, returned-point, and
+payload work as ordinary exact selectors of the same cardinality. The quoted
+wide response is 4,096 bytes larger solely because each returned metric and
+label name contains additional UTF-8 bytes; its p95 differs from the
+same-work commented shape by less than 0.5%. The exposition change preserves
+the allocation-free path for ordinary names and allocates only when an
+identity actually contains an escape.
+
+The wide fraction evaluates four public bucket series per family once, then
+does bounded Rust composition. It has identical storage work to the same-run
+`histogram_quantile` shape and one additional scalar intermediate per query;
+its 14.935 ms p95 is 2.2% lower than that shape's 15.271 ms p95, so no speedup
+is claimed. The fraction response is 3,872 bytes larger. The narrow fraction
+p50 is lower than the same-run quantile, but its 1.410 ms p95 is 65.8% higher
+and its 2.291 ms p99 is retained as an honest tail result. The absolute tail
+remains bounded, storage counters are unchanged, and there is no evidence
+that an extension primitive would avoid any read or decode work.
+
+The primary fixture deliberately adds 512 quoted-name series so the wide
+shape is comparable to the established 512-series metric. All 36,928 points
+completed the explicit durability barrier with zero failed or queued work;
+admission took 8.000 ms and the barrier took 92.961 ms. The additional 16,384
+points produce exactly 512 additional chunks, 53,831 extension payload bytes,
+49,152 SQLite index bytes, and 262,528 physical database/WAL/SHM bytes versus
+Session 11. Final metrics RSS HWM was 49,116 KiB, 2,760 KiB (5.95%) above
+Session 11 after doubling the main-series fixture and adding six query shapes.
+The unchanged log fixture remained byte-identical at 1,088,919 logical block
+bytes and 1,190,496 physical bytes; its 64,440 KiB HWM is 372 KiB (0.58%)
+above Session 13.
+
+All 528 pinned Prometheus 3.13.2 API cases, the six-case pinned
+VictoriaMetrics 1.148.0 step-relative fixture, all 80 metrics real-extension
+tests, all 45 metrics parser/evaluator/storage units, all 69 SQL recipes (93
+statements), both complete Rust workspaces, formatting, and clippy pass.
+`PQL-S10` is correctly deferred to MetricsQL row `MQL-09`.
+`PQL-F19`, `PQL-F20`, and `PQL-H03` are feature-gated experimental PromQL;
+the stable endpoint pins their upstream disabled/unknown diagnostics and
+tracks the distinct MetricsQL work as `MQL-10` through `MQL-12`. Cancellation,
+limits, GET/POST envelopes, compact, shutdown, reopen, and public catalog
+identity have real-extension regressions. No extension primitive, storage
+format, batching, compression, index, rollup, retention, transaction,
+migration, maintenance, or public batch/SQL contract changed.
