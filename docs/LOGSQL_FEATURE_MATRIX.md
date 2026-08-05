@@ -92,7 +92,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `LQL-F37` | sequence filter | missing | no | `ROWS` | `API` | P3 | Needs ordered state with strict memory bounds. |
 | `LQL-F38` | subquery/`in(...)` filter | missing | no | `SQL` | `API` | P3 | Use bounded SQL/API composition; do not add a nested-query vtab. |
 | `LQL-F39` | quoted identifiers/literals and escapes | shipped | partial | none | `API` | P0 | Double/single literals decode pinned Go escapes, backticks remain raw, quoted pipes do not split pipelines, and quoted field names are literal keys. Escapes producing non-UTF-8 bytes fail explicitly because the retained rich-log/JSON model is UTF-8. |
-| `LQL-F40` | comments and multi-line queries | missing | no | none | `API` | P2 | Parser-only, with error-location regressions. |
+| `LQL-F40` | comments and multi-line queries | in progress | no | none | `API` | P2 | Parser-only. Fourteen successful and six error pinned cases plus failing-then-passing unit and real-extension regressions establish LF/CRLF comments, multiline composition, quoted hashes, one optional terminal semicolon, strict malformed tails, lexical line/column errors, limits, durability, and reopen. Exact-build evidence remains before shipment. |
 | `LQL-F41` | `equals_common_case` / `contains_common_case` | missing | no | `ROWS` | `API` | P3 | Add only with a precise upstream Unicode/case oracle. |
 
 ## Pipes

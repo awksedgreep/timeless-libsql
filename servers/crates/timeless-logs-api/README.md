@@ -73,6 +73,17 @@ Safe top-level indexed conjuncts are pushed into public extension rows before
 the bounded Rust predicate evaluator. Predicates below `OR` or `NOT` are not
 unsafely pushed.
 
+Source may use LF or CRLF multiline layout and `#` line comments outside
+double-quoted, single-quoted, and raw-backtick literals. A hash inside a quoted
+field name or value remains literal. Exactly one optional terminal semicolon is
+accepted, including before a trailing comment. Nonterminal or repeated
+semicolons, comment-only input, dangling pipelines, and comments that remove a
+required argument fail explicitly; lexical quote/semicolon errors include
+one-based line and Unicode-character column locations. The common one-line
+path is borrowed without copying. Comment/semicolon normalization is bounded by
+the request body, preserves byte offsets and newlines, and remains entirely in
+the Rust API rather than the extension.
+
 The ordered pipeline also accepts `field_values`, `field_names`,
 `fields`/`keep`, `filter`/`where`, and `stats`. Projection accepts exact dotted
 paths, top-level prefixes, and `*`; a later filter observes the projected row,

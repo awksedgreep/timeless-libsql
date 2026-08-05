@@ -3686,6 +3686,176 @@ async fn session_sixteen_week_ranges_use_explicit_utc_offsets_and_reopen() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_comments_multiline_semicolons_and_locations_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("comment-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                (1_800_000_000_000_000, "word-exact", "alpha", r#"{}"#),
+                (1_800_000_000_000_001, "word-case", "ALPHA", r#"{}"#),
+                (
+                    1_800_000_000_000_002,
+                    "word-inside",
+                    "before alpha after",
+                    r#"{}"#,
+                ),
+                (
+                    1_800_000_000_000_003,
+                    "comment-hash",
+                    "hash#inside",
+                    r#"{"comment_group":"comments","hash#field":"hash#value"}"#,
+                ),
+            ]
+            .into_iter()
+            .map(|(ts, case, message, extra)| {
+                let mut metadata = serde_json::from_str::<serde_json::Value>(extra).unwrap();
+                metadata["case"] = serde_json::Value::String(case.into());
+                LogEntry {
+                    ts,
+                    level: 1,
+                    severity: "info".into(),
+                    message: message.into(),
+                    metadata_json: serde_json::to_string(&metadata).unwrap(),
+                }
+            })
+            .collect(),
+        )
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn cases(storage: &Storage, query: &str) -> Vec<String> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap()["case"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    let queries = [
+        ("case:=\"word-exact\" # ignored", vec!["word-exact"]),
+        ("# leading\ncase:=\"word-exact\"", vec!["word-exact"]),
+        ("case:=\"word-exact\"#attached", vec!["word-exact"]),
+        (
+            "(case:=\"word-exact\" OR\n case:=\"word-case\")",
+            vec!["word-exact", "word-case"],
+        ),
+        (
+            "comment_group:=\"comments\" \"hash#inside\"",
+            vec!["comment-hash"],
+        ),
+        (
+            "comment_group:=\"comments\" 'hash#inside'",
+            vec!["comment-hash"],
+        ),
+        (
+            "comment_group:=\"comments\" `hash#inside`",
+            vec!["comment-hash"],
+        ),
+        ("\"hash#field\":=\"hash#value\"", vec!["comment-hash"]),
+        ("\"hash#inside\"# trailing", vec!["comment-hash"]),
+        ("# windows\r\ncase:=\"word-exact\"", vec!["word-exact"]),
+        ("case:=\"word-exact\";", vec!["word-exact"]),
+        (
+            "case:=\"word-exact\"; # terminal before comment",
+            vec!["word-exact"],
+        ),
+        ("alpha\n~\"before\"", vec!["word-inside"]),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(cases(&storage, query).await, *expected, "{query:?}");
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "case:=\"word-exact\" |\n # projected below\n fields case",
+        )
+        .await,
+        [serde_json::json!({"case": "word-exact"})]
+    );
+
+    for (query, location) in [
+        ("# first line\n  \"hash#inside", "line 2, column 3"),
+        (
+            "case:=\"word-exact\";\n  case:=\"word-case\"",
+            "line 1, column 19",
+        ),
+    ] {
+        let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query:?}");
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], "malformed_logsql", "{query:?}");
+        assert!(
+            body["message"].as_str().unwrap().contains(location),
+            "{query:?}: {body}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("alpha # bounded parser\n| limit 100"))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        cases(&storage, "case:=\"word-exact\";").await,
+        ["word-exact"]
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(
+            cases(&reopened, query).await,
+            expected,
+            "reopened: {query:?}"
+        );
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

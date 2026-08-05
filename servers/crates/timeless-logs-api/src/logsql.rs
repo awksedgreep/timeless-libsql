@@ -4,6 +4,7 @@
 //! supported query into the public [`QuerySpec`] storage contract and never
 //! silently drops a term or pipe it does not understand.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::net::IpAddr;
 
@@ -608,6 +609,8 @@ pub fn parse_at(
     timestamp_unit: TimestampUnit,
     query_now: i64,
 ) -> Result<LogsqlPlan, LogsqlError> {
+    let prepared_query = prepare_query_layout(query)?;
+    let query = prepared_query.as_ref();
     let mut spec = QuerySpec {
         limit: 100,
         descending: true,
@@ -3056,6 +3059,110 @@ fn apply_exact_pushdown(
     Ok(())
 }
 
+/// Remove VictoriaLogs-compatible comments and one optional terminal
+/// semicolon without changing byte offsets or line boundaries.
+///
+/// The common path borrows the caller's query. A copy is made only when a
+/// comment or terminal semicolon actually needs to be replaced. LogsQL syntax
+/// remains API-owned; this normalized text is never sent to the extension.
+fn prepare_query_layout(input: &str) -> Result<Cow<'_, str>, LogsqlError> {
+    let mut comment_ranges = Vec::new();
+    let mut semicolons = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment_start = None;
+    let mut last_meaningful = None;
+
+    for (index, character) in input.char_indices() {
+        if let Some(start) = comment_start {
+            if character == '\n' {
+                comment_ranges.push((start, index));
+                comment_start = None;
+            }
+            continue;
+        }
+
+        if let Some((delimiter, _)) = quote {
+            last_meaningful = Some(index);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+
+        match character {
+            '#' => comment_start = Some(index),
+            '"' | '\'' | '`' => {
+                quote = Some((character, index));
+                last_meaningful = Some(index);
+            }
+            ';' => {
+                semicolons.push(index);
+                last_meaningful = Some(index);
+            }
+            character if !character.is_whitespace() => last_meaningful = Some(index),
+            _ => {}
+        }
+    }
+
+    if let Some(start) = comment_start {
+        comment_ranges.push((start, input.len()));
+    }
+    if let Some((_, start)) = quote {
+        let (line, column) = source_line_column(input, start);
+        return Err(LogsqlError::malformed(format!(
+            "unterminated LogsQL quoted string starting at line {line}, column {column}"
+        )));
+    }
+
+    if semicolons.len() > 1
+        || semicolons
+            .first()
+            .is_some_and(|offset| Some(*offset) != last_meaningful)
+    {
+        let offset = semicolons
+            .iter()
+            .copied()
+            .find(|offset| Some(*offset) != last_meaningful)
+            .unwrap_or(semicolons[0]);
+        let (line, column) = source_line_column(input, offset);
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL semicolon at line {line}, column {column}; only one terminal semicolon is allowed"
+        )));
+    }
+
+    if comment_ranges.is_empty() && semicolons.is_empty() {
+        return Ok(Cow::Borrowed(input));
+    }
+
+    let mut prepared = input.as_bytes().to_vec();
+    for (start, end) in comment_ranges {
+        prepared[start..end].fill(b' ');
+    }
+    if let Some(offset) = semicolons.first() {
+        prepared[*offset] = b' ';
+    }
+    Ok(Cow::Owned(
+        String::from_utf8(prepared).expect("ASCII replacement preserves valid UTF-8"),
+    ))
+}
+
+fn source_line_column(source: &str, byte_offset: usize) -> (usize, usize) {
+    let prefix = &source[..byte_offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map_or(prefix, |(_, suffix)| suffix)
+        .chars()
+        .count()
+        + 1;
+    (line, column)
+}
+
 fn pipeline_segments(input: &str) -> Result<Vec<&str>, LogsqlError> {
     let mut segments = Vec::new();
     let mut start = 0usize;
@@ -5120,6 +5227,66 @@ mod tests {
                 "{malformed}"
             );
         }
+    }
+
+    #[test]
+    fn session_sixteen_comments_multiline_semicolons_and_locations_are_strict() {
+        for query in [
+            "case:=\"word-exact\" # ignored",
+            "# leading\ncase:=\"word-exact\"",
+            "case:=\"word-exact\"#attached",
+            "(case:=\"word-exact\" OR\n case:=\"word-case\")",
+            "case:=\"word-exact\" |\n # projected below\n fields case",
+            "comment_group:=\"comments\" \"hash#inside\"",
+            "comment_group:=\"comments\" 'hash#inside'",
+            "comment_group:=\"comments\" `hash#inside`",
+            "\"hash#field\":=\"hash#value\"",
+            "# windows\r\ncase:=\"word-exact\"",
+            "case:=\"word-exact\";",
+            "case:=\"word-exact\"; # finished",
+            "\"hash;inside\"",
+        ] {
+            parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+        }
+
+        for malformed in [
+            "# no query",
+            "case:=\"word-exact\" | # no pipe",
+            ";",
+            "case:=\"word-exact\";;",
+            "case:=\"word-exact\"; # first query ended\ncase:=\"word-case\"",
+            "case:=\"word-exact\" | fields # missing field",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed:?}"
+            );
+        }
+
+        let quote = parse_at(
+            "# first line\n  \"hash#inside",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert!(quote.message.contains("line 2, column 3"), "{quote:?}");
+
+        let semicolon = parse_at(
+            "case:=\"word-exact\";\n  case:=\"word-case\"",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            semicolon.message.contains("line 1, column 19"),
+            "{semicolon:?}"
+        );
+
+        assert!(matches!(
+            prepare_query_layout("case:=\"word-exact\""),
+            Ok(Cow::Borrowed(_))
+        ));
     }
 
     #[test]

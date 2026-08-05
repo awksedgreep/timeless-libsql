@@ -133,7 +133,8 @@
     {"case": "week-wed", "_msg": "week Wednesday", "week_group": "week", "utc_weekday": "Wed", "utc_time_of_day": "12:00:00.000000"},
     {"case": "week-thu", "_msg": "week Thursday", "week_group": "week", "utc_weekday": "Thu", "utc_time_of_day": "12:00:00.000000"},
     {"case": "week-fri", "_msg": "week Friday", "week_group": "week", "utc_weekday": "Fri", "utc_time_of_day": "12:00:00.000000"},
-    {"case": "week-sat", "_msg": "week Saturday", "week_group": "week", "utc_weekday": "Sat", "utc_time_of_day": "12:00:00.000000"}
+    {"case": "week-sat", "_msg": "week Saturday", "week_group": "week", "utc_weekday": "Sat", "utc_time_of_day": "12:00:00.000000"},
+    {"case": "comment-hash", "_msg": "hash#inside", "comment_group": "comments", "hash#field": "hash#value"}
   ],
   "query_cases": [
     {
@@ -1152,7 +1153,7 @@
         "string-range-numeric", "string-range-boolean", "string-range-array",
         "string-range-object", "string-range-nested", "string-range-service",
         "string-range-message",
-        "page-0", "page-1", "page-2", "page-3",
+        "page-0", "page-1", "page-2", "page-3", "comment-hash",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
         "word-unicode-boundary", "word-unicode", "word-unicode-case"
@@ -1917,6 +1918,90 @@
       "query": "_time:week_range[Mon, Fri] offset 0h | filter week_group:=\"week\"",
       "status": 200,
       "expected_cases": ["week-mon-early", "week-mon", "week-tue", "week-wed", "week-thu", "week-fri"]
+    },
+    {
+      "id": "LQL-F40-trailing-comment",
+      "query": "case:=\"word-exact\" # ignore | case:=\"word-case\"",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F40-leading-comment-and-newline",
+      "query": "# leading comment\ncase:=\"word-exact\"",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F40-attached-comment-marker",
+      "query": "case:=\"word-exact\"#attached comment",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F40-multiline-logical-expression",
+      "query": "(case:=\"word-exact\" OR\n case:=\"word-case\")",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-case"]
+    },
+    {
+      "id": "LQL-F40-comment-between-pipe-and-operation",
+      "query": "case:=\"word-exact\" |\n # projected on the next line\n fields case",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F40-double-quoted-hash-is-literal",
+      "query": "comment_group:=\"comments\" \"hash#inside\"",
+      "status": 200,
+      "expected_cases": ["comment-hash"]
+    },
+    {
+      "id": "LQL-F40-single-quoted-hash-is-literal",
+      "query": "comment_group:=\"comments\" 'hash#inside'",
+      "status": 200,
+      "expected_cases": ["comment-hash"]
+    },
+    {
+      "id": "LQL-F40-backtick-quoted-hash-is-literal",
+      "query": "comment_group:=\"comments\" `hash#inside`",
+      "status": 200,
+      "expected_cases": ["comment-hash"]
+    },
+    {
+      "id": "LQL-F40-quoted-field-and-value-hashes-are-literal",
+      "query": "\"hash#field\":=\"hash#value\"",
+      "status": 200,
+      "expected_cases": ["comment-hash"]
+    },
+    {
+      "id": "LQL-F40-crlf-comment-ending",
+      "query": "# windows comment\r\ncase:=\"word-exact\"",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F40-terminal-semicolon",
+      "query": "case:=\"word-exact\";",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F40-terminal-semicolon-before-comment",
+      "query": "case:=\"word-exact\"; # finished",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F40-multiline-implicit-and",
+      "query": "alpha\n~\"before\"",
+      "status": 200,
+      "expected_cases": ["word-inside"]
+    },
+    {
+      "id": "LQL-F40-hash-after-quoted-hash-starts-comment",
+      "query": "comment_group:=\"comments\" \"hash#inside\"# ignore rest",
+      "status": 200,
+      "expected_cases": ["comment-hash"]
     }
   ],
   "stats_cases": [
@@ -2638,6 +2723,48 @@
     {
       "id": "LQL-F34-week-range-rejects-invalid-offset",
       "query": "_time:week_range[Mon, Fri] offset nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F40-comment-only-query-is-invalid",
+      "query": "# no query",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F40-dangling-pipe-before-comment-is-invalid",
+      "query": "case:=\"word-exact\" | # no pipe",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F40-unterminated-quote-with-hash-is-invalid",
+      "query": "\"hash#inside",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F40-nonterminal-semicolon-is-invalid",
+      "query": "case:=\"word-exact\"; case:=\"word-case\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F40-semicolon-only-query-is-invalid",
+      "query": ";",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F40-comment-removes-required-pipe-argument",
+      "query": "case:=\"word-exact\" | fields # missing field",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

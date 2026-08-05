@@ -660,6 +660,11 @@ offset policy. `SQL-LOG-024` gives direct users the Euclidean native-timestamp
 equivalent, including pre-epoch dates and bracket-wrap edges. Exact-build p95
 is 3.547/39.768 ms narrow/wide with byte-identical public reads versus the
 same-run equal-cardinality word baseline.
+LogsQL source also accepts VictoriaLogs-compatible `#` line comments, LF/CRLF
+multiline composition, literal hashes inside all three quoted forms, and one
+optional terminal semicolon. Malformed tails fail explicitly with lexical
+line/column locations. This bounded parser-only behavior never enters SQLite;
+direct users continue to compose the corresponding public-row SQL recipes.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

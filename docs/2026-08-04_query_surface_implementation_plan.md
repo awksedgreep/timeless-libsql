@@ -433,6 +433,15 @@ foundation including Euclidean pre-epoch weekdays. Exact-build evidence at
 commit `adb7f027f4a6c5e0d07d8ff3eb3b294e85277818` records narrow/wide weekday
 evaluation with byte-identical public reads. It closes the row without an
 extension primitive or storage-contract change.
+`LQL-F40` now has fourteen successful and six error pinned source-layout cases,
+failing-then-passing parser and real-extension regressions, LF/CRLF comments,
+literal quoted hashes, multiline logical/pipeline composition, one optional
+terminal semicolon, strict malformed tails, lexical line/column errors, request-
+bounded scanning, ordinary-query no-copy behavior, work-limit reuse, durability,
+and reopen. This is parser-only `API` ownership: direct SQLite/libSQL users write
+ordinary SQL, so neither an SQL recipe nor an extension primitive is honest.
+Exact-build narrow/wide evidence remains before the row ships and Session 16
+closes.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

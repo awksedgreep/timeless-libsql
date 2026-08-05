@@ -447,6 +447,27 @@ API. The predicate cannot independently prune an arbitrary absolute timestamp
 window, and ordinary SQL already receives the timestamp, so no extension
 primitive or storage-format change is added.
 
+LogsQL line comments begin with `#` outside double-quoted, single-quoted, and
+raw-backtick literals and continue through the next LF. CRLF input is accepted;
+the CR belongs to the comment and the LF remains the query boundary. A comment
+marker may follow a token without intervening whitespace. Hashes inside quoted
+field names and values are literal bytes.
+
+Queries may span lines anywhere ordinary grammar permits, including between
+logical terms and pipeline stages. One optional terminal semicolon is accepted,
+including immediately before a trailing comment. A semicolon before remaining
+query text, multiple semicolons, a comment-only query, a dangling pipe, and a
+comment that removes a required pipeline argument fail explicitly. Lexical
+unterminated-quote and misplaced-semicolon errors include one-based source line
+and Unicode-character column positions.
+
+The Rust API scans source once with memory bounded by the request-body limit.
+Ordinary one-line queries remain borrowed without a normalization copy; a copy
+is made only when comments or a terminal semicolon must be replaced. Replacement
+preserves byte offsets and line boundaries, and the normalized LogsQL source
+never enters SQLite. Direct SQLite/libSQL users write ordinary parameterized SQL,
+so `LQL-F40` has no separate SQL recipe or extension primitive.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

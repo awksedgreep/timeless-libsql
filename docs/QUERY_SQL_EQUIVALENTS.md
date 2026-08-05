@@ -137,6 +137,13 @@ language/value-envelope semantics belong to the Rust API.
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
 still correctly marked `missing`.
 
+`LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
+optional terminal semicolon are LogsQL source grammar owned by the Rust API;
+direct SQLite/libSQL users already write ordinary parameterized SQL and do not
+send LogsQL syntax to the extension. Each selected storage operation still
+uses the applicable public-row recipe above. Claiming a storage SQL equivalent
+for source preprocessing would conflate the two languages.
+
 ## Setup and parameter conventions
 
 Examples assume the extension has been loaded and these tables exist:

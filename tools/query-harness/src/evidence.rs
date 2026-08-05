@@ -1845,6 +1845,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "comments_narrow",
+                "logs-comments-narrow",
+                "host:=\"h00\" # retain indexed pruning\nAND query\n| sort by (_time) asc\n| limit 10000; # terminal",
+                host_matches,
+                None,
+            ),
+            (
+                "comments_wide",
+                "logs-comments-wide",
+                "# leading parser comment\nquery\n| sort by (_time) asc\n| limit 10000; # terminal",
+                entries,
+                None,
+            ),
+            (
                 "empty_narrow",
                 "logs-empty-narrow",
                 "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",
