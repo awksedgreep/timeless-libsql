@@ -3855,3 +3855,54 @@ pass locally. No private table, extension primitive, storage format,
 authoritative batching, compression, index, rollup, retention, transaction,
 migration, maintenance, or public batch/SQL contract changed. No CI workflow
 was modified or invoked.
+
+## Session 17 LogsQL P2 progress: delete pipelines
+
+The checked-in
+[`2026-08-05_session17_lql_p07_delete.json`](evidence/2026-08-05_session17_lql_p07_delete.json)
+was captured from exact extension, metrics-server, and logs-server build
+`05e40bf722245817ec6d1ae6338332a762707e31`. It closes `LQL-P07` with
+case-insensitive `delete`/`del`/`drop`/`rm` aliases; exact, quoted, prefix,
+special, nested, and all-field deletion; atomic retained arrays/scalars;
+empty-parent and empty-row pruning; ordered current-row composition; strict
+comma/wildcard errors; work limits; recursive cancellation; durability; and
+reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact plus nested-prefix delete, indexed host | 128 | 26,912 | 3.510 | 4.011 | 4.769 | 1 | 1,024 | 235,778 | 128 |
+| exact plus nested-prefix delete, full fixture | 8,192 | 1,752,794 | 44.485 | 45.768 | 46.688 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Deletion p95 is 16.9%/17.6% above the same-run narrow/wide word queries,
+whose p95 values are 3.431/38.916 ms. Narrow p99 is 4.769 ms versus 4.522
+ms; wide p99 is 46.688 ms versus 42.769 ms. The transform removes
+`context.*` and `range_key`, reducing response bytes by 22.4%/22.1%. Every
+equal-cardinality shape reads the same public blocks, entries, and payload
+bytes and crosses the same public rows. The measured cost is recursive
+in-place rich-object mutation and response reconstruction after decode, not
+storage amplification.
+
+Executable `SQL-LOG-025` gives direct SQLite/libSQL users exact retained-
+metadata-path deletion with public JSON1. LogsQL aliases, quoted and prefix
+grammar, formatted special fields, recursive empty-parent pruning, fully
+empty-row omission, pipeline composition, limits, cancellation, and envelopes
+remain bounded Rust API behavior. No extension primitive can eliminate the
+measured block read, decode, or row crossing, so the primitive gate rejects
+one.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+17.214 ms and the explicit durability barrier took 35.190 ms. The fixture,
+wire bytes, and storage are byte-identical to LQL-F40: four raw blocks,
+1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM bytes. Logs
+RSS HWM was 91,612 KiB, 604 KiB below LQL-F40; metrics HWM was 50,440 KiB,
+2,740 KiB lower. Both are retained as whole-process variation rather than
+credited to deletion.
+
+All 428 pinned VictoriaLogs 1.52.0 cases pass live. The complete 29-test logs
+real-extension suite, 60 logs library tests, complete extension and Rust server
+workspaces, all 45 CLI sections, Clippy with warnings denied, formatting, the
+29-test Rust query harness, documentation contracts, and all 91 SQL recipes
+(126 statements) pass locally. No private table, extension primitive, storage
+format, authoritative batching, compression, index, rollup, retention,
+transaction, migration, maintenance, or public batch/SQL contract changed. No
+CI workflow was modified or invoked.

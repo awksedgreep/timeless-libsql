@@ -495,6 +495,13 @@ pruning, empty-row omission, composition, limits, cancellation, and envelopes
 remain Rust API behavior. Public JSON1 already supplies the exact-path
 foundation; no extension primitive or storage-format change is warranted.
 
+Exact-build evidence over 8,192 retained rows measures exact plus nested-
+prefix deletion at 4.011/45.768 ms narrow/wide p95. That is 16.9%/17.6%
+above same-run word queries while response bytes are 22.4%/22.1% lower. Both
+paths read exactly one/four blocks, decode 1,024/8,192 entries, and read
+235,778/1,914,055 payload bytes. The cost is bounded row mutation after the
+same public decode, not storage amplification.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

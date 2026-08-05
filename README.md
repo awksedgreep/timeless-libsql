@@ -674,6 +674,9 @@ are pruned, later stages see the transformed row, and a fully empty row is
 omitted. Executable `SQL-LOG-025` gives embedded SQLite/libSQL users the exact
 metadata-path `json_remove` foundation; prefix grammar, recursive pruning,
 limits, cancellation, and response semantics remain bounded Rust API work.
+Exact-plus-prefix deletion measures 4.011/45.768 ms narrow/wide p95, 16.9%/
+17.6% above same-run word queries while returning 22.4%/22.1% fewer response
+bytes; block, decode, payload-byte, and public-row work are identical.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

@@ -463,8 +463,11 @@ empty-parent and empty-row pruning, strict errors, work limits, cancellation,
 durability, and reopen. Executable `SQL-LOG-025` proves the exact retained-
 metadata-path foundation through public JSON1. Prefix traversal and pruning
 remain bounded Rust API composition because they occur after the same public
-decode and do not justify an extension primitive. Exact-build evidence and
-the shipped-row closeout remain before advancing to `LQL-P10`.
+decode and do not justify an extension primitive. Exact-build evidence at
+commit `05e40bf722245817ec6d1ae6338332a762707e31` records narrow/wide
+deletion with byte-identical public reads and closes the row without an
+extension primitive or storage-contract change. Session 17 continues with
+`LQL-P10`.
 
 ### Session 18: applicable LogsQL P3
 

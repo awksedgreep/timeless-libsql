@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -114,6 +114,13 @@ request cancellation, flush/shutdown/reopen durability, and rich values are
 covered by the real-extension regression. `SQL-LOG-025` is the direct
 SQLite/libSQL exact-metadata-path foundation; language and recursive pruning
 remain Rust API behavior.
+
+Exact-build evidence measures exact plus nested-prefix deletion at
+4.011/45.768 ms narrow/wide p95, 16.9%/17.6% above same-run word queries.
+Removing the selected fields cuts response bytes by 22.4%/22.1%; candidate
+blocks, decoded entries, extension payload bytes, and public rows are
+identical. The bounded cost is row mutation and response reconstruction after
+the same public decode.
 
 The shipped statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,

@@ -109,7 +109,7 @@ extension.
 | `LQL-P04` | `field_values` ([indexed SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-004-distinct-field-values), [typed SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-012-typed-unique-values-and-counts)) | shipped | no | `VALUES` | `API` | P1 |
 | `LQL-P05` | `field_names` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | shipped | no | `ROWS`, `VALUES` | `API` | P1 |
 | `LQL-P06` | `fields` / `keep` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | shipped | no | `SQL` | `API` | P1 |
-| `LQL-P07` | `delete` / `drop` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-025-delete-exact-retained-metadata-fields)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P07` | `delete` / `drop` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-025-delete-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P08` | `filter` / `where` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-011-current-row-filter-and-empty-counts)) | shipped | no | `SQL` | `API` | P1 |
 | `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | shipped | partial | `COUNT`, `SQL` | `API` | P0 |
 | `LQL-P10` | `block_stats` | missing | no | `STATS` | `EXT` | P2 |
