@@ -298,7 +298,13 @@ Progress: `LQL-F11` is shipped with all four case-insensitive pattern anchors,
 all seven VictoriaLogs placeholders, strict one-argument grammar, rich-value textual
 projection, missing/null/empty behavior, field and pipeline composition,
 bounded work/cancellation, 23 pinned oracle cases, real-extension durability
-and reopen coverage, and no extension primitive or misleading SQL claim. The
+and reopen coverage, and no extension primitive or misleading SQL claim.
+Exact-build evidence at commit
+`2f4b2c5d8d0e1623da69d41a943b3cad8e517b60` records narrow/wide message and
+typed-field pattern costs. A single non-reproduced rich-block decoder failure
+is retained honestly in `QSF-112`; the exact 8,192-entry stress regression now
+covers 48 full reads across both readers, raw storage, reopen, and compression,
+and future failed evidence runs preserve their database and server log. The
 remaining rows continue in their listed order.
 
 ### Session 17: LogsQL P2 pipelines and query behavior

@@ -298,6 +298,19 @@ Session 12 after 18 additional typed query shapes; `QSF-081` records the
 bounded increase and the decision to keep composition in the Rust API rather
 than add a storage primitive without evidence of avoidable direct-user work.
 
+Session 16 adds VictoriaLogs-compatible structural pattern matching without
+changing that public storage path. Full-message pattern matching measured
+2.329ms/23.139ms narrow/wide p95; matching the textual projection of a nested
+numeric field measured 2.381ms/28.023ms. These shapes perform the same
+one-block/1,024-entry narrow or four-block/8,192-entry wide reads as the
+existing word, regexp, and typed-value filters. Physical bytes remain exactly
+1,190,496 and whole-process HWM is 64,812KiB. `QSF-113` keeps the typed-field
+composition cost visible and rejects a new extension primitive without
+evidence that it would remove storage work for direct SQLite/libSQL users.
+`QSF-112` separately preserves one non-reproduced decoder failure and the
+new exact rich-block stress/forensic regressions; it is not mislabeled as a
+pattern-query fix.
+
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).
 The pinned Session 1 comparison is reproduced in the

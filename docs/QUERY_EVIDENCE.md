@@ -3007,3 +3007,58 @@ reopen. No extension primitive, private table access, storage format,
 batching, compression, index, rollup, retention, transaction, migration,
 maintenance, or public batch/SQL contract changed. No CI workflow was
 invoked.
+
+## Session 16 LogsQL P2 progress: structural pattern matching
+
+The checked-in
+[`2026-08-05_session16_lql_f11_pattern_match.json`](evidence/2026-08-05_session16_lql_f11_pattern_match.json)
+was captured from exact extension, metrics-server, and logs-server build
+`2f4b2c5d8d0e1623da69d41a943b3cad8e517b60`. It closes `LQL-F11` with
+full-message and nested typed-field pattern shapes; correctness separately
+pins all four anchors, seven placeholders, Unicode word categories, restart
+behavior, unknown literals, case-insensitive function names, strict grammar,
+missing/null/empty projection, limits, cancellation, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| message pattern, indexed host | 128 | 21,826 | 2.066 | 2.329 | 2.548 | 1 | 1,024 | 132,676 | 128 |
+| message pattern, full fixture | 8,192 | 1,424,639 | 21.148 | 23.139 | 24.710 | 4 | 8,192 | 1,088,919 | 8,192 |
+| nested numeric-field pattern, indexed host | 128 | 21,826 | 2.166 | 2.381 | 2.515 | 1 | 1,024 | 132,676 | 128 |
+| nested numeric-field pattern, full fixture | 8,192 | 1,424,639 | 24.838 | 28.023 | 28.990 | 4 | 8,192 | 1,088,919 | 8,192 |
+
+The message pattern's 2.329/23.139 ms narrow/wide p95 is within run noise of
+word matching at 2.346/23.149 ms and regexp matching at 2.722/22.602 ms.
+Nested typed-field projection is 2.2%/21.1% above message matching at
+narrow/wide p95, but the storage counters are byte-identical: projection and
+placeholder evaluation add bounded Rust work after the same public row read.
+There is no measured block-read, decode, allocation, or row-crossing saving
+that would justify adding LogsQL syntax or a specialized pattern primitive to
+the extension. Direct SQLite/libSQL users retain the general public row
+surface; no misleading ordinary-SQL equivalent is claimed because SQLite
+`LIKE`/`GLOB` cannot implement these placeholder and Unicode-word semantics.
+
+All 8,192 log entries completed durably with zero queued work. Admission took
+9.341 ms and the explicit durability barrier took 21.256 ms. Logs storage
+remained four raw blocks, 1,088,919 logical bytes, and 1,190,496 physical
+database/WAL/SHM bytes. Logs RSS HWM was 64,812 KiB, 1,020 KiB above the
+preceding MQL-12 capture. Metrics storage remained byte-identical; its HWM was
+53,884 KiB, 1,904 KiB higher. Both are whole-process variations and neither is
+attributed to the pattern matcher.
+
+The first exact-build evidence attempt exposed the non-reproduced raw rich-log
+decoder incident recorded as `QSF-112`. It is not counted as fixed. The added
+regression performs 48 complete 8,192-row reads across both SQLite readers,
+raw storage, shutdown/reopen, and compressed storage, plus two complete
+pattern reads. Future evidence failures name their exact query and preserve
+the database and server log; the storage decoder remains fail-closed and is
+never retried into apparent success.
+
+All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
+cases, and all 98 pinned VictoriaLogs 1.52.0 cases pass. The complete 17-test
+logs real-extension suite, 39 logs library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 28-test Rust query
+harness, documentation contracts, and all 79 SQL recipes (110 statements)
+pass locally. No extension primitive, private table access, storage format,
+batching, compression, index, rollup, retention, transaction, migration,
+maintenance, or public batch/SQL contract changed. No CI workflow was
+invoked.
