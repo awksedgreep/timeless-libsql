@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -48,7 +48,8 @@ closed native-unit edges; all eight exact severities; service and arbitrary
 typed metadata equality; message word, phrase, word-prefix, phrase-prefix,
 case-sensitive substring, bounded RE2-compatible regexp, case-insensitive,
 full-message exact, start-anchored exact-prefix, and static
-`in(v1, ..., vN)` exact membership; VictoriaLogs-compatible
+`in(v1, ..., vN)` exact membership; field-independent wildcard no-ops for
+`in`, `contains_any`, and `contains_all`; VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
 names; time sort, limit, and
@@ -362,6 +363,15 @@ returning 51/3,277 rows. Both use the same one-block/1,024-entry or four-block/
 ordinary parameterized `IN` and existing hidden-column pruning for declared
 string-only index keys; `QSF-118` records why rich typed membership remains
 bounded Rust composition rather than a new extension primitive.
+
+Session 16 field no-ops measured 2.344ms/23.509ms narrow/wide p95 while
+returning 128/8,192 rows. They perform the same one-block/1,024-entry or four-
+block/8,192-entry public reads and return the same 21,826/1,424,639 response
+bytes as the comparison filters. Wide p95 is 2.7% above the same-run word
+query and 11.4% below the empty-field query; these are run/predicate variation
+over byte-identical storage work. Physical storage remains 1,190,496 bytes and
+whole-process HWM is 65,892KiB. `SQL-LOG-016` is the exact direct-user
+constant-true form; `QSF-120` rejects a redundant extension primitive.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).

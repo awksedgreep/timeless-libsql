@@ -320,7 +320,14 @@ reopen coverage. Exact-build evidence at commit
 `e782043dc662111f4f6f68b001da64fe9b3a7f00` records narrow/wide message and
 typed-field costs with storage work unchanged; direct users retain ordinary
 parameterized `IN` and the public string-index hidden column without a new
-extension primitive.
+extension primitive. `LQL-F20` is shipped with 11 pinned field-independent
+wildcard cases across `in`, `contains_any`, and `contains_all`; strict
+LQL-F21/LQL-F22/LQL-F38 boundaries; service/level alias dispatch; logical and
+pipeline composition; executable `SQL-LOG-016`; and real-extension durability/
+reopen coverage. Exact-build evidence at commit
+`e824450234b6f3cc57faa9d342696b222b3b532b` shows byte-identical public reads
+and confirms that ordinary constant-true SQL is the complete direct-user
+primitive.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

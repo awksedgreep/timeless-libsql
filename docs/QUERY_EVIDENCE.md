@@ -3157,3 +3157,45 @@ harness, documentation contracts, and all 81 SQL recipes (115 statements)
 pass locally. No private table, storage format, batching, compression, index,
 rollup, retention, transaction, migration, maintenance, or public batch/SQL
 contract changed. No CI workflow was invoked.
+
+## Session 16 LogsQL P2 progress: field-independent no-op filters
+
+The checked-in
+[`2026-08-05_session16_lql_f20_field_noop.json`](evidence/2026-08-05_session16_lql_f20_field_noop.json)
+was captured from exact extension, metrics-server, and logs-server build
+`e824450234b6f3cc57faa9d342696b222b3b532b`. It closes `LQL-F20` with the
+field-independent true predicate produced by any standalone unquoted wildcard
+inside `in`, `contains_any`, or `contains_all`. Correctness separately pins
+missing fields, mixed lists, quoted-star separation, case-insensitive names,
+service/level alias routing, logical/pipeline composition, malformed errors,
+explicit LQL-F21/LQL-F22/LQL-F38 boundaries, limits, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| missing-field `contains_any(*)`, indexed host | 128 | 21,826 | 2.125 | 2.344 | 2.390 | 1 | 1,024 | 132,676 | 128 |
+| missing-field `contains_all(*)`, full fixture | 8,192 | 1,424,639 | 21.647 | 23.509 | 25.121 | 4 | 8,192 | 1,088,919 | 8,192 |
+
+Narrow p95 is within 0.1% of the same-run empty-field query and 5.9% below
+the any-value query. Wide p95 is 2.7% above the same-run word query, 11.4%
+below empty-field matching, and 14.3% below any-value matching. Every compared
+shape with the same host/full-fixture cardinality reads byte-identical public
+storage and emits the same response bytes, so the differences are bounded
+predicate/run variation. Direct SQLite/libSQL users express the operation by
+omitting the field predicate, as executable `SQL-LOG-016` demonstrates. A new
+extension primitive would be strictly redundant.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+8.834 ms and the explicit durability barrier took 21.073 ms. Logs storage
+remained four raw blocks, 1,088,919 logical bytes, and 1,190,496 physical
+database/WAL/SHM bytes. Logs RSS HWM was 65,892 KiB, 112 KiB above the prior
+capture; metrics HWM was 49,440 KiB, 3,380 KiB lower. Both are whole-process
+variations, and metrics storage remained byte-identical.
+
+All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
+cases, and all 142 pinned VictoriaLogs 1.52.0 cases pass. The complete 19-test
+logs real-extension suite, 43 logs library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 28-test Rust query
+harness, documentation contracts, and all 82 SQL recipes (116 statements)
+pass locally. No private table, extension primitive, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed. No CI workflow was invoked.
