@@ -1873,6 +1873,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "query_stats_narrow",
+                "logs-query-stats-narrow",
+                "host:=\"h00\" AND query | query_stats",
+                1,
+                None,
+            ),
+            (
+                "query_stats_wide",
+                "logs-query-stats-wide",
+                "query | query_stats",
+                1,
+                None,
+            ),
+            (
                 "empty_narrow",
                 "logs-empty-narrow",
                 "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",

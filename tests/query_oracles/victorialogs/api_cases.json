@@ -2199,6 +2199,31 @@
       "id": "LQL-P07-null-and-empty-fields",
       "query": "delete_group:=\"delete\" | delete null_value, empty_value | fields case, null_value, empty_value",
       "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P12-query-stats-exact-logical-cardinality",
+      "query": "case:=\"word-exact\" | query_stats | keep RowsFound",
+      "expected_rows": [{"RowsFound": "1"}]
+    },
+    {
+      "id": "LQL-P12-query-stats-empty-match-still-emits",
+      "query": "case:=\"query-stats-missing\" | query_stats | keep RowsFound",
+      "expected_rows": [{"RowsFound": "0"}]
+    },
+    {
+      "id": "LQL-P12-query-stats-full-fixture-cardinality",
+      "query": "* | query_stats | keep RowsFound",
+      "expected_rows": [{"RowsFound": "135"}]
+    },
+    {
+      "id": "LQL-P12-query-stats-composes-after-limit",
+      "query": "case:=\"word-exact\" | limit 1 | query_stats | keep RowsFound",
+      "expected_rows": [{"RowsFound": "1"}]
+    },
+    {
+      "id": "LQL-P12-query-stats-is-one-row-for-later-pipes",
+      "query": "* | query_stats | keep RowsFound | count() as rows",
+      "expected_rows": [{"rows": "1"}]
     }
   ],
   "error_cases": [
@@ -2912,6 +2937,20 @@
     {
       "id": "LQL-P07-delete-rejects-embedded-wildcard",
       "query": "* | delete drop*prefix",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P12-query-stats-rejects-text-argument",
+      "query": "* | query_stats x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P12-query-stats-rejects-numeric-argument",
+      "query": "* | query_stats 0",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

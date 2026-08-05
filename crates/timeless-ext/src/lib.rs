@@ -47,6 +47,7 @@ mod logs_vtab;
 mod metrics_vtab;
 mod otel_json;
 pub mod query_frame;
+mod query_report;
 mod query_tvf;
 mod shadow_block_store;
 mod shadow_meta;
@@ -94,11 +95,12 @@ pub fn register_dbhealth(db: &Connection) -> Result<()> {
 /// excludes the development-only `timeless_spike` module and the separately
 /// packaged dbhealth modules.
 pub fn register_telemetry(db: &Connection) -> Result<()> {
+    let log_query_reports = std::sync::Arc::new(query_report::LogQueryReportState::default());
     capabilities::register(db)?;
     metrics_vtab::register(db)?;
-    logs_vtab::register(db)?;
+    logs_vtab::register(db, std::sync::Arc::clone(&log_query_reports))?;
     traces_vtab::register(db)?;
-    query_tvf::register(db)
+    query_tvf::register(db, log_query_reports)
 }
 
 #[cfg(feature = "entrypoints")]

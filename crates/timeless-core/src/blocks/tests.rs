@@ -1898,3 +1898,50 @@ fn query_work_limits_bound_decode_and_cancellation_leaves_the_engine_reusable() 
         10
     );
 }
+
+#[test]
+fn request_query_report_is_exact_and_does_not_require_profile_deltas() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&["service"])).unwrap();
+    for ts in 0..4 {
+        let service = if ts == 1 { "api" } else { "worker" };
+        engine
+            .push(entry(ts, 1, "persisted", &[("service", service)]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    engine
+        .push(entry(4, 1, "buffered", &[("service", "api")]))
+        .unwrap();
+    engine
+        .push(entry(5, 1, "buffered", &[("service", "worker")]))
+        .unwrap();
+
+    let query = LogQuery {
+        metadata_eq: vec![("service".into(), "api".into())],
+        ..full_range_query()
+    };
+    let (rows, report) = engine
+        .query_ordered_with_work_limit_report_after_snapshot(
+            &query,
+            LogQueryOrder::Asc,
+            None,
+            Some(6),
+            || {},
+        )
+        .unwrap();
+
+    assert_eq!(rows.iter().map(|row| row.ts).collect::<Vec<_>>(), [1, 4]);
+    assert_eq!(report.candidate_blocks, 1);
+    assert_eq!(report.processed_blocks, 1);
+    assert_eq!(report.blocks_skipped_by_bound, 0);
+    assert_eq!(report.buffered_entries_processed, 2);
+    assert_eq!(report.decoded_entries, 4);
+    assert_eq!(report.processed_entries, 6);
+    assert_eq!(report.matched_entries, 2);
+    assert_eq!(report.returned_entries, 2);
+    assert_eq!(report.values_read, 18);
+    assert_eq!(report.timestamps_read, 6);
+    assert!(report.payload_bytes_read > 0);
+    assert_eq!(report.payload_bytes_read, report.snapshot_payload_bytes);
+    assert!(!report.stable_location_snapshot);
+}

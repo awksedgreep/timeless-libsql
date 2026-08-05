@@ -41,6 +41,7 @@ use std::borrow::Cow;
 use std::ffi::{c_int, CStr, CString};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rusqlite::ffi;
 use rusqlite::types::{Null, ValueRef};
@@ -51,11 +52,12 @@ use rusqlite::vtab::{
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{
     canonical_severity, level_from_name, BlockEngine, BlockEngineConfig, BlockStore, LogEntry,
-    LogQuery, LogQueryOrder,
+    LogQuery, LogQueryExecutionReport, LogQueryOrder,
 };
 
 use crate::batch::BatchReader;
 use crate::flatjson::{pairs_to_json, parse_labels_json};
+use crate::query_report::LogQueryReportState;
 use crate::shadow_block_store::{self, ShadowBlockStore};
 use crate::shadow_meta;
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
@@ -64,9 +66,9 @@ use crate::table_args;
 use crate::vtab_tx::{self, SavepointVTab};
 
 /// Register the "timeless_logs" module on a freshly-loaded connection.
-pub(crate) fn register(db: &Connection) -> Result<()> {
+pub(crate) fn register(db: &Connection, query_reports: Arc<LogQueryReportState>) -> Result<()> {
     const MODULE: Module<LogsTab> = vtab_tx::update_module_with_savepoints();
-    db.create_module(c"timeless_logs", &MODULE, None::<()>)
+    db.create_module(c"timeless_logs", &MODULE, Some(query_reports))
 }
 
 /// Engine parameters (see BlockEngineConfig for what each knob means).
@@ -142,6 +144,10 @@ fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
 }
 
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
 fn canonical_rich_metadata(
     text: &str,
 ) -> std::result::Result<(String, Vec<(String, String)>), String> {
@@ -204,6 +210,7 @@ pub struct LogsTab {
     /// see metrics_vtab.rs and shared.rs for the full story.
     shared: Arc<SharedEngine<BlockEngine>>,
     key: RegistryKey,
+    query_reports: Arc<LogQueryReportState>,
     /// True while THIS connection's write txn holds the writer gate.
     gate_held: bool,
     rowid_counter: i64,
@@ -266,13 +273,16 @@ impl LogsTab {
 
     fn connect_create(
         db: &mut VTabConnection,
-        _aux: Option<&()>,
+        aux: Option<&Arc<LogQueryReportState>>,
         _module_name: &[u8],
         database_name: &[u8],
         table_name: &[u8],
         args: &[&[u8]],
         is_create: bool,
     ) -> Result<(Cow<'static, CStr>, Self)> {
+        let query_reports = aux.cloned().ok_or_else(|| {
+            module_err("timeless_logs: missing connection query-report state".into())
+        })?;
         let table = String::from_utf8_lossy(table_name).into_owned();
         let database = String::from_utf8_lossy(database_name).into_owned();
         let handle = unsafe { db.handle() };
@@ -436,6 +446,7 @@ impl LogsTab {
                 index_keys,
                 shared: shared_engine,
                 key,
+                query_reports,
                 gate_held: false,
                 rowid_counter: 0,
             },
@@ -646,7 +657,7 @@ fn parse_index_keys_value(table: &str, value: &str) -> std::result::Result<Vec<S
 }
 
 unsafe impl<'vtab> VTab<'vtab> for LogsTab {
-    type Aux = ();
+    type Aux = Arc<LogQueryReportState>;
     type Cursor = LogsCursor<'vtab>;
 
     fn connect(
@@ -823,7 +834,9 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             shared: Arc::clone(&self.shared),
             db: self.db,
             table_name: self.table_name.clone(),
+            database_name: self.database_name.clone(),
             index_keys: self.index_keys.clone(),
+            query_reports: Arc::clone(&self.query_reports),
             rows: Vec::new(),
             pos: 0,
             message_contains: None,
@@ -837,6 +850,8 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
 impl Drop for LogsTab {
     fn drop(&mut self) {
         self.release_write_gate();
+        self.query_reports
+            .clear(&self.database_name, &self.table_name);
     }
 }
 
@@ -1084,7 +1099,9 @@ pub struct LogsCursor<'vtab> {
     /// The connection driving this scan (bound in filter()).
     db: *mut ffi::sqlite3,
     table_name: String,
+    database_name: String,
     index_keys: Vec<String>,
+    query_reports: Arc<LogQueryReportState>,
     rows: Vec<OutRow>,
     pos: usize,
     /// Bound value of the public exact-search hidden column. Returning it from
@@ -1099,6 +1116,11 @@ unsafe impl VTabCursor for LogsCursor<'_> {
     /// one engine query (sequential block reads — no rayon anywhere on
     /// this path, per the Session 3 deadlock lesson), materialize rows.
     fn filter(&mut self, idx_num: c_int, idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        let started = Instant::now();
+        // A failed or cancelled scan must never leave a prior successful
+        // statement's report observable.
+        self.query_reports
+            .clear(&self.database_name, &self.table_name);
         // Route block reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
         // argv slots were claimed in canonical order (level, ts lo,
@@ -1240,8 +1262,8 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         };
         self.max_work_entries = max_work_entries;
 
-        let entries = if impossible {
-            Vec::new()
+        let (entries, mut report) = if impossible {
+            (Vec::new(), LogQueryExecutionReport::default())
         } else {
             let read = self
                 .shared
@@ -1260,7 +1282,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
             let (order, capacity) = bounded.unwrap_or((LogQueryOrder::Asc, None));
             self.shared
                 .engine
-                .query_ordered_with_work_limit_after_snapshot(
+                .query_ordered_with_work_limit_report_after_snapshot(
                     &query,
                     order,
                     capacity,
@@ -1283,6 +1305,10 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 }
             })
             .collect();
+        report.query_total_ns = elapsed_ns(started);
+        report.returned_entries = self.rows.len() as u64;
+        self.query_reports
+            .publish(&self.database_name, &self.table_name, report);
         self.pos = 0;
         Ok(())
     }

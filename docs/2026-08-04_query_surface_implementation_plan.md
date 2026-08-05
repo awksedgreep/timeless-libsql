@@ -494,6 +494,21 @@ request-scoped lineage contract. The parser and real-extension HTTP path pin a
 422 unsupported-capability response before storage work. Session 17 continues
 with `LQL-P12`.
 
+`LQL-P12` is shipped through a new public request-owned execution report, not
+through cumulative counter deltas or shadow-table access. A successful fully
+consumed `timeless_logs` scan publishes local work on its SQLite connection;
+`timeless_log_query_stats('logs')` consumes that table-scoped report exactly
+once, while new/failed/cancelled scans clear stale state. `SQL-LOG-026` exposes
+all sixteen native INTEGER counters and an executable mapping to the fourteen
+VictoriaLogs string fields. The Rust LogsQL API owns strict no-argument
+grammar, complete typed post-filter `RowsFound`, duration through the pipeline
+position, later-pipeline composition, limits, cancellation, and envelopes.
+Five successful and two error oracle cases pin the applicable semantics.
+`QSF-149` records the concurrency-safe public contract; `QSF-150` records the
+honest indivisible-payload mapping and the upstream scheduling-dependent
+`limit` distinction. No storage format or maintenance contract changed.
+Session 17 continues with `LQL-P13`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

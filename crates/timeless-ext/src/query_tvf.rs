@@ -174,6 +174,7 @@ use crate::flatjson::{labels_to_json, parse_labels_json, parse_matchers_json, Ma
 use crate::logs_vtab::{LogsTab, MERGE_TARGET_ENTRIES as LOG_MERGE_TARGET_ENTRIES};
 use crate::metrics_vtab::MetricsTab;
 use crate::query_frame::{encode_aggregate_frame, encode_latest_frame};
+use crate::query_report::LogQueryReportState;
 use crate::shared::{self, DbGuard, SharedEngine};
 use crate::sql_value::integer_affinity;
 use crate::traces_vtab::TracesTab;
@@ -320,7 +321,7 @@ fn parse_window_op(module: &str, name: Option<&str>) -> Result<timeless_core::Wi
 }
 
 /// Register the TVF modules on a freshly-loaded connection.
-pub(crate) fn register(db: &Connection) -> Result<()> {
+pub(crate) fn register(db: &Connection, query_reports: Arc<LogQueryReportState>) -> Result<()> {
     const GRID: Module<GridTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_grid", &GRID, None::<()>)?;
     const WINDOW: Module<WindowTab> = Module::eponymous_only_module();
@@ -341,6 +342,12 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     db.create_module(c"timeless_log_count", &LOG_COUNT, None::<()>)?;
     const LOG_VALUES: Module<LogValuesTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_log_values", &LOG_VALUES, None::<()>)?;
+    const LOG_QUERY_STATS: Module<LogQueryStatsTab> = Module::eponymous_only_module();
+    db.create_module(
+        c"timeless_log_query_stats",
+        &LOG_QUERY_STATS,
+        Some(query_reports),
+    )?;
     const TRACE_DISCOVERY: Module<TraceDiscoveryTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_trace_services", &TRACE_DISCOVERY, None::<()>)?;
     db.create_module(c"timeless_trace_operations", &TRACE_DISCOVERY, None::<()>)?;
@@ -362,6 +369,166 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
     db.create_module(c"timeless_latest", &LATEST, None::<()>)?;
     const LATEST_FRAME: Module<LatestFrameTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_latest_frame", &LATEST_FRAME, None::<()>)
+}
+
+/// `timeless_log_query_stats('logs')` consumes the request-owned report from
+/// the immediately preceding successful `timeless_logs` scan on this SQLite
+/// connection. It is deliberately separate from cumulative
+/// `timeless_stats('logs')`: concurrent readers cannot contaminate these
+/// values, and a failed/cancelled/new scan clears the prior report.
+#[repr(C)]
+pub(crate) struct LogQueryStatsTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+    reports: Arc<LogQueryReportState>,
+}
+
+const LOG_QUERY_STATS_TBL: c_int = 16;
+
+unsafe impl<'vtab> VTab<'vtab> for LogQueryStatsTab {
+    type Aux = Arc<LogQueryReportState>;
+    type Cursor = LogQueryStatsCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        aux: Option<&Self::Aux>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let reports = aux.cloned().ok_or_else(|| {
+            module_err("timeless_log_query_stats: missing connection report state".into())
+        })?;
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(
+                c"CREATE TABLE x(\
+                query_total_ns INTEGER,\
+                query_snapshot_ns INTEGER,\
+                query_materialize_ns INTEGER,\
+                snapshot_payload_bytes INTEGER,\
+                payload_bytes_read INTEGER,\
+                candidate_blocks INTEGER,\
+                processed_blocks INTEGER,\
+                blocks_skipped_by_bound INTEGER,\
+                buffered_entries_processed INTEGER,\
+                decoded_entries INTEGER,\
+                processed_entries INTEGER,\
+                matched_entries INTEGER,\
+                returned_entries INTEGER,\
+                values_read INTEGER,\
+                timestamps_read INTEGER,\
+                stable_location_snapshot INTEGER,\
+                tbl HIDDEN)",
+            ),
+            LogQueryStatsTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+                reports,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_tbl(info, LOG_QUERY_STATS_TBL)
+    }
+
+    fn open(&mut self) -> Result<Self::Cursor> {
+        Ok(LogQueryStatsCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            reports: Arc::clone(&self.reports),
+            report: None,
+            done: false,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LogQueryStatsCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    reports: Arc<LogQueryReportState>,
+    report: Option<timeless_core::LogQueryExecutionReport>,
+    done: bool,
+    phantom: PhantomData<&'vtab LogQueryStatsTab>,
+}
+
+fn report_i64(field: &str, value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        module_err(format!(
+            "timeless_log_query_stats: {field} exceeds SQLite INTEGER range"
+        ))
+    })
+}
+
+unsafe impl VTabCursor for LogQueryStatsCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        let (database, table) = require_tbl("timeless_log_query_stats", idx_num, args)?;
+        let _bind = DbGuard::bind(self.db);
+        if !matches!(detect_module(&database, &table)?, TimelessModule::Logs) {
+            return Err(module_err(format!(
+                "timeless_log_query_stats: {database}.{table} is not a timeless_logs table"
+            )));
+        }
+        self.report = Some(self.reports.take(&database, &table).ok_or_else(|| {
+            module_err(format!(
+                "timeless_log_query_stats: no unconsumed successful query report for \
+                 {database}.{table} on this connection; fully consume a timeless_logs \
+                 SELECT and call timeless_log_query_stats immediately afterward"
+            ))
+        })?);
+        self.done = false;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.done = true;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.done || self.report.is_none()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        let report = self
+            .report
+            .as_ref()
+            .ok_or_else(|| module_err("timeless_log_query_stats: cursor has no report".into()))?;
+        let value = match col {
+            0 => report_i64("query_total_ns", report.query_total_ns)?,
+            1 => report_i64("query_snapshot_ns", report.query_snapshot_ns)?,
+            2 => report_i64("query_materialize_ns", report.query_materialize_ns)?,
+            3 => report_i64("snapshot_payload_bytes", report.snapshot_payload_bytes)?,
+            4 => report_i64("payload_bytes_read", report.payload_bytes_read)?,
+            5 => report_i64("candidate_blocks", report.candidate_blocks)?,
+            6 => report_i64("processed_blocks", report.processed_blocks)?,
+            7 => report_i64("blocks_skipped_by_bound", report.blocks_skipped_by_bound)?,
+            8 => report_i64(
+                "buffered_entries_processed",
+                report.buffered_entries_processed,
+            )?,
+            9 => report_i64("decoded_entries", report.decoded_entries)?,
+            10 => report_i64("processed_entries", report.processed_entries)?,
+            11 => report_i64("matched_entries", report.matched_entries)?,
+            12 => report_i64("returned_entries", report.returned_entries)?,
+            13 => report_i64("values_read", report.values_read)?,
+            14 => report_i64("timestamps_read", report.timestamps_read)?,
+            15 => i64::from(report.stable_location_snapshot),
+            _ => {
+                return ctx.set_result(&rusqlite::types::Null);
+            }
+        };
+        ctx.set_result(&value)
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(1)
+    }
 }
 
 // Output columns (both modules).

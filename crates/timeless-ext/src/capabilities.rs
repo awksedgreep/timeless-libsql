@@ -76,6 +76,11 @@ fn document() -> &'static str {
                 },
                 "timeless_log_values": {
                     "max_work_entries": true
+                },
+                "timeless_log_query_stats": {
+                    "request_local": true,
+                    "same_connection": true,
+                    "single_use": true
                 }
             }
         })
@@ -112,6 +117,18 @@ mod tests {
         );
         assert_eq!(
             value["query_surfaces"]["timeless_log_values"]["max_work_entries"],
+            true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_log_query_stats"]["request_local"],
+            true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_log_query_stats"]["same_connection"],
+            true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_log_query_stats"]["single_use"],
             true
         );
     }

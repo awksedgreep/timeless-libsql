@@ -114,7 +114,7 @@ extension.
 | `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | shipped | partial | `COUNT`, `SQL` | `API` | P0 |
 | `LQL-P10` | `block_stats` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P11` | `blocks_count` | deferred | no | none | `DEFER` | DEFER |
-| `LQL-P12` | `query_stats` | missing | no | `STATS` | `API` | P2 |
+| `LQL-P12` | `query_stats` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)) | shipped | no | `STATS`, `SQL` | `API` | P2 |
 | `LQL-P13` | `first` | missing | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P14` | `last` | missing | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P15` | `top` | missing | no | `SQL` | `API` | P2 |
@@ -181,6 +181,22 @@ persisted and buffered sources at every pipeline stage, remains correct under
 concurrency/transactions/optimize/reopen, and demonstrates direct SQLite or
 libSQL utility. Global stats deltas and private block IDs are explicitly not
 acceptable substitutes. See `QSF-148`.
+
+`LQL-P12` uses the request-owned execution-report prerequisite identified
+while evaluating `LQL-P11`, but it does not relabel persisted block totals or
+subtract process-wide counters. A fully consumed successful `timeless_logs`
+scan publishes one table-scoped report on that SQLite connection;
+[`timeless_log_query_stats`](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)
+consumes it exactly once. New, failed, and cancelled scans clear older reports.
+The Rust API replaces the storage-level matched count with the complete typed
+LogsQL post-filter cardinality, maps actual work into VictoriaLogs' fourteen
+string-valued fields, measures duration through the pipe position, and permits
+later pipelines. Timeless reads one encoded payload rather than separately
+addressable field-column files, so the complete payload is
+`BytesReadValues`/`BytesReadTotal` and unavailable physical components are
+zero. A preceding `limit` does not undo work already performed by the eager
+bounded API scan; VictoriaLogs' parallel early cancellation also makes its
+physical counts scheduling-dependent. See `QSF-149` and `QSF-150`.
 
 Session 13's typed pipe contract is intentionally more faithful than the
 flattened VictoriaLogs store. `field_values` uses deterministic type-tag order

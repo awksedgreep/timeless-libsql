@@ -417,6 +417,269 @@ async fn session_sixteen_exact_rich_batch_stays_decodable_across_readers_and_reo
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_query_stats_is_request_local_durable_and_direct_sql_visible() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("query-stats-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let body = [
+        r#"{"_time":1,"_msg":"one","level":"info","case":"one","service":"api"}"#,
+        r#"{"_time":2,"_msg":"two","level":"info","case":"two","service":"worker"}"#,
+        r#"{"_time":3,"_msg":"three","level":"info","case":"three","service":"worker"}"#,
+        r#"{"_time":4,"_msg":"four","level":"info","case":"four","service":"worker"}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.flush().await.unwrap();
+
+    let full = pipeline_rows(&app, "* | query_stats").await;
+    assert_eq!(full.len(), 1);
+    let full = full[0].as_object().unwrap();
+    assert_eq!(full.len(), 14);
+    assert!(full.values().all(serde_json::Value::is_string));
+    assert_eq!(full["BytesReadColumnsHeaders"], "0");
+    assert_eq!(full["BytesReadColumnsHeaderIndexes"], "0");
+    assert_eq!(full["BytesReadBloomFilters"], "0");
+    assert_eq!(full["BytesReadTimestamps"], "0");
+    assert_eq!(full["BytesReadBlockHeaders"], "0");
+    assert_eq!(full["BytesProcessedUncompressedValues"], "0");
+    assert_eq!(full["BlocksProcessed"], "1");
+    assert_eq!(full["RowsProcessed"], "4");
+    assert_eq!(full["RowsFound"], "4");
+    assert_eq!(full["ValuesRead"], "12");
+    assert_eq!(full["TimestampsRead"], "4");
+    assert_eq!(full["BytesReadValues"], full["BytesReadTotal"]);
+    assert!(
+        full["BytesReadTotal"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        full["QueryDurationNsecs"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 0
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"service:="api" | query_stats | keep RowsFound,RowsProcessed"#,
+        )
+        .await,
+        [serde_json::json!({"RowsFound":"1","RowsProcessed":"4"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"="absent" | query_stats | keep RowsFound,RowsProcessed"#,
+        )
+        .await,
+        [serde_json::json!({"RowsFound":"0","RowsProcessed":"4"})]
+    );
+    // Timeless eagerly executes the bounded API rowset today. The report is
+    // actual work rather than a VictoriaLogs-style hypothetical early stop.
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "* | limit 1 | query_stats | keep RowsFound,RowsProcessed",
+        )
+        .await,
+        [serde_json::json!({"RowsFound":"4","RowsProcessed":"4"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "* | fields case | query_stats | keep RowsFound,ValuesRead,TimestampsRead",
+        )
+        .await,
+        [serde_json::json!({
+            "RowsFound":"4",
+            "ValuesRead":"12",
+            "TimestampsRead":"4"
+        })]
+    );
+
+    let malformed = app
+        .clone()
+        .oneshot(logsql_request("* | query_stats extra"))
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(malformed.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error":"invalid_query",
+            "reason":"malformed_logsql",
+            "message":"LogsQL query_stats accepts no arguments"
+        })
+    );
+
+    // Two reader connections execute different cardinalities concurrently;
+    // every response must retain only its own report.
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..32 {
+        let app = app.clone();
+        tasks.spawn(async move {
+            let (query, expected) = if index % 2 == 0 {
+                (r#"service:="api" | query_stats | keep RowsFound"#, "1")
+            } else {
+                (r#"service:="worker" | query_stats | keep RowsFound"#, "3")
+            };
+            let rows = pipeline_rows(&app, query).await;
+            assert_eq!(rows, [serde_json::json!({"RowsFound":expected})]);
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 2,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("* | query_stats"))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        pipeline_rows(&app, "* | query_stats | keep RowsFound").await,
+        [serde_json::json!({"RowsFound":"4"})]
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    assert_eq!(
+        pipeline_rows(&app, "* | query_stats | keep RowsFound").await,
+        [serde_json::json!({"RowsFound":"4"})]
+    );
+    storage.shutdown().await.unwrap();
+
+    // Fresh connection: no report. A consumed scan publishes exactly one;
+    // rollback does not erase work, while a failed scan clears prior state.
+    let conn = Connection::open(&database).unwrap();
+    unsafe {
+        conn.load_extension_enable().unwrap();
+        conn.load_extension(&extension, None::<&str>).unwrap();
+    }
+    conn.load_extension_disable().unwrap();
+    let take = || {
+        conn.query_row(
+            "SELECT processed_entries,matched_entries,payload_bytes_read \
+               FROM timeless_log_query_stats('logs')",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+    };
+    assert!(take().unwrap_err().to_string().contains("no unconsumed"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM logs WHERE service='api' AND max_work_entries=4",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    let (processed, matched, payload) = take().unwrap();
+    assert_eq!((processed, matched), (4, 1));
+    assert!(payload > 0);
+    assert!(take().unwrap_err().to_string().contains("no unconsumed"));
+
+    conn.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM logs", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+    conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(take().unwrap().0, 4);
+    assert!(conn
+        .query_row(
+            "SELECT count(*) FROM logs WHERE max_work_entries=1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("max_work_entries=1"));
+    assert!(take().unwrap_err().to_string().contains("no unconsumed"));
+    drop(conn);
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        pipeline_rows(&reopened_app, "* | query_stats | keep RowsFound").await,
+        [serde_json::json!({"RowsFound":"4"})]
+    );
+    reopened.shutdown().await.unwrap();
+
+    let corrupt = temp.path().join("query-stats-corrupt.db");
+    std::fs::copy(&database, &corrupt).unwrap();
+    let conn = Connection::open(corrupt).unwrap();
+    unsafe {
+        conn.load_extension_enable().unwrap();
+        conn.load_extension(&extension, None::<&str>).unwrap();
+    }
+    conn.load_extension_disable().unwrap();
+    conn.execute("UPDATE logs_blocks SET data=x'00'", [])
+        .unwrap();
+    assert!(conn
+        .query_row("SELECT count(*) FROM logs", [], |row| row.get::<_, i64>(0))
+        .is_err());
+    assert!(conn
+        .query_row(
+            "SELECT processed_entries FROM timeless_log_query_stats('logs')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("no unconsumed"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {

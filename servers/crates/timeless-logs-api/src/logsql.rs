@@ -630,6 +630,7 @@ pub(crate) enum PipelineOp {
     Delete(Vec<PipelineField>),
     Filter(LogPredicate),
     Stats(Vec<StatsExpression>),
+    QueryStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -951,6 +952,18 @@ pub fn parse_at(
                 pipeline.push(parse_stats_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
+            _ if words
+                .first()
+                .is_some_and(|word| word.eq_ignore_ascii_case("query_stats")) =>
+            {
+                if words.len() != 1 {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL query_stats accepts no arguments",
+                    ));
+                }
+                pipeline.push(PipelineOp::QueryStats);
+                has_session_thirteen_pipeline = true;
+            }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
             _ => {
                 return Err(LogsqlError::unsupported(format!(
@@ -973,7 +986,10 @@ pub fn parse_at(
     let cardinality_owned_by_pipeline = pipeline.iter().any(|operation| {
         matches!(
             operation,
-            PipelineOp::FieldValues { .. } | PipelineOp::FieldNames { .. } | PipelineOp::Stats(_)
+            PipelineOp::FieldValues { .. }
+                | PipelineOp::FieldNames { .. }
+                | PipelineOp::Stats(_)
+                | PipelineOp::QueryStats
         )
     });
     let implicit_result_limit =
@@ -5411,6 +5427,33 @@ mod tests {
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_query_stats_grammar_is_complete_and_strict() {
+        for query in [
+            "* | query_stats",
+            "* | QUERY_STATS",
+            "* | limit 1 | query_stats | keep RowsFound",
+            "* | fields case | query_stats | keep RowsFound, ValuesRead",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert!(
+                plan.pipeline
+                    .iter()
+                    .any(|operation| matches!(operation, PipelineOp::QueryStats)),
+                "{query:?}"
+            );
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+        }
+
+        for malformed in ["* | query_stats x", "* | query_stats 0"] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+            assert_eq!(error.message, "LogsQL query_stats accepts no arguments");
         }
     }
 

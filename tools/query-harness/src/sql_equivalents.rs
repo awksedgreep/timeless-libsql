@@ -1630,6 +1630,8 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let day_range_rows = recipe_values("SQL-LOG-023", 0)?;
     let week_range_rows = recipe_values("SQL-LOG-024", 0)?;
     let delete_rows = recipe_values("SQL-LOG-025", 0)?;
+    let query_stats_scan = recipe_values("SQL-LOG-026", 0)?;
+    let query_stats_rows = recipe_values("SQL-LOG-026", 1)?;
     if [
         bounded,
         substring,
@@ -1766,6 +1768,48 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         {
             bail!("SQL-LOG-025 exact deletion or retained metadata changed: {metadata}");
         }
+    }
+    let query_stats_timestamps = query_stats_scan
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if query_stats_timestamps != [Some(Value::Integer(1000)), Some(Value::Integer(2000))] {
+        bail!("SQL-LOG-026 source query ordering changed: {query_stats_scan:?}");
+    }
+    let [query_stats] = query_stats_rows.as_slice() else {
+        bail!("SQL-LOG-026 must return exactly one report row: {query_stats_rows:?}");
+    };
+    if query_stats.len() != 14
+        || !query_stats
+            .iter()
+            .all(|value| matches!(value, Value::Text(_)))
+    {
+        bail!("SQL-LOG-026 report schema/type changed: {query_stats:?}");
+    }
+    let text_u64 = |index: usize| -> Result<u64> {
+        let Value::Text(value) = &query_stats[index] else {
+            bail!("SQL-LOG-026 column {index} is not TEXT")
+        };
+        value
+            .parse::<u64>()
+            .with_context(|| format!("SQL-LOG-026 column {index} is not an unsigned integer"))
+    };
+    if text_u64(0)? != 0
+        || text_u64(1)? != 0
+        || text_u64(2)? != 0
+        || text_u64(4)? != 0
+        || text_u64(5)? != 0
+        || text_u64(12)? != 0
+        || text_u64(3)? == 0
+        || text_u64(3)? != text_u64(6)?
+        || text_u64(7)? != 2
+        || text_u64(8)? != 2
+        || text_u64(9)? != 2
+        || text_u64(10)? != 6
+        || text_u64(11)? != 2
+        || text_u64(13)? == 0
+    {
+        bail!("SQL-LOG-026 request-local report changed: {query_stats:?}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2577,13 +2621,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 91);
+        assert_eq!(recipes.len(), 92);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            120
+            122
         );
         assert_eq!(
             recipes
@@ -2591,7 +2635,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            126
+            128
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -452,3 +452,19 @@ and filter composition; idempotence; and strict comma/wildcard grammar. A row
 with no fields after deletion is omitted rather than encoded as an empty JSON
 object. The fixture now contains 296 row-query cases, 102 error cases, and 30
 statistics/pipeline cases; the fixture now contains 428 cases in total.
+
+`LQL-P12` adds five successful statistics/pipeline cases and two error cases.
+They pin exact and empty logical `RowsFound`, full-fixture cardinality, a
+controlled one-row `limit` composition, one-row output for a later aggregate,
+and strict no-argument grammar. The full fourteen-field names, ordering, and
+string types are source-audited against `pipe_query_stats.go` and pinned by the
+real-extension regression. Physical byte/work counters are not asserted equal
+across products: VictoriaLogs reads column files and can stop parallel workers
+after `limit`, while Timeless reads one rich block payload and eagerly executes
+the complete bounded API rowset. A controlled VictoriaLogs one-row/two-stream
+probe returned one found row after `limit 1`, while the 135-row fixture returned
+four on a separate run, confirming that early-stop physical work is scheduling
+dependent. Both products report actual work; `QSF-150` records the selected
+compatibility profile. The fixture now contains 296 row-query cases, 104 error
+cases, and 35 statistics/pipeline cases; the fixture now contains 435 cases in
+total.

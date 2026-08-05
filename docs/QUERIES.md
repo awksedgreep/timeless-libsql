@@ -533,6 +533,43 @@ operator; `limit 0` means no operator-specific cap, but never disables
 Pipelines fail closed if the bounded public row set would be incomplete; they
 do not aggregate a silently truncated prefix.
 
+## Request-local log query statistics
+
+Direct SQLite/libSQL callers can inspect the actual work of one public log
+scan without subtracting cumulative process counters. Run both statements on
+the same connection and fully consume the first result:
+
+```sql
+SELECT ts, level, message, metadata
+  FROM logs
+ WHERE service = :service
+   AND ts >= :start_us AND ts <= :end_us
+   AND max_work_entries = :max_work_entries
+ ORDER BY ts;
+
+SELECT query_total_ns, payload_bytes_read,
+       candidate_blocks, processed_blocks,
+       decoded_entries, processed_entries,
+       matched_entries, returned_entries,
+       values_read, timestamps_read
+  FROM timeless_log_query_stats('logs');
+```
+
+The report is connection- and table-scoped and is consumed exactly once. A
+new, failed, or cancelled scan clears an older report; a second read or fresh
+connection fails explicitly. Six additional columns expose snapshot and
+materialization timing, copied snapshot bytes, blocks skipped by an ordered
+bound, buffered entries examined, and whether the snapshot used stable SQLite
+locations. See executable [`SQL-LOG-026`](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)
+for the complete schema and the fourteen-field LogsQL `query_stats` mapping.
+
+Timeless codecs read one complete rich block payload rather than separately
+addressable field-column files. Payload, block, entry, and logical-slot
+counters therefore describe actual Timeless work; they do not pretend to be
+VictoriaLogs per-column byte accounting. The Rust LogsQL API owns query
+grammar, typed post-filter `RowsFound`, pipeline duration/composition, string
+result values, limits, cancellation, and HTTP envelopes.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

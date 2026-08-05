@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -92,9 +92,10 @@ run. Both paths read exactly one/four blocks, 1,024/8,192 entries, and
 run variation; source preprocessing neither amplifies nor reduces storage work.
 
 The ordered pipeline also accepts `field_values`, `field_names`,
-`fields`/`keep`, `filter`/`where`, and `stats`. Projection accepts exact dotted
-paths, top-level prefixes, and `*`; a later filter observes the projected row,
-not the original one. Field discovery is deterministic and top-level:
+`fields`/`keep`, `filter`/`where`, `stats`, and `query_stats`. Projection
+accepts exact dotted paths, top-level prefixes, and `*`; a later filter
+observes the projected row, not the original one. Field discovery is
+deterministic and top-level:
 `field_names` counts a field whenever it is present, including JSON null and
 empty values, and does not synthesize VictoriaLogs `_stream` fields that are
 not in the Timeless storage model. `field_values` keeps JSON types distinct,
@@ -430,9 +431,11 @@ ordinary SQLite page/freelist PRAGMAs provide only whole-database accounting.
 
 The server requires the extension capability
 `query_surfaces.{timeless_logs,timeless_log_count,timeless_log_values}.max_work_entries`
-and binds the positive hard guard on every row, count, and value-discovery
-request. Direct callers may use the backward-compatible unbounded arities or
-provide the same trailing/hidden input explicitly:
+and the `query_surfaces.timeless_log_query_stats` flags `request_local`,
+`same_connection`, and `single_use`. It binds the positive hard guard on every
+row, count, and value-discovery request. Direct callers may use the backward-
+compatible unbounded arities or provide the same trailing/hidden input
+explicitly:
 
 ```sql
 SELECT ts, level, message FROM logs
@@ -445,6 +448,23 @@ SELECT n FROM timeless_log_count(
 SELECT value FROM timeless_log_values(
   'logs', 'host', NULL, NULL, :start_us, :end_us, 1000, 100000);
 ```
+
+LogsQL `| query_stats` emits one row with VictoriaLogs' fourteen field names
+and string values. The server fully consumes the bounded public row scan and
+then consumes `timeless_log_query_stats('logs')` on that same serialized reader
+connection. It substitutes complete typed post-filter cardinality for
+`RowsFound`, measures duration through the pipeline position, and allows later
+pipelines. A new, failed, or cancelled scan clears a stale report, and a report
+can be read only once.
+
+Timeless reads one encoded rich payload instead of separate VictoriaLogs
+column files. `BytesReadValues` and `BytesReadTotal` therefore contain the same
+actual payload byte count; unavailable component byte fields and
+`BytesProcessedUncompressedValues` are zero. `ValuesRead` counts severity,
+message, and rich metadata slots, while `TimestampsRead` counts timestamps.
+A preceding pipeline `limit` does not undo work already performed by the eager
+bounded scan. The complete direct-user contract and executable mapping are in
+[`SQL-LOG-026`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics).
 
 Malformed LogsQL returns JSON HTTP 400 with `invalid_query` and
 `malformed_logsql`; recognized but unsupported syntax returns JSON HTTP 422

@@ -36,7 +36,8 @@ pub use codec::{
     CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_ZSTD,
 };
 pub use engine::{
-    BlockEngine, BlockEngineConfig, BlockEngineProfileSnapshot, LogQuery, LogQueryOrder,
+    BlockEngine, BlockEngineConfig, BlockEngineProfileSnapshot, LogQuery, LogQueryExecutionReport,
+    LogQueryOrder,
 };
 pub use mem::MemBlockStore;
 

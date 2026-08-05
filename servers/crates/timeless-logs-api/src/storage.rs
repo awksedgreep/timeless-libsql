@@ -773,6 +773,28 @@ pub struct QueryRow {
     pub metadata_json: String,
 }
 
+/// Request-owned physical work returned by the public extension surface after
+/// one successful `timeless_logs` scan on this reader connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LogQueryExecutionReport {
+    pub query_total_ns: u64,
+    pub query_snapshot_ns: u64,
+    pub query_materialize_ns: u64,
+    pub snapshot_payload_bytes: u64,
+    pub payload_bytes_read: u64,
+    pub candidate_blocks: u64,
+    pub processed_blocks: u64,
+    pub blocks_skipped_by_bound: u64,
+    pub buffered_entries_processed: u64,
+    pub decoded_entries: u64,
+    pub processed_entries: u64,
+    pub matched_entries: u64,
+    pub returned_entries: u64,
+    pub values_read: u64,
+    pub timestamps_read: u64,
+    pub stable_location_snapshot: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct StorageStats {
     pub total_blocks: i64,
@@ -1711,17 +1733,29 @@ fn reader_main(
                 reply,
             } => {
                 let started = Instant::now();
+                let needs_query_report = operations
+                    .iter()
+                    .any(|operation| matches!(operation, PipelineOp::QueryStats));
                 let result = cancellable_read(&conn, &cancelled, || {
-                    let rows =
-                        query_pipeline_rows(&conn, &spec, cancelled.as_ref(), timestamp_unit)?;
+                    let (rows, report) = query_pipeline_rows(
+                        &conn,
+                        &spec,
+                        cancelled.as_ref(),
+                        timestamp_unit,
+                        needs_query_report,
+                    )?;
                     pipeline::execute_query_rows(
                         rows,
-                        &operations,
-                        implicit_result_limit,
-                        rate_window_seconds,
-                        timestamp_unit,
-                        limits,
-                        cancelled.as_ref(),
+                        pipeline::PipelineExecution {
+                            report,
+                            operations: &operations,
+                            implicit_result_limit,
+                            rate_window_seconds,
+                            timestamp_unit,
+                            limits,
+                            cancelled: cancelled.as_ref(),
+                            query_started: started,
+                        },
                     )
                 });
                 let rows = result.as_ref().map_or(0, Vec::len);
@@ -1786,6 +1820,9 @@ fn open_connection(
     let capabilities = preflight_extension(&conn, spec)?;
     for surface in ["timeless_logs", "timeless_log_count", "timeless_log_values"] {
         require_query_surface(&capabilities, surface, "max_work_entries")?;
+    }
+    for capability in ["request_local", "same_connection", "single_use"] {
+        require_query_surface(&capabilities, "timeless_log_query_stats", capability)?;
     }
     preflight_database(&conn, spec.signal)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
@@ -2181,7 +2218,8 @@ fn query_pipeline_rows(
     spec: &QuerySpec,
     cancelled: &AtomicBool,
     timestamp_unit: TimestampUnit,
-) -> Result<Vec<QueryRow>, String> {
+    needs_query_report: bool,
+) -> Result<(Vec<QueryRow>, LogQueryExecutionReport), String> {
     let mut scan = spec.clone();
     scan.offset = 0;
     scan.limit = spec
@@ -2195,7 +2233,82 @@ fn query_pipeline_rows(
             spec.max_work_rows
         ));
     }
-    Ok(rows)
+    let mut report = if needs_query_report {
+        take_log_query_execution_report(conn)?
+    } else {
+        LogQueryExecutionReport::default()
+    };
+    // The extension reports predicates it owns. The API may apply additional
+    // exact LogsQL predicates over typed/nested metadata; after the complete
+    // bounded scan, this is the request's logical pre-pipeline cardinality.
+    report.matched_entries = rows.len() as u64;
+    report.returned_entries = rows.len() as u64;
+    Ok((rows, report))
+}
+
+fn take_log_query_execution_report(conn: &Connection) -> Result<LogQueryExecutionReport, String> {
+    let value = conn
+        .query_row(
+            "SELECT query_total_ns, query_snapshot_ns, query_materialize_ns, \
+                    snapshot_payload_bytes, payload_bytes_read, candidate_blocks, \
+                    processed_blocks, blocks_skipped_by_bound, \
+                    buffered_entries_processed, decoded_entries, processed_entries, \
+                    matched_entries, returned_entries, values_read, timestamps_read, \
+                    stable_location_snapshot \
+               FROM timeless_log_query_stats('logs')",
+            [],
+            |row| {
+                Ok([
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, i64>(15)?,
+                ])
+            },
+        )
+        .map_err(|error| format!("read request-local log query report: {error}"))?;
+    let unsigned = |name: &str, value: i64| {
+        u64::try_from(value)
+            .map_err(|_| format!("request-local log query report {name} is negative: {value}"))
+    };
+    Ok(LogQueryExecutionReport {
+        query_total_ns: unsigned("query_total_ns", value[0])?,
+        query_snapshot_ns: unsigned("query_snapshot_ns", value[1])?,
+        query_materialize_ns: unsigned("query_materialize_ns", value[2])?,
+        snapshot_payload_bytes: unsigned("snapshot_payload_bytes", value[3])?,
+        payload_bytes_read: unsigned("payload_bytes_read", value[4])?,
+        candidate_blocks: unsigned("candidate_blocks", value[5])?,
+        processed_blocks: unsigned("processed_blocks", value[6])?,
+        blocks_skipped_by_bound: unsigned("blocks_skipped_by_bound", value[7])?,
+        buffered_entries_processed: unsigned("buffered_entries_processed", value[8])?,
+        decoded_entries: unsigned("decoded_entries", value[9])?,
+        processed_entries: unsigned("processed_entries", value[10])?,
+        matched_entries: unsigned("matched_entries", value[11])?,
+        returned_entries: unsigned("returned_entries", value[12])?,
+        values_read: unsigned("values_read", value[13])?,
+        timestamps_read: unsigned("timestamps_read", value[14])?,
+        stable_location_snapshot: match value[15] {
+            0 => false,
+            1 => true,
+            other => {
+                return Err(format!(
+                    "request-local log query report stable_location_snapshot is not 0/1: {other}"
+                ))
+            }
+        },
+    })
 }
 
 fn query_count(

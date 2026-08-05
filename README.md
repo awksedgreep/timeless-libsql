@@ -436,6 +436,15 @@ SELECT key, value FROM timeless_stats('logs')
                'optimize_source_bytes')
  ORDER BY key;
 
+-- Request-local work is separate from cumulative/aggregate stats. Fully
+-- consume this scan and immediately consume its single-use report on the
+-- same connection:
+SELECT ts, level, message FROM logs
+ WHERE service='api' AND max_work_entries=100000 ORDER BY ts;
+SELECT payload_bytes_read, candidate_blocks, processed_blocks,
+       decoded_entries, processed_entries, matched_entries, returned_entries
+  FROM timeless_log_query_stats('logs');
+
 -- Optional discovery filters use the same matcher JSON and are applied
 -- before unrelated catalog rows cross SQLite:
 SELECT labels FROM timeless_series('metrics', 'cpu_usage',
@@ -456,7 +465,11 @@ Likewise, the `blocks` row is the current persisted total—not LogsQL
 `| blocks_count`, whose upstream value counts request-local processing batches
 after preceding pipeline stages. Timeless does not currently expose that
 lineage, and subtracting cumulative `query_candidate_blocks` values is unsafe
-when queries overlap.
+when queries overlap. The separate `timeless_log_query_stats` surface reports
+actual request-local scan work, but deliberately does not claim that private
+pipeline-batch lineage. Its same-connection, single-use contract and complete
+LogsQL mapping are executable as
+[`SQL-LOG-026`](docs/QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics).
 
 For worked recipes — reset-corrected counter math in pure SQL, top-k
 per bucket, cross-metric joins, IQR/σ outlier exclusion, gap-fill
@@ -563,7 +576,26 @@ SELECT value FROM timeless_log_values(
 `query_surfaces.timeless_logs`, `.timeless_log_count`, and
 `.timeless_log_values`. Omitting them preserves the older unbounded direct-SQL
 contract; the Rust logs API requires the capability and always binds a hard
-limit.
+limit. Request-local reports are advertised under
+`query_surfaces.timeless_log_query_stats` with `request_local`,
+`same_connection`, and `single_use` flags.
+
+After fully consuming a successful `timeless_logs` scan, direct callers can
+consume its actual work once on the same connection:
+
+```sql
+SELECT query_total_ns, payload_bytes_read,
+       candidate_blocks, processed_blocks,
+       decoded_entries, processed_entries,
+       matched_entries, returned_entries,
+       values_read, timestamps_read
+  FROM timeless_log_query_stats('logs');
+```
+
+New, failed, and cancelled scans clear stale reports. See
+[`SQL-LOG-026`](docs/QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)
+for all sixteen INTEGER columns and the exact fourteen-field string mapping
+used by LogsQL `| query_stats`.
 
 ### Traces
 
@@ -691,6 +723,12 @@ limits, cancellation, and response semantics remain bounded Rust API work.
 Exact-plus-prefix deletion measures 4.011/45.768 ms narrow/wide p95, 16.9%/
 17.6% above same-run word queries while returning 22.4%/22.1% fewer response
 bytes; block, decode, payload-byte, and public-row work are identical.
+`query_stats` emits VictoriaLogs' fourteen string-valued fields from a
+connection-local, single-use public extension report. It preserves exact
+logical post-filter cardinality and actual Timeless block/entry/payload work;
+it does not fabricate unavailable per-column storage files. Executable
+`SQL-LOG-026` documents every native counter, concurrency and invalidation
+rule, and the complete LogsQL mapping.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

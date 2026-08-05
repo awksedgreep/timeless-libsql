@@ -7,6 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::Instant;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Number, Value};
@@ -15,7 +16,7 @@ use crate::logsql::{
     logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, PipelineField, PipelineOp,
     StatsExpression, StatsKind,
 };
-use crate::storage::{day_range_matches, week_range_matches, QueryRow};
+use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
 
 #[derive(Clone, Copy)]
@@ -24,32 +25,30 @@ pub(crate) struct PipelineLimits {
     pub max_state_items: usize,
 }
 
+pub(crate) struct PipelineExecution<'a> {
+    pub report: LogQueryExecutionReport,
+    pub operations: &'a [PipelineOp],
+    pub implicit_result_limit: Option<usize>,
+    pub rate_window_seconds: Option<f64>,
+    pub timestamp_unit: TimestampUnit,
+    pub limits: PipelineLimits,
+    pub cancelled: &'a AtomicBool,
+    pub query_started: Instant,
+}
+
 pub(crate) fn execute_query_rows(
     rows: Vec<QueryRow>,
-    operations: &[PipelineOp],
-    implicit_result_limit: Option<usize>,
-    rate_window_seconds: Option<f64>,
-    timestamp_unit: TimestampUnit,
-    limits: PipelineLimits,
-    cancelled: &AtomicBool,
+    execution: PipelineExecution<'_>,
 ) -> Result<Vec<Value>, String> {
     let rows = rows
         .into_iter()
         .enumerate()
         .map(|(index, row)| {
-            check_periodically(cancelled, index)?;
-            response_row(row, timestamp_unit)
+            check_periodically(execution.cancelled, index)?;
+            response_row(row, execution.timestamp_unit)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    execute(
-        rows,
-        operations,
-        implicit_result_limit,
-        rate_window_seconds,
-        timestamp_unit,
-        limits,
-        cancelled,
-    )
+    execute(rows, execution)
 }
 
 pub(crate) fn response_row(row: QueryRow, timestamp_unit: TimestampUnit) -> Result<Value, String> {
@@ -83,15 +82,10 @@ pub(crate) fn format_timestamp(ts: i64, timestamp_unit: TimestampUnit) -> Result
 
 pub(crate) fn execute(
     mut rows: Vec<Value>,
-    operations: &[PipelineOp],
-    implicit_result_limit: Option<usize>,
-    rate_window_seconds: Option<f64>,
-    timestamp_unit: TimestampUnit,
-    limits: PipelineLimits,
-    cancelled: &AtomicBool,
+    execution: PipelineExecution<'_>,
 ) -> Result<Vec<Value>, String> {
-    for operation in operations {
-        ensure_active(cancelled)?;
+    for operation in execution.operations {
+        ensure_active(execution.cancelled)?;
         rows = match operation {
             PipelineOp::SortTime { descending } => {
                 rows.sort_by(|left, right| {
@@ -127,8 +121,8 @@ pub(crate) fn execute(
                 field,
                 filter.as_deref(),
                 *limit,
-                limits.max_result_rows,
-                cancelled,
+                execution.limits.max_result_rows,
+                execution.cancelled,
             )?,
             PipelineOp::FieldNames {
                 filter,
@@ -137,32 +131,74 @@ pub(crate) fn execute(
                 &rows,
                 filter.as_deref(),
                 result_name,
-                limits.max_result_rows,
-                cancelled,
+                execution.limits.max_result_rows,
+                execution.cancelled,
             )?,
-            PipelineOp::Project(fields) => project(rows, fields, cancelled)?,
-            PipelineOp::Delete(fields) => delete_fields(rows, fields, cancelled)?,
-            PipelineOp::Filter(predicate) => filter(rows, predicate, timestamp_unit, cancelled)?,
+            PipelineOp::Project(fields) => project(rows, fields, execution.cancelled)?,
+            PipelineOp::Delete(fields) => delete_fields(rows, fields, execution.cancelled)?,
+            PipelineOp::Filter(predicate) => filter(
+                rows,
+                predicate,
+                execution.timestamp_unit,
+                execution.cancelled,
+            )?,
             PipelineOp::Stats(expressions) => vec![Value::Object(stats(
                 &rows,
                 expressions,
-                rate_window_seconds,
-                limits,
-                cancelled,
+                execution.rate_window_seconds,
+                execution.limits,
+                execution.cancelled,
             )?)],
+            PipelineOp::QueryStats => vec![Value::Object(query_stats(
+                execution.report,
+                execution
+                    .query_started
+                    .elapsed()
+                    .as_nanos()
+                    .min(u64::MAX as u128) as u64,
+            ))],
         };
     }
-    if let Some(limit) = implicit_result_limit {
-        rows.truncate(limit.min(limits.max_result_rows));
+    if let Some(limit) = execution.implicit_result_limit {
+        rows.truncate(limit.min(execution.limits.max_result_rows));
     }
-    if rows.len() > limits.max_result_rows {
+    if rows.len() > execution.limits.max_result_rows {
         return Err(format!(
             "LogsQL pipeline result exceeds max_result_rows={}",
-            limits.max_result_rows
+            execution.limits.max_result_rows
         ));
     }
-    ensure_active(cancelled)?;
+    ensure_active(execution.cancelled)?;
     Ok(rows)
+}
+
+fn query_stats(report: LogQueryExecutionReport, query_duration_ns: u64) -> Map<String, Value> {
+    let mut result = Map::new();
+    let mut insert = |name: &str, value: u64| {
+        result.insert(name.to_owned(), Value::String(value.to_string()));
+    };
+
+    // Timeless codecs read one indivisible encoded payload. There are no
+    // separately addressable VictoriaLogs column headers, header indexes,
+    // blooms, timestamp streams, or block-header files to attribute here.
+    insert("BytesReadColumnsHeaders", 0);
+    insert("BytesReadColumnsHeaderIndexes", 0);
+    insert("BytesReadBloomFilters", 0);
+    insert("BytesReadValues", report.payload_bytes_read);
+    insert("BytesReadTimestamps", 0);
+    insert("BytesReadBlockHeaders", 0);
+    insert("BytesReadTotal", report.payload_bytes_read);
+    insert("BlocksProcessed", report.processed_blocks);
+    insert("RowsProcessed", report.processed_entries);
+    insert("RowsFound", report.matched_entries);
+    insert("ValuesRead", report.values_read);
+    insert("TimestampsRead", report.timestamps_read);
+    // The current block report measures bytes at the encoded-payload seam;
+    // it does not reserialize every decoded rich value merely to approximate
+    // VictoriaLogs' columnar uncompressed-byte counter.
+    insert("BytesProcessedUncompressedValues", 0);
+    insert("QueryDurationNsecs", query_duration_ns);
+    result
 }
 
 fn field_values(
@@ -1668,5 +1704,33 @@ mod tests {
         assert!(median(&rows, &[field], 1, &cancelled)
             .unwrap_err()
             .contains("max_work_rows=1"));
+    }
+
+    #[test]
+    fn query_stats_maps_one_request_without_global_counter_deltas() {
+        let result = query_stats(
+            LogQueryExecutionReport {
+                payload_bytes_read: 321,
+                processed_blocks: 2,
+                processed_entries: 9,
+                matched_entries: 4,
+                values_read: 27,
+                timestamps_read: 9,
+                ..LogQueryExecutionReport::default()
+            },
+            777,
+        );
+        assert_eq!(result.len(), 14);
+        assert_eq!(result["BytesReadColumnsHeaders"], json!("0"));
+        assert_eq!(result["BytesReadValues"], json!("321"));
+        assert_eq!(result["BytesReadTotal"], json!("321"));
+        assert_eq!(result["BlocksProcessed"], json!("2"));
+        assert_eq!(result["RowsProcessed"], json!("9"));
+        assert_eq!(result["RowsFound"], json!("4"));
+        assert_eq!(result["ValuesRead"], json!("27"));
+        assert_eq!(result["TimestampsRead"], json!("9"));
+        assert_eq!(result["BytesProcessedUncompressedValues"], json!("0"));
+        assert_eq!(result["QueryDurationNsecs"], json!("777"));
+        assert!(result.values().all(Value::is_string));
     }
 }

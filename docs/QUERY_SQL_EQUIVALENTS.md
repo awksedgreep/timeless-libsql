@@ -133,6 +133,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-023`](#sql-log-023-utc-day-range-with-explicit-offset) | `LQL-F33` | current foundation | exact UTC time-of-day bracket filtering with an explicit fixed offset over native public timestamps; API owns LogsQL clock/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-024`](#sql-log-024-utc-week-range-with-explicit-offset) | `LQL-F34` | current foundation | exact Sunday-through-Saturday UTC weekday filtering with an explicit fixed offset over native public timestamps; API owns LogsQL weekday/bracket/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-025`](#sql-log-025-delete-exact-retained-metadata-fields) | `LQL-P07` | current foundation | exact deletion of retained metadata paths with public JSON1; API owns aliases, prefixes, special fields, empty-parent/row pruning, composition, limits, cancellation, and envelopes |
+| [`SQL-LOG-026`](#sql-log-026-request-local-log-query-statistics) | `LQL-P12` | current foundation | single-use report for the immediately preceding successful public log scan on the same SQLite connection; API owns LogsQL syntax, complete logical predicates, pipeline duration, result strings, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5722,6 +5723,81 @@ so this recipe is the honest exact-path storage foundation rather than a
 claim of complete LogsQL pipeline equivalence. Prefix deletion and recursive
 pruning happen over already bounded public rows in Rust and do not justify an
 extension primitive.
+
+### SQL-LOG-026: request-local log query statistics
+
+Run these two statements on the same SQLite/libSQL connection. Fully consume
+the first result before immediately executing the second. The first statement
+uses the table's native timestamp unit and an inclusive interval:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND service = :service
+  AND max_work_entries = :max_work_entries
+ORDER BY ts;
+```
+
+The successful `timeless_logs` scan publishes one request-owned report. This
+statement consumes it and presents the LogsQL-compatible field names and TEXT
+value types:
+
+```sql
+SELECT
+  CAST(0 AS TEXT) AS BytesReadColumnsHeaders,
+  CAST(0 AS TEXT) AS BytesReadColumnsHeaderIndexes,
+  CAST(0 AS TEXT) AS BytesReadBloomFilters,
+  CAST(payload_bytes_read AS TEXT) AS BytesReadValues,
+  CAST(0 AS TEXT) AS BytesReadTimestamps,
+  CAST(0 AS TEXT) AS BytesReadBlockHeaders,
+  CAST(payload_bytes_read AS TEXT) AS BytesReadTotal,
+  CAST(processed_blocks AS TEXT) AS BlocksProcessed,
+  CAST(processed_entries AS TEXT) AS RowsProcessed,
+  CAST(matched_entries AS TEXT) AS RowsFound,
+  CAST(values_read AS TEXT) AS ValuesRead,
+  CAST(timestamps_read AS TEXT) AS TimestampsRead,
+  CAST(0 AS TEXT) AS BytesProcessedUncompressedValues,
+  CAST(query_total_ns AS TEXT) AS QueryDurationNsecs
+FROM timeless_log_query_stats('logs');
+```
+
+`timeless_log_query_stats` has one hidden `tbl` input and sixteen visible
+INTEGER columns: `query_total_ns`, `query_snapshot_ns`,
+`query_materialize_ns`, `snapshot_payload_bytes`, `payload_bytes_read`,
+`candidate_blocks`, `processed_blocks`, `blocks_skipped_by_bound`,
+`buffered_entries_processed`, `decoded_entries`, `processed_entries`,
+`matched_entries`, `returned_entries`, `values_read`, `timestamps_read`, and
+`stable_location_snapshot` (zero or one). A plain table name selects `main`;
+use `schema.table` for an attached database.
+
+The report is scoped to one connection and table, is published only after a
+successful scan, and is consumed exactly once. A new, failed, or cancelled
+scan clears an older unconsumed report. A second read, a fresh connection, a
+non-log table, or a call before the row statement fails explicitly. These
+rules prevent pooled/concurrent readers from being approximated through
+process-wide before/after counter deltas. The report describes work performed
+even when the scan occurred inside a transaction that was later rolled back.
+
+Timeless block codecs read one complete encoded payload containing timestamp,
+severity, message, and the rich metadata envelope. They do not have separately
+addressable VictoriaLogs column-header, header-index, bloom, timestamp, or
+block-header files. The equivalent therefore attributes the complete encoded
+payload to `BytesReadValues`, makes `BytesReadTotal` identical, and returns
+zero for the unavailable component counters. `ValuesRead` is three logical
+non-timestamp slots per processed Timeless row; `TimestampsRead` is one per
+processed row. `BytesProcessedUncompressedValues` remains zero rather than
+paying a query-time reserialization tax to invent an incomparable value.
+
+The Rust LogsQL API substitutes the exact logical row count after its typed and
+nested post-filters, measures duration through the `query_stats` pipeline
+position, returns all fourteen values as strings, and allows later pipelines.
+It currently executes the complete bounded API rowset eagerly, so a preceding
+`limit` does not retroactively reduce physical work counters. VictoriaLogs can
+cancel parallel storage workers after a limit; its reported work is scheduling
+dependent. Both products report work actually performed. Language parsing,
+result/response limits, cancellation, and HTTP errors remain API behavior.
 
 ## Adding the next recipe
 

@@ -282,6 +282,24 @@ SELECT value FROM timeless_log_values(
   :start, :stop, 1000, :max_work_entries);
 ```
 
+To inspect one scan's actual block/entry/byte work, fully consume that scan and
+then consume its report on the same connection:
+
+```sql
+SELECT ts, level, message FROM logs
+ WHERE service='api' AND max_work_entries=100000
+ ORDER BY ts;
+
+SELECT payload_bytes_read, processed_blocks, processed_entries,
+       matched_entries, returned_entries
+  FROM timeless_log_query_stats('logs');
+```
+
+The report is table-scoped and single-use. A new, failed, or cancelled scan
+clears it. Use
+[`SQL-LOG-026`](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)
+for every column and the LogsQL-compatible string mapping.
+
 Generic tables default to epoch milliseconds. The release Rust logs server
 declares microseconds and binds every timestamp and work guard in that native
 unit. Inspect `timeless_capabilities()` before depending on an additive query

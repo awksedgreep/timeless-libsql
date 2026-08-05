@@ -133,6 +133,45 @@ pub struct BlockEngineProfileSnapshot {
     pub optimize_merge_total_ns: u64,
 }
 
+/// Work performed by one successful log-row query.
+///
+/// Unlike [`BlockEngineProfileSnapshot`], this report is request-owned. It is
+/// assembled from the query's local counters before they are added to the
+/// process-wide profile, so concurrent readers cannot contaminate it. The
+/// SQLite extension publishes this report only for the connection that ran
+/// the query and clears it before the next scan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LogQueryExecutionReport {
+    pub query_total_ns: u64,
+    pub query_snapshot_ns: u64,
+    pub query_materialize_ns: u64,
+    /// Payload bytes copied while taking a conservative snapshot. File-backed
+    /// SQLite stores normally retain stable locations, so this is usually zero.
+    pub snapshot_payload_bytes: u64,
+    /// Complete encoded block payload bytes read or copied for this query.
+    pub payload_bytes_read: u64,
+    /// Blocks selected by timestamp/posting/trigram pruning before an ordered
+    /// result bound can stop the scan.
+    pub candidate_blocks: u64,
+    /// Candidate blocks actually decoded.
+    pub processed_blocks: u64,
+    pub blocks_skipped_by_bound: u64,
+    /// Live-buffer entries whose predicates were examined.
+    pub buffered_entries_processed: u64,
+    /// Persisted entries decoded from processed blocks.
+    pub decoded_entries: u64,
+    /// Persisted plus live-buffer entries whose predicates were examined.
+    pub processed_entries: u64,
+    pub matched_entries: u64,
+    pub returned_entries: u64,
+    /// Timeless log blocks have three logical non-timestamp value slots per
+    /// row: severity, message, and the complete metadata envelope. Current
+    /// codecs decode all three together rather than selecting physical fields.
+    pub values_read: u64,
+    pub timestamps_read: u64,
+    pub stable_location_snapshot: bool,
+}
+
 #[derive(Default)]
 struct BlockEngineProfile {
     ingest_batch_count: AtomicU64,
@@ -1734,6 +1773,31 @@ impl BlockEngine {
     where
         F: FnOnce(),
     {
+        self.query_ordered_with_work_limit_report_after_snapshot(
+            q,
+            order,
+            max_entries,
+            max_work_entries,
+            after_snapshot,
+        )
+        .map(|(entries, _report)| entries)
+    }
+
+    /// The request-owned form of
+    /// [`Self::query_ordered_with_work_limit_after_snapshot`]. Existing callers
+    /// retain the row-only API; SQLite query accounting uses this form so it
+    /// never derives one request from racy process-wide counter deltas.
+    pub fn query_ordered_with_work_limit_report_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        order: LogQueryOrder,
+        max_entries: Option<usize>,
+        max_work_entries: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<(Vec<LogEntry>, LogQueryExecutionReport), String>
+    where
+        F: FnOnce(),
+    {
         if max_work_entries == Some(0) {
             return Err("max_work_entries must be positive".into());
         }
@@ -1900,11 +1964,33 @@ impl BlockEngine {
         }
         self.store.check_cancelled()?;
         let materialize_ns = elapsed_ns(materialize_started);
+        let total_ns = elapsed_ns(started);
+        let buffered_entries_processed = snapshot.buffered_entries_considered as u64;
+        let processed_entries = decoded_entries.saturating_add(buffered_entries_processed);
+        let processed_blocks = candidate_blocks.saturating_sub(blocks_skipped_by_bound);
+        let report = LogQueryExecutionReport {
+            query_total_ns: total_ns,
+            query_snapshot_ns: snapshot_ns,
+            query_materialize_ns: materialize_ns,
+            snapshot_payload_bytes,
+            payload_bytes_read,
+            candidate_blocks,
+            processed_blocks,
+            blocks_skipped_by_bound,
+            buffered_entries_processed,
+            decoded_entries,
+            processed_entries,
+            matched_entries,
+            returned_entries: out.len() as u64,
+            values_read: processed_entries.saturating_mul(3),
+            timestamps_read: processed_entries,
+            stable_location_snapshot: stable_locations,
+        };
 
         self.profile.query_count.fetch_add(1, Ordering::Relaxed);
         self.profile
             .query_total_ns
-            .fetch_add(elapsed_ns(started), Ordering::Relaxed);
+            .fetch_add(total_ns, Ordering::Relaxed);
         self.profile
             .query_snapshot_ns
             .fetch_add(snapshot_ns, Ordering::Relaxed);
@@ -1955,7 +2041,7 @@ impl BlockEngine {
                 .query_blocks_skipped_by_bound
                 .fetch_add(blocks_skipped_by_bound, Ordering::Relaxed);
         }
-        Ok(out)
+        Ok((out, report))
     }
 
     fn enforce_query_work_limit(
