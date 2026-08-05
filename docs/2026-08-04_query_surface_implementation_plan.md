@@ -543,8 +543,12 @@ fixed before shipment and retained as a unit regression. Executable
 window-rank foundation. Work/result/response-state limits, cancellation,
 optimize, shutdown, reopen, and reader reuse remain shared and bounded without
 a new extension primitive or storage-contract change. `QSF-155` records the
-semantic boundary; exact-build evidence and the final verdict are recorded in
-`QSF-156`.
+semantic boundary. Exact-build commit
+`d2bdf12e2b8d91d04cb8716c860fe4105a86428d` measures partitioned/ranked
+`last` at 3.060/46.268 ms narrow/wide p95 versus 3.290/44.012 ms for
+same-run `first` controls, with byte-identical public storage work. `QSF-156`
+accepts the -7.0%/+5.1% endpoint variation, records the final HWM/storage
+verdict, and closes the row.
 Session 17 continues with `LQL-P15`.
 
 ### Session 18: applicable LogsQL P3

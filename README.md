@@ -747,6 +747,10 @@ Partitioned/ranked `first` measures 3.681/44.182 ms narrow/wide p95 versus
 3.153/37.107 ms for same-run equal-cardinality time-sort controls. The
 16.8%/19.1% bounded composition cost follows byte-identical public storage
 reads and does not justify a new extension primitive.
+Partitioned/ranked `last` measures 3.060/46.268 ms narrow/wide p95 versus
+3.290/44.012 ms for same-run `first` controls. Its -7.0%/+5.1% p95 variation
+and -9.8%/+3.9% internal API variation follow byte-identical public storage
+reads and retain the same no-new-primitive verdict.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

@@ -4017,3 +4017,49 @@ authoritative 8,192-entry batching, storage formats, compression, indexes,
 retention, optimize, transactions, migrations, and public batch/SQL contracts
 are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
 workflow, tag, release, or downstream repository was used or modified.
+
+## Session 17 LogsQL P2: bounded `last`
+
+The checked-in
+[`2026-08-05_session17_lql_p14_last.json`](evidence/2026-08-05_session17_lql_p14_last.json)
+was captured from exact release build
+`d2bdf12e2b8d91d04cb8716c860fe4105a86428d`. The feature shapes apply the
+same exact two-field coercion, two/eight partitions, top-eight selection,
+partition-local string rank, and rich projection as `first`, then reverse the
+complete comparison after each field's direction. Same-run `first` controls
+use the identical parser/state/evaluator path without the final reversal.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| partitioned/ranked `last`, indexed host | 16 | 2,605 | 2.910 | 3.060 | 3.338 | 1 | 1,024 | 235,778 | 128 |
+| partitioned/ranked `last`, full fixture | 64 | 11,864 | 42.841 | 46.268 | 47.424 | 4 | 8,192 | 1,914,055 | 8,192 |
+| partitioned/ranked `first` control, indexed host | 16 | 2,604 | 3.123 | 3.290 | 3.455 | 1 | 1,024 | 235,778 | 128 |
+| partitioned/ranked `first` control, full fixture | 64 | 11,864 | 40.796 | 44.012 | 47.294 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The `last` p95 is 7.0% below/5.1% above its narrow/wide same-run `first`
+control. Its internal API timer averages 2.461/41.788 ms versus
+2.729/40.222 ms, or 9.8% below/3.9% above. The narrow response differs by one
+byte because the selected reverse-ordered rich values differ; wide response
+size is identical. Every equal-width pair performs exactly the same public
+storage scan, block decode, payload read, row materialization, bounded key and
+partition construction, rank insertion, and projection. The only operation
+difference is the final comparator direction. The small bidirectional
+variation does not justify a new extension primitive.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+16.515 ms and the explicit durability barrier took 34.900 ms. Storage remains
+four raw blocks, 1,914,055 logical payload bytes, and 2,022,736 physical
+database/WAL/SHM bytes. Logs HWM was 93,484 KiB, 248 KiB below LQL-P13;
+metrics HWM was 53,244 KiB, 368 KiB below it. Each maximum spans the complete
+workload and is retained as whole-process variation. Cancellation ended with
+zero requests in flight.
+
+All 471 pinned VictoriaLogs v1.52.0 cases pass live. The final 32-test logs
+real-extension suite, 69 logs library tests, complete extension and Rust
+server workspaces, 45-section CLI/crash/transaction suite, 29-test Rust query
+harness, documentation contracts, Clippy with warnings denied, formatting,
+and all 94 SQL recipes (130 statements) pass locally. The extension's
+authoritative 8,192-entry batching, storage formats, compression, indexes,
+retention, optimize, transactions, migrations, and public batch/SQL contracts
+are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
+workflow, tag, release, or downstream repository was used or modified.
