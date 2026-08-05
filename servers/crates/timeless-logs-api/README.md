@@ -463,6 +463,12 @@ public storage scan and its physical counters are unchanged; later pipes still
 run over the report row, and a `query_stats` placed after another transform
 retains ordered pipeline behavior.
 
+Exact-build evidence measures the first-pipe path at 3.436/25.046 ms
+narrow/wide p95 versus 4.811/41.649 ms for same-run full-row word controls.
+Both execute identical one/four-block and 1,024/8,192-entry reads; the report
+is 380/385 response bytes instead of 34,677/2,249,775 bytes. The internal API
+timer is 4.6%/3.1% below the controls after removing discarded row formatting.
+
 Timeless reads one encoded rich payload instead of separate VictoriaLogs
 column files. `BytesReadValues` and `BytesReadTotal` therefore contain the same
 actual payload byte count; unavailable component byte fields and

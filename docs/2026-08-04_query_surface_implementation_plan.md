@@ -506,7 +506,12 @@ position, later-pipeline composition, limits, cancellation, and envelopes.
 Five successful and two error oracle cases pin the applicable semantics.
 `QSF-149` records the concurrency-safe public contract; `QSF-150` records the
 honest indivisible-payload mapping and the upstream scheduling-dependent
-`limit` distinction. No storage format or maintenance contract changed.
+`limit` distinction. Exact-build fast-path evidence at commit
+`6530dc232010e3e4169fdc9e95154c22b68f4a4d` records 3.436/25.046 ms
+narrow/wide p95 versus 4.811/41.649 ms for same-run full-row controls, with
+identical storage work and one 380/385-byte report response. `QSF-151` retains
+the pre-optimization cost and `QSF-152` records the accepted result. No
+storage format or maintenance contract changed.
 Session 17 continues with `LQL-P13`.
 
 ### Session 18: applicable LogsQL P3

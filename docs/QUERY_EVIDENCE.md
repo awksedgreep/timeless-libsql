@@ -3906,3 +3906,62 @@ workspaces, all 45 CLI sections, Clippy with warnings denied, formatting, the
 format, authoritative batching, compression, index, rollup, retention,
 transaction, migration, maintenance, or public batch/SQL contract changed. No
 CI workflow was modified or invoked.
+
+## Session 17 LogsQL P2: request-local query statistics
+
+The checked-in pre-fast-path
+[`2026-08-05_session17_lql_p12_query_stats_before_fast_path.json`](evidence/2026-08-05_session17_lql_p12_query_stats_before_fast_path.json)
+was captured from exact build
+`fc6281c5f2ba815b13feb0558c94f4dfa8e22dcc`. It exposed an avoidable API-only
+cost: a first `query_stats` pipe formatted all matched rich logs into response
+JSON before replacing them with the one report row. The checked-in final
+[`2026-08-05_session17_lql_p12_query_stats_fast_path.json`](evidence/2026-08-05_session17_lql_p12_query_stats_fast_path.json)
+was captured from exact optimized build
+`6530dc232010e3e4169fdc9e95154c22b68f4a4d` after a failing-then-passing
+regression removed that discarded conversion while preserving ordered behavior
+when another transform precedes `query_stats`.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | matched storage rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `query_stats`, indexed host | 1 | 380 | 3.082 | 3.436 | 3.586 | 1 | 1,024 | 235,778 | 128 |
+| `query_stats`, full fixture | 1 | 385 | 24.078 | 25.046 | 27.026 | 4 | 8,192 | 1,914,055 | 8,192 |
+| word/full-row control, indexed host | 128 | 34,677 | 3.538 | 4.811 | 5.175 | 1 | 1,024 | 235,778 | 128 |
+| word/full-row control, full fixture | 8,192 | 2,249,775 | 38.137 | 41.649 | 42.763 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The final `query_stats` endpoint p95 is 28.6%/39.9% below its same-run
+narrow/wide full-row control because the physical scan ends in one 380/385-byte
+report rather than a 34,677/2,249,775-byte row response. The internal API query
+timer averages 2.413/23.122 ms versus 2.528/23.856 ms for those controls, so
+the result no longer hides discarded formatting work. Against the exact
+pre-fast-path capture, internal query time fell 2.6%/27.9%. Cross-run narrow
+endpoint p95 rose 5.3% while its control rose 40.9%; that is retained as run
+variation, and only same-run comparisons are used for the verdict.
+
+Every equal-width pair performs identical storage work. The extension report
+comes from query-local counters before cumulative publication, is scoped by
+SQLite connection and table, and is consumed once. It reports the one/four
+candidate and processed blocks, 1,024/8,192 decoded entries,
+235,778/1,914,055 payload bytes, and 128/8,192 storage matches actually
+performed. The Rust API supplies complete typed post-filter `RowsFound`,
+duration through the pipe position, fourteen string fields, later-pipeline
+composition, and strict errors. `SQL-LOG-026` exposes all sixteen native
+INTEGER counters and the executable compatibility mapping to direct
+SQLite/libSQL users.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+16.514 ms and the explicit durability barrier took 38.385 ms. Both captures
+are byte-identical at four raw blocks, 1,914,055 logical payload bytes, and
+2,022,736 physical database/WAL/SHM bytes. Final logs HWM was 92,480 KiB,
+1,584 KiB below the baseline; the maximum spans the complete workload and is
+retained as whole-process variation rather than credited to one query path.
+Cancellation finished with zero requests in flight.
+
+All 435 pinned VictoriaLogs 1.52.0 cases pass live. The final complete 30-test
+logs real-extension suite, 63 logs library tests, 45-section CLI/crash/
+transaction suite, 29-test Rust query harness, documentation contracts,
+Clippy with warnings denied, formatting, and all 92 SQL recipes (128
+statements) pass locally. The extension's authoritative 8,192-entry batching,
+storage formats, compression, indexes, retention, optimize, transactions,
+migrations, and public batch/SQL contracts are unchanged. No private shadow
+table, Elixir/BEAM/NIF/HTTP fallback, CI workflow, tag, release, or downstream
+repository was used or modified.
