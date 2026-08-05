@@ -4766,7 +4766,7 @@ fn execute_prometheus_range_reduction_plan(
     Ok(output)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct IntermediateSeries {
     labels: BTreeMap<String, String>,
     points: Vec<(i64, f64)>,

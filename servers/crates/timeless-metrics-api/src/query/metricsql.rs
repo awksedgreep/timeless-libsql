@@ -854,7 +854,13 @@ fn execute_comparison_with_candidates(
         decode_prometheus_intermediate(&rhs_output.body, rhs_type, instant, limits, cancelled)?;
     let series = match (&lhs, &rhs) {
         (IntermediateValue::Vector(series), IntermediateValue::Scalar(_))
-        | (IntermediateValue::Scalar(_), IntermediateValue::Vector(series)) => series.clone(),
+        | (IntermediateValue::Scalar(_), IntermediateValue::Vector(series)) => series
+            .iter()
+            .map(|series| IntermediateSeries {
+                labels: series.labels.clone(),
+                points: Vec::new(),
+            })
+            .collect(),
         (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => {
             vector_comparison_candidates(comparison, lhs, rhs, cancelled)?
         }
