@@ -127,7 +127,13 @@ classification. Its `MQL-02` corpus adds six successful operation-level name
 cases and three syntax errors covering multi-name transforms, rollups,
 scalar/vector and vector/vector binaries, the explicit-`on(...)` matching
 exception, nested aggregation, and invalid selector/aggregate/unary targets.
-The fixture now contains 28 MetricsQL cases in total. Timeless compares exact
+Its `MQL-03` corpus adds thirteen successful union/alias cases and six errors.
+It covers named and parenthesized union, zero/single/multiple inputs, trailing
+commas, aliases that rename or remove the metric name, nested composition,
+first-argument labelset precedence, case-insensitive `union` versus lowercase
+template-only `alias`, malformed arguments, and the distinct
+duplicate-output behavior of a bare alias or scalar union. The fixture now
+contains 47 MetricsQL cases in total. Timeless compares exact
 result labels, timestamp grids, and
 float values while retaining its documented HTTP 400 `bad_data` envelope in
 place of VictoriaMetrics's HTTP 422/error-type-`422` wire policy.

@@ -236,6 +236,161 @@
       "expected_results": [
         {"metric": {}, "value": 5}
       ]
+    },
+    {
+      "id": "MQL-03-named-union-preserves-distinct-labelsets",
+      "query": "union(oracle_keep_a, oracle_keep_b)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        },
+        {
+          "metric": {"__name__": "oracle_keep_b", "host": "shared", "job": "oracle"},
+          "value": 3
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-parenthesized-union-is-equivalent",
+      "query": "(oracle_keep_a, oracle_keep_b)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        },
+        {
+          "metric": {"__name__": "oracle_keep_b", "host": "shared", "job": "oracle"},
+          "value": 3
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-alias-renames-the-metric",
+      "query": "alias(oracle_keep_a, \"oracle_alias\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_alias", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-first-union-argument-wins-alias-collision",
+      "query": "union(alias(oracle_keep_a, \"oracle_alias_collision\"), alias(oracle_keep_b, \"oracle_alias_collision\"))",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_alias_collision", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-empty-alias-removes-the-metric-name",
+      "query": "alias(oracle_keep_a, \"\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-union-and-alias-compose-under-aggregation",
+      "query": "sum(union(alias(oracle_keep_a, \"oracle_alias_a\"), alias(oracle_keep_b, \"oracle_alias_b\")))",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {"metric": {}, "value": 5}
+      ]
+    },
+    {
+      "id": "MQL-03-zero-argument-union-is-empty",
+      "query": "union()",
+      "evaluation_offset_ms": 30000,
+      "expected_results": []
+    },
+    {
+      "id": "MQL-03-single-argument-union-is-identity",
+      "query": "union(oracle_keep_a)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-named-union-allows-a-trailing-comma",
+      "query": "union(oracle_keep_a, oracle_keep_b,)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        },
+        {
+          "metric": {"__name__": "oracle_keep_b", "host": "shared", "job": "oracle"},
+          "value": 3
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-parenthesized-union-allows-a-trailing-comma",
+      "query": "(oracle_keep_a, oracle_keep_b,)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        },
+        {
+          "metric": {"__name__": "oracle_keep_b", "host": "shared", "job": "oracle"},
+          "value": 3
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-single-parenthesized-expression-allows-a-trailing-comma",
+      "query": "(oracle_keep_a,)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-alias-allows-a-trailing-comma",
+      "query": "alias(oracle_keep_a, \"oracle_alias\",)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_alias", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-03-union-function-name-is-case-insensitive",
+      "query": "UNION(oracle_keep_a, oracle_keep_b)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        },
+        {
+          "metric": {"__name__": "oracle_keep_b", "host": "shared", "job": "oracle"},
+          "value": 3
+        }
+      ]
     }
   ],
   "operator_error_cases": [
@@ -286,6 +441,54 @@
       "status": 422,
       "error_type": "422",
       "error_contains": "unparsed data left"
+    },
+    {
+      "id": "MQL-03-alias-rejects-a-post-rename-labelset-collision",
+      "query": "alias({__name__=~\"oracle_keep_a|oracle_keep_b\"}, \"oracle_alias_collision\")",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "duplicate output timeseries"
+    },
+    {
+      "id": "MQL-03-union-rejects-duplicate-scalar-labelsets",
+      "query": "union(1, 2)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "duplicate output timeseries"
+    },
+    {
+      "id": "MQL-03-alias-requires-two-arguments",
+      "query": "alias(oracle_keep_a)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "invalid number of args for \"alias\"; got 1; want 2"
+    },
+    {
+      "id": "MQL-03-alias-requires-a-string-name",
+      "query": "alias(oracle_keep_a, 1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "arg #2 must be a string"
+    },
+    {
+      "id": "MQL-03-empty-union-argument-is-invalid",
+      "query": "(oracle_keep_a,,oracle_keep_b)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected token \",\""
+    },
+    {
+      "id": "MQL-03-uppercase-alias-function-name-is-unsupported",
+      "query": "ALIAS(oracle_keep_a, \"oracle_alias\")",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unsupported function \"ALIAS\""
     }
   ],
   "error_cases": [

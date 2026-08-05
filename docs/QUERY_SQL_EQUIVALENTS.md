@@ -100,6 +100,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-056`](#sql-prom-056-histogram_fraction-over-classic-buckets) | `PQL-H02` | current foundation | bounded classic-bucket grouping and linear CDF interpolation; API owns strict bounds, scalar ASTs, IEEE values, names, limits, cancellation, and envelopes |
 | [`SQL-MQL-001`](#sql-mql-001-default-if-and-ifnot) | `MQL-01` | current foundation | bounded gap filling and step-local label membership; API owns MetricsQL syntax, implicit scalar vectors, full label/name policy, limits, cancellation, and envelopes |
 | [`SQL-MQL-002`](#sql-mql-002-keep_metric_names) | `MQL-02` | current foundation | carry the public metric-name column through ordinary SQL transforms; API owns modifier grammar, operation eligibility, name-aware matching, collisions, limits, cancellation, and envelopes |
+| [`SQL-MQL-003`](#sql-mql-003-union-and-alias) | `MQL-03` | current foundation | public-grid `UNION ALL`, explicit metric-name projection, and first-branch labelset precedence; API owns grammar, scalar-vector conversion, duplicate-output errors, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -3461,6 +3462,104 @@ additional storage read or decode.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-002`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_keep_metric_names_matches_victoriametrics_and_reopens`.
+
+### SQL-MQL-003: `union` and `alias`
+
+For exact metric inputs, ordinary `UNION ALL` composes bounded public grids.
+Carry the metric name beside the public labels because MetricsQL labelset
+identity includes `__name__`:
+
+```sql
+WITH candidates(branch, name, labels, ts, value) AS MATERIALIZED (
+  SELECT 0, :first_metric, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :first_metric, NULL,
+    :start, :end, :step, :lookback
+  )
+  UNION ALL
+  SELECT 1, :second_metric, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :second_metric, NULL,
+    :start, :end, :step, :lookback
+  )
+), winners(name, labels, branch) AS (
+  SELECT name, labels, min(branch)
+  FROM candidates
+  GROUP BY name, labels
+)
+SELECT candidates.name, candidates.labels, candidates.ts, candidates.value
+FROM candidates
+JOIN winners USING (name, labels, branch)
+ORDER BY candidates.name, candidates.labels, candidates.ts;
+```
+
+`alias(q, "name")` is direct metric-name projection. The stored metric name is
+already supplied separately to the public grid, so no JSON rewrite or
+extension function is required:
+
+```sql
+SELECT :alias_name AS name, labels, ts, value
+FROM timeless_grid(
+  'metrics', :alias_metric, NULL,
+  :start, :end, :step, :lookback
+)
+ORDER BY name, labels, ts;
+```
+
+If aliasing makes two union branches identical, choose the lowest branch once
+for the complete `(name, labels)` identity. This matches MetricsQL `union`'s
+first-argument precedence; it does not merge disjoint timestamps or values:
+
+```sql
+WITH candidates(branch, name, labels, ts, value) AS MATERIALIZED (
+  SELECT 0, :collision_alias, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :collision_first_metric, NULL,
+    :start, :end, :step, :lookback
+  )
+  UNION ALL
+  SELECT 1, :collision_alias, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :collision_second_metric, NULL,
+    :start, :end, :step, :lookback
+  )
+), winners(name, labels, branch) AS (
+  SELECT name, labels, min(branch)
+  FROM candidates
+  GROUP BY name, labels
+)
+SELECT candidates.name, candidates.labels, candidates.ts, candidates.value
+FROM candidates
+JOIN winners USING (name, labels, branch)
+ORDER BY candidates.name, candidates.labels, candidates.ts;
+```
+
+All timestamps use the metrics table's native unit. `:start` and `:end` are
+inclusive evaluation bounds, `:step` is positive, and `:lookback` is
+open-left and closed-right. `name` and `labels` are TEXT, `ts` is INTEGER, and
+`value` is REAL or NULL under the public grid contract. The recipes order by
+the complete output identity and timestamp; MetricsQL does not promise that
+HTTP union results preserve argument order.
+
+An empty alias removes `__name__`; a direct SQL caller represents that by
+omitting or discarding the projected `name` column. A bare `alias` over an
+input that collapses multiple series to the same output identity is not the
+same as a union: pinned VictoriaMetrics rejects it as duplicate output rather
+than choosing one. SQL clients can detect that condition with `GROUP BY name,
+labels HAVING count(*) > 1` over distinct source identities. The Rust API owns
+that failure, zero/single/multiple union grammar, shorthand `(q1, q2)`,
+trailing commas, scalar-to-vector behavior, nested AST composition, response
+types, limits, cancellation, and diagnostics.
+
+These statements use only public extension surfaces. `union` evaluates each
+requested public grid once, so a new extension primitive would not eliminate
+any storage read or decode. The Rust evaluator keeps only the first bounded
+output for each complete labelset and charges every child result to the
+existing intermediate-work limit.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-003`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_union_alias_match_victoriametrics_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

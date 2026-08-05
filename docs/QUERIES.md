@@ -1350,6 +1350,46 @@ public metric identity as an ordinary selected column. The executable
 [`SQL-MQL-002`](QUERY_SQL_EQUIVALENTS.md#sql-mql-002-keep_metric_names)
 recipe shows the exact form and the name-aware/`on(...)` join distinction.
 
+### Combining and renaming MetricsQL series
+
+The explicit MetricsQL routes support both the named and parenthesized union
+forms plus `alias`:
+
+```text
+union(cpu_usage, memory_usage)
+(cpu_usage, memory_usage)
+alias(cpu_usage, "host_cpu_usage")
+sum(union(alias(cpu_usage, "cpu"), alias(memory_usage, "memory")))
+```
+
+`union()` returns an empty vector, `union(q)` returns `q`, and both named and
+parenthesized lists accept a trailing comma. Every argument is evaluated as a
+bounded existing query plan. The union retains the first complete time series
+when later arguments have the same metric name and labels; it never merges
+their samples. Result ordering is not an argument-order contract.
+
+`alias(q, "name")` replaces `__name__` on every returned series; an empty name
+removes it. Alias does not silently choose among series that become identical
+after renaming. A bare alias that creates duplicate output labelsets fails,
+matching pinned VictoriaMetrics 1.148.0. Likewise, `union(1, 2)` fails because
+both scalar arguments become duplicate nameless vectors. Invalid arity,
+non-string alias names, and empty comma slots fail explicitly.
+The `union` function name is case-insensitive. `alias` is a lowercase built-in
+template in pinned VictoriaMetrics, so `ALIAS(...)` is unsupported and
+Timeless preserves that distinction.
+
+Union and alias compose beneath stable operators and aggregations, but are
+accepted only by `/metricsql/api/v1/query` and
+`/metricsql/api/v1/query_range`; the PromQL routes retain their original
+parser and reject both forms. Child results, collision state, output bytes,
+and cancellation are charged to the existing bounded Rust query envelope.
+
+The extension does not parse either construct. Direct SQLite/libSQL users use
+ordinary public-grid `UNION ALL`, project an alias as the metric-name column,
+and select the lowest branch for duplicate complete labelsets. The executable
+[`SQL-MQL-003`](QUERY_SQL_EQUIVALENTS.md#sql-mql-003-union-and-alias) recipe
+pins that behavior and explains the bare-alias collision check.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

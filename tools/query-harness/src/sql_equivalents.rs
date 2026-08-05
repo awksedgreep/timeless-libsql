@@ -304,6 +304,13 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "lower" => Value::Real(0.1),
         "upper" => Value::Real(0.5),
         "destination" => Value::Text("joined".to_owned()),
+        "first_metric" => Value::Text("cpu".to_owned()),
+        "second_metric" => Value::Text("requests_total".to_owned()),
+        "alias_metric" => Value::Text("cpu".to_owned()),
+        "alias_name" => Value::Text("aliased_cpu".to_owned()),
+        "collision_first_metric" => Value::Text("errors_total".to_owned()),
+        "collision_second_metric" => Value::Text("requests_total".to_owned()),
+        "collision_alias" => Value::Text("combined_total".to_owned()),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
         "output_labels_json" => Value::Text(r#"{"case":"late","service":"api"}"#.to_owned()),
@@ -752,6 +759,104 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         bail!("SQL-MQL-002 keep_metric_names changed: {rows:?}");
     }
 
+    let union_alias_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-003")
+        .context("SQL-MQL-003 recipe")?;
+    if union_alias_recipe.statements.len() != 3 {
+        bail!("SQL-MQL-003 must retain union, alias, and collision statements");
+    }
+    let expected_rows = [
+        vec![
+            (
+                "cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                100_i64,
+                10.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                110_i64,
+                30.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-2","service":"api"}"#,
+                100_i64,
+                20.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-2","service":"api"}"#,
+                110_i64,
+                20.0_f64,
+            ),
+            ("requests_total", r#"{"host":"web-1"}"#, 100_i64, 10.0_f64),
+            ("requests_total", r#"{"host":"web-1"}"#, 110_i64, 10.0_f64),
+        ],
+        vec![
+            (
+                "aliased_cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                100_i64,
+                10.0_f64,
+            ),
+            (
+                "aliased_cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                110_i64,
+                30.0_f64,
+            ),
+            (
+                "aliased_cpu",
+                r#"{"host":"web-2","service":"api"}"#,
+                100_i64,
+                20.0_f64,
+            ),
+            (
+                "aliased_cpu",
+                r#"{"host":"web-2","service":"api"}"#,
+                110_i64,
+                20.0_f64,
+            ),
+        ],
+        vec![
+            ("combined_total", r#"{"host":"web-1"}"#, 100_i64, 2.0_f64),
+            ("combined_total", r#"{"host":"web-1"}"#, 110_i64, 2.0_f64),
+        ],
+    ];
+    for (ordinal, expected) in expected_rows.iter().enumerate() {
+        let mut statement = connection.prepare(&union_alias_recipe.statements[ordinal])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-003 parameter must be named")?
+                .trim_start_matches(':');
+            statement.raw_bind_parameter(index, parameter("SQL-MQL-003", name))?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected = expected
+            .iter()
+            .map(|(name, labels, ts, value)| {
+                ((*name).to_owned(), (*labels).to_owned(), *ts, *value)
+            })
+            .collect::<Vec<_>>();
+        if rows != expected {
+            bail!("SQL-MQL-003 statement {} changed: {rows:?}", ordinal + 1);
+        }
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1175,13 +1280,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 71);
+        assert_eq!(recipes.len(), 72);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            91
+            94
         );
         assert_eq!(
             recipes
@@ -1189,7 +1294,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            97
+            100
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

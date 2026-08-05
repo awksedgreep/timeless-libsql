@@ -4,7 +4,7 @@
 //! accepted only by the explicitly named MetricsQL routes, lowered into the
 //! same bounded Rust plan tree, and never sent into SQLite as query syntax.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::AtomicBool;
 
 use rusqlite::Connection;
@@ -27,6 +27,17 @@ pub(crate) struct BinaryPlan {
     pub(super) lhs: Box<PromPlan>,
     pub(super) rhs: Box<PromPlan>,
     pub(super) matching: PromVectorMatching,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct UnionPlan {
+    pub(super) inputs: Vec<PromPlan>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AliasPlan {
+    pub(super) inner: Box<PromPlan>,
+    pub(super) name: String,
 }
 
 struct LowerContext<'a> {
@@ -105,6 +116,9 @@ fn lower_expr(
             matching,
         }));
     }
+    if let Some(plan) = lower_union_or_alias(input, context, depth + 1)? {
+        return Ok(plan);
+    }
 
     let rewritten = rewrite_nested(input, context, depth + 1)?;
     let mut plan = lower_promql(&rewritten, context.lookback)?;
@@ -125,6 +139,7 @@ fn supports_keep_metric_names(plan: &PromPlan, input: &str) -> bool {
         | PromPlan::Calendar(_)
         | PromPlan::HistogramQuantile(_)
         | PromPlan::HistogramFraction(_)
+        | PromPlan::MetricsUnion(_)
         | PromPlan::MetricsBinary(_)
         | PromPlan::Binary(_)
         | PromPlan::RangeReduction(_) => true,
@@ -133,12 +148,112 @@ fn supports_keep_metric_names(plan: &PromPlan, input: &str) -> bool {
         PromPlan::Scalar(_) => looks_like_function_call(input),
         PromPlan::String(_)
         | PromPlan::KeepMetricNames(_)
+        | PromPlan::MetricsAlias(_)
         | PromPlan::Unary(_)
         | PromPlan::Aggregate(_)
         | PromPlan::Selector { .. }
         | PromPlan::RangeSelector { .. }
         | PromPlan::Subquery(_) => false,
     }
+}
+
+fn lower_union_or_alias(
+    input: &str,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<Option<PromPlan>, String> {
+    let start = skip_space_and_comments(input, 0);
+    if input.as_bytes().get(start) == Some(&b'(') {
+        let close = matching_paren(input, start)?;
+        if !has_code(&input[close + 1..]) {
+            let had_comma = split_arguments(&input[start + 1..close])?.len() > 1;
+            let arguments = metric_sql_arguments(&input[start + 1..close], "union")?;
+            if arguments.len() > 1 {
+                return lower_union_arguments(arguments, context, depth).map(Some);
+            }
+            if had_comma && arguments.len() == 1 {
+                return lower_expr(arguments[0], context, depth + 1).map(Some);
+            }
+        }
+    }
+
+    let Some((name, name_end)) = read_identifier(input, start) else {
+        return Ok(None);
+    };
+    let open = skip_space_and_comments(input, name_end);
+    if input.as_bytes().get(open) != Some(&b'(') {
+        return Ok(None);
+    }
+    let close = matching_paren(input, open)?;
+    if has_code(&input[close + 1..]) {
+        return Ok(None);
+    }
+    let function = if name.eq_ignore_ascii_case("union") {
+        "union"
+    } else if name == "alias" {
+        "alias"
+    } else {
+        return Ok(None);
+    };
+    let arguments = metric_sql_arguments(&input[open + 1..close], function)?;
+    match function {
+        "union" => lower_union_arguments(arguments, context, depth).map(Some),
+        "alias" => {
+            let [inner, name] = arguments.as_slice() else {
+                return Err("MetricsQL alias requires an expression and a string name".into());
+            };
+            let inner = lower_expr(inner, context, depth + 1)?;
+            if !matches!(
+                inner.value_type(),
+                PromValueType::Scalar | PromValueType::Vector
+            ) {
+                return Err("MetricsQL alias requires a scalar or instant vector".into());
+            }
+            let alias = lower_promql(name, context.lookback)?;
+            let PromPlan::String(name) = alias else {
+                return Err("MetricsQL alias name must be a string literal".into());
+            };
+            Ok(Some(PromPlan::MetricsAlias(AliasPlan {
+                inner: Box::new(inner),
+                name,
+            })))
+        }
+        _ => unreachable!("guarded MetricsQL function"),
+    }
+}
+
+fn lower_union_arguments(
+    arguments: Vec<&str>,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    let inputs = arguments
+        .into_iter()
+        .map(|argument| {
+            let plan = lower_expr(argument, context, depth + 1)?;
+            if !matches!(
+                plan.value_type(),
+                PromValueType::Scalar | PromValueType::Vector
+            ) {
+                return Err("MetricsQL union requires scalar or instant-vector expressions".into());
+            }
+            Ok(plan)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(PromPlan::MetricsUnion(UnionPlan { inputs }))
+}
+
+fn metric_sql_arguments<'a>(input: &'a str, name: &str) -> Result<Vec<&'a str>, String> {
+    let mut arguments = split_arguments(input)?;
+    if arguments.len() == 1 && !has_code(arguments[0]) {
+        arguments.clear();
+    } else if arguments.last().is_some_and(|argument| !has_code(argument)) {
+        arguments.pop();
+    }
+    if arguments.iter().any(|argument| !has_code(argument)) {
+        return Err(format!("MetricsQL {name} contains an empty argument"));
+    }
+    Ok(arguments)
 }
 
 fn looks_like_function_call(input: &str) -> bool {
@@ -507,28 +622,40 @@ fn rewrite_nested(
             b'(' => {
                 let close = matching_paren(input, index)?;
                 let inner = &input[index + 1..close];
-                if contains_custom_word(inner) {
-                    let identifier = previous_identifier(input, index)
-                        .map(|(_, value)| value.to_ascii_lowercase());
-                    let modifier = identifier.as_deref().is_some_and(|name| {
+                let identifier = previous_identifier(input, index);
+                let identifier_name = identifier.map(|(_, value)| value.to_ascii_lowercase());
+                let special_call = identifier
+                    .is_some_and(|(_, name)| name.eq_ignore_ascii_case("union") || name == "alias");
+                if special_call || contains_custom_syntax(inner) {
+                    let modifier = identifier_name.as_deref().is_some_and(|name| {
                         matches!(
                             name,
                             "on" | "ignoring" | "group_left" | "group_right" | "by" | "without"
                         )
                     });
-                    output.push_str(&input[copied..index]);
-                    if modifier {
+                    if special_call {
+                        let (identifier_start, _) = identifier.expect("special call identifier");
+                        output.push_str(&input[copied..identifier_start]);
+                        let plan =
+                            lower_expr(&input[identifier_start..close + 1], context, depth + 1)?;
+                        output.push_str(&store_placeholder(context, plan));
+                    } else {
+                        output.push_str(&input[copied..index]);
+                    }
+                    if special_call {
+                        // The complete function call was replaced above.
+                    } else if modifier {
                         output.push('(');
                         output.push_str(inner);
                         output.push(')');
-                    } else if identifier.is_some() {
+                    } else if identifier_name.is_some() {
                         output.push('(');
                         for (argument_index, argument) in split_arguments(inner)?.iter().enumerate()
                         {
                             if argument_index > 0 {
                                 output.push(',');
                             }
-                            if contains_custom_word(argument) {
+                            if contains_custom_syntax(argument) {
                                 let plan = lower_expr(argument, context, depth + 1)?;
                                 output.push_str(&store_placeholder(context, plan));
                             } else {
@@ -549,6 +676,56 @@ fn rewrite_nested(
     }
     output.push_str(&input[copied..]);
     Ok(output)
+}
+
+fn contains_custom_syntax(input: &str) -> bool {
+    contains_custom_word(input) || contains_parenthesized_union(input)
+}
+
+fn contains_parenthesized_union(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if delimiter != b'`' && escaped {
+                escaped = false;
+            } else if delimiter != b'`' && byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'#' => comment = true,
+            b'"' | b'\'' | b'`' => quote = Some(byte),
+            b'(' if previous_identifier(input, index).is_none() => {
+                let Ok(close) = matching_paren(input, index) else {
+                    return false;
+                };
+                if split_arguments(&input[index + 1..close])
+                    .is_ok_and(|arguments| arguments.len() > 1)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 fn contains_custom_word(input: &str) -> bool {
@@ -595,6 +772,8 @@ fn contains_custom_word(input: &str) -> bool {
                 let word = &input[start..index];
                 if BinaryOp::parse(&word.to_ascii_lowercase()).is_some()
                     || word.eq_ignore_ascii_case("keep_metric_names")
+                    || word.eq_ignore_ascii_case("union")
+                    || word == "alias"
                 {
                     return true;
                 }
@@ -709,6 +888,12 @@ fn replace_placeholders(
             replace_placeholders(&mut plan.upper, placeholders)?;
             replace_placeholders(&mut plan.inner, placeholders)?;
         }
+        PromPlan::MetricsUnion(plan) => {
+            for input in &mut plan.inputs {
+                replace_placeholders(input, placeholders)?;
+            }
+        }
+        PromPlan::MetricsAlias(plan) => replace_placeholders(&mut plan.inner, placeholders)?,
         PromPlan::MetricsBinary(plan) => {
             replace_placeholders(&mut plan.lhs, placeholders)?;
             replace_placeholders(&mut plan.rhs, placeholders)?;
@@ -819,6 +1004,162 @@ fn matching_paren(input: &str, open: usize) -> Result<usize, String> {
         }
     }
     Err("unclosed parenthesis in MetricsQL expression".into())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_union(
+    conn: &Connection,
+    features: QueryFeatures,
+    union: &UnionPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let mut frame_bytes = 0_usize;
+    let mut intermediate_points = 0_u64;
+    let mut output = Vec::new();
+    let mut labels_seen = BTreeSet::new();
+    let mut retained_label_bytes = 0_usize;
+    for input in &union.inputs {
+        check_cancelled(cancelled)?;
+        let input_type = input.value_type();
+        let child = execute_prometheus(
+            conn,
+            features,
+            input,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        )?;
+        frame_bytes = frame_bytes.saturating_add(child.frame_bytes);
+        intermediate_points = intermediate_points
+            .saturating_add(child.intermediate_points)
+            .saturating_add(child.points);
+        enforce_intermediate_work(intermediate_points, limits)?;
+        let series = into_series(decode_prometheus_intermediate(
+            &child.body,
+            input_type,
+            instant,
+            limits,
+            cancelled,
+        )?);
+        for series in series {
+            check_cancelled(cancelled)?;
+            if labels_seen.insert(series.labels.clone()) {
+                charge_metricsql_labels(&mut retained_label_bytes, &series.labels, limits)?;
+                output.push(series);
+            } else if input_type == PromValueType::Scalar {
+                return Err("duplicate output timeseries: {}".into());
+            }
+        }
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(output),
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_alias(
+    conn: &Connection,
+    features: QueryFeatures,
+    alias: &AliasPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    if alias.name.len() > limits.max_response_bytes {
+        return Err(prometheus_response_limit_error(limits));
+    }
+    let input_type = alias.inner.value_type();
+    let child = execute_prometheus(
+        conn,
+        features,
+        &alias.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let mut series = into_series(decode_prometheus_intermediate(
+        &child.body,
+        input_type,
+        instant,
+        limits,
+        cancelled,
+    )?);
+    let mut labels_seen = BTreeSet::new();
+    let mut generated_label_bytes = 0_usize;
+    for item in &mut series {
+        check_cancelled(cancelled)?;
+        if alias.name.is_empty() {
+            item.labels.remove("__name__");
+        } else {
+            generated_label_bytes = generated_label_bytes
+                .checked_add("__name__".len())
+                .and_then(|bytes| bytes.checked_add(alias.name.len()))
+                .filter(|bytes| *bytes <= limits.max_response_bytes)
+                .ok_or_else(|| prometheus_response_limit_error(limits))?;
+            item.labels.insert("__name__".into(), alias.name.clone());
+        }
+        if !labels_seen.insert(item.labels.clone()) {
+            return Err("duplicate output timeseries: aliased labelset".into());
+        }
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        instant,
+        child.frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+fn charge_metricsql_labels(
+    total: &mut usize,
+    labels: &BTreeMap<String, String>,
+    limits: PromQueryLimits,
+) -> Result<(), String> {
+    for (name, value) in labels {
+        *total = total
+            .checked_add(name.len())
+            .and_then(|bytes| bytes.checked_add(value.len()))
+            .filter(|bytes| *bytes <= limits.max_response_bytes)
+            .ok_or_else(|| prometheus_response_limit_error(limits))?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1335,5 +1676,70 @@ mod tests {
             .unwrap(),
             PromPlan::Function(_)
         ));
+    }
+
+    #[test]
+    fn union_named_shorthand_nested_and_trailing_forms_lower_separately() {
+        for query in [
+            "union(cpu, memory)",
+            "(cpu, memory)",
+            "union(cpu, memory,)",
+            "(cpu, memory,)",
+            "UNION(cpu, memory)",
+        ] {
+            assert!(matches!(
+                lower(query, 300_000, 10_000).unwrap(),
+                PromPlan::MetricsUnion(UnionPlan { inputs }) if inputs.len() == 2
+            ));
+        }
+        assert!(matches!(
+            lower("union()", 300_000, 10_000).unwrap(),
+            PromPlan::MetricsUnion(UnionPlan { inputs }) if inputs.is_empty()
+        ));
+        assert!(matches!(
+            lower("union(cpu)", 300_000, 10_000).unwrap(),
+            PromPlan::MetricsUnion(UnionPlan { inputs }) if inputs.len() == 1
+        ));
+        assert!(matches!(
+            lower("(cpu,)", 300_000, 10_000).unwrap(),
+            PromPlan::Selector { .. }
+        ));
+        let nested = lower(
+            "sum(union(alias(cpu, \"renamed_cpu\"), alias(memory, \"renamed_memory\")))",
+            300_000,
+            10_000,
+        )
+        .unwrap();
+        let PromPlan::Aggregate(aggregate) = nested else {
+            panic!("aggregate expected")
+        };
+        let PromPlan::MetricsUnion(UnionPlan { inputs }) = *aggregate.inner else {
+            panic!("nested union expected")
+        };
+        assert!(inputs
+            .iter()
+            .all(|input| matches!(input, PromPlan::MetricsAlias(_))));
+    }
+
+    #[test]
+    fn alias_lowers_name_and_rejects_invalid_arguments() {
+        let plan = lower("alias(cpu, \"renamed\")", 300_000, 10_000).unwrap();
+        assert!(matches!(
+            plan,
+            PromPlan::MetricsAlias(AliasPlan { name, .. }) if name == "renamed"
+        ));
+        assert!(matches!(
+            lower("alias(cpu, \"renamed\",)", 300_000, 10_000).unwrap(),
+            PromPlan::MetricsAlias(AliasPlan { name, .. }) if name == "renamed"
+        ));
+        for query in [
+            "alias(cpu)",
+            "alias(cpu, 1)",
+            "alias(cpu, \"a\", \"b\")",
+            "(cpu,,memory)",
+            "ALIAS(cpu, \"renamed\")",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
+        }
     }
 }

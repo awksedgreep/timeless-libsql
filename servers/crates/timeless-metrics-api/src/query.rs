@@ -400,6 +400,8 @@ pub(crate) enum PromPlan {
     Calendar(PromCalendarPlan),
     HistogramQuantile(PromHistogramQuantilePlan),
     HistogramFraction(PromHistogramFractionPlan),
+    MetricsUnion(metricsql::UnionPlan),
+    MetricsAlias(metricsql::AliasPlan),
     MetricsBinary(metricsql::BinaryPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
@@ -1394,6 +1396,7 @@ impl PromPlan {
             Self::Calendar(_) => PromValueType::Vector,
             Self::HistogramQuantile(_) => PromValueType::Vector,
             Self::HistogramFraction(_) => PromValueType::Vector,
+            Self::MetricsUnion(_) | Self::MetricsAlias(_) => PromValueType::Vector,
             Self::MetricsBinary(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
@@ -1928,6 +1931,14 @@ fn attach_promql_plan_source_positions(
             attach_promql_plan_source_positions(&mut histogram.lower, calls)?;
             attach_promql_plan_source_positions(&mut histogram.upper, calls)?;
             attach_promql_plan_source_positions(&mut histogram.inner, calls)?;
+        }
+        PromPlan::MetricsUnion(union) => {
+            for input in &mut union.inputs {
+                attach_promql_plan_source_positions(input, calls)?;
+            }
+        }
+        PromPlan::MetricsAlias(alias) => {
+            attach_promql_plan_source_positions(&mut alias.inner, calls)?;
         }
         PromPlan::MetricsBinary(binary) => {
             attach_promql_plan_source_positions(&mut binary.lhs, calls)?;
@@ -4551,6 +4562,34 @@ fn execute_prometheus(
             limits,
             annotations,
             false,
+            cancelled,
+        ),
+        PromPlan::MetricsUnion(union) => metricsql::execute_union(
+            conn,
+            features,
+            union,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
+        PromPlan::MetricsAlias(alias) => metricsql::execute_alias(
+            conn,
+            features,
+            alias,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
             cancelled,
         ),
         PromPlan::MetricsBinary(binary) => metricsql::execute_binary(

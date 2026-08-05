@@ -12144,6 +12144,253 @@ async fn session_fifteen_metricsql_keep_metric_names_matches_victoriametrics_and
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_union_alias_match_victoriametrics_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_fifteen_metricsql_union.db");
+    let base = 1_785_901_638_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "mql_union_a{{host=\"shared\"}} 2 {}\n",
+            "mql_union_b{{host=\"shared\"}} 3 {}\n",
+            "mql_union_c{{host=\"other\"}} 4 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let expected_union = serde_json::json!([
+        {
+            "metric": {"__name__": "mql_union_a", "host": "shared"},
+            "value": [base, "2"]
+        },
+        {
+            "metric": {"__name__": "mql_union_b", "host": "shared"},
+            "value": [base, "3"]
+        }
+    ]);
+    let named = mql_query(&app, "union(mql_union_a, mql_union_b)", base).await;
+    assert_eq!(named.0, StatusCode::OK, "{}", named.1);
+    assert_eq!(named.1["data"]["resultType"], "vector");
+    assert_eq!(named.1["data"]["result"], expected_union);
+    let shorthand = mql_query(&app, "(mql_union_a, mql_union_b)", base).await;
+    assert_eq!(shorthand, named);
+    assert_eq!(
+        mql_query(&app, "UNION(mql_union_a, mql_union_b)", base).await,
+        named
+    );
+    assert_eq!(
+        mql_query(&app, "union(mql_union_a)", base).await.1["data"]["result"],
+        serde_json::json!([expected_union[0].clone()])
+    );
+    assert_eq!(
+        mql_query(&app, "union(mql_union_a, mql_union_b,)", base).await,
+        named
+    );
+    assert_eq!(
+        mql_query(&app, "(mql_union_a, mql_union_b,)", base).await,
+        named
+    );
+    assert_eq!(
+        mql_query(&app, "(mql_union_a,)", base).await.1["data"]["result"],
+        serde_json::json!([expected_union[0].clone()])
+    );
+    let empty = mql_query(&app, "union()", base).await;
+    assert_eq!(empty.0, StatusCode::OK, "{}", empty.1);
+    assert_eq!(empty.1["data"]["resultType"], "vector");
+    assert_eq!(empty.1["data"]["result"], serde_json::json!([]));
+
+    let aliased = mql_query(&app, "alias(mql_union_a, \"mql_alias\")", base).await;
+    assert_eq!(aliased.0, StatusCode::OK, "{}", aliased.1);
+    assert_eq!(
+        aliased.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_alias", "host": "shared"},
+            "value": [base, "2"]
+        }])
+    );
+    assert_eq!(
+        mql_query(&app, "alias(mql_union_a, \"mql_alias\",)", base).await,
+        aliased
+    );
+    let collision = mql_query(
+        &app,
+        concat!(
+            "union(alias(mql_union_a, \"mql_collision\"), ",
+            "alias(mql_union_b, \"mql_collision\"))"
+        ),
+        base,
+    )
+    .await;
+    assert_eq!(collision.0, StatusCode::OK, "{}", collision.1);
+    assert_eq!(
+        collision.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_collision", "host": "shared"},
+            "value": [base, "2"]
+        }])
+    );
+    let direct_collision = mql_query(
+        &app,
+        "alias({__name__=~\"mql_union_a|mql_union_b\"}, \"mql_collision\")",
+        base,
+    )
+    .await;
+    assert_eq!(
+        direct_collision.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        direct_collision.1
+    );
+    assert_eq!(direct_collision.1["errorType"], "execution");
+    assert!(direct_collision.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("duplicate output timeseries"));
+    let nameless = mql_query(&app, "alias(mql_union_a, \"\")", base).await;
+    assert_eq!(nameless.0, StatusCode::OK, "{}", nameless.1);
+    assert_eq!(
+        nameless.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "shared"},
+            "value": [base, "2"]
+        }])
+    );
+    let scalars = mql_query(&app, "union(1, 2)", base).await;
+    assert_eq!(scalars.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", scalars.1);
+    assert_eq!(scalars.1["errorType"], "execution");
+    assert!(scalars.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("duplicate output timeseries"));
+    let nested = mql_query(
+        &app,
+        concat!(
+            "sum(union(alias(mql_union_a, \"mql_alias_a\"), ",
+            "alias(mql_union_b, \"mql_alias_b\")))"
+        ),
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base, "5"]}])
+    );
+
+    let range = mql_query_range(&app, "alias(mql_union_a, \"mql_alias\")", base, base, 1).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(range.1["data"]["resultType"], "matrix");
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "2"]])
+    );
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "union(mql_union_a, mql_union_b)")
+            .append_pair("time", &base.to_string())
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted, named);
+
+    for query in [
+        "union(mql_union_a, mql_union_b)",
+        "(mql_union_a, mql_union_b)",
+        "alias(mql_union_a, \"mql_alias\")",
+    ] {
+        let stable = prom_query(&app, query, base).await;
+        assert_eq!(stable.0, StatusCode::BAD_REQUEST, "{query}: {}", stable.1);
+        assert_eq!(stable.1["errorType"], "bad_data");
+    }
+    for query in [
+        "alias(mql_union_a)",
+        "alias(mql_union_a, 1)",
+        "alias(mql_union_a, \"a\", \"b\")",
+        "ALIAS(mql_union_a, \"mql_alias\")",
+        "(mql_union_a,,mql_union_b)",
+    ] {
+        let invalid = mql_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query(&limited, "union(mql_union_a, mql_union_b)", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_response_bytes: 350,
+            ..PromQueryLimits::default()
+        },
+    );
+    let long_alias = "x".repeat(200);
+    let rejected = mql_query(
+        &response_limited,
+        &format!("alias({{__name__=~\"mql_union_a|mql_union_c\"}}, \"{long_alias}\")"),
+        base,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("response-size limit"));
+    assert_eq!(
+        mql_query(&response_limited, "union()", base).await.0,
+        StatusCode::OK
+    );
+
+    drop((response_limited, limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 16, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query(&reopened_app, "union(mql_union_a, mql_union_b)", base).await,
+        named
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

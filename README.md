@@ -617,9 +617,10 @@ must be tested before it can be marked shipped:
 PromQL, the explicitly named MetricsQL compatibility tier, and LogsQL
 parsing/evaluation live in the Rust signal APIs. MetricsQL-only syntax never
 changes the default PromQL routes and never enters SQLite as query syntax. The
-MetricsQL routes currently implement conditional `default`/`if`/`ifnot` and
-operation-level `keep_metric_names`; direct SQL users retain the same public
-metric identity with executable `SQL-MQL-001` and `SQL-MQL-002` recipes. The
+MetricsQL routes currently implement conditional `default`/`if`/`ifnot`,
+operation-level `keep_metric_names`, and bounded `union`/`alias` composition;
+direct SQL users retain the same public mechanics with executable
+`SQL-MQL-001` through `SQL-MQL-003` recipes. The
 extension exposes general SQLite/libSQL primitives and receives a new query
 vector only when measurements prove that storage-aware pushdown materially
 avoids reads, decode, copies, or row crossings. Saved queries, subscriptions,
