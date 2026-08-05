@@ -135,6 +135,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-025`](#sql-log-025-delete-exact-retained-metadata-fields) | `LQL-P07` | current foundation | exact deletion of retained metadata paths with public JSON1; API owns aliases, prefixes, special fields, empty-parent/row pruning, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-026`](#sql-log-026-request-local-log-query-statistics) | `LQL-P12` | current foundation | single-use report for the immediately preceding successful public log scan on the same SQLite connection; API owns LogsQL syntax, complete logical predicates, pipeline duration, result strings, limits, cancellation, and envelopes |
 | [`SQL-LOG-027`](#sql-log-027-first-numeric-rows-per-partition) | `LQL-P13` | current foundation | bounded numeric top-k per textual partition through a window rank; API owns LogsQL natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
+| [`SQL-LOG-028`](#sql-log-028-last-numeric-rows-per-partition) | `LQL-P14` | current foundation | bounded reverse numeric top-k per textual partition through a window rank; API owns LogsQL direction inversion, natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5870,6 +5871,78 @@ read or decode.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_first_is_typed_partitioned_bounded_and_durable`.
+
+### SQL-LOG-028: last numeric rows per partition
+
+Bind `:sort_path`, `:tie_path`, and `:partition_path` as SQLite JSON paths.
+The timestamp bounds use the table's native unit. This statement returns the
+last `:last_count` rows in every textual partition in reverse order and emits
+the rank as TEXT, matching LogsQL's public rank value type:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), ranked AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    COALESCE(CAST(json_extract(metadata, :partition_path) AS TEXT), '')
+      AS partition_value,
+    row_number() OVER (
+      PARTITION BY
+        COALESCE(CAST(json_extract(metadata, :partition_path) AS TEXT), '')
+      ORDER BY
+        CAST(json_extract(metadata, :sort_path) AS REAL) DESC,
+        COALESCE(CAST(json_extract(metadata, :tie_path) AS TEXT), '') DESC,
+        ts DESC,
+        level DESC,
+        message DESC,
+        metadata DESC
+    ) AS partition_rank
+  FROM bounded
+)
+SELECT
+  ts,
+  level,
+  message,
+  metadata,
+  CAST(partition_rank AS TEXT) AS rank
+FROM ranked
+WHERE partition_rank <= :last_count
+ORDER BY partition_value, partition_rank
+LIMIT :max_result_rows;
+```
+
+This is exact for a sort path whose present values are JSON numbers or
+numeric strings representable by SQLite `REAL`; missing and JSON null both
+project to SQL NULL and follow present numeric values in descending order.
+`:tie_path` makes equal sort values deterministic. The partition projection
+maps missing and null to the same empty string, ranks restart at one inside
+each partition, partitions and rows are deterministic, and retained metadata
+types are unchanged. `:last_count`, `:max_work_entries`, and
+`:max_result_rows` must be positive.
+
+The Rust API implements the complete LogsQL operation by reversing the same
+order as `first`; every per-field `desc` reverses again. It compares exact
+signed and unsigned integers before floating point, recognizes RFC3339 times,
+durations and byte sizes, applies VictoriaLogs natural UTF-8 ordering, reads
+nested rich paths, and implements the no-`by` form over the current pipeline
+row schema. It also owns quoted grammar, partition-key framing, rank insertion,
+strict errors, state/work/result/response limits, cancellation, and HTTP
+envelopes. SQLite has no built-in VictoriaLogs natural collation, so arbitrary
+textual sort values are not claimed by this numeric recipe. The bounded public
+rows already contain all required values; no extension primitive or private
+table would save a block read or decode.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_last_inverts_first_with_same_bounds_and_durability`.
 
 ## Adding the next recipe
 

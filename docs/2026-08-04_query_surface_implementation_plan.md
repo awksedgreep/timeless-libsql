@@ -532,6 +532,21 @@ storage work. `QSF-154` accepts that bounded API composition cost and records
 the final HWM/storage verdict.
 Session 17 continues with `LQL-P14`.
 
+`LQL-P14` reuses the bounded `first` parser/state machinery and reverses its
+complete comparator only after per-field direction is applied. Ten successful
+and eight error oracle cases pin default/count/by/partition/rank grammar,
+exact integer and natural order, direction inversion, current-schema no-`by`
+behavior, composition, and empty input. The initial inverse-order regression
+found an early-return comparator path that bypassed global reversal; it was
+fixed before shipment and retained as a unit regression. Executable
+`SQL-LOG-028` gives direct SQLite/libSQL users the descending numeric
+window-rank foundation. Work/result/response-state limits, cancellation,
+optimize, shutdown, reopen, and reader reuse remain shared and bounded without
+a new extension primitive or storage-contract change. `QSF-155` records the
+semantic boundary; exact-build evidence and the final verdict are recorded in
+`QSF-156`.
+Session 17 continues with `LQL-P15`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

@@ -92,7 +92,8 @@ run. Both paths read exactly one/four blocks, 1,024/8,192 entries, and
 run variation; source preprocessing neither amplifies nor reduces storage work.
 
 The ordered pipeline also accepts `field_values`, `field_names`,
-`fields`/`keep`, `filter`/`where`, `stats`, `query_stats`, and bounded `first`.
+`fields`/`keep`, `filter`/`where`, `stats`, `query_stats`, and bounded
+`first`/`last`.
 Projection
 accepts exact dotted paths, top-level prefixes, and `*`; a later filter
 observes the projected row, not the original one. Field discovery is
@@ -497,6 +498,11 @@ operation compares the current pipeline schema, so preceding projection or
 deletion is observable. Timeless retains rich JSON response types instead of
 flattening them to strings.
 
+`last` has the same grammar, partitioning, rank strings, coercions, current-row
+behavior, rich response, and limits. It reverses the complete `first` order;
+an explicit field `desc` is therefore reversed once at the field and once at
+the operation. Rank one is the first reverse-ordered row in each partition.
+
 The complete input is bounded by `max_work_rows`, output by
 `max_result_rows`, and retained sort/partition/index state by
 `max_response_bytes`; state overflow returns the same explicit HTTP 422
@@ -506,6 +512,8 @@ rows and changes no extension or storage contract. Executable
 [`SQL-LOG-027`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)
 gives direct users the exact bounded numeric window-rank foundation and
 documents why default SQLite collation is not full LogsQL natural ordering.
+[`SQL-LOG-028`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)
+is the executable reverse-order counterpart.
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for

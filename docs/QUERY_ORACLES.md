@@ -484,3 +484,16 @@ rich JSON response types. The fixture now contains 296 row-query cases, 112
 error cases, and 45 statistics/pipeline cases: 453 cases total, all passing
 against the immutable VictoriaLogs v1.52.0 image.
 The fixture now contains 453 cases.
+
+`LQL-P14` adds ten successful statistics/pipeline cases and eight error cases.
+They prove that `last` accepts the same default/count/by/partition/rank grammar
+as `first` and reverses the complete selected order. Per-field `desc` reverses
+before the global operation direction, rank strings restart at one per
+partition, no-`by` observes the current schema after deletion or projection,
+and empty input emits no rows. The cases also pin exact integer/natural order,
+RFC3339 time order, filter composition, and strict malformed syntax. Source
+audit confirms both operations share `parsePipeLastFirst` and the bounded
+top-k processor in VictoriaLogs v1.52.0. The fixture now contains 296
+row-query cases, 120 error cases, and 55 statistics/pipeline cases: 471 cases
+total, all passing against the immutable image.
+The fixture now contains 471 cases.

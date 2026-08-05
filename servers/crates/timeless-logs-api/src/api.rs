@@ -524,7 +524,10 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                     }
                     | crate::logsql::PipelineOp::First(crate::logsql::FirstSpec {
                         limit, ..
-                    }) if *limit > limits.max_result_rows => {
+                    })
+                    | crate::logsql::PipelineOp::Last(crate::logsql::FirstSpec { limit, .. })
+                        if *limit > limits.max_result_rows =>
+                    {
                         return Err(("max_result_rows", limits.max_result_rows));
                     }
                     crate::logsql::PipelineOp::Offset(offset) if *offset > limits.max_work_rows => {

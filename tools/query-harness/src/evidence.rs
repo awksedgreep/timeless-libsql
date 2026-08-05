@@ -1901,6 +1901,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "last_narrow",
+                "logs-last-narrow",
+                "host:=\"h00\" AND query | last 8 by (context.attempt, range_key) partition by (context.retry) rank as position | fields _time, _msg, host, status, context.attempt, range_key, position",
+                16,
+                None,
+            ),
+            (
+                "last_wide",
+                "logs-last-wide",
+                "query | last 8 by (context.attempt, range_key) partition by (service, level) rank as position | fields _time, _msg, service, level, status, context.attempt, range_key, position",
+                64,
+                None,
+            ),
+            (
                 "first_control_narrow",
                 "logs-first-control-narrow",
                 "host:=\"h00\" AND query | sort by (_time) asc | limit 16 | fields _time, _msg, host, status, context.attempt, range_key",

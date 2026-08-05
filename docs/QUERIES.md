@@ -570,7 +570,7 @@ VictoriaLogs per-column byte accounting. The Rust LogsQL API owns query
 grammar, typed post-filter `RowsFound`, pipeline duration/composition, string
 result values, limits, cancellation, and HTTP envelopes.
 
-## Bounded LogsQL `first`
+## Bounded LogsQL `first` and `last`
 
 The Rust logs API implements the VictoriaLogs-compatible pipeline forms:
 
@@ -578,6 +578,8 @@ The Rust logs API implements the VictoriaLogs-compatible pipeline forms:
 * | first
 * | first 10 by (status desc, _time)
 * | first 3 by (duration, _time) partition by (service, host)
+    rank as position
+* | last 3 by (duration, _time) partition by (service, host)
     rank as position
 ```
 
@@ -588,6 +590,11 @@ inserts a one-based string rank that restarts in every partition (`rank`
 defaults the field name to `rank`). Empty field lists and a trailing comma are
 accepted where the pinned upstream grammar accepts them. Wildcard fields,
 invalid counts, missing names, and trailing tokens fail before storage work.
+
+`last` accepts exactly the same grammar and returns the reverse of `first`'s
+complete order. A per-field `desc` modifier reverses that field first, and the
+operation-wide `last` direction reverses it again. Results are emitted from
+last to first, and rank one names the first emitted row in each partition.
 
 Missing and JSON null project to empty text. Sort coercion follows pinned
 VictoriaLogs order: exact signed integer, exact unsigned integer, RFC3339
@@ -615,6 +622,10 @@ includes the parameterized statement, timestamp units, order, missing/null,
 rank-type, and result-bound contract. It deliberately does not claim full
 LogsQL natural collation or exact cross-type integer coercion from ordinary
 SQLite `REAL`.
+Executable
+[`SQL-LOG-028`](QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)
+provides the corresponding descending window-rank statement and documents the
+same boundary.
 
 ## Public log storage statistics
 

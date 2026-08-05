@@ -309,6 +309,11 @@ integer and VictoriaLogs natural ordering, current-row pipeline composition,
 rich paths, per-field direction, rank insertion, strict errors, cancellation,
 and state/result limits; ordinary SQLite collation is not presented as an
 equivalent for those language semantics.
+Use executable
+[`SQL-LOG-028`](QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)
+for the reverse numeric form. LogsQL `last` reverses the complete `first`
+order—including each field's selected direction—and shares the same bounded
+partition/rank implementation.
 
 Generic tables default to epoch milliseconds. The release Rust logs server
 declares microseconds and binds every timestamp and work guard in that native

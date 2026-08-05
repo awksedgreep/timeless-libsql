@@ -2292,6 +2292,74 @@
       "id": "LQL-P13-first-empty-input",
       "query": "case:=first-missing | first 3 by (case)",
       "expected_rows": []
+    },
+    {
+      "id": "LQL-P14-last-default-all-fields",
+      "query": "case:in(numeric-two, numeric-ten) | last | fields case",
+      "expected_rows": [{"case": "numeric-ten"}]
+    },
+    {
+      "id": "LQL-P14-last-natural-descending-limit",
+      "query": "numeric_group:=numeric | last 5 by (n, case) | fields case, n",
+      "expected_rows": [
+        {"case": "numeric-huge", "n": "9007199254740993"},
+        {"case": "numeric-ten", "n": "10"},
+        {"case": "numeric-string", "n": "3"},
+        {"case": "numeric-decimal", "n": "2.5"},
+        {"case": "numeric-two", "n": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P14-last-reverses-per-field-descending",
+      "query": "numeric_group:=numeric | last 3 by (case desc) | fields case",
+      "expected_rows": [
+        {"case": "numeric-decimal"},
+        {"case": "numeric-huge"},
+        {"case": "numeric-missing"}
+      ]
+    },
+    {
+      "id": "LQL-P14-last-partition-and-custom-rank",
+      "query": "numeric_group:=numeric | last 2 by (n, case) partition by (first_partition) rank as position | fields case, first_partition, position",
+      "expected_rows": [
+        {"case": "numeric-huge", "first_partition": "a", "position": "1"},
+        {"case": "numeric-decimal", "first_partition": "a", "position": "2"},
+        {"case": "numeric-ten", "first_partition": "b", "position": "1"},
+        {"case": "numeric-string", "first_partition": "b", "position": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P14-last-default-rank",
+      "query": "numeric_group:=numeric | last 2 by (case) rank | fields case, rank",
+      "expected_rows": [
+        {"case": "numeric-zero", "rank": "1"},
+        {"case": "numeric-two", "rank": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P14-last-time-ascending",
+      "query": "page_group:=page | last 2 by (_time) | fields case",
+      "expected_rows": [{"case": "page-3"}, {"case": "page-2"}]
+    },
+    {
+      "id": "LQL-P14-last-composes-between-pipes",
+      "query": "numeric_group:=numeric | filter n:>0 | last 2 by (n, case) | fields case",
+      "expected_rows": [{"case": "numeric-huge"}, {"case": "numeric-ten"}]
+    },
+    {
+      "id": "LQL-P14-last-default-observes-prior-delete",
+      "query": "case:in(numeric-two, numeric-ten) | delete _time | last | fields case",
+      "expected_rows": [{"case": "numeric-two"}]
+    },
+    {
+      "id": "LQL-P14-last-default-observes-prior-projection-order",
+      "query": "case:in(numeric-two, numeric-ten) | fields case, n | last | fields case",
+      "expected_rows": [{"case": "numeric-two"}]
+    },
+    {
+      "id": "LQL-P14-last-empty-input",
+      "query": "case:=last-missing | last 3 by (case)",
+      "expected_rows": []
     }
   ],
   "error_cases": [
@@ -3075,6 +3143,62 @@
     {
       "id": "LQL-P13-first-rejects-trailing-token",
       "query": "* | first by (case) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-rejects-zero",
+      "query": "* | last 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-rejects-nonnumeric-limit",
+      "query": "* | last nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-requires-by-fields",
+      "query": "* | last by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-rejects-wildcard-sort-field",
+      "query": "* | last by (case*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-requires-partition-fields",
+      "query": "* | last partition by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-rejects-wildcard-partition-field",
+      "query": "* | last partition by (*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-requires-rank-name-after-as",
+      "query": "* | last rank as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P14-last-rejects-trailing-token",
+      "query": "* | last by (case) trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -401,13 +401,23 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
 }
 
 fn parse_first_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
-    let tokens = lex_first_pipe(segment)?;
+    parse_first_last_spec(segment, "first").map(PipelineOp::First)
+}
+
+fn parse_last_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    parse_first_last_spec(segment, "last").map(PipelineOp::Last)
+}
+
+fn parse_first_last_spec(segment: &str, operation: &str) -> Result<FirstSpec, LogsqlError> {
+    let tokens = lex_first_pipe(segment, operation)?;
     let Some(command) = tokens.first() else {
-        return Err(LogsqlError::malformed("LogsQL first pipe is empty"));
-    };
-    if !command.eq_ignore_ascii_case("first") {
         return Err(LogsqlError::malformed(format!(
-            "expected LogsQL first pipe, not {command:?}"
+            "LogsQL {operation} pipe is empty"
+        )));
+    };
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL {operation} pipe, not {command:?}"
         )));
     }
     let mut cursor = 1usize;
@@ -421,13 +431,13 @@ fn parse_first_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         let value = &tokens[cursor];
         limit = value.parse::<usize>().map_err(|_| {
             LogsqlError::malformed(format!(
-                "LogsQL first requires a positive integer limit, not {value:?}"
+                "LogsQL {operation} requires a positive integer limit, not {value:?}"
             ))
         })?;
         if limit == 0 {
-            return Err(LogsqlError::malformed(
-                "LogsQL first limit must be greater than zero",
-            ));
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {operation} limit must be greater than zero"
+            )));
         }
         cursor += 1;
     }
@@ -438,9 +448,9 @@ fn parse_first_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         .is_some_and(|token| token.eq_ignore_ascii_case("by"))
     {
         cursor += 1;
-        by_fields = parse_first_sort_fields(&tokens, &mut cursor)?;
+        by_fields = parse_first_sort_fields(&tokens, &mut cursor, operation)?;
     } else if tokens.get(cursor).is_some_and(|token| token == "(") {
-        by_fields = parse_first_sort_fields(&tokens, &mut cursor)?;
+        by_fields = parse_first_sort_fields(&tokens, &mut cursor, operation)?;
     }
 
     let mut partition_by = Vec::new();
@@ -455,7 +465,7 @@ fn parse_first_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         {
             cursor += 1;
         }
-        partition_by = parse_first_fields(&tokens, &mut cursor, "partition")?;
+        partition_by = parse_first_fields(&tokens, &mut cursor, "partition", operation)?;
     }
 
     let mut rank_field = None;
@@ -473,43 +483,51 @@ fn parse_first_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         let field = match tokens.get(cursor) {
             Some(token) if token != "," && token != "(" && token != ")" => {
                 cursor += 1;
-                parse_first_exact_field(token, "rank")?
+                parse_first_exact_field(token, "rank", operation)?
             }
             _ if explicit_as => {
-                return Err(LogsqlError::malformed(
-                    "LogsQL first rank as requires a field name",
-                ))
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL {operation} rank as requires a field name"
+                )))
             }
-            _ => parse_first_exact_field("rank", "rank")?,
+            _ => parse_first_exact_field("rank", "rank", operation)?,
         };
         rank_field = Some(field);
     }
 
     if let Some(token) = tokens.get(cursor) {
         return Err(LogsqlError::malformed(format!(
-            "unexpected LogsQL first token {token:?}"
+            "unexpected LogsQL {operation} token {token:?}"
         )));
     }
-    Ok(PipelineOp::First(FirstSpec {
+    Ok(FirstSpec {
         limit,
         by_fields,
         partition_by,
         rank_field,
-    }))
+    })
 }
 
 fn is_first_pipe(segment: &str) -> bool {
-    let Some(command) = segment.get(.."first".len()) else {
+    is_first_last_pipe(segment, "first")
+}
+
+fn is_last_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "last")
+}
+
+fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
+    let Some(command) = segment.get(..operation.len()) else {
         return false;
     };
-    command.eq_ignore_ascii_case("first")
-        && segment["first".len()..]
+    command.eq_ignore_ascii_case(operation)
+        && segment[operation.len()..]
             .chars()
             .next()
             .is_none_or(|character| character.is_whitespace() || character == '(')
 }
 
-fn lex_first_pipe(segment: &str) -> Result<Vec<String>, LogsqlError> {
+fn lex_first_pipe(segment: &str, operation: &str) -> Result<Vec<String>, LogsqlError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quote = None;
@@ -546,9 +564,9 @@ fn lex_first_pipe(segment: &str) -> Result<Vec<String>, LogsqlError> {
         }
     }
     if quote.is_some() {
-        return Err(LogsqlError::malformed(
-            "unterminated quoted field in LogsQL first pipe",
-        ));
+        return Err(LogsqlError::malformed(format!(
+            "unterminated quoted field in LogsQL {operation} pipe"
+        )));
     }
     if !current.is_empty() {
         tokens.push(current);
@@ -559,11 +577,12 @@ fn lex_first_pipe(segment: &str) -> Result<Vec<String>, LogsqlError> {
 fn parse_first_sort_fields(
     tokens: &[String],
     cursor: &mut usize,
+    operation: &str,
 ) -> Result<Vec<PipelineSortField>, LogsqlError> {
     if tokens.get(*cursor).is_none_or(|token| token != "(") {
-        return Err(LogsqlError::malformed(
-            "LogsQL first by requires parenthesized fields",
-        ));
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {operation} by requires parenthesized fields"
+        )));
     }
     *cursor += 1;
     let mut fields = Vec::new();
@@ -574,12 +593,12 @@ fn parse_first_sort_fields(
                 return Ok(fields);
             }
             Some(",") | None => {
-                return Err(LogsqlError::malformed(
-                    "LogsQL first by requires a field after each comma",
-                ))
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL {operation} by requires a field after each comma"
+                )))
             }
             Some(token) => {
-                let field = parse_first_exact_field(token, "sort")?;
+                let field = parse_first_exact_field(token, "sort", operation)?;
                 *cursor += 1;
                 let descending = match tokens.get(*cursor).map(String::as_str) {
                     Some(direction) if direction.eq_ignore_ascii_case("desc") => {
@@ -607,13 +626,13 @@ fn parse_first_sort_fields(
                     }
                     Some(token) => {
                         return Err(LogsqlError::malformed(format!(
-                            "unexpected LogsQL first by token {token:?}; expected ',' or ')'"
+                            "unexpected LogsQL {operation} by token {token:?}; expected ',' or ')'"
                         )))
                     }
                     None => {
-                        return Err(LogsqlError::malformed(
-                            "unterminated LogsQL first by fields",
-                        ))
+                        return Err(LogsqlError::malformed(format!(
+                            "unterminated LogsQL {operation} by fields"
+                        )))
                     }
                 }
             }
@@ -625,10 +644,11 @@ fn parse_first_fields(
     tokens: &[String],
     cursor: &mut usize,
     clause: &str,
+    operation: &str,
 ) -> Result<Vec<PipelineField>, LogsqlError> {
     if tokens.get(*cursor).is_none_or(|token| token != "(") {
         return Err(LogsqlError::malformed(format!(
-            "LogsQL first {clause} requires parenthesized fields"
+            "LogsQL {operation} {clause} requires parenthesized fields"
         )));
     }
     *cursor += 1;
@@ -641,11 +661,11 @@ fn parse_first_fields(
             }
             Some(",") | None => {
                 return Err(LogsqlError::malformed(format!(
-                    "LogsQL first {clause} requires a field after each comma"
+                    "LogsQL {operation} {clause} requires a field after each comma"
                 )))
             }
             Some(token) => {
-                fields.push(parse_first_exact_field(token, clause)?);
+                fields.push(parse_first_exact_field(token, clause, operation)?);
                 *cursor += 1;
                 match tokens.get(*cursor).map(String::as_str) {
                     Some(")") => {
@@ -661,12 +681,12 @@ fn parse_first_fields(
                     }
                     Some(token) => {
                         return Err(LogsqlError::malformed(format!(
-                            "unexpected LogsQL first {clause} token {token:?}; expected ',' or ')'"
+                            "unexpected LogsQL {operation} {clause} token {token:?}; expected ',' or ')'"
                         )))
                     }
                     None => {
                         return Err(LogsqlError::malformed(format!(
-                            "unterminated LogsQL first {clause} fields"
+                            "unterminated LogsQL {operation} {clause} fields"
                         )))
                     }
                 }
@@ -675,11 +695,15 @@ fn parse_first_fields(
     }
 }
 
-fn parse_first_exact_field(value: &str, clause: &str) -> Result<PipelineField, LogsqlError> {
+fn parse_first_exact_field(
+    value: &str,
+    clause: &str,
+    operation: &str,
+) -> Result<PipelineField, LogsqlError> {
     match parse_pipeline_field(value, false)? {
         field @ PipelineField::Exact { .. } => Ok(field),
         PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
-            "LogsQL first {clause} requires an exact field"
+            "LogsQL {operation} {clause} requires an exact field"
         ))),
     }
 }
@@ -931,6 +955,7 @@ pub(crate) enum PipelineOp {
     Stats(Vec<StatsExpression>),
     QueryStats,
     First(FirstSpec),
+    Last(FirstSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1268,6 +1293,10 @@ pub fn parse_at(
                 pipeline.push(parse_first_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
+            _ if is_last_pipe(segment) => {
+                pipeline.push(parse_last_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
             _ => {
                 return Err(LogsqlError::unsupported(format!(
@@ -1295,6 +1324,7 @@ pub fn parse_at(
                 | PipelineOp::Stats(_)
                 | PipelineOp::QueryStats
                 | PipelineOp::First(_)
+                | PipelineOp::Last(_)
         )
     });
     let implicit_result_limit =
@@ -5927,6 +5957,40 @@ mod tests {
             "* | first partition by (*)",
             "* | first rank as",
             "* | first by (case) trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_last_grammar_is_complete_and_strict() {
+        for query in [
+            "* | last",
+            "* | LAST 2 (n DeSc, case)",
+            "* | last by (n asc, case desc)",
+            "* | last by ()",
+            "* | last by (case,)",
+            "* | last 2 by (n, case) partition by (group, zone) rank as position",
+            "* | last partition (group) rank",
+            "* | fields case, n | last by (n) | keep case",
+            r#"* | last by ("field name") partition by ('group name') rank as `row rank`"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+        }
+
+        for malformed in [
+            "* | last 0",
+            "* | last nope",
+            "* | last by",
+            "* | last by (case*)",
+            "* | last partition by",
+            "* | last partition by (*)",
+            "* | last rank as",
+            "* | last by (case) trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

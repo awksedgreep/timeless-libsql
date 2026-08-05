@@ -21,7 +21,7 @@ wildcard selection; relative, bracketed, and comparison time bounds; all eight
 severities; service and arbitrary typed/nested field predicates; message
 filters; logical composition; deterministic time sort, limit, and offset;
 field names/values; typed projection and current-row filters; bounded
-VictoriaLogs-compatible `first` selection; and the listed count, unique,
+VictoriaLogs-compatible `first`/`last` selection; and the listed count, unique,
 numeric, and rate statistics. The native GET query API may have
 additional parameters, but they do not count as LogsQL support until the
 LogsQL parser and executor accept them.
@@ -117,7 +117,7 @@ extension.
 | `LQL-P11` | `blocks_count` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P12` | `query_stats` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)) | shipped | no | `STATS`, `SQL` | `API` | P2 |
 | `LQL-P13` | `first` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)) | shipped | no | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-P14` | `last` | missing | no | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-P14` | `last` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)) | in progress | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P15` | `top` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P16` | `uniq` | missing | no | `VALUES`, `SQL` | `API` | P2 |
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
