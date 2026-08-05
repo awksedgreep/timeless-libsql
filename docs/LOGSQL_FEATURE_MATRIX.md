@@ -112,7 +112,7 @@ extension.
 | `LQL-P07` | `delete` / `drop` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-025-delete-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P08` | `filter` / `where` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-011-current-row-filter-and-empty-counts)) | shipped | no | `SQL` | `API` | P1 |
 | `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | shipped | partial | `COUNT`, `SQL` | `API` | P0 |
-| `LQL-P10` | `block_stats` | missing | no | `STATS` | `EXT` | P2 |
+| `LQL-P10` | `block_stats` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P11` | `blocks_count` | missing | no | `STATS` | `EXT` | P2 |
 | `LQL-P12` | `query_stats` | missing | no | `STATS` | `API` | P2 |
 | `LQL-P13` | `first` | missing | no | `ROWS`, `SQL` | `API` | P2 |
@@ -153,6 +153,19 @@ extension.
 | `LQL-P48` | `generate_sequence` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P49` | `set_stream_fields` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
+
+`LQL-P10` is deliberately deferred, not approximated. VictoriaLogs
+`block_stats` exposes one row per physical field column with its internal
+encoding type, dictionary item/byte counts, value bytes, bloom bytes, stream
+identity, and filesystem part path. Timeless rich-log blocks retain block-level
+timestamp/count/codec metadata, posting terms, and a compressed rich envelope;
+they do not retain compatible per-field dictionaries, blooms, stream IDs, or
+part paths. [`timeless_stats('logs')`](../README.md#logs) remains the public
+aggregate operational surface, but it is not a SQL equivalent for this pipe.
+Reconsider this row only after a versioned public per-field physical-accounting
+contract exists across every readable codec, with a stored stream identity,
+an honest SQLite block-location policy, bounded/cancellable enumeration, and
+direct-user utility. See `QSF-147`.
 
 Session 13's typed pipe contract is intentionally more faithful than the
 flattened VictoriaLogs store. `field_values` uses deterministic type-tag order

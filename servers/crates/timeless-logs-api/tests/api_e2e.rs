@@ -5358,23 +5358,34 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
             "message": "LogsQL level: term requires a value"
         })
     );
-    let unsupported = default_app
-        .clone()
-        .oneshot(logsql_request("* | unpack_json"))
-        .await
-        .unwrap();
-    assert_eq!(unsupported.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(
-            &to_bytes(unsupported.into_body(), usize::MAX).await.unwrap()
-        )
-        .unwrap(),
-        serde_json::json!({
-            "error": "unsupported_capability",
-            "reason": "unsupported_logsql",
-            "message": "unsupported LogsQL pipeline \"unpack_json\""
-        })
-    );
+    for (query, message) in [
+        (
+            "* | unpack_json",
+            "unsupported LogsQL pipeline \"unpack_json\"",
+        ),
+        (
+            "* | block_stats",
+            "unsupported LogsQL pipeline \"block_stats\"",
+        ),
+    ] {
+        let unsupported = default_app
+            .clone()
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(unsupported.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(unsupported.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "error": "unsupported_capability",
+                "reason": "unsupported_logsql",
+                "message": message
+            })
+        );
+    }
     let missing = default_app
         .clone()
         .oneshot(

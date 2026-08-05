@@ -444,6 +444,15 @@ SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host',
   '{"env":{"neq":"dev"}}');
 ```
 
+The aggregate log rows above are intentionally not VictoriaLogs
+`| block_stats` compatibility. That pipe reports VictoriaLogs-specific
+per-field dictionaries, bloom filters, stream identities, and filesystem
+parts, which Timeless blocks do not retain. There is therefore no honest
+public SQL equivalent today; use `timeless_stats('logs')` for aggregate
+operational accounting and consult the
+[LogsQL matrix](docs/LOGSQL_FEATURE_MATRIX.md) for the exact deferred
+prerequisite. Private shadow tables are not a supported workaround.
+
 For worked recipes — reset-corrected counter math in pure SQL, top-k
 per bucket, cross-metric joins, IQR/σ outlier exclusion, gap-fill
 patterns — see **[docs/QUERIES.md](docs/QUERIES.md)**; every recipe in

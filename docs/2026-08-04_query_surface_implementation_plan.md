@@ -469,6 +469,18 @@ deletion with byte-identical public reads and closes the row without an
 extension primitive or storage-contract change. Session 17 continues with
 `LQL-P10`.
 
+`LQL-P10` is deferred after auditing VictoriaLogs v1.52.0 source commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` and every retained Timeless log
+codec. Upstream `block_stats` reports per-field physical encoding,
+dictionary/value/bloom sizes, stream identity, and filesystem part path.
+Timeless rich codec 7 stores one compressed rich metadata envelope and has no
+compatible dictionary, bloom, stream, or part records; aggregate
+`timeless_stats('logs')` values cannot honestly substitute for those rows.
+The Rust parser and real HTTP path pin an explicit unsupported-capability
+response without touching storage. Reconsider only after the versioned
+per-field accounting and stream/location prerequisites in `QSF-147` exist.
+Session 17 continues with `LQL-P11`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,
