@@ -118,9 +118,10 @@ It pins `Ni` lookbehind and subquery durations against the request step,
 including millisecond steps, and records the exact Prometheus rejection of the
 same syntax separately. This oracle is used only for rows explicitly assigned
 to the MetricsQL compatibility tier. The fixture contains five success cases
-and one explicit syntax error for `MQL-09`. Its `MQL-01` corpus adds nine
+and one explicit syntax error for `MQL-09`. Its `MQL-01` corpus adds ten
 operator success cases and three syntax errors covering sparse and completely
-filtered identity, vector/scalar behavior, `on(...)`, a join modifier,
+filtered identity, non-overlapping samples, vector/scalar behavior,
+`on(...)`, a join modifier,
 comparison matching, nesting, precedence, and the pinned upstream error
 classification. Timeless compares exact result labels, timestamp grids, and
 float values while retaining its documented HTTP 400 `bad_data` envelope in

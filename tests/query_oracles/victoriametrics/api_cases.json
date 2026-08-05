@@ -96,6 +96,15 @@
       ]
     },
     {
+      "id": "MQL-01-default-preserves-vector-identity-without-overlapping-samples",
+      "query": "(oracle_mql_disjoint_left > on(host) oracle_mql_disjoint_right) default 0",
+      "evaluation_offset_ms": 610000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 610000, "step": "600s"},
+      "expected_results": [
+        {"metric": {"host": "c"}, "values": [0, 0]}
+      ]
+    },
+    {
       "id": "MQL-01-if-keeps-left-values-only-where-right-exists",
       "query": "oracle_mql_cpu if on(host) oracle_mql_sparse",
       "evaluation_offset_ms": 30000,

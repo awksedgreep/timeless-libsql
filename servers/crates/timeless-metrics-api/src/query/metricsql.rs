@@ -688,20 +688,57 @@ pub(super) fn execute_binary(
     check_cancelled(cancelled)?;
     let lhs_type = binary.lhs.value_type();
     let rhs_type = binary.rhs.value_type();
-    let lhs = execute_prometheus(
-        conn,
-        features,
-        &binary.lhs,
-        start,
-        stop,
-        step,
-        instant,
-        query_start,
-        query_end,
-        limits,
-        annotations,
-        cancelled,
-    )?;
+    let mut candidates = None;
+    let lhs = if binary.op == BinaryOp::Default {
+        match execute_comparison_with_candidates(
+            conn,
+            features,
+            &binary.lhs,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        )? {
+            Some((output, comparison_candidates)) => {
+                candidates = Some(comparison_candidates);
+                output
+            }
+            None => execute_prometheus(
+                conn,
+                features,
+                &binary.lhs,
+                start,
+                stop,
+                step,
+                instant,
+                query_start,
+                query_end,
+                limits,
+                annotations,
+                cancelled,
+            )?,
+        }
+    } else {
+        execute_prometheus(
+            conn,
+            features,
+            &binary.lhs,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        )?
+    };
     check_cancelled(cancelled)?;
     let rhs = execute_prometheus(
         conn,
@@ -722,34 +759,16 @@ pub(super) fn execute_binary(
         .saturating_add(lhs.points)
         .saturating_add(rhs.intermediate_points)
         .saturating_add(rhs.points);
-    let mut frame_bytes = lhs.frame_bytes.saturating_add(rhs.frame_bytes);
+    let frame_bytes = lhs.frame_bytes.saturating_add(rhs.frame_bytes);
     let mut lhs = into_series(decode_prometheus_intermediate(
         &lhs.body, lhs_type, instant, limits, cancelled,
     )?);
     let rhs = into_series(decode_prometheus_intermediate(
         &rhs.body, rhs_type, instant, limits, cancelled,
     )?);
-    if binary.op == BinaryOp::Default {
-        if let Some(candidates) = comparison_candidates(
-            conn,
-            features,
-            &binary.lhs,
-            start,
-            stop,
-            step,
-            instant,
-            query_start,
-            query_end,
-            limits,
-            annotations,
-            cancelled,
-        )? {
-            intermediate_points = intermediate_points
-                .saturating_add(candidates.intermediate_points)
-                .saturating_add(candidates.points);
-            frame_bytes = frame_bytes.saturating_add(candidates.frame_bytes);
-            lhs = merge_comparison_candidates(lhs, candidates.series, cancelled)?;
-        }
+    if let Some(candidates) = candidates {
+        intermediate_points = intermediate_points.saturating_add(candidates.work_points);
+        lhs = merge_comparison_candidates(lhs, candidates.series, cancelled)?;
     }
     enforce_intermediate_work(intermediate_points, limits)?;
     let output = apply_binary(binary, lhs, rhs, cancelled)?;
@@ -765,13 +784,11 @@ pub(super) fn execute_binary(
 
 struct CandidateSeries {
     series: Vec<IntermediateSeries>,
-    frame_bytes: usize,
-    points: u64,
-    intermediate_points: u64,
+    work_points: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn comparison_candidates(
+fn execute_comparison_with_candidates(
     conn: &Connection,
     features: QueryFeatures,
     plan: &PromPlan,
@@ -784,116 +801,99 @@ fn comparison_candidates(
     limits: PromQueryLimits,
     annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
-) -> Result<Option<CandidateSeries>, String> {
+) -> Result<Option<(ReadOutput, CandidateSeries)>, String> {
     let PromPlan::Binary(comparison) = plan else {
         return Ok(None);
     };
     if comparison.return_bool || comparison.op.is_arithmetic() || comparison.op.is_set() {
         return Ok(None);
     }
-    match (comparison.lhs.value_type(), comparison.rhs.value_type()) {
-        (PromValueType::Vector, PromValueType::Scalar)
-        | (PromValueType::Scalar, PromValueType::Vector) => {
-            let child = if comparison.lhs.value_type() == PromValueType::Vector {
-                comparison.lhs.as_ref()
-            } else {
-                comparison.rhs.as_ref()
-            };
-            let output = execute_prometheus(
-                conn,
-                features,
-                child,
-                start,
-                stop,
-                step,
-                instant,
-                query_start,
-                query_end,
-                limits,
-                annotations,
-                cancelled,
-            )?;
-            let series = into_series(decode_prometheus_intermediate(
-                &output.body,
-                child.value_type(),
-                instant,
-                limits,
-                cancelled,
-            )?);
-            Ok(Some(CandidateSeries {
-                series,
-                frame_bytes: output.frame_bytes,
-                points: output.points,
-                intermediate_points: output.intermediate_points,
-            }))
+    let lhs_type = comparison.lhs.value_type();
+    let rhs_type = comparison.rhs.value_type();
+    let lhs_output = execute_prometheus(
+        conn,
+        features,
+        &comparison.lhs,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    check_cancelled(cancelled)?;
+    let rhs_output = execute_prometheus(
+        conn,
+        features,
+        &comparison.rhs,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    let intermediate_points = lhs_output
+        .intermediate_points
+        .saturating_add(lhs_output.points)
+        .saturating_add(rhs_output.intermediate_points)
+        .saturating_add(rhs_output.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let frame_bytes = lhs_output
+        .frame_bytes
+        .saturating_add(rhs_output.frame_bytes);
+    let lhs =
+        decode_prometheus_intermediate(&lhs_output.body, lhs_type, instant, limits, cancelled)?;
+    let rhs =
+        decode_prometheus_intermediate(&rhs_output.body, rhs_type, instant, limits, cancelled)?;
+    let series = match (&lhs, &rhs) {
+        (IntermediateValue::Vector(series), IntermediateValue::Scalar(_))
+        | (IntermediateValue::Scalar(_), IntermediateValue::Vector(series)) => series.clone(),
+        (IntermediateValue::Vector(lhs), IntermediateValue::Vector(rhs)) => {
+            vector_comparison_candidates(comparison, lhs, rhs, cancelled)?
         }
-        (PromValueType::Vector, PromValueType::Vector) => {
-            let lhs = execute_prometheus(
-                conn,
-                features,
-                &comparison.lhs,
-                start,
-                stop,
-                step,
-                instant,
-                query_start,
-                query_end,
-                limits,
-                annotations,
-                cancelled,
-            )?;
-            let rhs = execute_prometheus(
-                conn,
-                features,
-                &comparison.rhs,
-                start,
-                stop,
-                step,
-                instant,
-                query_start,
-                query_end,
-                limits,
-                annotations,
-                cancelled,
-            )?;
-            let lhs_series = into_series(decode_prometheus_intermediate(
-                &lhs.body,
-                PromValueType::Vector,
-                instant,
-                limits,
-                cancelled,
-            )?);
-            let rhs_series = into_series(decode_prometheus_intermediate(
-                &rhs.body,
-                PromValueType::Vector,
-                instant,
-                limits,
-                cancelled,
-            )?);
-            let series =
-                vector_comparison_candidates(comparison, lhs_series, rhs_series, cancelled)?;
-            let candidate_points = series
-                .iter()
-                .map(|series| series.points.len() as u64)
-                .sum::<u64>();
-            Ok(Some(CandidateSeries {
-                series,
-                frame_bytes: lhs.frame_bytes.saturating_add(rhs.frame_bytes),
-                points: lhs.points.saturating_add(rhs.points),
-                intermediate_points: lhs
-                    .intermediate_points
-                    .saturating_add(rhs.intermediate_points)
-                    .saturating_add(candidate_points),
-            }))
-        }
-        _ => Ok(None),
-    }
+        _ => Vec::new(),
+    };
+    let work_points = series
+        .iter()
+        .map(|series| series.points.len().max(1) as u64)
+        .sum();
+    let value = apply_prometheus_binary(
+        comparison.op,
+        comparison.return_bool,
+        &comparison.matching,
+        &comparison.cardinality,
+        lhs,
+        rhs,
+        cancelled,
+    )?;
+    let output = encode_prometheus_intermediate(
+        value,
+        instant,
+        frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )?;
+    Ok(Some((
+        output,
+        CandidateSeries {
+            series,
+            work_points,
+        },
+    )))
 }
 
 fn vector_comparison_candidates(
     comparison: &PromBinaryPlan,
-    lhs: Vec<IntermediateSeries>,
-    rhs: Vec<IntermediateSeries>,
+    lhs: &[IntermediateSeries],
+    rhs: &[IntermediateSeries],
     cancelled: &AtomicBool,
 ) -> Result<Vec<IntermediateSeries>, String> {
     let lhs_keys: Vec<_> = lhs
@@ -904,89 +904,73 @@ fn vector_comparison_candidates(
         .iter()
         .map(|series| comparison.matching.key(&series.labels))
         .collect();
-    let lhs_by_timestamp = samples_by_timestamp(&lhs, cancelled)?;
-    let rhs_by_timestamp = samples_by_timestamp(&rhs, cancelled)?;
-    let mut output: BTreeMap<BTreeMap<String, String>, Vec<(i64, f64)>> = BTreeMap::new();
-
-    for (timestamp, lhs_samples) in lhs_by_timestamp {
+    let mut lhs_groups: BTreeMap<&PromMatchingKey, Vec<usize>> = BTreeMap::new();
+    for (index, key) in lhs_keys.iter().enumerate() {
         check_cancelled(cancelled)?;
-        let Some(rhs_samples) = rhs_by_timestamp.get(&timestamp) else {
+        lhs_groups.entry(key).or_default().push(index);
+    }
+    let mut rhs_groups: BTreeMap<&PromMatchingKey, Vec<usize>> = BTreeMap::new();
+    for (index, key) in rhs_keys.iter().enumerate() {
+        check_cancelled(cancelled)?;
+        rhs_groups.entry(key).or_default().push(index);
+    }
+    let mut output = BTreeMap::new();
+    for (key, lhs_group) in lhs_groups {
+        check_cancelled(cancelled)?;
+        let Some(rhs_group) = rhs_groups.get(key) else {
             continue;
         };
-        let mut lhs_groups: PromStepGroups<'_> = BTreeMap::new();
-        for (index, value) in lhs_samples {
-            lhs_groups
-                .entry(&lhs_keys[index])
-                .or_default()
-                .push((index, value));
-        }
-        let mut rhs_groups: PromStepGroups<'_> = BTreeMap::new();
-        for (index, value) in rhs_samples {
-            rhs_groups
-                .entry(&rhs_keys[*index])
-                .or_default()
-                .push((*index, *value));
-        }
-        for (key, lhs_group) in lhs_groups {
-            check_cancelled(cancelled)?;
-            let Some(rhs_group) = rhs_groups.get(key) else {
-                continue;
-            };
-            let matches: Vec<(usize, usize)> = match &comparison.cardinality {
-                PromVectorCardinality::OneToOne => {
-                    if lhs_group.len() != 1 || rhs_group.len() != 1 {
-                        return Err(duplicate_matching_error(key));
-                    }
-                    vec![(lhs_group[0].0, rhs_group[0].0)]
+        let matches: Vec<(usize, usize)> = match &comparison.cardinality {
+            PromVectorCardinality::OneToOne => {
+                if lhs_group.len() != 1 || rhs_group.len() != 1 {
+                    return Err(duplicate_matching_error(key));
                 }
-                PromVectorCardinality::ManyToOne(_) => {
-                    if rhs_group.len() != 1 {
-                        return Err(duplicate_matching_error(key));
-                    }
-                    lhs_group
-                        .iter()
-                        .map(|(lhs_index, _)| (*lhs_index, rhs_group[0].0))
-                        .collect()
-                }
-                PromVectorCardinality::OneToMany(_) => {
-                    if lhs_group.len() != 1 {
-                        return Err(duplicate_matching_error(key));
-                    }
-                    rhs_group
-                        .iter()
-                        .map(|(rhs_index, _)| (lhs_group[0].0, *rhs_index))
-                        .collect()
-                }
-                PromVectorCardinality::ManyToMany => {
-                    return Err("comparison operators do not allow many-to-many matching".into())
-                }
-            };
-            for (lhs_index, rhs_index) in matches {
-                let (base_labels, one_labels) = match comparison.cardinality {
-                    PromVectorCardinality::OneToMany(_) => {
-                        (&rhs[rhs_index].labels, &lhs[lhs_index].labels)
-                    }
-                    _ => (&lhs[lhs_index].labels, &rhs[rhs_index].labels),
-                };
-                let labels = vector_result_labels(
-                    base_labels,
-                    one_labels,
-                    comparison.op,
-                    false,
-                    &comparison.matching,
-                    &comparison.cardinality,
-                );
-                output.entry(labels).or_default().push((timestamp, 0.0));
+                vec![(lhs_group[0], rhs_group[0])]
             }
+            PromVectorCardinality::ManyToOne(_) => {
+                if rhs_group.len() != 1 {
+                    return Err(duplicate_matching_error(key));
+                }
+                lhs_group
+                    .iter()
+                    .map(|lhs_index| (*lhs_index, rhs_group[0]))
+                    .collect()
+            }
+            PromVectorCardinality::OneToMany(_) => {
+                if lhs_group.len() != 1 {
+                    return Err(duplicate_matching_error(key));
+                }
+                rhs_group
+                    .iter()
+                    .map(|rhs_index| (lhs_group[0], *rhs_index))
+                    .collect()
+            }
+            PromVectorCardinality::ManyToMany => {
+                return Err("comparison operators do not allow many-to-many matching".into())
+            }
+        };
+        for (lhs_index, rhs_index) in matches {
+            let (base_labels, one_labels) = match comparison.cardinality {
+                PromVectorCardinality::OneToMany(_) => {
+                    (&rhs[rhs_index].labels, &lhs[lhs_index].labels)
+                }
+                _ => (&lhs[lhs_index].labels, &rhs[rhs_index].labels),
+            };
+            let labels = vector_result_labels(
+                base_labels,
+                one_labels,
+                comparison.op,
+                false,
+                &comparison.matching,
+                &comparison.cardinality,
+            );
+            output.entry(labels).or_insert_with(Vec::new);
         }
     }
-    normalize_prometheus_vector(
-        output
-            .into_iter()
-            .map(|(labels, points)| IntermediateSeries { labels, points })
-            .collect(),
-        cancelled,
-    )
+    Ok(output
+        .into_iter()
+        .map(|(labels, points)| IntermediateSeries { labels, points })
+        .collect())
 }
 
 fn merge_comparison_candidates(

@@ -11675,7 +11675,9 @@ async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_re
             "mql_cpu{{host=\"b\",zone=\"west\"}} 4 {}\n",
             "mql_sparse{{host=\"a\"}} 10 {}\n",
             "mql_sparse{{host=\"a\"}} 30 {}\n",
-            "mql_sparse{{host=\"b\"}} 20 {}\n"
+            "mql_sparse{{host=\"b\"}} 20 {}\n",
+            "mql_disjoint_left{{host=\"c\"}} 1 {}\n",
+            "mql_disjoint_right{{host=\"c\"}} 2 {}\n"
         ),
         (base - 20) * 1_000,
         base * 1_000,
@@ -11684,6 +11686,8 @@ async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_re
         (base - 20) * 1_000,
         base * 1_000,
         (base - 10) * 1_000,
+        (base - 600) * 1_000,
+        base * 1_000,
     );
     assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
     assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
@@ -11740,6 +11744,22 @@ async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_re
                 "values": [[base - 20, "0"], [base - 10, "0"], [base, "0"]]
             }
         ])
+    );
+    let disjoint = mql_query_range(
+        &app,
+        "(mql_disjoint_left > on(host) mql_disjoint_right) default 0",
+        base - 600,
+        base,
+        600,
+    )
+    .await;
+    assert_eq!(disjoint.0, StatusCode::OK, "{}", disjoint.1);
+    assert_eq!(
+        disjoint.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "c"},
+            "values": [[base - 600, "0"], [base, "0"]]
+        }])
     );
 
     let selector_default = mql_query_range(&app, "mql_cpu default 0", base - 20, base, 10).await;
