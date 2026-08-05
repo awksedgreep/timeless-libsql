@@ -1627,6 +1627,102 @@
       "query": "ip_group:=\"string-range\" | filter cmp_left:lt_field(cmp_right)",
       "status": 200,
       "expected_cases": ["string-range-inside", "string-range-uppercase", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array"]
+    },
+    {
+      "id": "LQL-F32-prefix-searches-any-matching-field",
+      "query": "ip_group:=\"string-range\" cmp_*:alpha",
+      "status": 200,
+      "expected_cases": ["string-range-lower"]
+    },
+    {
+      "id": "LQL-F32-narrower-prefix-excludes-other-fields",
+      "query": "ip_group:=\"string-range\" cmp_l*:foo",
+      "status": 200,
+      "expected_cases": ["string-range-upper"]
+    },
+    {
+      "id": "LQL-F32-nonexistent-prefix-matches-nothing",
+      "query": "case:=\"string-range-lower\" cmp_z*:alpha",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F32-quoted-prefix",
+      "query": "ip_group:=\"string-range\" \"cmp_\"*:foo",
+      "status": 200,
+      "expected_cases": ["string-range-inside", "string-range-upper"]
+    },
+    {
+      "id": "LQL-F32-empty-prefix-searches-all-fields",
+      "query": "case:=\"string-range-lower\" *:alpha",
+      "status": 200,
+      "expected_cases": ["string-range-lower"]
+    },
+    {
+      "id": "LQL-F32-quoted-empty-prefix-searches-all-fields",
+      "query": "case:=\"string-range-lower\" \"\"*:alpha",
+      "status": 200,
+      "expected_cases": ["string-range-lower"]
+    },
+    {
+      "id": "LQL-F32-field-group-and-may-use-different-fields",
+      "query": "case:=\"string-range-inside\" cmp_*:(bar AND foo)",
+      "status": 200,
+      "expected_cases": ["string-range-inside"]
+    },
+    {
+      "id": "LQL-F32-field-group-or",
+      "query": "case:=\"string-range-upper\" cmp_*:(alpha OR bar)",
+      "status": 200,
+      "expected_cases": ["string-range-upper"]
+    },
+    {
+      "id": "LQL-F32-not-negates-the-expanded-set",
+      "query": "(case:=\"string-range-lower\" OR case:=\"string-range-inside\") AND NOT cmp_*:alpha",
+      "status": 200,
+      "expected_cases": ["string-range-inside"]
+    },
+    {
+      "id": "LQL-F32-exact-filter-expands-fields",
+      "query": "case:=\"string-range-lower\" cmp_*:exact(alpha)",
+      "status": 200,
+      "expected_cases": ["string-range-lower"]
+    },
+    {
+      "id": "LQL-F32-string-range-expands-fields",
+      "query": "case:=\"string-range-inside\" cmp_*:string_range(bar, baz)",
+      "status": 200,
+      "expected_cases": ["string-range-inside"]
+    },
+    {
+      "id": "LQL-F32-value-type-expands-fields",
+      "query": "case:=\"string-range-uppercase\" cmp_*:value_type(const)",
+      "status": 200,
+      "expected_cases": ["string-range-uppercase"]
+    },
+    {
+      "id": "LQL-F32-field-comparison-does-not-expand-left-fields-upstream",
+      "query": "ip_group:=\"string-range\" cmp_l*:eq_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty"]
+    },
+    {
+      "id": "LQL-F32-pipeline-composition",
+      "query": "ip_group:=\"string-range\" | filter cmp_*:foo",
+      "status": 200,
+      "expected_cases": ["string-range-inside", "string-range-upper"]
+    },
+    {
+      "id": "LQL-F32-special-field-prefix-includes-message",
+      "query": "case:=\"string-range-lower\" _*:range",
+      "status": 200,
+      "expected_cases": ["string-range-lower"]
+    },
+    {
+      "id": "LQL-F32-flattened-object-child-participates",
+      "query": "case:=\"string-range-object\" ip*:alpha",
+      "status": 200,
+      "expected_cases": ["string-range-object"]
     }
   ],
   "stats_cases": [
@@ -2194,6 +2290,48 @@
     {
       "id": "LQL-F30-time-left-remains-reserved-for-time-filters",
       "query": "_time:eq_field(_time)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F32-prefix-requires-a-filter",
+      "query": "cmp_*:",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F32-prefix-rejects-empty-group",
+      "query": "cmp_*:()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F32-prefix-rejects-unterminated-group",
+      "query": "cmp_*:(alpha",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F32-prefix-rejects-repeated-wildcards",
+      "query": "cmp_**:alpha",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F32-prefix-field-comparison-rejects-right-wildcard",
+      "query": "cmp_*:eq_field(cmp_*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F32-prefix-rejects-unterminated-quoted-prefix",
+      "query": "\"cmp_*:alpha",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

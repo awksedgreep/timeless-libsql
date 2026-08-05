@@ -59,6 +59,9 @@ filtering over the retained rich textual projection; inclusive Unicode-
 codepoint `len_range(minimum, maximum)` filtering over that projection;
 same-row `eq_field`, `le_field`, and `lt_field` comparisons with exact
 equality and VictoriaLogs math-value-or-bytewise ordering;
+literal `prefix*:filter` field-set searches, including empty/quoted prefixes,
+canonical special fields, recursively dotted rich-object leaves, independent
+field-scoped logical operands, and current-row pipeline evaluation;
 VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
@@ -216,6 +219,25 @@ Exact-build evidence over 8,192 retained rows measures same-field equality at
 narrow shape reads one block and 1,024 entries; every wide shape reads four
 blocks and all 8,192 entries. The predicates therefore add no storage
 amplification or row crossing and do not justify an extension primitive.
+
+Field-set selectors end in one unquoted wildcard: `cmp_*:foo`, `*:foo`, and
+`"foo:bar:"*:exact(needle)`. Every atomic filter succeeds when any existing
+canonical field with that prefix succeeds. `_msg`, `_time`, and `level` are
+canonical special fields; retained objects contribute dotted leaf paths;
+arrays and null remain leaves; and object parents are not implicitly matched.
+A field-scoped `AND` may use a different matching field for each atom, `NOT`
+negates the expanded result, and pipeline filters inspect the current projected
+row. Expansion is cancellation-aware, retains only one recursive path, and is
+bounded by the decoded row rather than allocating a field list.
+
+Wildcard left operands for `eq_field`, `le_field`, and `lt_field` are rejected.
+This intentionally avoids VictoriaLogs' current literal-nonexistent-field
+behavior, which can produce surprising empty-projection matches. Direct
+SQLite/libSQL callers can use executable `SQL-LOG-022` for literal field-name
+prefix selection and retained string/null exactness over public rows. The Rust
+API owns the complete LogsQL filter, rich projection, `_time`, grammar, limits,
+cancellation, and envelope semantics; the extension storage contract is
+unchanged.
 
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept

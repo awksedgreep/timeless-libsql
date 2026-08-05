@@ -3011,6 +3011,239 @@ async fn session_sixteen_field_comparisons_match_numeric_lexical_and_rich_rows_a
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_field_prefixes_expand_existing_rich_fields_and_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("field-prefix-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let entry = |offset: i64, message: &str, level: u8, metadata_json: &str| LogEntry {
+        ts: 1_817_000_000_000_000 + offset,
+        level,
+        severity: if level == 3 { "error" } else { "info" }.into(),
+        message: message.into(),
+        metadata_json: metadata_json.into(),
+    };
+    storage
+        .ingest(vec![
+            entry(
+                1,
+                "plain",
+                1,
+                r#"{"case":"cross","cmp_left":"bar","cmp_right":"foo"}"#,
+            ),
+            entry(2, "plain", 1, r#"{"case":"alpha-left","cmp_left":"alpha"}"#),
+            entry(
+                3,
+                "plain",
+                1,
+                r#"{"case":"alpha-right","cmp_right":"alpha"}"#,
+            ),
+            entry(4, "plain", 1, r#"{"case":"foo-left","cmp_left":"foo"}"#),
+            entry(
+                5,
+                "plain",
+                1,
+                r#"{"case":"quoted-prefix","foo:bar:value":"needle"}"#,
+            ),
+            entry(
+                6,
+                "plain",
+                1,
+                r#"{"case":"nested","nested":{"ip":"alpha","number":2},"tags":["alpha"]}"#,
+            ),
+            entry(7, "plain", 1, r#"{"case":"null","nullable_one":null}"#),
+            entry(8, "messageword alpha", 1, r#"{"case":"message"}"#),
+            entry(9, "plain", 3, r#"{"case":"level"}"#),
+            entry(
+                10,
+                "plain",
+                1,
+                r#"{"case":"numeric","numeric_u64":18446744073709551615}"#,
+            ),
+            entry(11, "plain", 1, r#"{"case":"none","other":"omega"}"#),
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn cases(storage: &Storage, query: &str) -> Vec<String> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap()["case"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    let queries = [
+        ("cmp_*:alpha", vec!["alpha-left", "alpha-right"]),
+        ("cmp_l*:foo", vec!["foo-left"]),
+        ("cmp_z*:alpha", Vec::new()),
+        ("\"cmp_\"*:foo", vec!["cross", "foo-left"]),
+        (
+            "*:alpha",
+            vec!["alpha-left", "alpha-right", "nested", "message"],
+        ),
+        (
+            "\"\"*:alpha",
+            vec!["alpha-left", "alpha-right", "nested", "message"],
+        ),
+        ("cmp_*:(bar AND foo)", vec!["cross"]),
+        (
+            "cmp_*:(alpha OR foo)",
+            vec!["cross", "alpha-left", "alpha-right", "foo-left"],
+        ),
+        ("cmp_*:exact(alpha)", vec!["alpha-left", "alpha-right"]),
+        ("cmp_*:string_range(bar, baz)", vec!["cross"]),
+        ("nested.*:alpha", vec!["nested"]),
+        ("tag*:value_type(array)", vec!["nested"]),
+        ("numeric*:value_type(uint64)", vec!["numeric"]),
+        ("\"foo:bar:\"*:needle", vec!["quoted-prefix"]),
+        ("_*:messageword", vec!["message"]),
+        (
+            "\"_time\"*:value_type(string)",
+            vec![
+                "cross",
+                "alpha-left",
+                "alpha-right",
+                "foo-left",
+                "quoted-prefix",
+                "nested",
+                "null",
+                "message",
+                "level",
+                "numeric",
+                "none",
+            ],
+        ),
+        ("level*:exact(error)", vec!["level"]),
+        ("nullable*:exact(\"\")", vec!["null"]),
+        (
+            "NOT cmp_*:alpha",
+            vec![
+                "cross",
+                "foo-left",
+                "quoted-prefix",
+                "nested",
+                "null",
+                "message",
+                "level",
+                "numeric",
+                "none",
+            ],
+        ),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(cases(&storage, query).await, *expected, "{query}");
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(&app, "* | filter cmp_*:foo | fields case | limit 100",)
+            .await
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        ["cross", "foo-left"]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "* | fields cmp_left, case | filter cmp_*:bar | fields case | limit 100",
+        )
+        .await
+        .into_iter()
+        .map(|row| row["case"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>(),
+        ["cross"]
+    );
+
+    for malformed in [
+        "cmp_*:",
+        "cmp_*:()",
+        "cmp_*:(alpha",
+        "cmp_**:alpha",
+        "\"cmp_*:alpha",
+        "cmp_*:eq_field(cmp_right)",
+        "cmp_*:le_field(cmp_right)",
+        "cmp_*:lt_field(cmp_right)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("cmp_*:alpha | limit 100"))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        cases(&storage, "cmp_*:alpha").await,
+        ["alpha-left", "alpha-right"],
+        "the reader must remain reusable after a bounded-work rejection"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(cases(&reopened, query).await, expected, "reopened: {query}");
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

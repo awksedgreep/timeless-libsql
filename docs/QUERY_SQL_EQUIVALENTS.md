@@ -129,6 +129,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-019`](#sql-log-019-bytewise-string-range-over-retained-text) | `LQL-F27` | current foundation | lower-inclusive/upper-exclusive bytewise range over retained text plus missing/null-as-empty; API owns rich-value projection, grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-020`](#sql-log-020-unicode-codepoint-length-range-over-retained-text) | `LQL-F28` | current foundation | inclusive Unicode-codepoint length over retained text plus missing/null-as-empty; API owns rich-value projection, bound grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-021`](#sql-log-021-same-row-textual-field-comparison) | `LQL-F30` | current foundation | exact textual equality and explicit bytewise fallback ordering over two public-row fields; API owns VictoriaLogs math-value detection, `_time` rendering, grammar, composition, limits, cancellation, and envelopes |
+| [`SQL-LOG-022`](#sql-log-022-prefix-selected-field-set) | `LQL-F32` | current foundation | row-local exact-string matching over canonical special fields and recursively flattened metadata leaf names selected by a literal prefix; API owns LogsQL filter semantics, rich projection, grammar, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5414,6 +5415,106 @@ timestamp endpoints are inclusive, `max_work_entries` bounds public decode,
 output is newest first, and `:limit` is applied after comparison. Both operands
 already arrive in the same decoded public row, so an extension primitive would
 not remove a block read, decode, allocation, copy, or row crossing.
+
+### SQL-LOG-022: prefix-selected field set
+
+Bind `:field_prefix` to the literal canonical field-name prefix without the
+LogsQL trailing `*`, and bind `:exact_text` to a retained string. For example,
+`deployment.*:exact(us-east)` becomes `deployment.` and `us-east`. An empty
+prefix searches every existing field. This statement recursively flattens only
+metadata objects, keeps arrays as leaf values, adds the public `_msg`, `_time`,
+and `level` fields, and matches if any selected string or null-valued field has
+the requested exact textual value:
+
+```sql
+WITH RECURSIVE
+bounded AS MATERIALIZED (
+  SELECT
+    ROW_NUMBER() OVER (ORDER BY ts DESC) AS query_row,
+    ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), metadata_fields(
+  query_row, ts, level, message, metadata,
+  field_name, field_value, field_type
+) AS (
+  SELECT
+    bounded.query_row, bounded.ts, bounded.level,
+    bounded.message, bounded.metadata,
+    CAST(child.key AS TEXT), child.value, child.type
+  FROM bounded
+  JOIN json_each(bounded.metadata) AS child
+  UNION ALL
+  SELECT
+    parent.query_row, parent.ts, parent.level,
+    parent.message, parent.metadata,
+    parent.field_name || '.' || CAST(child.key AS TEXT),
+    child.value, child.type
+  FROM metadata_fields AS parent
+  JOIN json_each(parent.field_value) AS child
+  WHERE parent.field_type = 'object'
+), fields AS (
+  SELECT query_row, ts, level, message, metadata,
+         '_msg' AS field_name, message AS field_value, 'text' AS field_type
+  FROM bounded
+  UNION ALL
+  SELECT query_row, ts, level, message, metadata,
+         '_time', CAST(ts AS TEXT), 'text'
+  FROM bounded
+  UNION ALL
+  SELECT query_row, ts, level, message, metadata,
+         'level', level, 'text'
+  FROM bounded
+  UNION ALL
+  SELECT query_row, ts, level, message, metadata,
+         field_name, field_value, field_type
+  FROM metadata_fields
+  WHERE field_type <> 'object'
+), matched AS (
+  SELECT query_row, ts, level, message, metadata
+  FROM fields
+  WHERE substr(field_name, 1, length(:field_prefix)) =
+        :field_prefix COLLATE BINARY
+    AND CASE field_type
+      WHEN 'text' THEN CAST(field_value AS TEXT)
+      WHEN 'null' THEN ''
+    END = :exact_text COLLATE BINARY
+  GROUP BY query_row
+)
+SELECT ts, level, message, metadata
+FROM matched
+ORDER BY ts DESC, query_row
+LIMIT :limit;
+```
+
+The prefix comparison is literal: `%` and `_` have no wildcard meaning, and a
+quoted LogsQL prefix containing `:` is bound after quote decoding. A nested
+object contributes dotted leaf names such as `deployment.region` but not the
+object parent; an array remains one leaf. JSON null is an existing field and
+projects to the empty string for this exact-text recipe. A missing prefix has
+no candidate and therefore cannot match, even when `:exact_text` is empty.
+`query_row` prevents one row matching multiple fields from being duplicated
+without collapsing two otherwise identical stored log entries.
+
+The direct `_time` value is the table's native integer timestamp. The Rust API
+formats `_time` at the configured precision before applying a LogsQL filter.
+It also supplies word, phrase, regexp, pattern, range, logical-group, rich JSON,
+and pipeline-current-row semantics; recursively enumerates retained leaves
+without allocating a row-wide field list; and owns parser errors, work/result/
+response limits, cancellation, and HTTP envelopes. In particular, Timeless
+rejects a wildcard left operand for `eq_field`, `le_field`, or `lt_field`:
+VictoriaLogs currently treats that spelling as one literal nonexistent field,
+which can accidentally match missing/empty projections rather than expanding
+the prefix.
+
+Both timestamp endpoints are inclusive and use milliseconds in this example.
+`max_work_entries` bounds public extension decode, while recursive field work
+is bounded by each already-decoded metadata value. The result limit is applied
+after field matching. Ordinary SQL already receives the required public rows;
+an extension primitive would not avoid a storage read, decode, allocation,
+copy, or row crossing.
 
 ## Adding the next recipe
 

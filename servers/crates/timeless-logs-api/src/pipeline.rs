@@ -716,6 +716,36 @@ fn predicate_matches(
     cancelled: &AtomicBool,
 ) -> Result<bool, String> {
     ensure_active(cancelled)?;
+    if let Some(prefix) = predicate_field_prefix(predicate) {
+        let Some(object) = row.as_object() else {
+            return Ok(false);
+        };
+        return row_prefix_predicate_matches(
+            object,
+            &mut Vec::new(),
+            prefix,
+            predicate,
+            row,
+            timestamp_unit,
+            cancelled,
+        );
+    }
+    predicate_matches_resolved(predicate, row, timestamp_unit, cancelled, None)
+}
+
+fn predicate_matches_resolved(
+    predicate: &LogPredicate,
+    row: &Value,
+    timestamp_unit: TimestampUnit,
+    cancelled: &AtomicBool,
+    field_override: Option<&LogField>,
+) -> Result<bool, String> {
+    ensure_active(cancelled)?;
+    macro_rules! resolved_field {
+        ($field:expr) => {
+            resolved_log_field($field, field_override)
+        };
+    }
     match predicate {
         LogPredicate::True => Ok(true),
         LogPredicate::And(predicates) => {
@@ -744,7 +774,7 @@ fn predicate_matches(
             field,
             value,
             case_insensitive,
-        } => Ok(field_text(row, field).is_some_and(|text| {
+        } => Ok(field_text(row, resolved_field!(field)).is_some_and(|text| {
             if *case_insensitive {
                 word_matches(&text.to_lowercase(), value)
             } else {
@@ -755,7 +785,7 @@ fn predicate_matches(
             field,
             value,
             case_insensitive,
-        } => Ok(field_text(row, field).is_some_and(|text| {
+        } => Ok(field_text(row, resolved_field!(field)).is_some_and(|text| {
             if *case_insensitive {
                 phrase_matches(&text.to_lowercase(), value)
             } else {
@@ -767,7 +797,7 @@ fn predicate_matches(
             value,
             phrase,
             case_insensitive,
-        } => Ok(field_text(row, field).is_some_and(|text| {
+        } => Ok(field_text(row, resolved_field!(field)).is_some_and(|text| {
             if *case_insensitive {
                 prefix_matches(&text.to_lowercase(), value, *phrase)
             } else {
@@ -778,7 +808,7 @@ fn predicate_matches(
             field,
             value,
             case_insensitive,
-        } => Ok(field_text(row, field).is_some_and(|text| {
+        } => Ok(field_text(row, resolved_field!(field)).is_some_and(|text| {
             if *case_insensitive {
                 text.to_lowercase().contains(value)
             } else {
@@ -786,34 +816,38 @@ fn predicate_matches(
             }
         })),
         LogPredicate::Exact { field, value } => {
-            Ok(field_text(row, field).is_some_and(|text| text == value))
+            Ok(field_text(row, resolved_field!(field)).is_some_and(|text| text == value))
         }
-        LogPredicate::TextualExact { field, value } => {
-            Ok(projected_field_matches(row, field, |text| text == value))
-        }
-        LogPredicate::TextualIn { field, values } => {
-            Ok(projected_field_matches(row, field, |text| {
+        LogPredicate::TextualExact { field, value } => Ok(projected_field_matches(
+            row,
+            resolved_field!(field),
+            |text| text == value,
+        )),
+        LogPredicate::TextualIn { field, values } => Ok(projected_field_matches(
+            row,
+            resolved_field!(field),
+            |text| {
                 values
                     .binary_search_by(|candidate| candidate.as_str().cmp(text))
                     .is_ok()
-            }))
-        }
+            },
+        )),
         LogPredicate::TextualContainsAll { field, values } => {
-            let matched = projected_field_matches(row, field, |text| {
+            let matched = projected_field_matches(row, resolved_field!(field), |text| {
                 values.iter().all(|phrase| phrase_matches(text, phrase))
             });
             ensure_active(cancelled)?;
             Ok(matched)
         }
         LogPredicate::TextualContainsAny { field, values } => {
-            let matched = projected_field_matches(row, field, |text| {
+            let matched = projected_field_matches(row, resolved_field!(field), |text| {
                 values.iter().any(|phrase| phrase_matches(text, phrase))
             });
             ensure_active(cancelled)?;
             Ok(matched)
         }
         LogPredicate::JsonArrayContainsAny { field, values } => {
-            let matched = field_json(row, field)
+            let matched = field_json(row, resolved_field!(field))
                 .and_then(Value::as_array)
                 .is_some_and(|array| {
                     array
@@ -829,7 +863,7 @@ fn predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && field_text(row, field)
+                && field_text(row, resolved_field!(field))
                     .and_then(parse_ipv4_address)
                     .is_some_and(|address| address >= *minimum && address <= *maximum);
             ensure_active(cancelled)?;
@@ -841,7 +875,7 @@ fn predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && field_text(row, field)
+                && field_text(row, resolved_field!(field))
                     .and_then(parse_ipv6_address)
                     .is_some_and(|address| address >= *minimum && address <= *maximum);
             ensure_active(cancelled)?;
@@ -853,7 +887,7 @@ fn predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && projected_field_matches(row, field, |text| {
+                && projected_field_matches(row, resolved_field!(field), |text| {
                     text >= minimum.as_str() && text < maximum.as_str()
                 });
             ensure_active(cancelled)?;
@@ -865,7 +899,7 @@ fn predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && projected_field_matches(row, field, |text| {
+                && projected_field_matches(row, resolved_field!(field), |text| {
                     let length = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
                     length >= *minimum && length <= *maximum
                 });
@@ -892,27 +926,31 @@ fn predicate_matches(
             ensure_active(cancelled)?;
             Ok(matched)
         }
-        LogPredicate::ExactPrefix { field, value } => {
-            Ok(projected_field_matches(row, field, |text| {
-                text.starts_with(value)
-            }))
-        }
+        LogPredicate::ExactPrefix { field, value } => Ok(projected_field_matches(
+            row,
+            resolved_field!(field),
+            |text| text.starts_with(value),
+        )),
         LogPredicate::TypedExact { field, value } => {
-            Ok(field_json(row, field).is_some_and(|actual| json_equal(actual, value)))
+            Ok(field_json(row, resolved_field!(field))
+                .is_some_and(|actual| json_equal(actual, value)))
         }
-        LogPredicate::Empty { field } => Ok(field_json(row, field).is_none_or(is_empty)),
-        LogPredicate::AnyValue { field } => Ok(field_json(row, field).is_some_and(is_nonempty)),
+        LogPredicate::Empty { field } => {
+            Ok(field_json(row, resolved_field!(field)).is_none_or(is_empty))
+        }
+        LogPredicate::AnyValue { field } => {
+            Ok(field_json(row, resolved_field!(field)).is_some_and(is_nonempty))
+        }
         LogPredicate::Numeric {
             field,
             operator,
             value,
-        } => Ok(field_json(row, field)
+        } => Ok(field_json(row, resolved_field!(field))
             .and_then(Value::as_number)
             .and_then(|actual| compare_numbers(actual, value))
             .is_some_and(|ordering| numeric_op_matches(*operator, ordering))),
-        LogPredicate::ValueType { field, kind } => {
-            Ok(field_json(row, field).is_some_and(|value| value_is_type(value, *kind)))
-        }
+        LogPredicate::ValueType { field, kind } => Ok(field_json(row, resolved_field!(field))
+            .is_some_and(|value| value_is_type(value, *kind))),
         LogPredicate::Timestamp { minimum, maximum } => {
             let timestamp = row
                 .get("_time")
@@ -928,16 +966,123 @@ fn predicate_matches(
             }))
         }
         LogPredicate::Regex { field, regex } => {
-            let matched = field_text(row, field).is_some_and(|text| regex.is_match(text));
+            let matched =
+                field_text(row, resolved_field!(field)).is_some_and(|text| regex.is_match(text));
             ensure_active(cancelled)?;
             Ok(matched)
         }
         LogPredicate::PatternMatch { field, matcher } => {
-            let matched = projected_field_matches(row, field, |text| matcher.matches(text));
+            let matched =
+                projected_field_matches(row, resolved_field!(field), |text| matcher.matches(text));
             ensure_active(cancelled)?;
             Ok(matched)
         }
     }
+}
+
+fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
+    let field = match predicate {
+        LogPredicate::Word { field, .. }
+        | LogPredicate::Phrase { field, .. }
+        | LogPredicate::Prefix { field, .. }
+        | LogPredicate::Substring { field, .. }
+        | LogPredicate::Exact { field, .. }
+        | LogPredicate::TextualExact { field, .. }
+        | LogPredicate::TextualIn { field, .. }
+        | LogPredicate::TextualContainsAll { field, .. }
+        | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::JsonArrayContainsAny { field, .. }
+        | LogPredicate::Ipv4Range { field, .. }
+        | LogPredicate::Ipv6Range { field, .. }
+        | LogPredicate::StringRange { field, .. }
+        | LogPredicate::LenRange { field, .. }
+        | LogPredicate::ExactPrefix { field, .. }
+        | LogPredicate::TypedExact { field, .. }
+        | LogPredicate::Empty { field }
+        | LogPredicate::AnyValue { field }
+        | LogPredicate::Numeric { field, .. }
+        | LogPredicate::ValueType { field, .. }
+        | LogPredicate::Regex { field, .. }
+        | LogPredicate::PatternMatch { field, .. } => field,
+        LogPredicate::True
+        | LogPredicate::And(_)
+        | LogPredicate::Or(_)
+        | LogPredicate::Not(_)
+        | LogPredicate::FieldCompare { .. }
+        | LogPredicate::Timestamp { .. } => return None,
+    };
+    match field {
+        LogField::FieldPrefix(prefix) => Some(prefix),
+        LogField::Message | LogField::Level | LogField::Time | LogField::Metadata(_) => None,
+    }
+}
+
+fn resolved_log_field<'a>(
+    field: &'a LogField,
+    field_override: Option<&'a LogField>,
+) -> &'a LogField {
+    match field {
+        LogField::FieldPrefix(_) => {
+            field_override.expect("field-prefix predicates are resolved before evaluation")
+        }
+        LogField::Message | LogField::Level | LogField::Time | LogField::Metadata(_) => field,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_prefix_predicate_matches(
+    object: &Map<String, Value>,
+    path: &mut Vec<String>,
+    prefix: &str,
+    predicate: &LogPredicate,
+    row: &Value,
+    timestamp_unit: TimestampUnit,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    for (name, value) in object {
+        ensure_active(cancelled)?;
+        path.push(name.clone());
+        let matched = match value {
+            Value::Object(child) => row_prefix_predicate_matches(
+                child,
+                path,
+                prefix,
+                predicate,
+                row,
+                timestamp_unit,
+                cancelled,
+            )?,
+            Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::Array(_) => {
+                let canonical = path.join(".");
+                if !canonical.starts_with(prefix) {
+                    false
+                } else {
+                    let field = match path.as_slice() {
+                        [field] if field == "_msg" => LogField::Message,
+                        [field] if field == "_time" => LogField::Time,
+                        [field] if field == "level" => LogField::Level,
+                        _ => LogField::Metadata(path.clone()),
+                    };
+                    predicate_matches_resolved(
+                        predicate,
+                        row,
+                        timestamp_unit,
+                        cancelled,
+                        Some(&field),
+                    )?
+                }
+            }
+        };
+        path.pop();
+        if matched {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn projected_field_matches(
@@ -970,6 +1115,7 @@ fn field_json<'a>(row: &'a Value, field: &LogField) -> Option<&'a Value> {
         LogField::Level => row.get("level"),
         LogField::Time => row.get("_time"),
         LogField::Metadata(path) => field_value(row, path),
+        LogField::FieldPrefix(_) => None,
     }
 }
 
@@ -1256,6 +1402,11 @@ mod tests {
         let row = json!({"_msg": "request 42"});
         let cancelled = AtomicBool::new(true);
         for predicate in [
+            LogPredicate::Word {
+                field: LogField::FieldPrefix(String::new()),
+                value: "request".into(),
+                case_insensitive: false,
+            },
             LogPredicate::TextualContainsAll {
                 field: LogField::Message,
                 values: vec!["request".into(), "42".into()],

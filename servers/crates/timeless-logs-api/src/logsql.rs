@@ -1527,6 +1527,11 @@ fn parse_field_comparison_filter(
     .find_map(|(name, operator)| token[..open].eq_ignore_ascii_case(name).then_some(operator)) else {
         return Ok(None);
     };
+    if matches!(left, LogField::FieldPrefix(_)) {
+        return Err(LogsqlError::malformed(
+            "LogsQL field comparisons require one concrete left-hand field; wildcard prefixes are ambiguous",
+        ));
+    }
     let close = matching_parenthesis(token, open)?;
     if close + 1 != token.len() {
         return Err(LogsqlError::malformed(
@@ -1556,7 +1561,12 @@ fn parse_field_comparison_filter(
             "unquoted wildcard in LogsQL field-comparison field",
         ));
     }
-    let right = log_field(&parse_field_path(right)?);
+    let right = parse_field_selector(right)?;
+    if matches!(right, LogField::FieldPrefix(_)) {
+        return Err(LogsqlError::malformed(
+            "LogsQL field comparisons require one concrete right-hand field",
+        ));
+    }
     Ok(Some(LogPredicate::FieldCompare {
         left,
         right,
@@ -2545,7 +2555,7 @@ fn compile_logical_expression(
             compile_logical_atom(atom, inherited_field, timestamp_unit, query_now)
         }
         LogicalExpression::Field(field, expression) => {
-            let field = log_field(&parse_field_path(field)?);
+            let field = parse_field_selector(field)?;
             compile_logical_expression(expression, Some(&field), timestamp_unit, query_now)
         }
         LogicalExpression::And(expressions) => expressions
@@ -2588,7 +2598,7 @@ fn compile_logical_atom(
     }
     if let Some((operator, typed)) = metadata_operator(atom) {
         let width = if typed { 2 } else { 1 };
-        let field = log_field(&parse_field_path(&atom[..operator])?);
+        let field = parse_field_selector(&atom[..operator])?;
         let value = &atom[operator + width..];
         return compile_field_filter(&field, value, typed);
     }
@@ -2601,6 +2611,11 @@ fn compile_field_filter(
     value: &str,
     typed: bool,
 ) -> Result<LogPredicate, LogsqlError> {
+    if matches!(field, LogField::FieldPrefix(_)) && value.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL field prefix requires a non-empty filter",
+        ));
+    }
     if typed {
         if let Some(value) = parse_exact_prefix_argument(value)? {
             return Ok(LogPredicate::ExactPrefix {
@@ -2676,7 +2691,24 @@ fn compile_field_filter(
             LogPredicate::And(predicates)
         });
     }
-    let value = quoted_value(value)?.unwrap_or_else(|| value.to_owned());
+    let quoted = quoted_value(value)?;
+    if matches!(field, LogField::FieldPrefix(_)) {
+        if let Some(value) = quoted {
+            return Ok(LogPredicate::Phrase {
+                field: field.clone(),
+                value,
+                case_insensitive: false,
+            });
+        }
+        if value.chars().all(logsql_word_char) {
+            return Ok(LogPredicate::Word {
+                field: field.clone(),
+                value: value.to_owned(),
+                case_insensitive: false,
+            });
+        }
+    }
+    let value = quoted.unwrap_or_else(|| value.to_owned());
     Ok(LogPredicate::Exact {
         field: field.clone(),
         value,
@@ -2955,7 +2987,7 @@ fn apply_exact_pushdown(
         {
             spec.metadata_eq.insert(path[0].clone(), value.to_owned());
         }
-        LogField::Message | LogField::Time | LogField::Metadata(_) => {}
+        LogField::Message | LogField::Time | LogField::Metadata(_) | LogField::FieldPrefix(_) => {}
     }
     Ok(())
 }
@@ -3187,9 +3219,14 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         )));
     };
     let operator_width = if typed { 2 } else { 1 };
-    let field = &token[..operator];
+    let field_text = &token[..operator];
     let value = &token[operator + operator_width..];
-    let path = parse_field_path(field)?;
+    let field = parse_field_selector(field_text)?;
+    if matches!(field, LogField::FieldPrefix(_)) {
+        append_predicate(spec, compile_field_filter(&field, value, typed)?);
+        return Ok(());
+    }
+    let path = parse_field_path(field_text)?;
     if typed {
         if let Some(value) = parse_exact_prefix_argument(value)? {
             append_predicate(
@@ -3384,6 +3421,49 @@ fn log_field(path: &[String]) -> LogField {
     }
 }
 
+fn parse_field_selector(field: &str) -> Result<LogField, LogsqlError> {
+    if field.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL metadata filter requires a field name",
+        ));
+    }
+    if let Some((decoded, consumed)) = parse_quoted_prefix(field)? {
+        let suffix = &field[consumed..];
+        if suffix == "*" {
+            return Ok(LogField::FieldPrefix(decoded));
+        }
+        if suffix.is_empty() {
+            if decoded.is_empty() {
+                return Err(LogsqlError::malformed(
+                    "LogsQL metadata filter requires a non-empty field name",
+                ));
+            }
+            return Ok(log_field(&[decoded]));
+        }
+        return Err(LogsqlError::malformed(format!(
+            "unexpected characters after LogsQL quoted field {field:?}"
+        )));
+    }
+    if let Some(prefix) = field.strip_suffix('*') {
+        if prefix.contains('*')
+            || prefix.chars().any(|character| {
+                character.is_whitespace() || matches!(character, ':' | '"' | '\'' | '`')
+            })
+        {
+            return Err(LogsqlError::malformed(format!(
+                "invalid LogsQL field prefix {field:?}"
+            )));
+        }
+        return Ok(LogField::FieldPrefix(prefix.to_owned()));
+    }
+    if field.contains('*') {
+        return Err(LogsqlError::malformed(format!(
+            "invalid LogsQL wildcard field {field:?}"
+        )));
+    }
+    Ok(log_field(&parse_field_path(field)?))
+}
+
 fn metadata_operator(token: &str) -> Option<(usize, bool)> {
     let mut quote = None;
     let mut escaped = false;
@@ -3434,7 +3514,9 @@ fn parse_field_path(field: &str) -> Result<Vec<String>, LogsqlError> {
     if path.iter().any(|segment| {
         segment.is_empty()
             || segment.chars().any(|character| {
-                character.is_whitespace() || matches!(character, ':' | '"' | '\'' | '`')
+                character.is_whitespace()
+                    || matches!(character, ':' | '"' | '\'' | '`')
+                    || character == '*'
             })
     }) {
         return Err(LogsqlError::malformed(format!(
@@ -4640,6 +4722,38 @@ mod tests {
             lt("+Inf", "NaN"),
             "NaN selects byte order instead of float order"
         );
+    }
+
+    #[test]
+    fn session_sixteen_field_prefix_grammar_is_complete_and_strict() {
+        for query in [
+            "cmp_*:alpha",
+            "\"cmp_\"*:exact(alpha)",
+            "*:string_range(alpha, beta)",
+            "\"\"*:value_type(uint64)",
+            "cmp_*:(bar AND foo)",
+            "* | filter nested.*:alpha",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            assert!(
+                format!("{plan:?}").contains("FieldPrefix"),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for malformed in [
+            "cmp_*:",
+            "cmp_*:()",
+            "cmp_*:(alpha",
+            "cmp_**:alpha",
+            "\"cmp_*:alpha",
+            "cmp_*:eq_field(cmp_right)",
+            "cmp_*:le_field(cmp_right)",
+            "cmp_*:lt_field(cmp_right)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
     }
 
     #[test]

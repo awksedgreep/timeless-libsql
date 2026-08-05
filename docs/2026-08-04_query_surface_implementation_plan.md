@@ -399,6 +399,15 @@ the Rust API. Exact-build evidence at commit
 `afd7804edb5d438a3aa400b1f358a0e287b648ae` records narrow/wide equality and
 exact retained-number ordering with byte-identical public reads and closes the
 row without an extension primitive or storage-contract change.
+`LQL-F32` now has sixteen successful and six error pinned field-prefix cases,
+source-audited any-matching-field and independent group-atom semantics,
+failing-then-passing parser and real-extension regressions, literal empty and
+quoted prefixes, canonical special fields, recursively dotted retained object
+leaves, array/null leaf fidelity, strict wildcard-comparison errors, projected
+pipeline behavior, work limits, cancellation, durability, and reopen.
+Executable `SQL-LOG-022` proves a recursive public-row exact-string foundation
+without collapsing duplicate log entries. The implementation and oracle gates
+pass; exact-build narrow/wide evidence remains before the row is shipped.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

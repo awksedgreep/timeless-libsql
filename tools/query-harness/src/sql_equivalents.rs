@@ -382,7 +382,15 @@ fn parameter(identifier: &str, name: &str) -> Value {
         ),
         "left_path" | "right_path" => Value::Text("$.deployment.region".to_owned()),
         "comparison" => Value::Text("eq".to_owned()),
-        "field_prefix" => Value::Text("us-".to_owned()),
+        "field_prefix" => Value::Text(
+            if identifier == "SQL-LOG-022" {
+                "deployment."
+            } else {
+                "us-"
+            }
+            .to_owned(),
+        ),
+        "exact_text" => Value::Text("us-east".to_owned()),
         "field_value_1" => Value::Text("us-east".to_owned()),
         "field_value_2" => Value::Text("us-west".to_owned()),
         "array_value_1" => Value::Text("prod".to_owned()),
@@ -1607,6 +1615,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let string_range_rows = recipe_values("SQL-LOG-019", 0)?;
     let len_range_rows = recipe_values("SQL-LOG-020", 0)?;
     let field_compare_rows = recipe_values("SQL-LOG-021", 0)?;
+    let field_prefix_rows = recipe_values("SQL-LOG-022", 0)?;
     if [
         bounded,
         substring,
@@ -1703,6 +1712,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if field_compare_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
         bail!("SQL-LOG-021 field equality changed: {field_compare_rows:?}");
+    }
+    let field_prefix_timestamps = field_prefix_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if field_prefix_timestamps != [Some(Value::Integer(1000))] {
+        bail!("SQL-LOG-022 field-prefix selection changed: {field_prefix_rows:?}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2102,6 +2118,17 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             r#"{"deployment":{"region":"elsewhere"}}"#
         ],
     )?;
+    for _ in 0..2 {
+        connection.execute(
+            "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+            params![
+                6002_i64,
+                "info",
+                "duplicate prefix fixture",
+                r#"{"dup_field":"same"}"#
+            ],
+        )?;
+    }
     connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
     for (identifier, statement_index) in [
         ("SQL-LOG-014", 1),
@@ -2209,6 +2236,66 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     if !field_compare_timestamps("unknown", "$.left", "$.right")?.is_empty() {
         bail!("SQL-LOG-021 must reject an unknown comparison selector");
     }
+
+    connection.execute(
+        "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+        params![
+            6000_i64,
+            "info",
+            "literal prefix fixture",
+            r#"{"foo:bar:value":"needle","under_score":"literal"}"#
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+        params![
+            6001_i64,
+            "info",
+            "lookalike prefix fixture",
+            r#"{"underXscore":"literal"}"#
+        ],
+    )?;
+    connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
+    let field_prefix_sql = recipe_sql("SQL-LOG-022", 0)?;
+    let field_prefix_timestamps =
+        |prefix: &str, exact: &str, start: i64, end: i64| -> Result<Vec<i64>> {
+            let mut statement = connection.prepare(&field_prefix_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-022 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "field_prefix" => Value::Text(prefix.to_owned()),
+                    "exact_text" => Value::Text(exact.to_owned()),
+                    "start_ms" => Value::Integer(start),
+                    "end_ms" => Value::Integer(end),
+                    _ => parameter("SQL-LOG-022", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            Ok(statement
+                .raw_query()
+                .mapped(|row| row.get::<_, i64>(0))
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+    for (prefix, exact, start, end, expected) in [
+        ("deployment.", "us-east", 1000, 2000, vec![1000]),
+        ("", "request timeout", 1000, 2000, vec![1000]),
+        ("_", "request timeout", 1000, 2000, vec![1000]),
+        ("_time", "1000", 1000, 2000, vec![1000]),
+        ("nested.", "", 1000, 2000, vec![2000, 1000]),
+        ("missing.", "", 1000, 2000, vec![]),
+        ("foo:bar:", "needle", 6000, 6001, vec![6000]),
+        ("under_", "literal", 6000, 6001, vec![6000]),
+        ("dup_", "same", 6002, 6002, vec![6002, 6002]),
+        ("deployment", r#"{"region":"us-east"}"#, 1000, 2000, vec![]),
+    ] {
+        let actual = field_prefix_timestamps(prefix, exact, start, end)?;
+        if actual != expected {
+            bail!("SQL-LOG-022 prefix {prefix:?} exact value {exact:?} changed: {actual:?}");
+        }
+    }
     Ok(())
 }
 
@@ -2250,13 +2337,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 87);
+        assert_eq!(recipes.len(), 88);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            116
+            117
         );
         assert_eq!(
             recipes
@@ -2264,7 +2351,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            122
+            123
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

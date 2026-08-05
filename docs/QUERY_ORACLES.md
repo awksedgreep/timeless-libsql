@@ -426,8 +426,8 @@ than hidden:
   to promise its own deterministic input order.
 
 `QSF-063`, `QSF-076` through `QSF-080`, `QSF-125`, and `QSF-127` record these
-selected compatibility behaviors. The fixture now contains 179 row-query
-cases, 30 error cases, and twelve statistics/pipeline cases (221 total). Phrase, escape,
+selected compatibility behaviors. The fixture now contains 252 row-query
+cases, 72 error cases, and twelve statistics/pipeline cases; the fixture now contains 336 cases in total. Phrase, escape,
 identifier,
 filtering, ordering, cardinality, pipeline-order, limit-zero, and rate-window
 semantics remain exact to the pinned oracle where the retained Timeless

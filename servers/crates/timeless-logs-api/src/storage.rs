@@ -95,6 +95,11 @@ pub enum LogField {
     Level,
     Time,
     Metadata(Vec<String>),
+    /// A VictoriaLogs-compatible row-local wildcard over canonical field
+    /// names. The prefix excludes the trailing `*`; an empty prefix searches
+    /// every existing field. It is resolved before an atomic predicate is
+    /// evaluated and is never passed to extension storage.
+    FieldPrefix(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2283,6 +2288,98 @@ fn log_predicate_matches(
     timestamp_unit: TimestampUnit,
 ) -> Result<bool, String> {
     ensure_query_active(cancelled)?;
+    if let Some(prefix) = predicate_field_prefix(predicate) {
+        if "_msg".starts_with(prefix)
+            && log_predicate_matches_resolved(
+                predicate,
+                timestamp,
+                message,
+                level,
+                metadata,
+                cancelled,
+                timestamp_unit,
+                Some(&LogField::Message),
+            )?
+        {
+            return Ok(true);
+        }
+        if "_time".starts_with(prefix) {
+            let formatted = pipeline::format_timestamp(timestamp, timestamp_unit)?;
+            if log_predicate_matches_resolved(
+                predicate,
+                timestamp,
+                &formatted,
+                level,
+                metadata,
+                cancelled,
+                timestamp_unit,
+                Some(&LogField::Message),
+            )? {
+                return Ok(true);
+            }
+        }
+        if "level".starts_with(prefix)
+            && log_predicate_matches_resolved(
+                predicate,
+                timestamp,
+                message,
+                level,
+                metadata,
+                cancelled,
+                timestamp_unit,
+                Some(&LogField::Level),
+            )?
+        {
+            return Ok(true);
+        }
+        if let Some(JsonValue::Object(object)) = metadata {
+            let mut path = Vec::new();
+            if metadata_prefix_predicate_matches(
+                object,
+                &mut path,
+                prefix,
+                predicate,
+                timestamp,
+                message,
+                level,
+                metadata,
+                cancelled,
+                timestamp_unit,
+            )? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    log_predicate_matches_resolved(
+        predicate,
+        timestamp,
+        message,
+        level,
+        metadata,
+        cancelled,
+        timestamp_unit,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_predicate_matches_resolved(
+    predicate: &LogPredicate,
+    timestamp: i64,
+    message: &str,
+    level: &str,
+    metadata: Option<&JsonValue>,
+    cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
+    field_override: Option<&LogField>,
+) -> Result<bool, String> {
+    ensure_query_active(cancelled)?;
+    macro_rules! resolved_field {
+        ($field:expr) => {
+            resolved_log_field($field, field_override)
+        };
+    }
     match predicate {
         LogPredicate::True => Ok(true),
         LogPredicate::And(predicates) => {
@@ -2331,7 +2428,7 @@ fn log_predicate_matches(
             value,
             case_insensitive,
         } => Ok(
-            log_field_text(field, message, level, metadata).is_some_and(|text| {
+            log_field_text(resolved_field!(field), message, level, metadata).is_some_and(|text| {
                 if *case_insensitive {
                     logsql_word_matches(&text.to_lowercase(), value)
                 } else {
@@ -2344,7 +2441,7 @@ fn log_predicate_matches(
             value,
             case_insensitive,
         } => Ok(
-            log_field_text(field, message, level, metadata).is_some_and(|text| {
+            log_field_text(resolved_field!(field), message, level, metadata).is_some_and(|text| {
                 if *case_insensitive {
                     logsql_phrase_matches(&text.to_lowercase(), value)
                 } else {
@@ -2358,7 +2455,7 @@ fn log_predicate_matches(
             phrase,
             case_insensitive,
         } => Ok(
-            log_field_text(field, message, level, metadata).is_some_and(|text| {
+            log_field_text(resolved_field!(field), message, level, metadata).is_some_and(|text| {
                 if *case_insensitive {
                     logsql_prefix_matches(&text.to_lowercase(), value, *phrase)
                 } else {
@@ -2371,7 +2468,7 @@ fn log_predicate_matches(
             value,
             case_insensitive,
         } => Ok(
-            log_field_text(field, message, level, metadata).is_some_and(|text| {
+            log_field_text(resolved_field!(field), message, level, metadata).is_some_and(|text| {
                 if *case_insensitive {
                     text.to_lowercase().contains(value)
                 } else {
@@ -2380,17 +2477,20 @@ fn log_predicate_matches(
             }),
         ),
         LogPredicate::Exact { field, value } => {
-            Ok(log_field_text(field, message, level, metadata).is_some_and(|text| text == value))
+            Ok(
+                log_field_text(resolved_field!(field), message, level, metadata)
+                    .is_some_and(|text| text == value),
+            )
         }
         LogPredicate::TextualExact { field, value } => Ok(log_field_projected_matches(
-            field,
+            resolved_field!(field),
             message,
             level,
             metadata,
             |text| text == value,
         )),
         LogPredicate::TextualIn { field, values } => Ok(log_field_projected_matches(
-            field,
+            resolved_field!(field),
             message,
             level,
             metadata,
@@ -2401,25 +2501,37 @@ fn log_predicate_matches(
             },
         )),
         LogPredicate::TextualContainsAll { field, values } => {
-            let matched = log_field_projected_matches(field, message, level, metadata, |text| {
-                values
-                    .iter()
-                    .all(|phrase| logsql_phrase_matches(text, phrase))
-            });
+            let matched = log_field_projected_matches(
+                resolved_field!(field),
+                message,
+                level,
+                metadata,
+                |text| {
+                    values
+                        .iter()
+                        .all(|phrase| logsql_phrase_matches(text, phrase))
+                },
+            );
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
         LogPredicate::TextualContainsAny { field, values } => {
-            let matched = log_field_projected_matches(field, message, level, metadata, |text| {
-                values
-                    .iter()
-                    .any(|phrase| logsql_phrase_matches(text, phrase))
-            });
+            let matched = log_field_projected_matches(
+                resolved_field!(field),
+                message,
+                level,
+                metadata,
+                |text| {
+                    values
+                        .iter()
+                        .any(|phrase| logsql_phrase_matches(text, phrase))
+                },
+            );
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
         LogPredicate::JsonArrayContainsAny { field, values } => {
-            let matched = match field {
+            let matched = match resolved_field!(field) {
                 LogField::Metadata(path) => metadata
                     .and_then(|value| metadata_path(value, path))
                     .and_then(JsonValue::as_array)
@@ -2428,7 +2540,9 @@ fn log_predicate_matches(
                             .iter()
                             .any(|value| json_array_primitive_in(values, value))
                     }),
-                LogField::Message | LogField::Level | LogField::Time => false,
+                LogField::Message | LogField::Level | LogField::Time | LogField::FieldPrefix(_) => {
+                    false
+                }
             };
             ensure_query_active(cancelled)?;
             Ok(matched)
@@ -2439,7 +2553,7 @@ fn log_predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && log_field_text(field, message, level, metadata)
+                && log_field_text(resolved_field!(field), message, level, metadata)
                     .and_then(parse_ipv4_address)
                     .is_some_and(|address| address >= *minimum && address <= *maximum);
             ensure_query_active(cancelled)?;
@@ -2451,7 +2565,7 @@ fn log_predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && log_field_text(field, message, level, metadata)
+                && log_field_text(resolved_field!(field), message, level, metadata)
                     .and_then(parse_ipv6_address)
                     .is_some_and(|address| address >= *minimum && address <= *maximum);
             ensure_query_active(cancelled)?;
@@ -2463,9 +2577,13 @@ fn log_predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && log_field_projected_matches(field, message, level, metadata, |text| {
-                    text >= minimum.as_str() && text < maximum.as_str()
-                });
+                && log_field_projected_matches(
+                    resolved_field!(field),
+                    message,
+                    level,
+                    metadata,
+                    |text| text >= minimum.as_str() && text < maximum.as_str(),
+                );
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
@@ -2475,10 +2593,16 @@ fn log_predicate_matches(
             maximum,
         } => {
             let matched = minimum <= maximum
-                && log_field_projected_matches(field, message, level, metadata, |text| {
-                    let length = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
-                    length >= *minimum && length <= *maximum
-                });
+                && log_field_projected_matches(
+                    resolved_field!(field),
+                    message,
+                    level,
+                    metadata,
+                    |text| {
+                        let length = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+                        length >= *minimum && length <= *maximum
+                    },
+                );
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
@@ -2510,48 +2634,172 @@ fn log_predicate_matches(
             Ok(matched)
         }
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
-            field,
+            resolved_field!(field),
             message,
             level,
             metadata,
             |text| text.starts_with(value),
         )),
         LogPredicate::TypedExact { field, value } => {
-            Ok(log_field_value(field, message, level, metadata)
-                .is_some_and(|actual| actual.equals_json(value)))
+            Ok(
+                log_field_value(resolved_field!(field), message, level, metadata)
+                    .is_some_and(|actual| actual.equals_json(value)),
+            )
         }
-        LogPredicate::Empty { field } => Ok(
-            log_field_value(field, message, level, metadata).is_none_or(LogFieldValue::is_empty)
-        ),
-        LogPredicate::AnyValue { field } => Ok(log_field_value(field, message, level, metadata)
-            .is_some_and(LogFieldValue::is_nonempty)),
+        LogPredicate::Empty { field } => {
+            Ok(
+                log_field_value(resolved_field!(field), message, level, metadata)
+                    .is_none_or(LogFieldValue::is_empty),
+            )
+        }
+        LogPredicate::AnyValue { field } => {
+            Ok(
+                log_field_value(resolved_field!(field), message, level, metadata)
+                    .is_some_and(LogFieldValue::is_nonempty),
+            )
+        }
         LogPredicate::Numeric {
             field,
             operator,
             value,
-        } => Ok(log_field_value(field, message, level, metadata)
-            .and_then(LogFieldValue::number)
-            .and_then(|actual| compare_json_numbers(actual, value))
-            .is_some_and(|ordering| operator.matches(ordering))),
+        } => Ok(
+            log_field_value(resolved_field!(field), message, level, metadata)
+                .and_then(LogFieldValue::number)
+                .and_then(|actual| compare_json_numbers(actual, value))
+                .is_some_and(|ordering| operator.matches(ordering)),
+        ),
         LogPredicate::ValueType { field, kind } => {
-            Ok(log_field_value(field, message, level, metadata)
-                .is_some_and(|value| value.is_type(*kind)))
+            Ok(
+                log_field_value(resolved_field!(field), message, level, metadata)
+                    .is_some_and(|value| value.is_type(*kind)),
+            )
         }
         LogPredicate::Timestamp { minimum, maximum } => Ok(minimum
             .is_none_or(|minimum| timestamp >= minimum)
             && maximum.is_none_or(|maximum| timestamp <= maximum)),
         LogPredicate::Regex { field, regex } => {
-            let matched = log_field_text(field, message, level, metadata)
+            let matched = log_field_text(resolved_field!(field), message, level, metadata)
                 .is_some_and(|text| regex.is_match(text));
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
         LogPredicate::PatternMatch { field, matcher } => {
-            let matched = log_field_pattern_matches(field, message, level, metadata, matcher);
+            let matched = log_field_pattern_matches(
+                resolved_field!(field),
+                message,
+                level,
+                metadata,
+                matcher,
+            );
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
     }
+}
+
+fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
+    let field = match predicate {
+        LogPredicate::Word { field, .. }
+        | LogPredicate::Phrase { field, .. }
+        | LogPredicate::Prefix { field, .. }
+        | LogPredicate::Substring { field, .. }
+        | LogPredicate::Exact { field, .. }
+        | LogPredicate::TextualExact { field, .. }
+        | LogPredicate::TextualIn { field, .. }
+        | LogPredicate::TextualContainsAll { field, .. }
+        | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::JsonArrayContainsAny { field, .. }
+        | LogPredicate::Ipv4Range { field, .. }
+        | LogPredicate::Ipv6Range { field, .. }
+        | LogPredicate::StringRange { field, .. }
+        | LogPredicate::LenRange { field, .. }
+        | LogPredicate::ExactPrefix { field, .. }
+        | LogPredicate::TypedExact { field, .. }
+        | LogPredicate::Empty { field }
+        | LogPredicate::AnyValue { field }
+        | LogPredicate::Numeric { field, .. }
+        | LogPredicate::ValueType { field, .. }
+        | LogPredicate::Regex { field, .. }
+        | LogPredicate::PatternMatch { field, .. } => field,
+        LogPredicate::True
+        | LogPredicate::And(_)
+        | LogPredicate::Or(_)
+        | LogPredicate::Not(_)
+        | LogPredicate::FieldCompare { .. }
+        | LogPredicate::Timestamp { .. } => return None,
+    };
+    match field {
+        LogField::FieldPrefix(prefix) => Some(prefix),
+        LogField::Message | LogField::Level | LogField::Time | LogField::Metadata(_) => None,
+    }
+}
+
+fn resolved_log_field<'a>(
+    field: &'a LogField,
+    field_override: Option<&'a LogField>,
+) -> &'a LogField {
+    match field {
+        LogField::FieldPrefix(_) => {
+            field_override.expect("field-prefix predicates are resolved before evaluation")
+        }
+        LogField::Message | LogField::Level | LogField::Time | LogField::Metadata(_) => field,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metadata_prefix_predicate_matches(
+    object: &serde_json::Map<String, JsonValue>,
+    path: &mut Vec<String>,
+    prefix: &str,
+    predicate: &LogPredicate,
+    timestamp: i64,
+    message: &str,
+    level: &str,
+    metadata: Option<&JsonValue>,
+    cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
+) -> Result<bool, String> {
+    for (name, value) in object {
+        ensure_query_active(cancelled)?;
+        path.push(name.clone());
+        let matched = match value {
+            JsonValue::Object(child) => metadata_prefix_predicate_matches(
+                child,
+                path,
+                prefix,
+                predicate,
+                timestamp,
+                message,
+                level,
+                metadata,
+                cancelled,
+                timestamp_unit,
+            )?,
+            JsonValue::Null
+            | JsonValue::Bool(_)
+            | JsonValue::Number(_)
+            | JsonValue::String(_)
+            | JsonValue::Array(_) => {
+                let canonical = path.join(".");
+                canonical.starts_with(prefix)
+                    && log_predicate_matches_resolved(
+                        predicate,
+                        timestamp,
+                        message,
+                        level,
+                        metadata,
+                        cancelled,
+                        timestamp_unit,
+                        Some(&LogField::Metadata(path.clone())),
+                    )?
+            }
+        };
+        path.pop();
+        if matched {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
@@ -2582,9 +2830,12 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::Numeric { field, .. }
         | LogPredicate::ValueType { field, .. }
         | LogPredicate::Regex { field, .. }
-        | LogPredicate::PatternMatch { field, .. } => matches!(field, LogField::Metadata(_)),
+        | LogPredicate::PatternMatch { field, .. } => {
+            matches!(field, LogField::Metadata(_) | LogField::FieldPrefix(_))
+        }
         LogPredicate::FieldCompare { left, right, .. } => {
-            matches!(left, LogField::Metadata(_)) || matches!(right, LogField::Metadata(_))
+            matches!(left, LogField::Metadata(_) | LogField::FieldPrefix(_))
+                || matches!(right, LogField::Metadata(_) | LogField::FieldPrefix(_))
         }
     }
 }
@@ -2738,6 +2989,7 @@ fn log_field_value<'a>(
         LogField::Level => Some(LogFieldValue::Text(level)),
         LogField::Time => None,
         LogField::Metadata(path) => Some(LogFieldValue::Json(metadata_path(metadata?, path)?)),
+        LogField::FieldPrefix(_) => None,
     }
 }
 
@@ -2760,6 +3012,7 @@ fn log_field_text<'a>(
         LogField::Level => Some(level),
         LogField::Time => None,
         LogField::Metadata(path) => metadata_path(metadata?, path)?.as_str(),
+        LogField::FieldPrefix(_) => None,
     }
 }
 
@@ -2791,6 +3044,7 @@ fn log_field_projected_matches(
             Some(JsonValue::String(value)) => predicate(value),
             Some(value) => predicate(&value.to_string()),
         },
+        LogField::FieldPrefix(_) => false,
     }
 }
 
@@ -2844,6 +3098,9 @@ fn project_log_field<T>(
             Some(JsonValue::String(value)) => callback(value),
             Some(value) => callback(&value.to_string()),
         },
+        LogField::FieldPrefix(_) => {
+            Err("unresolved LogsQL field prefix reached scalar field projection".into())
+        }
     }
 }
 
@@ -3301,6 +3558,11 @@ mod tests {
     fn decoded_log_predicates_observe_query_cancellation() {
         let cancelled = AtomicBool::new(true);
         for predicate in [
+            LogPredicate::Word {
+                field: LogField::FieldPrefix(String::new()),
+                value: "request".into(),
+                case_insensitive: false,
+            },
             LogPredicate::TextualIn {
                 field: LogField::Message,
                 values: vec!["other".into(), "request 42".into()],

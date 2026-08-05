@@ -642,6 +642,10 @@ over the same non-mutating rich projection, plus inclusive Unicode-codepoint
 `len_range(...)` filtering with VictoriaLogs-compatible unsigned bound
 grammar, plus same-row `eq_field`, `le_field`, and `lt_field` comparisons with
 exact equality and VictoriaLogs math-value-or-bytewise ordering.
+It also supports literal `prefix*:filter` field-set searches over canonical
+special fields and recursively dotted retained metadata leaves, including
+empty/quoted prefixes, independent field-group operands, projected pipelines,
+strict wildcard-comparison errors, bounded traversal, and cancellation.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally
@@ -651,6 +655,7 @@ array-membership recipes in `SQL-LOG-014` through `SQL-LOG-017`, plus the
 retained-text byte-range and codepoint-length foundations in `SQL-LOG-019`
 and `SQL-LOG-020`, plus complete retained-model field equality and the
 bytewise ordering fallback in `SQL-LOG-021`, including the
+literal public-row prefix-selected field-set foundation in `SQL-LOG-022`, and
 existing public posting index for declared string-only keys. `contains_all`
 and `contains_any` remain honest API-only rows: portable SQLite does not supply
 their Unicode phrase-boundary predicate. JSON-array membership needs no new

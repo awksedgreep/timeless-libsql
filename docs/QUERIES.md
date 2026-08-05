@@ -371,6 +371,34 @@ type. Both operands already cross the same decoded public row, so a new
 extension primitive would not avoid storage reads, decode, allocation, copy,
 or row crossing.
 
+A field selector ending in `*` applies its filter to every existing canonical
+field whose name begins with the text before the wildcard. `cmp_*:foo` searches
+`cmp_left`, `cmp_right`, and any other matching leaf until one succeeds;
+`*:foo` and `""*:foo` search every field. Prefixes may be quoted, including
+`"foo:bar:"*:exact(needle)`. `_msg`, `_time`, and `level` participate under
+their canonical names. Retained metadata objects contribute dotted leaf names,
+such as `deployment.region`, while arrays and null remain existing leaf values
+and object parents are not implicitly flattened into matchable values.
+
+Each atomic predicate expands independently. Consequently,
+`cmp_*:(bar AND foo)` may satisfy `bar` in `cmp_left` and `foo` in `cmp_right`;
+`NOT` negates the completed any-field result. A `filter`/`where` pipeline
+enumerates the current projected row, so a preceding `fields` operation can
+remove candidates. Expansion uses a single recursive path and stops at the
+first match instead of allocating a row-wide field list. It observes request
+cancellation at each retained node and remains bounded by the already-decoded
+row and the API's storage-work, body, response, and deadline limits.
+
+Wildcard field comparisons fail explicitly. VictoriaLogs currently treats a
+left operand such as `cmp_*:eq_field(right)` as one literal nonexistent field
+rather than expanding it, which can accidentally match missing/null/empty
+projections. Timeless selects the strict behavior instead of preserving that
+footgun. `SQL-LOG-022` gives direct SQLite/libSQL users the executable public-
+row field-set expansion for literal prefix selection and retained string/null
+exactness. LogsQL parsing, word/phrase/range/rich-value semantics, RFC3339
+`_time` projection, composition, limits, cancellation, and envelopes remain
+in the Rust API. No extension primitive or storage-format change is involved.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the
