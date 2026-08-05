@@ -429,8 +429,10 @@ Sunday-through-Saturday non-wrapping interval, full-week and valid-empty edge
 cases, signed compound offsets, current-row pipelines, work limits,
 cancellation, durability, and reopen. Timeless deliberately makes an omitted
 offset mean UTC. Executable `SQL-LOG-024` proves the native-unit public-row
-foundation including Euclidean pre-epoch weekdays. Exact-build narrow/wide
-evidence remains before the row is shipped.
+foundation including Euclidean pre-epoch weekdays. Exact-build evidence at
+commit `adb7f027f4a6c5e0d07d8ff3eb3b294e85277818` records narrow/wide weekday
+evaluation with byte-identical public reads. It closes the row without an
+extension primitive or storage-contract change.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

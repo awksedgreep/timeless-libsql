@@ -657,8 +657,9 @@ with the same public block, entry, and byte reads as equal-cardinality filters.
 Week-range filtering adds case-insensitive short/full English weekdays,
 open/closed Sunday-through-Saturday ranges, and the same explicit signed UTC
 offset policy. `SQL-LOG-024` gives direct users the Euclidean native-timestamp
-equivalent, including pre-epoch dates and bracket-wrap edges; exact-build
-evidence remains pending.
+equivalent, including pre-epoch dates and bracket-wrap edges. Exact-build p95
+is 3.547/39.768 ms narrow/wide with byte-identical public reads versus the
+same-run equal-cardinality word baseline.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

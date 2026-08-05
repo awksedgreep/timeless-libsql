@@ -3747,3 +3747,59 @@ locally. The executable SQL command is the Rust harness used by CLI section
 batching, compression, index, rollup, retention, transaction, migration,
 maintenance, or public batch/SQL contract changed. No CI workflow was modified
 or invoked.
+
+## Session 16 LogsQL P2 progress: UTC week ranges with fixed offsets
+
+The checked-in
+[`2026-08-05_session16_lql_f34_week_range.json`](evidence/2026-08-05_session16_lql_f34_week_range.json)
+was captured from exact extension, metrics-server, and logs-server build
+`adb7f027f4a6c5e0d07d8ff3eb3b294e85277818`. It closes `LQL-F34` with
+case-insensitive short/full English weekdays, exact open/closed bracket
+normalization, and an optional fixed signed duration offset over UTC.
+Correctness separately pins Sunday-through-Saturday linear ranges, full-week,
+equal, and valid-empty edges, positive/negative/compound offsets,
+deterministic omitted-offset UTC, pre-epoch native timestamps, current-row
+pipelines, strict errors, work limits, cancellation, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `_time:week_range[Fri,Fri]`, indexed host | 128 | 34,677 | 3.235 | 3.547 | 3.691 | 1 | 1,024 | 235,778 | 128 |
+| `_time:week_range[Fri,Fri]`, full fixture | 8,192 | 2,249,775 | 36.841 | 39.768 | 40.239 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Week-range p95 is 1.4% below the same-run word query at narrow cardinality and
+3.4% below it over the full fixture. Narrow p99 is 3.691 ms versus the word
+query's 3.703 ms; wide p99 is 40.239 ms versus 41.347 ms. Both equal-
+cardinality paths read the same public blocks, entries, and bytes and return
+the same public rows, so none of the CPU/tail variation indicates storage
+amplification.
+
+Executable `SQL-LOG-024` exposes Euclidean native-timestamp day calculation,
+normalized inclusive weekday bounds, and explicit fixed offsets over bounded
+public `logs` rows. It parameterizes millisecond and microsecond storage units
+and pins pre-epoch behavior despite SQLite's truncating integer division. The
+Rust API owns weekday, bracket, and signed compound-duration grammar,
+deterministic UTC default, logical/current-row pipeline composition, limits,
+cancellation, and response semantics. A repeated weekly predicate cannot
+independently prune an arbitrary absolute timestamp interval, and an extension
+primitive would not remove any measured block read, decode, allocation, copy,
+or row crossing, so it is rejected by the documented primitive gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+14.819 ms and the explicit durability barrier took 41.395 ms. The fixture,
+wire bytes, and storage are byte-identical to LQL-F33: four raw blocks,
+1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM bytes. Logs
+RSS HWM was 91,072 KiB, 1,796 KiB below LQL-F33; metrics HWM was 49,376 KiB,
+4,216 KiB lower. Both are retained as whole-process variation rather than
+attributed to the predicate.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 382
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 27-test logs real-
+extension suite, 57 logs library tests, complete Rust server workspace, Clippy
+with warnings denied, formatting, the 29-test Rust query harness,
+documentation contracts, and all 90 SQL recipes (125 statements) pass
+locally. The executable SQL command is the Rust harness used by CLI section
+45. No private table, extension primitive, storage format, authoritative
+batching, compression, index, rollup, retention, transaction, migration,
+maintenance, or public batch/SQL contract changed. No CI workflow was modified
+or invoked.
