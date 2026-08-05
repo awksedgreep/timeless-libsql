@@ -27,6 +27,7 @@ struct Recipe {
 
 fn parse_recipes(path: &Path) -> Result<Vec<Recipe>> {
     let heading = Regex::new(r"^### (SQL-(?:PROM|MQL|LOG)-\d{3}):")?;
+    let index_entry = Regex::new(r"^\|\s*\[`(SQL-(?:PROM|MQL|LOG)-\d{3})`\]")?;
     let content = fs::read_to_string(path)?;
     let mut recipes = Vec::new();
     let mut current: Option<Recipe> = None;
@@ -76,6 +77,31 @@ fn parse_recipes(path: &Path) -> Result<Vec<Recipe>> {
                 recipe.identifier
             );
         }
+    }
+    let recipe_ids = recipes
+        .iter()
+        .map(|recipe| recipe.identifier.clone())
+        .collect::<BTreeSet<_>>();
+    let mut index_ids = BTreeSet::new();
+    for captures in content
+        .lines()
+        .filter_map(|line| index_entry.captures(line))
+    {
+        let identifier = captures[1].to_owned();
+        if !index_ids.insert(identifier.clone()) {
+            bail!("duplicate SQL recipe index entry {identifier}");
+        }
+    }
+    if recipe_ids != index_ids {
+        let missing = recipe_ids
+            .difference(&index_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        let unknown = index_ids
+            .difference(&recipe_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        bail!("SQL recipe index mismatch; missing {missing:?}; unknown {unknown:?}");
     }
     Ok(recipes)
 }
@@ -288,6 +314,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "end" => Value::Integer(if counter_window { 60 } else { 110 }),
         "step" | "resolution" => Value::Integer(10),
         "lookback" | "window" => Value::Integer(if counter_window { 60 } else { 20 }),
+        "history" => Value::Integer(300),
+        "max_lookback" => Value::Integer(0),
         "offset" => Value::Integer(10),
         "max_work_points" => Value::Integer(100_000),
         "max_work_entries" => Value::Integer(100_000),
@@ -963,6 +991,92 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         }
     }
 
+    let rollup_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-005")
+        .context("SQL-MQL-005 recipe")?;
+    if rollup_recipe.statements.len() != 2 {
+        bail!("SQL-MQL-005 must retain default and window statements");
+    }
+    let expected_rows = [
+        vec![
+            (
+                "cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                100_i64,
+                10.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                110_i64,
+                30.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-2","service":"api"}"#,
+                100_i64,
+                20.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-2","service":"api"}"#,
+                110_i64,
+                20.0_f64,
+            ),
+        ],
+        vec![
+            (
+                "cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                100_i64,
+                10.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-1","service":"api"}"#,
+                110_i64,
+                30.0_f64,
+            ),
+            (
+                "cpu",
+                r#"{"host":"web-2","service":"api"}"#,
+                100_i64,
+                20.0_f64,
+            ),
+        ],
+    ];
+    for (ordinal, expected) in expected_rows.iter().enumerate() {
+        let mut statement = connection.prepare(&rollup_recipe.statements[ordinal])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-005 parameter must be named")?
+                .trim_start_matches(':');
+            statement.raw_bind_parameter(index, parameter("SQL-MQL-005", name))?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected = expected
+            .iter()
+            .map(|(name, labels, ts, value)| {
+                ((*name).to_owned(), (*labels).to_owned(), *ts, *value)
+            })
+            .collect::<Vec<_>>();
+        if rows != expected {
+            bail!("SQL-MQL-005 statement {} changed: {rows:?}", ordinal + 1);
+        }
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1386,13 +1500,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 73);
+        assert_eq!(recipes.len(), 74);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            96
+            98
         );
         assert_eq!(
             recipes
@@ -1400,9 +1514,35 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            102
+            104
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
+    }
+
+    #[test]
+    fn recipe_index_must_cover_every_executable_recipe() {
+        let file = NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "# SQL\n\n## Recipe index\n\n\
+             | recipe | state |\n\
+             |---|---|\n\
+             | [`SQL-PROM-001`](#sql-prom-001-example) | current |\n\n\
+             ### SQL-PROM-001: example\n\n```sql\nSELECT 1;\n```\n",
+        )
+        .unwrap();
+        assert_eq!(parse_recipes(file.path()).unwrap().len(), 1);
+
+        fs::write(
+            file.path(),
+            "# SQL\n\n## Recipe index\n\n\
+             | recipe | state |\n\
+             |---|---|\n\n\
+             ### SQL-PROM-001: example\n\n```sql\nSELECT 1;\n```\n",
+        )
+        .unwrap();
+        let error = parse_recipes(file.path()).unwrap_err().to_string();
+        assert!(error.contains("missing [\"SQL-PROM-001\"]"), "{error}");
     }
 
     #[test]

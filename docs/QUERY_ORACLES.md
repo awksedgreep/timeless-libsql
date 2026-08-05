@@ -137,11 +137,27 @@ adds thirteen successful `MQL-04` label-transform cases and five errors. They
 pin add/replace/delete behavior, empty-value deletion, metric-name handling,
 last-duplicate precedence, identity forms, nesting, scalar vectorization,
 case-insensitive transform names, trailing commas, `keep_metric_names`, typed
-arguments, and duplicate-output failures. The fixture now contains 65
-MetricsQL cases in total. Timeless compares exact
-result labels, timestamp grids, and
-float values while retaining its documented HTTP 400 `bad_data` envelope in
-place of VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
+arguments, and duplicate-output failures. Its `MQL-05` corpus adds 29 success
+cases and two arity errors for implicit and explicit `default_rollup`,
+open-left windows, 0.6-quantile scrape inference, jitter inflation,
+`max_lookback`, stale markers, every retained one-argument window-less rollup,
+previous-sample and counter-reset behavior, metric-name policy, timestamp
+provenance, scalar and aggregate composition, case-insensitive names, and
+trailing commas. The fixture now contains 96 MetricsQL cases in total.
+Timeless compares exact result labels, timestamp grids, and float values while
+retaining its documented HTTP 400 `bad_data` envelope in place of
+VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
+
+The `MQL-05` fixture deliberately records two storage-boundary observations.
+VictoriaMetrics drops an ordinary NaN series during remote-write ingestion,
+whereas Timeless's packed float storage preserves the ordinary NaN and
+distinguishes it from the exact Prometheus stale-marker bits. Timeless therefore
+matches stale-marker suppression but documents its stronger ordinary-NaN
+fidelity as an intentional divergence. VictoriaMetrics also adjusts `deriv`'s
+window from inferred scrape cadence without fetching the same leading silence
+history used by `rate`; the slow-scrape leading evaluation consequently emits
+zero. Timeless pins that behavior instead of applying a superficially more
+uniform history policy.
 
 Session 14 also pins Prometheus 3 quoted UTF-8 metric and label names, comments
 and source positions, and classic-bucket `histogram_fraction` grouping and

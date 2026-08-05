@@ -902,6 +902,12 @@ fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec
         metricsql_range("metricsql_label_set_wide", "metrics-metricsql-label-set-wide", r#"label_set(query_contract_cpu, "environment", "production")"#, at, series * 4),
         metricsql_instant("metricsql_label_del_narrow", "metrics-metricsql-label-del-narrow", r#"label_del(query_contract_cpu{host="h0000"}, "host")"#, 1),
         metricsql_range("metricsql_label_del_wide", "metrics-metricsql-label-del-wide", r#"label_del(query_contract_cpu, "__name__")"#, at, series * 4),
+        metricsql_instant("metricsql_default_rollup_narrow", "metrics-metricsql-default-rollup-narrow", r#"query_contract_cpu{host="h0000"}"#, 1),
+        metricsql_range("metricsql_default_rollup_wide", "metrics-metricsql-default-rollup-wide", "query_contract_cpu", at, series * 4),
+        metricsql_instant("metricsql_windowless_avg_narrow", "metrics-metricsql-windowless-avg-narrow", r#"avg_over_time(query_contract_cpu{host="h0000"})"#, 1),
+        metricsql_range("metricsql_windowless_avg_wide", "metrics-metricsql-windowless-avg-wide", "avg_over_time(query_contract_cpu)", at, series * 4),
+        metricsql_instant("metricsql_windowless_rate_narrow", "metrics-metricsql-windowless-rate-narrow", r#"rate(query_contract_cpu{host="h0000"})"#, 1),
+        metricsql_range("metricsql_windowless_rate_wide", "metrics-metricsql-windowless-rate-wide", "rate(query_contract_cpu)", at, series * 4),
         instant("arithmetic_vector_scalar_narrow", "metrics-arithmetic-vector-scalar-narrow", r#"query_contract_cpu{host="h0000"} * 2"#, 1),
         range("arithmetic_one_to_one_wide", "metrics-arithmetic-one-to-one-wide", "query_contract_cpu + query_contract_cpu", at, series * 4),
         instant("comparison_filter_narrow", "metrics-comparison-filter-narrow", r#"query_contract_cpu{host="h0000"} > 30"#, 1),
@@ -1809,7 +1815,7 @@ mod tests {
         // The work-limit query is appended only after its 100,025-point
         // fixture crosses the second durability barrier.
         assert!(keys.insert("work_limit_rejected"));
-        assert_eq!(keys.len(), 153);
+        assert_eq!(keys.len(), 159);
         assert!(keys.contains("histogram_quantile_narrow"));
         assert!(keys.contains("histogram_quantile_wide"));
         assert!(keys.contains("quoted_name_narrow"));
@@ -1834,6 +1840,12 @@ mod tests {
         assert!(keys.contains("metricsql_label_set_wide"));
         assert!(keys.contains("metricsql_label_del_narrow"));
         assert!(keys.contains("metricsql_label_del_wide"));
+        assert!(keys.contains("metricsql_default_rollup_narrow"));
+        assert!(keys.contains("metricsql_default_rollup_wide"));
+        assert!(keys.contains("metricsql_windowless_avg_narrow"));
+        assert!(keys.contains("metricsql_windowless_avg_wide"));
+        assert!(keys.contains("metricsql_windowless_rate_narrow"));
+        assert!(keys.contains("metricsql_windowless_rate_wide"));
         assert!(keys.contains("result_limit_rejected"));
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1877,6 +1889,12 @@ mod tests {
             "metricsql_label_set_wide",
             "metricsql_label_del_narrow",
             "metricsql_label_del_wide",
+            "metricsql_default_rollup_narrow",
+            "metricsql_default_rollup_wide",
+            "metricsql_windowless_avg_narrow",
+            "metricsql_windowless_avg_wide",
+            "metricsql_windowless_rate_narrow",
+            "metricsql_windowless_rate_wide",
         ]);
         assert_eq!(keys, expected);
     }

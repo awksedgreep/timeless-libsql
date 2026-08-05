@@ -534,6 +534,273 @@
           "value": 2
         }
       ]
+    },
+    {
+      "id": "MQL-05-bare-selector-uses-implicit-default-rollup",
+      "query": "oracle_step",
+      "evaluation_offset_ms": 26000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 26000, "step": "2s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_step", "job": "oracle"},
+          "offsets_ms": [20000, 22000, 24000],
+          "values": [31, 31, 31]
+        }
+      ]
+    },
+    {
+      "id": "MQL-05-explicit-default-rollup-matches-implicit-selector",
+      "query": "default_rollup(oracle_step)",
+      "evaluation_offset_ms": 26000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 26000, "step": "2s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_step", "job": "oracle"},
+          "offsets_ms": [20000, 22000, 24000],
+          "values": [31, 31, 31]
+        }
+      ]
+    },
+    {
+      "id": "MQL-05-explicit-default-rollup-window-is-left-open",
+      "query": "default_rollup(oracle_step[2s])",
+      "evaluation_offset_ms": 24000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 24000, "step": "2s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_step", "job": "oracle"},
+          "offsets_ms": [20000],
+          "values": [31]
+        }
+      ]
+    },
+    {
+      "id": "MQL-05-max-lookback-caps-only-the-automatic-default-window",
+      "query": "default_rollup(oracle_step)",
+      "evaluation_offset_ms": 26000,
+      "max_lookback": "3s",
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 26000, "step": "2s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_step", "job": "oracle"},
+          "offsets_ms": [20000, 22000],
+          "values": [31, 31]
+        }
+      ]
+    },
+    {
+      "id": "MQL-05-explicit-default-window-is-not-shortened-by-max-lookback",
+      "query": "default_rollup(oracle_step[10s])",
+      "evaluation_offset_ms": 26000,
+      "max_lookback": "3s",
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 26000, "step": "2s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_step", "job": "oracle"},
+          "values": [31, 31, 31, 31]
+        }
+      ]
+    },
+    {
+      "id": "MQL-05-default-rollup-removes-a-prometheus-stale-marker",
+      "query": "default_rollup(oracle_mql_stale)",
+      "evaluation_offset_ms": 20000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 20000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_mql_stale", "job": "oracle"},
+          "offsets_ms": [0, 20000],
+          "values": [1, 2]
+        }
+      ]
+    },
+    {
+      "id": "MQL-05-victoriametrics-storage-omits-an-ordinary-nan-series",
+      "query": "default_rollup(oracle_mql_nan)",
+      "evaluation_offset_ms": 10000,
+      "step": "1s",
+      "expected_empty": true
+    },
+    {
+      "id": "MQL-05-windowless-avg-uses-step-and-retains-name",
+      "query": "avg_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [10.5, 12.5, 14.5]
+    },
+    {
+      "id": "MQL-05-windowless-min-uses-step-and-retains-name",
+      "query": "min_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [10, 12, 14]
+    },
+    {
+      "id": "MQL-05-windowless-max-uses-step-and-retains-name",
+      "query": "max_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [11, 13, 15]
+    },
+    {
+      "id": "MQL-05-windowless-sum-uses-step-and-drops-name",
+      "query": "sum_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [21, 25, 29]
+    },
+    {
+      "id": "MQL-05-windowless-count-uses-step-and-drops-name",
+      "query": "count_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [2, 2, 2]
+    },
+    {
+      "id": "MQL-05-windowless-present-uses-step-and-drops-name",
+      "query": "present_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-05-windowless-stddev-uses-population-semantics",
+      "query": "stddev_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0.5, 0.5, 0.5]
+    },
+    {
+      "id": "MQL-05-windowless-stdvar-uses-population-semantics",
+      "query": "stdvar_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0.25, 0.25, 0.25]
+    },
+    {
+      "id": "MQL-05-windowless-first-is-left-open-and-retains-name",
+      "query": "FIRST_OVER_TIME(oracle_step,)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [10, 12, 14]
+    },
+    {
+      "id": "MQL-05-windowless-last-is-left-open-and-retains-name",
+      "query": "last_over_time(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [11, 13, 15]
+    },
+    {
+      "id": "MQL-05-windowless-increase-uses-the-previous-sample",
+      "query": "increase(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [2, 2, 2]
+    },
+    {
+      "id": "MQL-05-windowless-delta-uses-the-previous-sample",
+      "query": "delta(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [2, 2, 2]
+    },
+    {
+      "id": "MQL-05-windowless-idelta-uses-the-final-pair",
+      "query": "idelta(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-05-windowless-changes-includes-the-previous-transition",
+      "query": "changes(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [2, 2, 2]
+    },
+    {
+      "id": "MQL-05-windowless-resets-includes-the-previous-transition",
+      "query": "resets(oracle_mql_reset_counter)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1, 1, 0]
+    },
+    {
+      "id": "MQL-05-windowless-rate-adjusts-for-the-scrape-interval",
+      "query": "rate(oracle_mql_slow_counter)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-05-windowless-irate-adjusts-for-the-scrape-interval",
+      "query": "irate(oracle_mql_slow_counter)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-05-windowless-deriv-adjusts-for-the-scrape-interval",
+      "query": "deriv(oracle_mql_slow_counter)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [0, 0, 0]
+    },
+    {
+      "id": "MQL-05-timestamp-adjusts-its-implicit-rollup-window",
+      "query": "timestamp(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_value_offsets_ms": [0, 2000, 4000]
+    },
+    {
+      "id": "MQL-05-default-rollup-vectorizes-a-scalar-subquery",
+      "query": "default_rollup(1)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-05-default-rollup-is-case-insensitive-and-allows-trailing-comma",
+      "query": "DEFAULT_ROLLUP(oracle_keep_a,)",
+      "evaluation_offset_ms": 30000,
+      "step": "1s",
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-05-default-rollup-composes-under-aggregation",
+      "query": "sum(default_rollup(oracle_mql_cpu))",
+      "evaluation_offset_ms": 30000,
+      "step": "10s",
+      "expected_results": [
+        {"metric": {}, "value": 7}
+      ]
     }
   ],
   "operator_error_cases": [
@@ -672,6 +939,22 @@
       "status": 422,
       "error_type": "422",
       "error_contains": "duplicate output timeseries"
+    },
+    {
+      "id": "MQL-05-default-rollup-requires-one-argument",
+      "query": "default_rollup()",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "expecting at least 1 args to \"default_rollup\"; got 0 args"
+    },
+    {
+      "id": "MQL-05-default-rollup-rejects-extra-arguments",
+      "query": "default_rollup(oracle_step, 1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected number of args; got 2; want 1"
     }
   ],
   "error_cases": [

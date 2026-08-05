@@ -101,6 +101,8 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-MQL-001`](#sql-mql-001-default-if-and-ifnot) | `MQL-01` | current foundation | bounded gap filling and step-local label membership; API owns MetricsQL syntax, implicit scalar vectors, full label/name policy, limits, cancellation, and envelopes |
 | [`SQL-MQL-002`](#sql-mql-002-keep_metric_names) | `MQL-02` | current foundation | carry the public metric-name column through ordinary SQL transforms; API owns modifier grammar, operation eligibility, name-aware matching, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-003`](#sql-mql-003-union-and-alias) | `MQL-03` | current foundation | public-grid `UNION ALL`, explicit metric-name projection, and first-branch labelset precedence; API owns grammar, scalar-vector conversion, duplicate-output errors, limits, cancellation, and envelopes |
+| [`SQL-MQL-004`](#sql-mql-004-label_set-and-label_del) | `MQL-04` | current foundation | ordinary JSON label projection and separate metric-name projection; API owns transform grammar, scalar vectorization, collisions, limits, cancellation, and envelopes |
+| [`SQL-MQL-005`](#sql-mql-005-default_rollup-and-window-less-rollups) | `MQL-05` | current foundation | automatic finite-series last-sample window and step-sized public window reductions; API owns packed stale/NaN fidelity, carry-in/reset semantics, language, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -3647,6 +3649,180 @@ primitive or storage-format change is warranted.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-004`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_label_set_del_match_victoriametrics_and_reopen`.
+
+### SQL-MQL-005: `default_rollup` and window-less rollups
+
+For one exact metric, ordinary SQL can reproduce the finite-series storage
+work behind automatic `default_rollup`. The following statement reads a
+bounded public raw interval, estimates each series' scrape interval from the
+interpolated 0.6 quantile of its last 20 positive intervals, applies the
+VictoriaMetrics jitter inflation, caps the artificial window with
+`:max_lookback` when it is positive, and selects the newest sample in the
+open-left, closed-right window:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), raw AS MATERIALIZED (
+  SELECT series_id, labels, ts, value
+  FROM timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :history - :step, :end
+  )
+), all_intervals AS (
+  SELECT
+    series_id,
+    ts,
+    ts - lag(ts) OVER (PARTITION BY series_id ORDER BY ts) AS sample_interval
+  FROM raw
+), recent_intervals AS (
+  SELECT
+    series_id,
+    sample_interval,
+    row_number() OVER (PARTITION BY series_id ORDER BY ts DESC) AS recency
+  FROM all_intervals
+  WHERE sample_interval > 0
+), ordered_intervals AS (
+  SELECT
+    series_id,
+    sample_interval,
+    row_number() OVER (
+      PARTITION BY series_id ORDER BY sample_interval
+    ) - 1 AS interval_index,
+    count(*) OVER (PARTITION BY series_id) AS interval_count
+  FROM recent_intervals
+  WHERE recency <= 20
+), quantile_targets AS (
+  SELECT
+    series_id,
+    interval_count,
+    0.6 * (interval_count - 1) AS quantile_index
+  FROM ordered_intervals
+  GROUP BY series_id, interval_count
+), scrape_quantiles AS (
+  SELECT
+    target.series_id,
+    CAST(
+      max(CASE
+        WHEN interval_index = CAST(quantile_index AS INTEGER)
+        THEN sample_interval
+      END) * (1.0 - (quantile_index - CAST(quantile_index AS INTEGER)))
+      + max(CASE
+          WHEN interval_index = min(
+            CAST(quantile_index AS INTEGER) + 1,
+            interval_count - 1
+          )
+          THEN sample_interval
+        END) * (quantile_index - CAST(quantile_index AS INTEGER))
+      AS INTEGER
+    ) AS scrape_interval
+  FROM ordered_intervals AS ordered
+  JOIN quantile_targets AS target USING (series_id, interval_count)
+  GROUP BY target.series_id
+), series AS (
+  SELECT DISTINCT series_id FROM raw
+), scrape_intervals AS (
+  SELECT
+    series.series_id,
+    CASE
+      WHEN :start = :end THEN :step
+      ELSE coalesce(nullif(scrape_quantiles.scrape_interval, 0), :step)
+    END AS scrape_interval
+  FROM series
+  LEFT JOIN scrape_quantiles USING (series_id)
+), inflated AS (
+  SELECT
+    series_id,
+    CASE
+      WHEN scrape_interval <= 2 THEN scrape_interval * 5
+      WHEN scrape_interval <= 4 THEN scrape_interval * 3
+      WHEN scrape_interval <= 8 THEN scrape_interval * 2
+      WHEN scrape_interval <= 16 THEN scrape_interval + scrape_interval / 2
+      WHEN scrape_interval <= 32 THEN scrape_interval + scrape_interval / 4
+      ELSE scrape_interval + scrape_interval / 8
+    END AS max_previous_interval
+  FROM scrape_intervals
+), windows AS (
+  SELECT
+    series_id,
+    CASE
+      WHEN :max_lookback > 0 THEN min(
+        max(:step, min(max_previous_interval, :max_lookback)),
+        :max_lookback
+      )
+      ELSE max(:step, max_previous_interval)
+    END AS window
+  FROM inflated
+), candidates AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.value,
+    row_number() OVER (
+      PARTITION BY raw.series_id, evaluation.ts ORDER BY raw.ts DESC
+    ) AS recency
+  FROM evaluation
+  JOIN raw ON raw.ts <= evaluation.ts
+  JOIN windows USING (series_id)
+  WHERE raw.ts > evaluation.ts - windows.window
+)
+SELECT :metric AS name, labels, ts, value
+FROM candidates
+WHERE recency = 1
+ORDER BY name, labels, ts;
+```
+
+`:history` is the maximum bounded interval from which scrape cadence may be
+inferred; bind `300` for the release API's five-minute silence history.
+`:max_lookback = 0` means no request cap. The recipe assumes the default
+seconds table, so the jitter thresholds `2`, `4`, `8`, `16`, and `32` are
+seconds; scale every time and threshold together for another declared metric
+timestamp unit. `:start` and `:end` are inclusive evaluation bounds and
+`:step` is positive. Canonical labels and the projected metric name are TEXT,
+timestamps are INTEGER, and deterministic ordering uses complete identity and
+time.
+
+Ordinary window-less statistical rollups use the request step as their exact
+window. The public window TVF performs the bounded decode and reduction:
+
+```sql
+SELECT :metric AS name, labels, ts, value
+FROM timeless_window(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :step,
+  :aggregate
+)
+ORDER BY name, labels, ts;
+```
+
+Bind `:aggregate` to `avg`, `min`, `max`, `sum`, or `count`. Direct users keep
+the projected name for `avg`, `min`, and `max`, and drop it for `sum` and
+`count`; `last` is the equivalent public-grid operation and retains the name.
+`present_over_time` maps any positive `count` result to `1`. The existing
+`SQL-PROM-028`, `SQL-PROM-030`, and `SQL-PROM-034` recipes show the ordinary
+SQL foundations for population deviation/variance, final-pair differences,
+and regression. Every window is `(T-step,T]`; empty windows emit no row.
+
+These are executable storage foundations, not a claim that SQLite parses
+MetricsQL. Row-projected SQLite cannot distinguish the exact Prometheus stale
+NaN bit pattern from an ordinary NaN normalized to SQL NULL. Window-less
+`rate`, `irate`, `increase`, `delta`, `idelta`, `changes`, and `resets` also
+need the bounded previous sample, VictoriaMetrics reset correction and
+precision threshold, and `max_lookback` policy. The Rust MetricsQL API reads
+the public packed raw frame once to preserve those distinctions and owns
+implicit syntax, scalar/subquery composition, metric-name policy, duplicate
+outputs, cumulative limits, cancellation, HTTP result types, and errors. No
+new extension primitive is justified: all storage rows and reductions already
+come from public raw/window surfaces, and the remaining work is language and
+cross-window composition.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-005`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_default_and_windowless_rollups_match_victoriametrics_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

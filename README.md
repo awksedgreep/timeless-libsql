@@ -619,8 +619,10 @@ parsing/evaluation live in the Rust signal APIs. MetricsQL-only syntax never
 changes the default PromQL routes and never enters SQLite as query syntax. The
 MetricsQL routes currently implement conditional `default`/`if`/`ifnot`,
 operation-level `keep_metric_names`, bounded `union`/`alias` composition, and
-bounded `label_set`/`label_del` transformations; direct SQL users retain the
-same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-004`
+bounded `label_set`/`label_del` transformations, plus implicit
+`default_rollup` and the established one-argument window-less rollups with
+VictoriaMetrics scrape/carry-in semantics; direct SQL users retain the
+same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-005`
 recipes. The
 extension exposes general SQLite/libSQL primitives and receives a new query
 vector only when measurements prove that storage-aware pushdown materially

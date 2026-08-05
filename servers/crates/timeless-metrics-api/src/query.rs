@@ -403,6 +403,7 @@ pub(crate) enum PromPlan {
     MetricsUnion(metricsql::UnionPlan),
     MetricsAlias(metricsql::AliasPlan),
     MetricsLabels(metricsql::LabelPlan),
+    MetricsDynamicRollup(metricsql::DynamicRollupPlan),
     MetricsBinary(metricsql::BinaryPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
@@ -711,6 +712,7 @@ enum PromRangeOp {
     PredictLinear,
     Changes,
     Resets,
+    First,
     Last,
 }
 
@@ -735,6 +737,7 @@ impl PromRangeOp {
             Self::PredictLinear => "predict_linear",
             Self::Changes => "changes",
             Self::Resets => "resets",
+            Self::First => "first_over_time",
             Self::Last => "last_over_time",
         }
     }
@@ -759,6 +762,7 @@ impl PromRangeOp {
             | Self::PredictLinear
             | Self::Changes
             | Self::Resets
+            | Self::First
             | Self::Last => None,
         }
     }
@@ -783,12 +787,13 @@ impl PromRangeOp {
             | Self::PredictLinear
             | Self::Changes
             | Self::Resets
+            | Self::First
             | Self::Last => None,
         }
     }
 
     fn retains_metric_name(self) -> bool {
-        matches!(self, Self::Last)
+        matches!(self, Self::First | Self::Last)
     }
 }
 
@@ -1397,9 +1402,10 @@ impl PromPlan {
             Self::Calendar(_) => PromValueType::Vector,
             Self::HistogramQuantile(_) => PromValueType::Vector,
             Self::HistogramFraction(_) => PromValueType::Vector,
-            Self::MetricsUnion(_) | Self::MetricsAlias(_) | Self::MetricsLabels(_) => {
-                PromValueType::Vector
-            }
+            Self::MetricsUnion(_)
+            | Self::MetricsAlias(_)
+            | Self::MetricsLabels(_)
+            | Self::MetricsDynamicRollup(_) => PromValueType::Vector,
             Self::MetricsBinary(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
@@ -1608,7 +1614,7 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
 }
 
 pub(crate) fn metricsql_instant_request(params: &Params) -> Result<ReadRequest, String> {
-    params.ensure_prometheus_only(&["query", "time", "step", "lookback_delta"])?;
+    params.ensure_prometheus_only(&["query", "time", "step", "lookback_delta", "max_lookback"])?;
     let query = params.get("query").unwrap_or("");
     let time = match params.get("time") {
         Some(value) => parse_prom_time(Some(value), 0).map_err(|_| {
@@ -1627,8 +1633,8 @@ pub(crate) fn metricsql_instant_request(params: &Params) -> Result<ReadRequest, 
     if step <= 0 {
         return Err("step must be positive".into());
     }
-    let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
-    let plan = metricsql::lower(query, lookback, step)
+    let (lookback, max_lookback) = metricsql_lookbacks(params)?;
+    let plan = metricsql::lower_with_max_lookback(query, lookback, step, max_lookback)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     Ok(ReadRequest::Prometheus {
         query: query.to_owned(),
@@ -1642,7 +1648,14 @@ pub(crate) fn metricsql_instant_request(params: &Params) -> Result<ReadRequest, 
 }
 
 pub(crate) fn metricsql_range_request(params: &Params) -> Result<ReadRequest, String> {
-    params.ensure_prometheus_only(&["query", "start", "end", "step", "lookback_delta"])?;
+    params.ensure_prometheus_only(&[
+        "query",
+        "start",
+        "end",
+        "step",
+        "lookback_delta",
+        "max_lookback",
+    ])?;
     let query = params.get("query").unwrap_or("");
     let start_input = params.get("start").unwrap_or("");
     let start = parse_prom_time(Some(start_input), 0).map_err(|_| {
@@ -1656,7 +1669,7 @@ pub(crate) fn metricsql_range_request(params: &Params) -> Result<ReadRequest, St
     let step = parse_prom_step(Some(step_input), 0).map_err(|_| {
         format!("invalid parameter \"step\": cannot parse \"{step_input}\" to a valid duration")
     })?;
-    let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
+    let (lookback, max_lookback) = metricsql_lookbacks(params)?;
     if stop < start {
         return Err(
             "invalid parameter \"end\": end timestamp must not be before start time".into(),
@@ -1671,7 +1684,7 @@ pub(crate) fn metricsql_range_request(params: &Params) -> Result<ReadRequest, St
         step,
         PromQueryLimits::default().max_points_per_series,
     )?;
-    let plan = metricsql::lower(query, lookback, step)
+    let plan = metricsql::lower_with_max_lookback(query, lookback, step, max_lookback)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     match plan.value_type() {
         PromValueType::Matrix => {
@@ -1946,6 +1959,7 @@ fn attach_promql_plan_source_positions(
         PromPlan::MetricsLabels(labels) => {
             attach_promql_plan_source_positions(&mut labels.inner, calls)?;
         }
+        PromPlan::MetricsDynamicRollup(_) => {}
         PromPlan::MetricsBinary(binary) => {
             attach_promql_plan_source_positions(&mut binary.lhs, calls)?;
             attach_promql_plan_source_positions(&mut binary.rhs, calls)?;
@@ -3420,6 +3434,23 @@ fn parse_prom_request_lookback(value: Option<&str>, default: i64) -> Result<i64,
     })
 }
 
+fn metricsql_lookbacks(params: &Params) -> Result<(i64, i64), String> {
+    if params.get("lookback_delta").is_some() && params.get("max_lookback").is_some() {
+        return Err("lookback_delta and max_lookback cannot be used together".into());
+    }
+    let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
+    let max_lookback = match params.get("max_lookback") {
+        Some(value) => parse_prom_duration_millis(value, "max lookback").map_err(|_| {
+            format!(
+                "error parsing max lookback duration: cannot parse \"{value}\" to a valid duration"
+            )
+        })?,
+        None if params.get("lookback_delta").is_some() => lookback,
+        None => 0,
+    };
+    Ok((lookback, max_lookback))
+}
+
 fn parse_prom_duration_millis(value: &str, parameter: &str) -> Result<i64, String> {
     if let Ok(seconds) = value.parse::<f64>() {
         let millis = seconds * 1_000.0;
@@ -4612,6 +4643,20 @@ fn execute_prometheus(
             annotations,
             cancelled,
         ),
+        PromPlan::MetricsDynamicRollup(rollup) => metricsql::execute_dynamic_rollup(
+            conn,
+            features,
+            rollup,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            false,
+            cancelled,
+        ),
         PromPlan::MetricsBinary(binary) => metricsql::execute_binary(
             conn,
             features,
@@ -4815,6 +4860,20 @@ fn execute_prometheus_keep_metric_names(
             query_end,
             limits,
             annotations,
+            true,
+            cancelled,
+        ),
+        PromPlan::MetricsDynamicRollup(rollup) => metricsql::execute_dynamic_rollup(
+            conn,
+            features,
+            rollup,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
             true,
             cancelled,
         ),
@@ -8100,6 +8159,9 @@ fn prometheus_range_reduction(
     if matches!(op, PromRangeOp::Present) {
         return Ok(Some(1.0));
     }
+    if matches!(op, PromRangeOp::First) {
+        return Ok(Some(points[0].1));
+    }
     if matches!(op, PromRangeOp::Last) {
         return Ok(Some(points[points.len() - 1].1));
     }
@@ -9020,6 +9082,8 @@ fn execute_prometheus_range_raw(
                             previous = current;
                         }
                         Some(resets as f64)
+                    } else if matches!(op, PromRangeOp::First) {
+                        Some(series.value(raw.frame.as_deref(), lo)?)
                     } else if matches!(op, PromRangeOp::Last) {
                         Some(series.value(raw.frame.as_deref(), hi - 1)?)
                     } else {

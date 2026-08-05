@@ -12693,6 +12693,423 @@ async fn session_fifteen_metricsql_label_set_del_match_victoriametrics_and_reope
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_default_and_windowless_rollups_match_victoriametrics_and_reopen()
+{
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fifteen_metricsql_rollups.db");
+    let base = 1_785_908_100_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        64,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let regular = (-10_i64..=20)
+        .map(|offset| (base + offset, (offset + 11) as f64))
+        .collect::<Vec<_>>();
+    storage
+        .submit_named_batch(named_series_batch("mql_rollup", &regular), regular.len())
+        .await
+        .unwrap();
+    let stale = [
+        (base, 1.0),
+        (base + 10, f64::from_bits(0x7ff0_0000_0000_0002)),
+        (base + 20, 2.0),
+    ];
+    storage
+        .submit_named_batch(named_series_batch("mql_rollup_stale", &stale), stale.len())
+        .await
+        .unwrap();
+    storage
+        .submit_named_batch(
+            named_series_batch("mql_rollup_nan", &[(base + 10, f64::NAN)]),
+            1,
+        )
+        .await
+        .unwrap();
+    let slow_counter = [
+        (base - 20, 0.0),
+        (base - 10, 10.0),
+        (base, 20.0),
+        (base + 10, 30.0),
+        (base + 20, 40.0),
+    ];
+    storage
+        .submit_named_batch(
+            named_series_batch("mql_rollup_slow_counter", &slow_counter),
+            slow_counter.len(),
+        )
+        .await
+        .unwrap();
+    let reset_counter = [
+        (base - 2, 10.0),
+        (base - 1, 1.0),
+        (base, 2.0),
+        (base + 1, 10.0),
+        (base + 2, 1.0),
+        (base + 3, 2.0),
+        (base + 4, 3.0),
+    ];
+    storage
+        .submit_named_batch(
+            named_series_batch("mql_rollup_reset_counter", &reset_counter),
+            reset_counter.len(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let expected_default = serde_json::json!([{
+        "metric": {"__name__": "mql_rollup"},
+        "values": [[base + 20, "31"], [base + 22, "31"], [base + 24, "31"]]
+    }]);
+    let implicit = mql_query_range(&app, "mql_rollup", base + 20, base + 26, 2).await;
+    assert_eq!(implicit.0, StatusCode::OK, "{}", implicit.1);
+    assert_eq!(implicit.1["data"]["result"], expected_default);
+    let explicit =
+        mql_query_range(&app, "default_rollup(mql_rollup)", base + 20, base + 26, 2).await;
+    assert_eq!(explicit.0, StatusCode::OK, "{}", explicit.1);
+    assert_eq!(explicit.1["data"]["result"], expected_default);
+
+    let fixed = mql_query_range(
+        &app,
+        "default_rollup(mql_rollup[2s])",
+        base + 20,
+        base + 24,
+        2,
+    )
+    .await;
+    assert_eq!(fixed.0, StatusCode::OK, "{}", fixed.1);
+    assert_eq!(
+        fixed.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_rollup"},
+            "values": [[base + 20, "31"]]
+        }])
+    );
+
+    let capped_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "default_rollup(mql_rollup)")
+        .append_pair("start", &(base + 20).to_string())
+        .append_pair("end", &(base + 26).to_string())
+        .append_pair("step", "2")
+        .append_pair("max_lookback", "3s")
+        .finish();
+    let capped = get_json(
+        &app,
+        &format!("/metricsql/api/v1/query_range?{capped_params}"),
+    )
+    .await;
+    assert_eq!(capped.0, StatusCode::OK, "{}", capped.1);
+    assert_eq!(
+        capped.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_rollup"},
+            "values": [[base + 20, "31"], [base + 22, "31"]]
+        }])
+    );
+    let explicit_capped_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "default_rollup(mql_rollup[10s])")
+        .append_pair("start", &(base + 20).to_string())
+        .append_pair("end", &(base + 26).to_string())
+        .append_pair("step", "2")
+        .append_pair("max_lookback", "3s")
+        .finish();
+    let explicit_capped = get_json(
+        &app,
+        &format!("/metricsql/api/v1/query_range?{explicit_capped_params}"),
+    )
+    .await;
+    assert_eq!(explicit_capped.0, StatusCode::OK, "{}", explicit_capped.1);
+    assert_eq!(
+        explicit_capped.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base + 20, "31"],
+            [base + 22, "31"],
+            [base + 24, "31"],
+            [base + 26, "31"]
+        ])
+    );
+
+    let stale_result = mql_query_range(
+        &app,
+        "default_rollup(mql_rollup_stale)",
+        base,
+        base + 20,
+        10,
+    )
+    .await;
+    assert_eq!(stale_result.0, StatusCode::OK, "{}", stale_result.1);
+    assert_eq!(
+        stale_result.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_rollup_stale"},
+            "values": [[base, "1"], [base + 20, "2"]]
+        }])
+    );
+    let nan_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "default_rollup(mql_rollup_nan)")
+        .append_pair("time", &(base + 10).to_string())
+        .append_pair("step", "1")
+        .finish();
+    let nan = get_json(&app, &format!("/metricsql/api/v1/query?{nan_params}")).await;
+    assert_eq!(nan.0, StatusCode::OK, "{}", nan.1);
+    assert_eq!(
+        nan.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"__name__": "mql_rollup_nan"},
+            "value": [base + 10, "NaN"]
+        }])
+    );
+
+    for (query, metric, expected) in [
+        (
+            "avg_over_time(mql_rollup)",
+            serde_json::json!({"__name__": "mql_rollup"}),
+            serde_json::json!([[base, "10.5"], [base + 2, "12.5"], [base + 4, "14.5"]]),
+        ),
+        (
+            "min_over_time(mql_rollup)",
+            serde_json::json!({"__name__": "mql_rollup"}),
+            serde_json::json!([[base, "10"], [base + 2, "12"], [base + 4, "14"]]),
+        ),
+        (
+            "max_over_time(mql_rollup)",
+            serde_json::json!({"__name__": "mql_rollup"}),
+            serde_json::json!([[base, "11"], [base + 2, "13"], [base + 4, "15"]]),
+        ),
+        (
+            "sum_over_time(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "21"], [base + 2, "25"], [base + 4, "29"]]),
+        ),
+        (
+            "count_over_time(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "2"], [base + 2, "2"], [base + 4, "2"]]),
+        ),
+        (
+            "present_over_time(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "1"], [base + 2, "1"], [base + 4, "1"]]),
+        ),
+        (
+            "stddev_over_time(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "0.5"], [base + 2, "0.5"], [base + 4, "0.5"]]),
+        ),
+        (
+            "stdvar_over_time(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "0.25"], [base + 2, "0.25"], [base + 4, "0.25"]]),
+        ),
+        (
+            "FIRST_OVER_TIME(mql_rollup,)",
+            serde_json::json!({"__name__": "mql_rollup"}),
+            serde_json::json!([[base, "10"], [base + 2, "12"], [base + 4, "14"]]),
+        ),
+        (
+            "last_over_time(mql_rollup)",
+            serde_json::json!({"__name__": "mql_rollup"}),
+            serde_json::json!([[base, "11"], [base + 2, "13"], [base + 4, "15"]]),
+        ),
+        (
+            "increase(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "2"], [base + 2, "2"], [base + 4, "2"]]),
+        ),
+        (
+            "delta(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "2"], [base + 2, "2"], [base + 4, "2"]]),
+        ),
+        (
+            "idelta(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "1"], [base + 2, "1"], [base + 4, "1"]]),
+        ),
+        (
+            "changes(mql_rollup)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "2"], [base + 2, "2"], [base + 4, "2"]]),
+        ),
+        (
+            "resets(mql_rollup_reset_counter)",
+            serde_json::json!({}),
+            serde_json::json!([[base, "1"], [base + 2, "1"], [base + 4, "0"]]),
+        ),
+    ] {
+        let response = mql_query_range(&app, query, base, base + 4, 2).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["metric"], metric, "{query}");
+        assert_eq!(
+            response.1["data"]["result"][0]["values"], expected,
+            "{query}"
+        );
+    }
+    for (query, expected) in [
+        (
+            "rate(mql_rollup_slow_counter)",
+            serde_json::json!([[base, "1"], [base + 2, "1"], [base + 4, "1"]]),
+        ),
+        (
+            "irate(mql_rollup_slow_counter)",
+            serde_json::json!([[base, "1"], [base + 2, "1"], [base + 4, "1"]]),
+        ),
+        (
+            "deriv(mql_rollup_slow_counter)",
+            serde_json::json!([[base, "0"], [base + 2, "0"], [base + 4, "0"]]),
+        ),
+    ] {
+        let response = mql_query_range(&app, query, base, base + 4, 2).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["metric"],
+            serde_json::json!({}),
+            "{query}"
+        );
+        assert_eq!(
+            response.1["data"]["result"][0]["values"], expected,
+            "{query}"
+        );
+    }
+    let timestamp = mql_query_range(&app, "timestamp(mql_rollup)", base, base + 4, 2).await;
+    assert_eq!(timestamp.0, StatusCode::OK, "{}", timestamp.1);
+    assert_eq!(
+        timestamp.1["data"]["result"][0]["metric"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        timestamp.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base, base.to_string()],
+            [base + 2, (base + 2).to_string()],
+            [base + 4, (base + 4).to_string()]
+        ])
+    );
+
+    let scalar = mql_query_range(&app, "default_rollup(1)", base, base + 4, 2).await;
+    assert_eq!(scalar.0, StatusCode::OK, "{}", scalar.1);
+    assert_eq!(
+        scalar.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base, "1"], [base + 2, "1"], [base + 4, "1"]]
+        }])
+    );
+    let uppercase = mql_query(&app, "DEFAULT_ROLLUP(mql_rollup,)", base + 20).await;
+    assert_eq!(uppercase.0, StatusCode::OK, "{}", uppercase.1);
+    assert_eq!(uppercase.1["data"]["result"][0]["value"][1], "31");
+    let aggregate = mql_query(&app, "sum(default_rollup(mql_rollup))", base + 20).await;
+    assert_eq!(aggregate.0, StatusCode::OK, "{}", aggregate.1);
+    assert_eq!(
+        aggregate.1["data"]["result"][0]["metric"],
+        serde_json::json!({})
+    );
+    assert_eq!(aggregate.1["data"]["result"][0]["value"][1], "31");
+
+    for query in [
+        "default_rollup()",
+        "default_rollup(mql_rollup, 1)",
+        "first_over_time()",
+        "first_over_time(mql_rollup, 1)",
+        "avg_over_time()",
+        "avg_over_time(mql_rollup, 1)",
+    ] {
+        let invalid = mql_query(&app, query, base + 20).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    for query in [
+        "default_rollup(mql_rollup)",
+        "avg_over_time(mql_rollup)",
+        "first_over_time(mql_rollup)",
+    ] {
+        let stable = prom_query(&app, query, base + 20).await;
+        assert_eq!(stable.0, StatusCode::BAD_REQUEST, "{query}: {}", stable.1);
+        assert_eq!(stable.1["errorType"], "bad_data");
+    }
+    let stable_selector = prom_query(&app, "mql_rollup", base + 26).await;
+    assert_eq!(stable_selector.0, StatusCode::OK, "{}", stable_selector.1);
+    assert_eq!(stable_selector.1["data"]["result"][0]["value"][1], "31");
+
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "default_rollup(mql_rollup)")
+            .append_pair("time", &(base + 20).to_string())
+            .append_pair("step", "2")
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted.0, StatusCode::OK, "{}", posted.1);
+    assert_eq!(posted.1["data"]["result"][0]["value"][1], "31");
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query(&limited, "default_rollup(mql_rollup)", base + 20).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+    assert_eq!(
+        mql_query(&limited, "default_rollup(mql_rollup_nan)", base + 10)
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 64, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query_range(
+            &reopened_app,
+            "default_rollup(mql_rollup)",
+            base + 20,
+            base + 26,
+            2,
+        )
+        .await,
+        explicit
+    );
+    let reopened_first = mql_query_range(
+        &reopened_app,
+        "first_over_time(mql_rollup)",
+        base,
+        base + 4,
+        2,
+    )
+    .await;
+    assert_eq!(reopened_first.0, StatusCode::OK, "{}", reopened_first.1);
+    assert_eq!(
+        reopened_first.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "10"], [base + 2, "12"], [base + 4, "14"]])
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
@@ -12940,9 +13357,16 @@ fn extension_path() -> PathBuf {
 }
 
 fn named_batch(points: usize, first_timestamp: i64) -> Vec<u8> {
-    let points_u32 = u32::try_from(points).unwrap();
-    let name = b"session_one_metric";
-    let mut blob = Vec::with_capacity(12 + name.len() + points * 20);
+    let values = (0..points)
+        .map(|offset| (first_timestamp + offset as i64, offset as f64))
+        .collect::<Vec<_>>();
+    named_series_batch("session_one_metric", &values)
+}
+
+fn named_series_batch(name: &str, points: &[(i64, f64)]) -> Vec<u8> {
+    let points_u32 = u32::try_from(points.len()).unwrap();
+    let name = name.as_bytes();
+    let mut blob = Vec::with_capacity(12 + name.len() + points.len() * 20);
     blob.push(0x01);
     blob.push(0);
     blob.extend_from_slice(&0_u16.to_le_bytes());
@@ -12951,14 +13375,14 @@ fn named_batch(points: usize, first_timestamp: i64) -> Vec<u8> {
     blob.extend_from_slice(&(name.len() as u32).to_le_bytes());
     blob.extend_from_slice(name);
     blob.extend_from_slice(&0_u32.to_le_bytes());
-    for _ in 0..points {
+    for _ in points {
         blob.extend_from_slice(&0_u32.to_le_bytes());
     }
-    for offset in 0..points {
-        blob.extend_from_slice(&(first_timestamp + offset as i64).to_le_bytes());
+    for (timestamp, _) in points {
+        blob.extend_from_slice(&timestamp.to_le_bytes());
     }
-    for offset in 0..points {
-        blob.extend_from_slice(&(offset as f64).to_bits().to_le_bytes());
+    for (_, value) in points {
+        blob.extend_from_slice(&value.to_bits().to_le_bytes());
     }
     blob
 }

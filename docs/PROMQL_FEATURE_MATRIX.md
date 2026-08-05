@@ -188,7 +188,7 @@ the P0 PromQL rows. They remain `API` composition, not extension syntax.
 | `MQL-02` | `keep_metric_names` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-002-keep_metric_names)) | shipped | yes | `API` | P2 |
 | `MQL-03` | `union` and `alias` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-003-union-and-alias)); named/shorthand/zero/single/multiple/trailing-comma union, first-labelset precedence, alias rename/removal, collision errors, scalar duplicates, nesting, limits, route isolation, and reopen are pinned | shipped | yes | `API` | P2 |
 | `MQL-04` | `label_set` and `label_del` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-004-label_set-and-label_del)); add/replace/delete/name/empty-value/duplicate-order behavior, scalar vectorization, case-insensitive transforms, collisions, limits, stable-route isolation, and reopen are pinned | shipped | yes | `API` | P2 |
-| `MQL-05` | `default_rollup` and window-less rollups | missing | yes | `API` | P2 |
+| `MQL-05` | `default_rollup` and window-less rollups ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-005-default_rollup-and-window-less-rollups)); implicit selectors, 0.6-quantile scrape inference, jitter inflation, `max_lookback`, stale/ordinary-NaN distinction, step windows, previous-sample/reset semantics, first/last/name policy, timestamp provenance, limits, stable-route isolation, and reopen are pinned | shipped | yes | `API` | P2 |
 | `MQL-06` | `range_avg/min/max/sum` | missing | yes | `API` | P2 |
 | `MQL-07` | `running_avg/min/max/sum` | missing | yes | `API` | P2 |
 | `MQL-08` | remaining MetricsQL functions/operators | missing | partial | `API` | DEFER |

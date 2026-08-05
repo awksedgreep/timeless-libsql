@@ -753,12 +753,24 @@ fn operator_expected(
     if let Some(range) = case.get("range").and_then(Value::as_object) {
         let start_ms = sample_ms + offset(range, "start_offset_ms")?;
         let end_ms = sample_ms + offset(range, "end_offset_ms")?;
-        let params = Map::from_iter([
+        let mut params = Map::from_iter([
             ("query".to_owned(), json!(expression)),
             ("start".to_owned(), timestamp(start_ms)),
             ("end".to_owned(), timestamp(end_ms)),
             ("step".to_owned(), json!(string(range, "step")?)),
         ]);
+        if case.contains_key("lookback_delta") {
+            params.insert(
+                "lookback_delta".to_owned(),
+                json!(string(case, "lookback_delta")?),
+            );
+        }
+        if case.contains_key("max_lookback") {
+            params.insert(
+                "max_lookback".to_owned(),
+                json!(string(case, "max_lookback")?),
+            );
+        }
         let mut result = if let Some(expected_results) =
             case.get("expected_results").and_then(Value::as_array)
         {
@@ -822,10 +834,25 @@ fn operator_expected(
         ));
     }
 
-    let params = Map::from_iter([
+    let mut params = Map::from_iter([
         ("query".to_owned(), json!(expression)),
         ("time".to_owned(), timestamp(evaluation_ms)),
     ]);
+    if case.contains_key("step") {
+        params.insert("step".to_owned(), json!(string(case, "step")?));
+    }
+    if case.contains_key("lookback_delta") {
+        params.insert(
+            "lookback_delta".to_owned(),
+            json!(string(case, "lookback_delta")?),
+        );
+    }
+    if case.contains_key("max_lookback") {
+        params.insert(
+            "max_lookback".to_owned(),
+            json!(string(case, "max_lookback")?),
+        );
+    }
     if case
         .get("expected_empty")
         .and_then(Value::as_bool)

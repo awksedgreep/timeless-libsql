@@ -165,6 +165,28 @@ ordinary expressions, and reject duplicate output labelsets. Generated label
 bytes and intermediate work remain bounded by the existing response/work
 limits.
 
+Bare selectors on the MetricsQL routes now apply VictoriaMetrics
+`default_rollup` implicitly. Range queries estimate each series' scrape
+interval from the interpolated 0.6 quantile of its last 20 intervals, inflate
+that interval for jitter, and use the larger of it and the request step. A
+positive `max_lookback` caps the automatic default window; an explicitly
+written range is not shortened. The exact Prometheus stale-NaN marker ends the
+visible series, while an ordinary stored NaN remains a bit-preserved Timeless
+sample instead of being discarded at ingestion as it is by VictoriaMetrics.
+
+The same routes accept selector arguments without brackets for
+`avg_over_time`, `min_over_time`, `max_over_time`, `sum_over_time`,
+`count_over_time`, `present_over_time`, `stddev_over_time`,
+`stdvar_over_time`, `first_over_time`, `last_over_time`, `rate`, `irate`,
+`increase`, `delta`, `idelta`, `deriv`, `changes`, and `resets`. Ordinary
+statistical windows equal the request step. `default_rollup`, `rate`, `irate`,
+`deriv`, and selector-backed `timestamp` use their pinned adjustable-window
+rules. Counter reset correction and the bounded previous sample are applied
+where VictoriaMetrics requires them. Average, minimum, maximum, first, last,
+and default rollup retain the source metric name; the other rollups and
+`timestamp` drop it. `first_over_time` remains unavailable on the stable
+PromQL routes because the pinned Prometheus tier feature-gates it.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding
@@ -175,6 +197,8 @@ and
 [`SQL-MQL-003`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-003-union-and-alias)
 and
 [`SQL-MQL-004`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-004-label_set-and-label_del)
+and
+[`SQL-MQL-005`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-005-default_rollup-and-window-less-rollups)
 recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
 envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
 `422`. Limits and cancellation continue to use Timeless's existing execution
@@ -224,7 +248,7 @@ The authoritative support contract is the
 Rust API rows at this revision are listed below for CI; prose in this README
 must not imply a broader language surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S14 PQL-S15 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-S23 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O08 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 PQL-H02 MQL-01 MQL-02 MQL-03 MQL-04 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S14 PQL-S15 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-S23 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O08 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 PQL-H02 MQL-01 MQL-02 MQL-03 MQL-04 MQL-05 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are

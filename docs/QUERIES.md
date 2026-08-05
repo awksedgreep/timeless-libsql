@@ -1430,6 +1430,67 @@ public-grid labels. The executable
 recipe pins empty-value deletion, name handling, JSON paths, ordering, types,
 and the duplicate-output check.
 
+### Automatic and window-less MetricsQL rollups
+
+On the explicitly named MetricsQL routes, every bare selector is an implicit
+`default_rollup`:
+
+```text
+cpu_usage
+default_rollup(cpu_usage)
+default_rollup(cpu_usage[30s])
+```
+
+The first two forms are equivalent. For a range query, Timeless infers each
+series' scrape interval from the interpolated 0.6 quantile of its last 20
+intervals and applies VictoriaMetrics's jitter allowance. The automatic
+window is at least the request step. Bind `max_lookback=30s` on the MetricsQL
+request to cap this inferred default window; it does not shorten the explicit
+`[30s]` form. Every range remains open on the left and closed on the right.
+Instant requests use the request step directly.
+
+The MetricsQL routes also accept the established one-argument rollups without
+a bracketed selector range:
+
+```text
+avg_over_time(cpu_usage)
+FIRST_OVER_TIME(cpu_usage,)
+rate(http_requests_total)
+changes(build_state)
+timestamp(cpu_usage)
+```
+
+Supported window-less names are `avg_over_time`, `min_over_time`,
+`max_over_time`, `sum_over_time`, `count_over_time`, `present_over_time`,
+`stddev_over_time`, `stdvar_over_time`, `first_over_time`, `last_over_time`,
+`rate`, `irate`, `increase`, `delta`, `idelta`, `deriv`, `changes`, and
+`resets`. Function names are case-insensitive and a trailing comma is valid.
+Statistical functions use the request step as their window. `rate`, `irate`,
+and `deriv` use the pinned adjustable-window behavior; `increase`, `delta`,
+`idelta`, `changes`, and `resets` can consume the bounded previous sample.
+Counter functions apply VictoriaMetrics reset correction before calculating
+the result.
+
+`default_rollup`, average, minimum, maximum, first, and last retain the input
+metric name. Other rollups and `timestamp` remove it. A `default_rollup` of a
+scalar is a nameless vector and all forms compose under ordinary MetricsQL
+operators and aggregations. Invalid arity fails with HTTP 400 `bad_data`.
+Stable `/api/v1/query*` endpoints remain PromQL-only: they reject bracketless
+rollups and keep `first_over_time` behind Prometheus's experimental tier.
+
+The packed public raw path distinguishes the exact Prometheus stale-NaN bits
+from an ordinary stored NaN. A stale marker ends the visible result at that
+step. Timeless preserves and returns an ordinary NaN; pinned VictoriaMetrics
+discards that series during ingestion, so this stronger storage-fidelity
+behavior is documented rather than presented as oracle equality.
+
+Direct SQLite/libSQL users can run the bounded automatic finite-series
+selection and step-window reductions in
+[`SQL-MQL-005`](QUERY_SQL_EQUIVALENTS.md#sql-mql-005-default_rollup-and-window-less-rollups).
+The Rust API retains language parsing, exact packed-NaN handling, carry-in and
+reset composition, names, limits, cancellation, and HTTP envelopes; no
+MetricsQL syntax enters the extension.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

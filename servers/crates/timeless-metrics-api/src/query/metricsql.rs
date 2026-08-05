@@ -13,6 +13,8 @@ use super::*;
 
 const MAX_METRICSQL_DEPTH: usize = 64;
 const PLACEHOLDER_PREFIX: &str = "__timeless_metricsql_expr_";
+const DEFAULT_MAX_SILENCE_INTERVAL_MS: i64 = 300_000;
+const PROMETHEUS_STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BinaryOp {
@@ -52,20 +54,97 @@ pub(super) enum LabelOperation {
     Del(Vec<String>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DynamicRollupOp {
+    Default,
+    Avg,
+    Min,
+    Max,
+    Sum,
+    Count,
+    Present,
+    StdDev,
+    StdVar,
+    Rate,
+    IRate,
+    Increase,
+    Delta,
+    IDelta,
+    Deriv,
+    Changes,
+    Resets,
+    First,
+    Last,
+    Timestamp,
+}
+
+impl DynamicRollupOp {
+    fn adjusts_window(self) -> bool {
+        matches!(
+            self,
+            Self::Default | Self::Rate | Self::IRate | Self::Deriv | Self::Timestamp
+        )
+    }
+
+    fn needs_silence_history(self) -> bool {
+        matches!(
+            self,
+            Self::Default
+                | Self::Rate
+                | Self::IRate
+                | Self::Increase
+                | Self::Delta
+                | Self::IDelta
+                | Self::Changes
+                | Self::Resets
+        )
+    }
+
+    fn removes_counter_resets(self) -> bool {
+        matches!(self, Self::Rate | Self::IRate | Self::Increase)
+    }
+
+    fn retains_metric_name(self) -> bool {
+        matches!(
+            self,
+            Self::Default | Self::Avg | Self::Min | Self::Max | Self::First | Self::Last
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DynamicRollupPlan {
+    pub(super) op: DynamicRollupOp,
+    pub(super) selector: Selector,
+    pub(super) max_lookback: i64,
+}
+
 struct LowerContext<'a> {
     original: &'a str,
     lookback: i64,
     #[allow(dead_code)]
     step: i64,
+    max_lookback: i64,
     next_placeholder: usize,
     placeholders: HashMap<String, PromPlan>,
 }
 
-pub(super) fn lower(input: &str, lookback: i64, step: i64) -> Result<PromPlan, String> {
+#[cfg(test)]
+fn lower(input: &str, lookback: i64, step: i64) -> Result<PromPlan, String> {
+    lower_with_max_lookback(input, lookback, step, lookback)
+}
+
+pub(super) fn lower_with_max_lookback(
+    input: &str,
+    lookback: i64,
+    step: i64,
+    max_lookback: i64,
+) -> Result<PromPlan, String> {
     let mut context = LowerContext {
         original: input,
         lookback,
         step,
+        max_lookback,
         next_placeholder: 0,
         placeholders: HashMap::new(),
     };
@@ -74,6 +153,7 @@ pub(super) fn lower(input: &str, lookback: i64, step: i64) -> Result<PromPlan, S
     if !context.placeholders.is_empty() {
         return Err("internal MetricsQL placeholder was not consumed".into());
     }
+    apply_implicit_rollups(&mut plan, max_lookback)?;
     Ok(plan)
 }
 
@@ -153,6 +233,7 @@ fn supports_keep_metric_names(plan: &PromPlan, input: &str) -> bool {
         | PromPlan::HistogramFraction(_)
         | PromPlan::MetricsUnion(_)
         | PromPlan::MetricsLabels(_)
+        | PromPlan::MetricsDynamicRollup(_)
         | PromPlan::MetricsBinary(_)
         | PromPlan::Binary(_)
         | PromPlan::RangeReduction(_) => true,
@@ -201,7 +282,17 @@ fn lower_union_or_alias(
     if has_code(&input[close + 1..]) {
         return Ok(None);
     }
-    let function = if name.eq_ignore_ascii_case("union") {
+    let normalized = name.to_ascii_lowercase();
+    if normalized == "default_rollup" {
+        let arguments = metric_sql_arguments(&input[open + 1..close], "default_rollup")?;
+        return lower_default_rollup(arguments, context, depth).map(Some);
+    }
+    if let Some((dynamic, op)) = windowless_rollup_op(&normalized) {
+        let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
+        return lower_metricsql_rollup(&normalized, dynamic, op, arguments, context, depth)
+            .map(Some);
+    }
+    let function = if normalized == "union" {
         "union"
     } else if name == "alias" {
         "alias"
@@ -239,6 +330,142 @@ fn lower_union_or_alias(
         "label_del" => lower_label_del(arguments, context, depth).map(Some),
         _ => unreachable!("guarded MetricsQL function"),
     }
+}
+
+fn windowless_rollup_op(name: &str) -> Option<(DynamicRollupOp, PromRangeOp)> {
+    Some(match name {
+        "avg_over_time" => (DynamicRollupOp::Avg, PromRangeOp::Avg),
+        "min_over_time" => (DynamicRollupOp::Min, PromRangeOp::Min),
+        "max_over_time" => (DynamicRollupOp::Max, PromRangeOp::Max),
+        "sum_over_time" => (DynamicRollupOp::Sum, PromRangeOp::Sum),
+        "count_over_time" => (DynamicRollupOp::Count, PromRangeOp::Count),
+        "present_over_time" => (DynamicRollupOp::Present, PromRangeOp::Present),
+        "stddev_over_time" => (DynamicRollupOp::StdDev, PromRangeOp::StdDev),
+        "stdvar_over_time" => (DynamicRollupOp::StdVar, PromRangeOp::StdVar),
+        "rate" => (DynamicRollupOp::Rate, PromRangeOp::Rate),
+        "irate" => (DynamicRollupOp::IRate, PromRangeOp::IRate),
+        "increase" => (DynamicRollupOp::Increase, PromRangeOp::Increase),
+        "delta" => (DynamicRollupOp::Delta, PromRangeOp::Delta),
+        "idelta" => (DynamicRollupOp::IDelta, PromRangeOp::IDelta),
+        "deriv" => (DynamicRollupOp::Deriv, PromRangeOp::Deriv),
+        "changes" => (DynamicRollupOp::Changes, PromRangeOp::Changes),
+        "resets" => (DynamicRollupOp::Resets, PromRangeOp::Resets),
+        "first_over_time" => (DynamicRollupOp::First, PromRangeOp::First),
+        "last_over_time" => (DynamicRollupOp::Last, PromRangeOp::Last),
+        _ => return None,
+    })
+}
+
+fn lower_default_rollup(
+    arguments: Vec<&str>,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    let [argument] = arguments.as_slice() else {
+        return Err(format!(
+            "MetricsQL default_rollup requires exactly one argument; got {}",
+            arguments.len()
+        ));
+    };
+    let input = lower_expr(argument, context, depth + 1)?;
+    match input {
+        PromPlan::Selector { selector, .. } => {
+            Ok(PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Default,
+                selector,
+                max_lookback: context.max_lookback,
+            }))
+        }
+        PromPlan::RangeSelector { selector, window } => {
+            Ok(PromPlan::RangeReduction(PromRangePlan {
+                op: PromRangeOp::Last,
+                input: PromRangeInput::Selector { selector, window },
+                parameter: None,
+                source: None,
+            }))
+        }
+        PromPlan::Subquery(subquery) => Ok(PromPlan::RangeReduction(PromRangePlan {
+            op: PromRangeOp::Last,
+            input: PromRangeInput::Subquery(subquery),
+            parameter: None,
+            source: None,
+        })),
+        plan if matches!(
+            plan.value_type(),
+            PromValueType::Scalar | PromValueType::Vector
+        ) =>
+        {
+            Ok(vectorize_scalar(plan))
+        }
+        _ => {
+            Err("MetricsQL default_rollup requires a scalar, selector, or vector expression".into())
+        }
+    }
+}
+
+fn lower_metricsql_rollup(
+    function: &str,
+    dynamic: DynamicRollupOp,
+    op: PromRangeOp,
+    arguments: Vec<&str>,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    let [argument] = arguments.as_slice() else {
+        return Err(format!(
+            "MetricsQL {function} requires exactly one argument; got {}",
+            arguments.len()
+        ));
+    };
+    let input = lower_expr(argument, context, depth + 1)?;
+    let plan = match input {
+        PromPlan::Selector { selector, .. } => PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+            op: dynamic,
+            selector,
+            max_lookback: context.max_lookback,
+        }),
+        PromPlan::RangeSelector { selector, window } => PromPlan::RangeReduction(PromRangePlan {
+            op,
+            input: PromRangeInput::Selector { selector, window },
+            parameter: None,
+            source: None,
+        }),
+        PromPlan::Subquery(subquery) => PromPlan::RangeReduction(PromRangePlan {
+            op,
+            input: PromRangeInput::Subquery(subquery),
+            parameter: None,
+            source: None,
+        }),
+        plan if matches!(
+            plan.value_type(),
+            PromValueType::Scalar | PromValueType::Vector
+        ) =>
+        {
+            PromPlan::RangeReduction(PromRangePlan {
+                op,
+                input: PromRangeInput::Subquery(SubqueryPlan {
+                    inner: Box::new(vectorize_scalar(plan)),
+                    window: context.step,
+                    resolution: Some(context.step),
+                    timing: SelectorTiming::default(),
+                }),
+                parameter: None,
+                source: None,
+            })
+        }
+        _ => {
+            return Err(format!(
+                "MetricsQL {function} requires a scalar, selector, or vector expression"
+            ))
+        }
+    };
+    Ok(
+        if matches!(op, PromRangeOp::Avg | PromRangeOp::Min | PromRangeOp::Max) {
+            PromPlan::KeepMetricNames(Box::new(plan))
+        } else {
+            plan
+        },
+    )
 }
 
 fn lower_label_set(
@@ -359,6 +586,15 @@ fn looks_like_function_call(input: &str) -> bool {
         && matching_paren(input, open)
             .ok()
             .is_some_and(|close| !has_code(&input[close + 1..]))
+}
+
+fn is_metricsql_special_call(name: &str) -> bool {
+    name.eq_ignore_ascii_case("union")
+        || name == "alias"
+        || name.eq_ignore_ascii_case("label_set")
+        || name.eq_ignore_ascii_case("label_del")
+        || name.eq_ignore_ascii_case("default_rollup")
+        || windowless_rollup_op(&name.to_ascii_lowercase()).is_some()
 }
 
 fn trailing_keep_metric_names(input: &str) -> Result<Option<&str>, String> {
@@ -717,12 +953,8 @@ fn rewrite_nested(
                 let inner = &input[index + 1..close];
                 let identifier = previous_identifier(input, index);
                 let identifier_name = identifier.map(|(_, value)| value.to_ascii_lowercase());
-                let special_call = identifier.is_some_and(|(_, name)| {
-                    name.eq_ignore_ascii_case("union")
-                        || name == "alias"
-                        || name.eq_ignore_ascii_case("label_set")
-                        || name.eq_ignore_ascii_case("label_del")
-                });
+                let special_call =
+                    identifier.is_some_and(|(_, name)| is_metricsql_special_call(name));
                 if special_call || contains_custom_syntax(inner) {
                     let modifier = identifier_name.as_deref().is_some_and(|name| {
                         matches!(
@@ -873,6 +1105,8 @@ fn contains_custom_word(input: &str) -> bool {
                     || word == "alias"
                     || word.eq_ignore_ascii_case("label_set")
                     || word.eq_ignore_ascii_case("label_del")
+                    || word.eq_ignore_ascii_case("default_rollup")
+                    || windowless_rollup_op(&word.to_ascii_lowercase()).is_some()
                 {
                     return true;
                 }
@@ -881,6 +1115,91 @@ fn contains_custom_word(input: &str) -> bool {
         }
     }
     false
+}
+
+fn apply_implicit_rollups(plan: &mut PromPlan, max_lookback: i64) -> Result<(), String> {
+    if let PromPlan::Selector { selector, .. } = plan {
+        *plan = PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+            op: DynamicRollupOp::Default,
+            selector: selector.clone(),
+            max_lookback,
+        });
+        return Ok(());
+    }
+    if let PromPlan::Timestamp(timestamp) = plan {
+        if let PromPlan::Selector { selector, .. } = timestamp.inner.as_ref() {
+            *plan = PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Timestamp,
+                selector: selector.clone(),
+                max_lookback,
+            });
+            return Ok(());
+        }
+    }
+    match plan {
+        PromPlan::Scalar(_)
+        | PromPlan::String(_)
+        | PromPlan::Time
+        | PromPlan::MetricsDynamicRollup(_)
+        | PromPlan::RangeSelector { .. } => {}
+        PromPlan::KeepMetricNames(inner) | PromPlan::Unary(inner) => {
+            apply_implicit_rollups(inner, max_lookback)?
+        }
+        PromPlan::Function(function) => {
+            apply_implicit_rollups(&mut function.inner, max_lookback)?;
+            for parameter in &mut function.parameters {
+                apply_implicit_rollups(parameter, max_lookback)?;
+            }
+        }
+        PromPlan::LabelReplace(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::LabelJoin(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::Absent(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::Sort(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::Conversion(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::Timestamp(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::Calendar(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::HistogramQuantile(plan) => {
+            apply_implicit_rollups(&mut plan.quantile, max_lookback)?;
+            apply_implicit_rollups(&mut plan.inner, max_lookback)?;
+        }
+        PromPlan::HistogramFraction(plan) => {
+            apply_implicit_rollups(&mut plan.lower, max_lookback)?;
+            apply_implicit_rollups(&mut plan.upper, max_lookback)?;
+            apply_implicit_rollups(&mut plan.inner, max_lookback)?;
+        }
+        PromPlan::MetricsUnion(plan) => {
+            for input in &mut plan.inputs {
+                apply_implicit_rollups(input, max_lookback)?;
+            }
+        }
+        PromPlan::MetricsAlias(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::MetricsLabels(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::MetricsBinary(plan) => {
+            apply_implicit_rollups(&mut plan.lhs, max_lookback)?;
+            apply_implicit_rollups(&mut plan.rhs, max_lookback)?;
+        }
+        PromPlan::Binary(plan) => {
+            apply_implicit_rollups(&mut plan.lhs, max_lookback)?;
+            apply_implicit_rollups(&mut plan.rhs, max_lookback)?;
+        }
+        PromPlan::Aggregate(plan) => {
+            apply_implicit_rollups(&mut plan.inner, max_lookback)?;
+            if let Some(parameter) = &mut plan.param {
+                apply_implicit_rollups(parameter, max_lookback)?;
+            }
+        }
+        PromPlan::RangeReduction(plan) => {
+            if let Some(parameter) = &mut plan.parameter {
+                apply_implicit_rollups(parameter, max_lookback)?;
+            }
+            if let PromRangeInput::Subquery(subquery) = &mut plan.input {
+                apply_implicit_rollups(&mut subquery.inner, max_lookback)?;
+            }
+        }
+        PromPlan::Subquery(plan) => apply_implicit_rollups(&mut plan.inner, max_lookback)?,
+        PromPlan::Selector { .. } => unreachable!("selector handled before traversal"),
+    }
+    Ok(())
 }
 
 fn split_arguments(input: &str) -> Result<Vec<&str>, String> {
@@ -994,6 +1313,7 @@ fn replace_placeholders(
         }
         PromPlan::MetricsAlias(plan) => replace_placeholders(&mut plan.inner, placeholders)?,
         PromPlan::MetricsLabels(plan) => replace_placeholders(&mut plan.inner, placeholders)?,
+        PromPlan::MetricsDynamicRollup(_) => {}
         PromPlan::MetricsBinary(plan) => {
             replace_placeholders(&mut plan.lhs, placeholders)?;
             replace_placeholders(&mut plan.rhs, placeholders)?;
@@ -1104,6 +1424,524 @@ fn matching_paren(input: &str, open: usize) -> Result<usize, String> {
         }
     }
     Err("unclosed parenthesis in MetricsQL expression".into())
+}
+
+fn metricsql_scrape_interval(timestamps: &[i64], default_interval: i64) -> i64 {
+    if timestamps.len() < 2 {
+        return default_interval;
+    }
+    let first = timestamps.len().saturating_sub(21);
+    let mut intervals = timestamps[first..]
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]) as f64)
+        .collect::<Vec<_>>();
+    intervals.sort_by(|left, right| left.total_cmp(right));
+    let rank = 0.6 * (intervals.len() - 1) as f64;
+    let lower = rank.floor() as usize;
+    let upper = (lower + 1).min(intervals.len() - 1);
+    let weight = rank - rank.floor();
+    let interval = (intervals[lower] * (1.0 - weight) + intervals[upper] * weight) as i64;
+    if interval > 0 {
+        interval
+    } else {
+        default_interval
+    }
+}
+
+fn metricsql_max_previous_interval(scrape_interval: i64) -> i64 {
+    if scrape_interval <= 2_000 {
+        scrape_interval.saturating_mul(5)
+    } else if scrape_interval <= 4_000 {
+        scrape_interval.saturating_mul(3)
+    } else if scrape_interval <= 8_000 {
+        scrape_interval.saturating_mul(2)
+    } else if scrape_interval <= 16_000 {
+        scrape_interval.saturating_add(scrape_interval / 2)
+    } else if scrape_interval <= 32_000 {
+        scrape_interval.saturating_add(scrape_interval / 4)
+    } else {
+        scrape_interval.saturating_add(scrape_interval / 8)
+    }
+}
+
+fn dynamic_rollup_window(
+    op: DynamicRollupOp,
+    timestamps: &[i64],
+    step: i64,
+    instant: bool,
+    max_lookback: i64,
+) -> (i64, i64) {
+    let mut max_previous = if instant {
+        step
+    } else {
+        metricsql_max_previous_interval(metricsql_scrape_interval(timestamps, step))
+    };
+    if max_lookback > 0 {
+        max_previous = max_previous.min(max_lookback);
+    }
+    let mut window = if op.adjusts_window() {
+        step.max(max_previous)
+    } else {
+        step
+    };
+    if op == DynamicRollupOp::Default && max_lookback > 0 {
+        window = window.min(max_lookback);
+    }
+    (window, max_previous)
+}
+
+fn is_prometheus_stale_nan(value: f64) -> bool {
+    value.to_bits() == PROMETHEUS_STALE_NAN_BITS
+}
+
+fn correct_metricsql_counter_resets(samples: &mut [(i64, f64)], max_staleness: i64) {
+    let Some((_, first)) = samples.first().copied() else {
+        return;
+    };
+    let mut correction = 0.0;
+    let mut previous_timestamp = samples[0].0;
+    let mut previous_value = first;
+    let mut previous_adjusted = first;
+    for (index, (timestamp, value)) in samples.iter_mut().enumerate() {
+        if value.is_nan() {
+            correction = 0.0;
+            previous_timestamp = *timestamp;
+            previous_value = *value;
+            previous_adjusted = *value;
+            continue;
+        }
+        let raw = *value;
+        let delta = raw - previous_value;
+        if delta < 0.0 {
+            correction += if (-delta * 8.0) < previous_value {
+                previous_value - raw
+            } else {
+                previous_value
+            };
+        }
+        if index > 0 && max_staleness > 0 && *timestamp - previous_timestamp > max_staleness {
+            correction = 0.0;
+            previous_timestamp = *timestamp;
+            previous_value = raw;
+            previous_adjusted = raw;
+            continue;
+        }
+        previous_timestamp = *timestamp;
+        previous_value = raw;
+        *value = raw + correction;
+        if index > 0 && !previous_adjusted.is_nan() && *value < previous_adjusted {
+            *value = previous_adjusted;
+        }
+        previous_adjusted = *value;
+    }
+}
+
+fn previous_numeric_sample(
+    samples: &[(i64, f64)],
+    before: usize,
+    lower: i64,
+) -> Option<(i64, f64)> {
+    for &(timestamp, value) in samples[..before].iter().rev() {
+        if timestamp <= lower || value.is_nan() {
+            return None;
+        }
+        return Some((timestamp, value));
+    }
+    None
+}
+
+fn real_previous_numeric_sample(
+    samples: &[(i64, f64)],
+    before: usize,
+    current: i64,
+    max_lookback: i64,
+) -> Option<(i64, f64)> {
+    let &(timestamp, value) = samples[..before].last()?;
+    if value.is_nan() || max_lookback > 0 && current.saturating_sub(timestamp) >= max_lookback {
+        None
+    } else {
+        Some((timestamp, value))
+    }
+}
+
+fn real_next_numeric_sample(samples: &[(i64, f64)], after: usize) -> Option<(i64, f64)> {
+    let &(timestamp, value) = samples.get(after)?;
+    (!value.is_nan()).then_some((timestamp, value))
+}
+
+fn metricsql_numeric_window(samples: &[(i64, f64)]) -> Vec<(i64, f64)> {
+    let start = samples
+        .iter()
+        .rposition(|(_, value)| is_prometheus_stale_nan(*value))
+        .map_or(0, |index| index + 1);
+    samples[start..]
+        .iter()
+        .copied()
+        .filter(|(_, value)| !value.is_nan())
+        .collect()
+}
+
+fn metricsql_aggregate(
+    op: PromAggregateOp,
+    samples: &[(i64, f64)],
+    cancelled: &AtomicBool,
+) -> Result<Option<f64>, String> {
+    let Some((_, first)) = samples.first().copied() else {
+        return Ok(None);
+    };
+    let mut reduction = PromAggregateState::new(op, first);
+    for &(_, value) in &samples[1..] {
+        check_cancelled(cancelled)?;
+        reduction.add(op, value);
+    }
+    Ok(Some(reduction.finish(op)))
+}
+
+fn metricsql_delta(
+    samples: &[(i64, f64)],
+    previous: Option<(i64, f64)>,
+    real_previous: Option<(i64, f64)>,
+    real_next: Option<(i64, f64)>,
+) -> Option<f64> {
+    let Some((_, last)) = samples.last().copied() else {
+        return previous.map(|_| 0.0);
+    };
+    let mut values = samples;
+    let baseline = if let Some((_, previous)) = previous {
+        previous
+    } else if let Some((_, previous)) = real_previous {
+        return Some(last - previous);
+    } else {
+        let first = samples[0].1;
+        let delta = samples
+            .get(1)
+            .map(|(_, value)| *value - first)
+            .or_else(|| real_next.map(|(_, value)| value - first))
+            .unwrap_or(0.0);
+        if first.abs() < 10.0 * (delta.abs() + 1.0) {
+            0.0
+        } else {
+            values = &samples[1..];
+            first
+        }
+    };
+    Some(values.last().map_or(0.0, |(_, value)| *value - baseline))
+}
+
+fn metricsql_changed(previous: f64, current: f64) -> bool {
+    current != previous && (current - previous).abs() >= 1e-12 * current.abs()
+}
+
+fn metricsql_dynamic_value(
+    op: DynamicRollupOp,
+    samples: &[(i64, f64)],
+    lo: usize,
+    hi: usize,
+    lower: i64,
+    max_previous: i64,
+    max_lookback: i64,
+    cancelled: &AtomicBool,
+) -> Result<Option<f64>, String> {
+    let values = &samples[lo..hi];
+    if op == DynamicRollupOp::Default {
+        return Ok(values
+            .last()
+            .filter(|(_, value)| !is_prometheus_stale_nan(*value))
+            .map(|(_, value)| *value));
+    }
+    if op == DynamicRollupOp::Timestamp {
+        return Ok(values
+            .last()
+            .filter(|(_, value)| !is_prometheus_stale_nan(*value))
+            .map(|(timestamp, _)| *timestamp as f64 / 1_000.0));
+    }
+    if op == DynamicRollupOp::First {
+        return Ok(values
+            .first()
+            .filter(|(_, value)| !is_prometheus_stale_nan(*value))
+            .map(|(_, value)| *value));
+    }
+    if op == DynamicRollupOp::Last {
+        return Ok(values
+            .last()
+            .filter(|(_, value)| !is_prometheus_stale_nan(*value))
+            .map(|(_, value)| *value));
+    }
+
+    let numeric = metricsql_numeric_window(values);
+    let previous = previous_numeric_sample(samples, lo, lower.saturating_sub(max_previous));
+    let current = numeric.first().map_or(lower, |(timestamp, _)| *timestamp);
+    let real_previous = real_previous_numeric_sample(samples, lo, current, max_lookback);
+    let real_next = real_next_numeric_sample(samples, hi);
+    match op {
+        DynamicRollupOp::Avg => metricsql_aggregate(PromAggregateOp::Avg, &numeric, cancelled),
+        DynamicRollupOp::Min => metricsql_aggregate(PromAggregateOp::Min, &numeric, cancelled),
+        DynamicRollupOp::Max => metricsql_aggregate(PromAggregateOp::Max, &numeric, cancelled),
+        DynamicRollupOp::Sum => metricsql_aggregate(PromAggregateOp::Sum, &numeric, cancelled),
+        DynamicRollupOp::Count => Ok((!numeric.is_empty()).then_some(numeric.len() as f64)),
+        DynamicRollupOp::Present => Ok((!numeric.is_empty()).then_some(1.0)),
+        DynamicRollupOp::StdDev => {
+            metricsql_aggregate(PromAggregateOp::StdDev, &numeric, cancelled)
+        }
+        DynamicRollupOp::StdVar => {
+            metricsql_aggregate(PromAggregateOp::StdVar, &numeric, cancelled)
+        }
+        DynamicRollupOp::Deriv => {
+            if numeric.len() == 1 {
+                Ok(Some(0.0))
+            } else if numeric.len() < 2 {
+                Ok(None)
+            } else {
+                prometheus_linear_regression(&numeric, numeric[0].0, cancelled)
+                    .map(|value| value.map(|(slope, _)| slope))
+            }
+        }
+        DynamicRollupOp::Rate | DynamicRollupOp::IRate => {
+            if op == DynamicRollupOp::IRate {
+                let (start, end) = if numeric.len() >= 2 {
+                    (numeric[numeric.len() - 2], numeric[numeric.len() - 1])
+                } else if numeric.len() == 1 {
+                    let Some(previous) = previous else {
+                        return Ok(None);
+                    };
+                    (previous, numeric[0])
+                } else {
+                    return Ok(None);
+                };
+                let elapsed = end.0 - start.0;
+                return Ok((elapsed > 0).then(|| (end.1 - start.1) / (elapsed as f64 / 1_000.0)));
+            }
+            let Some(end) = numeric.last().copied() else {
+                return Ok(previous.map(|_| 0.0));
+            };
+            let start = previous.or_else(|| (numeric.len() >= 2).then_some(numeric[0]));
+            let Some(start) = start else {
+                return Ok(None);
+            };
+            let elapsed = end.0 - start.0;
+            Ok((elapsed > 0).then(|| (end.1 - start.1) / (elapsed as f64 / 1_000.0)))
+        }
+        DynamicRollupOp::Increase | DynamicRollupOp::Delta => Ok(metricsql_delta(
+            &numeric,
+            previous,
+            real_previous,
+            real_next,
+        )),
+        DynamicRollupOp::IDelta => {
+            let Some((_, last)) = numeric.last().copied() else {
+                return Ok(previous.map(|_| 0.0));
+            };
+            let prior = numeric
+                .get(numeric.len().saturating_sub(2))
+                .filter(|_| numeric.len() >= 2)
+                .copied()
+                .or(previous);
+            Ok(Some(prior.map_or(last, |(_, value)| last - value)))
+        }
+        DynamicRollupOp::Changes => {
+            if numeric.is_empty() {
+                return Ok(previous.map(|_| 0.0));
+            }
+            let mut count = 0_u64;
+            let mut index = 0_usize;
+            let mut prior = if let Some((_, value)) = previous.or(real_previous) {
+                value
+            } else {
+                count = 1;
+                index = 1;
+                numeric[0].1
+            };
+            for &(_, value) in &numeric[index..] {
+                check_cancelled(cancelled)?;
+                if metricsql_changed(prior, value) {
+                    count += 1;
+                    prior = value;
+                }
+            }
+            Ok(Some(count as f64))
+        }
+        DynamicRollupOp::Resets => {
+            if numeric.is_empty() {
+                return Ok(previous.map(|_| 0.0));
+            }
+            let (mut prior, start) = previous.map_or((numeric[0].1, 1), |(_, value)| (value, 0));
+            let mut count = 0_u64;
+            for &(_, value) in &numeric[start..] {
+                check_cancelled(cancelled)?;
+                if value < prior && metricsql_changed(prior, value) {
+                    count += 1;
+                }
+                prior = value;
+            }
+            Ok(Some(count as f64))
+        }
+        DynamicRollupOp::Default
+        | DynamicRollupOp::First
+        | DynamicRollupOp::Last
+        | DynamicRollupOp::Timestamp => unreachable!("handled before numeric rollup"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_dynamic_rollup(
+    conn: &Connection,
+    features: QueryFeatures,
+    plan: &DynamicRollupPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    keep_metric_names: bool,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let selection_start = plan
+        .selector
+        .timing
+        .selection_time(start, query_start, query_end)?;
+    let selection_stop = plan
+        .selector
+        .timing
+        .selection_time(stop, query_start, query_end)?;
+    let read_start = selection_start.min(selection_stop);
+    let read_stop = selection_start.max(selection_stop);
+    let history = if plan.op.needs_silence_history() {
+        DEFAULT_MAX_SILENCE_INTERVAL_MS
+            .max(plan.max_lookback)
+            .saturating_add(step)
+    } else {
+        step
+    };
+    let catalogs = prometheus_catalogs(conn, features.table, &plan.selector, limits, cancelled)?;
+    let mut body = Vec::new();
+    write_prometheus_prefix(&mut body, instant);
+    enforce_prometheus_output(&body, 0, limits)?;
+    let mut emitted = 0_usize;
+    let mut points = 0_u64;
+    let mut frame_bytes = 0_usize;
+    let mut remaining_work = limits.max_work_points;
+    for (metric, catalog) in catalogs {
+        check_cancelled(cancelled)?;
+        if remaining_work == 0 {
+            return Err(format!(
+                "query exceeded the maximum storage-work limit of {} points",
+                limits.max_work_points
+            ));
+        }
+        let raw = raw_query(
+            conn,
+            features,
+            &metric,
+            &plan.selector.filter,
+            storage_seconds_floor(read_start.saturating_sub(history)),
+            storage_seconds_floor(read_stop),
+            Some(remaining_work),
+        )?;
+        let work_points = raw.series.iter().map(RawSeries::len).sum();
+        consume_prometheus_work(&mut remaining_work, work_points, limits)?;
+        frame_bytes = frame_bytes.saturating_add(raw.frame_bytes);
+        let by_id: HashMap<_, _> = raw
+            .series
+            .iter()
+            .map(|series| (series.id, series))
+            .collect();
+        for meta in &catalog {
+            check_cancelled(cancelled)?;
+            let Some(series) = by_id.get(&meta.id) else {
+                continue;
+            };
+            let mut samples = Vec::with_capacity(series.len());
+            for index in 0..series.len() {
+                check_cancelled(cancelled)?;
+                samples.push((
+                    seconds_to_millis(series.timestamp(raw.frame.as_deref(), index)?),
+                    series.value(raw.frame.as_deref(), index)?,
+                ));
+            }
+            let timestamps = samples
+                .iter()
+                .map(|(timestamp, _)| *timestamp)
+                .collect::<Vec<_>>();
+            let (window, max_previous) =
+                dynamic_rollup_window(plan.op, &timestamps, step, instant, plan.max_lookback);
+            if plan.op.removes_counter_resets() {
+                correct_metricsql_counter_resets(&mut samples, plan.max_lookback);
+            }
+            let item_start = body.len();
+            comma(&mut body, emitted);
+            let retain_name = keep_metric_names || plan.op.retains_metric_name();
+            write_prometheus_item_prefix(
+                &mut body,
+                retain_name.then_some(metric.as_str()),
+                &meta.labels,
+                instant,
+                limits,
+            )?;
+            enforce_prometheus_output(&body, points, limits)?;
+            let mut lo = 0_usize;
+            let mut hi = 0_usize;
+            let mut item_points = 0_u64;
+            let mut outer = start;
+            loop {
+                check_cancelled(cancelled)?;
+                let selection_time =
+                    plan.selector
+                        .timing
+                        .selection_time(outer, query_start, query_end)?;
+                while hi < samples.len() && samples[hi].0 <= selection_time {
+                    hi += 1;
+                }
+                let lower = selection_time.saturating_sub(window);
+                while lo < hi && samples[lo].0 <= lower {
+                    lo += 1;
+                }
+                if let Some(value) = metricsql_dynamic_value(
+                    plan.op,
+                    &samples,
+                    lo,
+                    hi,
+                    lower,
+                    max_previous,
+                    plan.max_lookback,
+                    cancelled,
+                )? {
+                    admit_prometheus_point(points.saturating_add(item_points), limits)?;
+                    if !instant {
+                        comma(&mut body, item_points as usize);
+                    }
+                    write_prometheus_sample(&mut body, outer, value)?;
+                    item_points += 1;
+                    enforce_prometheus_output(&body, points.saturating_add(item_points), limits)?;
+                }
+                if outer >= stop {
+                    break;
+                }
+                let Some(next) = outer.checked_add(step).filter(|next| *next <= stop) else {
+                    break;
+                };
+                outer = next;
+            }
+            if item_points == 0 {
+                body.truncate(item_start);
+            } else {
+                write_prometheus_item_suffix(&mut body, instant);
+                emitted += 1;
+                points = points.saturating_add(item_points);
+            }
+        }
+    }
+    write_prometheus_suffix(&mut body);
+    enforce_prometheus_output(&body, points, limits)?;
+    Ok(ReadOutput {
+        body,
+        frame_bytes,
+        series: emitted as u64,
+        points,
+        intermediate_points: 0,
+        rows: points,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1816,7 +2654,10 @@ mod tests {
     fn keywords_in_labels_strings_and_metric_names_are_not_operators() {
         assert!(matches!(
             lower(r#"default_metric{word="ifnot default"}"#, 300_000, 10_000).unwrap(),
-            PromPlan::Selector { .. }
+            PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Default,
+                ..
+            })
         ));
         assert!(lower("if + 1", 300_000, 10_000).is_ok());
     }
@@ -1896,7 +2737,10 @@ mod tests {
         ));
         assert!(matches!(
             lower("(cpu,)", 300_000, 10_000).unwrap(),
-            PromPlan::Selector { .. }
+            PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Default,
+                ..
+            })
         ));
         let nested = lower(
             "sum(union(alias(cpu, \"renamed_cpu\"), alias(memory, \"renamed_memory\")))",
@@ -1958,6 +2802,48 @@ mod tests {
             "label_del(cpu, 1)",
             "label_set()",
             "label_del()",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
+        }
+    }
+
+    #[test]
+    fn default_rollup_and_windowless_rollups_match_metricsql_grammar() {
+        for query in [
+            "default_rollup(cpu)",
+            "default_rollup(cpu[2s])",
+            "default_rollup(1)",
+            "DEFAULT_ROLLUP(cpu,)",
+            "avg_over_time(cpu)",
+            "min_over_time(cpu)",
+            "max_over_time(cpu)",
+            "sum_over_time(cpu)",
+            "count_over_time(cpu)",
+            "present_over_time(cpu)",
+            "stddev_over_time(cpu)",
+            "stdvar_over_time(cpu)",
+            "FIRST_OVER_TIME(cpu,)",
+            "last_over_time(cpu)",
+            "rate(cpu)",
+            "irate(cpu)",
+            "increase(cpu)",
+            "delta(cpu)",
+            "idelta(cpu)",
+            "deriv(cpu)",
+            "changes(cpu)",
+            "resets(cpu)",
+            "timestamp(cpu)",
+            "sum(default_rollup(cpu))",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_ok(), "{query}");
+        }
+        for query in [
+            "default_rollup()",
+            "default_rollup(cpu, 1)",
+            "first_over_time()",
+            "first_over_time(cpu, 1)",
+            "avg_over_time()",
+            "avg_over_time(cpu, 1)",
         ] {
             assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
         }

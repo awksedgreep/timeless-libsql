@@ -576,5 +576,39 @@ pub(super) fn prometheus_remote_write(timestamp_ms: i64) -> Vec<u8> {
     );
     request.series("oracle_keep_a", &[(2.0, 30_000)], &[("host", "shared")]);
     request.series("oracle_keep_b", &[(3.0, 30_000)], &[("host", "shared")]);
+    request.series(
+        "oracle_mql_stale",
+        &[
+            (1.0, 0),
+            (f64::from_bits(0x7ff0_0000_0000_0002), 10_000),
+            (2.0, 20_000),
+        ],
+        &[],
+    );
+    request.series("oracle_mql_nan", &[(f64::NAN, 10_000)], &[]);
+    request.series(
+        "oracle_mql_slow_counter",
+        &[
+            (0.0, -20_000),
+            (10.0, -10_000),
+            (20.0, 0),
+            (30.0, 10_000),
+            (40.0, 20_000),
+        ],
+        &[],
+    );
+    request.series(
+        "oracle_mql_reset_counter",
+        &[
+            (10.0, -2_000),
+            (1.0, -1_000),
+            (2.0, 0),
+            (10.0, 1_000),
+            (1.0, 2_000),
+            (2.0, 3_000),
+            (3.0, 4_000),
+        ],
+        &[],
+    );
     snappy_literal(&request.encoded)
 }
