@@ -3355,3 +3355,57 @@ harness, documentation contracts, and all 83 SQL recipes (118 statements)
 pass locally. No private table, extension primitive, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed. No CI workflow was invoked.
+
+## Session 16 LogsQL P2 progress: IPv4 range filtering
+
+The checked-in
+[`2026-08-05_session16_lql_f25_ipv4_range.json`](evidence/2026-08-05_session16_lql_f25_ipv4_range.json)
+was captured from exact extension, metrics-server, and logs-server build
+`9081a326cbe9a23be8b877f2cae36b11251becf5`. It closes `LQL-F25` with
+inclusive unsigned IPv4 matching over exact retained strings. Correctness
+separately pins one address, CIDR and explicit bounds, network/broadcast
+edges, host-bit normalization, `/0`, decimal leading zeroes, inverted ranges,
+whole-string parsing, message/arbitrary fields, aliases, logical/pipeline
+composition, missing/null/non-string/invalid/embedded non-matches, strict
+errors, work limits, cancellation, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `client_ip:ipv4_range(10.0.0.0/19)`, indexed host | 128 | 27,834 | 2.706 | 3.147 | 3.508 | 1 | 1,024 | 181,028 | 128 |
+| `client_ip:ipv4_range(10.0.0.0/19)`, full fixture | 8,192 | 1,811,775 | 33.505 | 37.651 | 38.765 | 4 | 8,192 | 1,476,055 | 8,192 |
+| explicit `10.0.0.0` through `10.0.31.255`, indexed host | 128 | 27,834 | 2.679 | 2.827 | 2.870 | 1 | 1,024 | 181,028 | 128 |
+| explicit `10.0.0.0` through `10.0.31.255`, full fixture | 8,192 | 1,811,775 | 33.150 | 37.312 | 39.197 | 4 | 8,192 | 1,476,055 | 8,192 |
+
+CIDR p95 is 4.9% above the same-run word query at narrow cardinality and
+16.0% above it over the full fixture. Explicit-bound p95 is 5.8% below/15.0%
+above the same word comparison. Every equal-cardinality shape reads the same
+public blocks, entries, and payload bytes and emits the same response bytes.
+The difference is bounded address parsing/evaluation after decode, not storage
+amplification.
+
+Direct SQLite/libSQL users receive the exact retained-string operation through
+executable `SQL-LOG-018`. It strictly parses four decimal octets with public
+JSON1, packs them in unsigned network order, binds inclusive bounds, and
+applies the result limit after filtering. The API remains responsible for
+address/CIDR grammar, normalization, composition, limits, cancellation, and
+error envelopes. Identical storage work plus this ordinary SQL foundation
+rejects a new extension primitive under the documented gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+13.441 ms and the explicit durability barrier took 27.556 ms. Adding exact
+`client_ip` to every evidence row increased logical payload and wide response
+size by 206,912 bytes; logs storage is four raw blocks, 1,476,055 logical
+bytes, and 1,581,896 physical database/WAL/SHM bytes. Logs RSS HWM was 75,200
+KiB, 3,204 KiB above LQL-F23; metrics HWM was 52,152 KiB, 1,420 KiB higher.
+Both are retained as whole-process variation, and metrics storage is otherwise
+unchanged.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 221
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 20-test logs
+real-extension suite, 48 logs library tests, both complete Rust workspaces,
+Clippy with warnings denied, formatting, the 29-test Rust query harness,
+documentation contracts, and all 84 SQL recipes (119 statements) pass
+locally. No private table, extension primitive, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed. No CI workflow was invoked.

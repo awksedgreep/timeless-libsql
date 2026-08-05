@@ -355,8 +355,10 @@ error pinned `ipv4_range` cases, failing-then-passing parser and real-extension
 regressions, exact retained-string parsing, inclusive address/CIDR/two-bound
 ordering, strict grammar, logical/pipeline composition, work limits,
 cancellation, durability, and reopen. Executable `SQL-LOG-018` proves the
-bounded public JSON1 form; exact-build measurement remains the final row exit
-criterion.
+bounded public JSON1 form. Exact-build evidence at commit
+`9081a326cbe9a23be8b877f2cae36b11251becf5` records narrow/wide CIDR and
+explicit-bound matching with byte-identical same-run public reads and closes
+the row without an extension primitive.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 
