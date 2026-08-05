@@ -389,6 +389,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "ipv4_max" => Value::Integer(0x0a00_00ff),
         "string_min" => Value::Text("us-".to_owned()),
         "string_max" => Value::Text("ut".to_owned()),
+        "length_min" => Value::Integer(7),
+        "length_max" => Value::Integer(7),
         "empty_path" => Value::Text("$.nested.none".to_owned()),
         "any_path" => Value::Text("$.deployment.region".to_owned()),
         "duration_threshold" => Value::Integer(10),
@@ -1601,6 +1603,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let json_array_empty_rows = recipe_values("SQL-LOG-017", 1)?;
     let ipv4_range_rows = recipe_values("SQL-LOG-018", 0)?;
     let string_range_rows = recipe_values("SQL-LOG-019", 0)?;
+    let len_range_rows = recipe_values("SQL-LOG-020", 0)?;
     if [
         bounded,
         substring,
@@ -1683,6 +1686,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if string_range_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
         bail!("SQL-LOG-019 string range changed: {string_range_rows:?}");
+    }
+    let len_range_timestamps = len_range_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if len_range_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
+        bail!("SQL-LOG-020 length range changed: {len_range_rows:?}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -1798,6 +1808,45 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         let actual = string_range_timestamps(minimum, maximum, path)?;
         if actual != expected {
             bail!("SQL-LOG-019 bounds [{minimum:?}, {maximum:?}) at {path:?} changed: {actual:?}");
+        }
+    }
+    let len_range_sql = recipe_sql("SQL-LOG-020", 0)?;
+    let len_range_timestamps =
+        |minimum: i64, maximum: i64, path: &str, start: i64, end: i64| -> Result<Vec<i64>> {
+            let mut statement = connection.prepare(&len_range_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-020 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "length_min" => Value::Integer(minimum),
+                    "length_max" => Value::Integer(maximum),
+                    "field_path" => Value::Text(path.to_owned()),
+                    "start_ms" => Value::Integer(start),
+                    "end_ms" => Value::Integer(end),
+                    _ => parameter("SQL-LOG-020", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            Ok(statement
+                .raw_query()
+                .mapped(|row| row.get::<_, i64>(0))
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+    for (minimum, maximum, path, expected) in [
+        (7, 7, "$.deployment.region", vec![2000, 1000]),
+        (8, 8, "$.deployment.region", vec![]),
+        (0, 0, "$.nested.none", vec![2000, 1000]),
+        (0, 0, "$.nested.empty", vec![2000, 1000]),
+        (0, 0, "$.absent", vec![2000, 1000]),
+        (1, 3, "$.duration_ms", vec![]),
+        (0, 100, "$.deployment", vec![]),
+        (8, 7, "$.deployment.region", vec![]),
+    ] {
+        let actual = len_range_timestamps(minimum, maximum, path, 1000, 2000)?;
+        if actual != expected {
+            bail!("SQL-LOG-020 bounds [{minimum}, {maximum}] at {path:?} changed: {actual:?}");
         }
     }
     let field_names = recipe_values("SQL-LOG-010", 0)?;
@@ -2026,6 +2075,16 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
 
     connection.execute(
         "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+        params![500_i64, "info", "unicode", r#"{"probe":"é"}"#],
+    )?;
+    connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
+    let unicode_length = len_range_timestamps(1, 1, "$.probe", 500, 500)?;
+    if unicode_length != [500] {
+        bail!("SQL-LOG-020 Unicode codepoint length changed: {unicode_length:?}");
+    }
+
+    connection.execute(
+        "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
         params![
             3000_i64,
             "notice",
@@ -2040,6 +2099,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ("SQL-LOG-017", 0),
         ("SQL-LOG-018", 0),
         ("SQL-LOG-019", 0),
+        ("SQL-LOG-020", 0),
     ] {
         let sql = recipe_sql(identifier, statement_index)?;
         let mut statement = connection
@@ -2113,13 +2173,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 85);
+        assert_eq!(recipes.len(), 86);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            114
+            115
         );
         assert_eq!(
             recipes
@@ -2127,7 +2187,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            120
+            121
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

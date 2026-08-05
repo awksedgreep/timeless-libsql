@@ -609,6 +609,14 @@ pub enum LogPredicate {
         minimum: String,
         maximum: String,
     },
+    /// VictoriaLogs `len_range(minimum, maximum)` over the rich textual
+    /// projection. Length is measured in Unicode scalar values; both bounds
+    /// are inclusive, and missing and null project to length zero.
+    LenRange {
+        field: LogField,
+        minimum: u64,
+        maximum: u64,
+    },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
         field: LogField,
@@ -2379,6 +2387,19 @@ fn log_predicate_matches(
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::LenRange {
+            field,
+            minimum,
+            maximum,
+        } => {
+            let matched = minimum <= maximum
+                && log_field_projected_matches(field, message, level, metadata, |text| {
+                    let length = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+                    length >= *minimum && length <= *maximum
+                });
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
             field,
             message,
@@ -2444,6 +2465,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::Ipv4Range { field, .. }
         | LogPredicate::Ipv6Range { field, .. }
         | LogPredicate::StringRange { field, .. }
+        | LogPredicate::LenRange { field, .. }
         | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
@@ -3141,6 +3163,11 @@ mod tests {
                 field: LogField::Message,
                 minimum: String::new(),
                 maximum: "z".into(),
+            },
+            LogPredicate::LenRange {
+                field: LogField::Message,
+                minimum: 0,
+                maximum: u64::MAX,
             },
             LogPredicate::Regex {
                 field: LogField::Message,

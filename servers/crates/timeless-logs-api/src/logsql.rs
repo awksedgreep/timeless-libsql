@@ -719,6 +719,10 @@ pub fn parse_at(
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
+                    if let Some(predicate) = parse_len_range_filter(&token, LogField::Message)? {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
                     if let Some(predicate) = parse_case_insensitive_filter(&token)? {
                         append_predicate(&mut spec, predicate);
                         continue;
@@ -1431,6 +1435,266 @@ fn parse_string_range_filter(
     }))
 }
 
+fn parse_len_range_filter(
+    token: &str,
+    field: LogField,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    const FUNCTION: &str = "len_range";
+
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    if !token[..open].eq_ignore_ascii_case(FUNCTION) {
+        return Ok(None);
+    }
+    let close = matching_parenthesis(token, open)?;
+    if close + 1 != token.len() {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected text after LogsQL {FUNCTION}() filter"
+        )));
+    }
+    let inner = token[open + 1..close].trim();
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    let arguments = if inner.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(inner, ',')?
+            .into_iter()
+            .map(|argument| {
+                let argument = argument.trim();
+                if argument.is_empty() {
+                    return Err(LogsqlError::malformed(format!(
+                        "empty LogsQL {FUNCTION}() argument"
+                    )));
+                }
+                Ok(quoted_value(argument)?.unwrap_or_else(|| argument.to_owned()))
+            })
+            .collect::<Result<Vec<_>, LogsqlError>>()?
+    };
+    let [minimum, maximum] = arguments.as_slice() else {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {FUNCTION}() requires exactly two bounds"
+        )));
+    };
+    let minimum = parse_len_range_bound(minimum).ok_or_else(|| {
+        LogsqlError::malformed(format!(
+            "invalid LogsQL {FUNCTION}() minimum bound {minimum:?}"
+        ))
+    })?;
+    let maximum = parse_len_range_bound(maximum).ok_or_else(|| {
+        LogsqlError::malformed(format!(
+            "invalid LogsQL {FUNCTION}() maximum bound {maximum:?}"
+        ))
+    })?;
+    Ok(Some(LogPredicate::LenRange {
+        field,
+        minimum,
+        maximum,
+    }))
+}
+
+fn parse_len_range_bound(value: &str) -> Option<u64> {
+    if value.eq_ignore_ascii_case("inf") || value.eq_ignore_ascii_case("+inf") {
+        return Some(u64::MAX);
+    }
+    if invalid_base_zero_integer(value) {
+        return None;
+    }
+    parse_prefixed_u64(value)
+        .or_else(|| parse_human_bytes(value))
+        .or_else(|| parse_human_duration_ns(value))
+}
+
+fn invalid_base_zero_integer(value: &str) -> bool {
+    let value = value.strip_prefix('+').unwrap_or(value);
+    if !valid_numeric_underscores(value) {
+        return false;
+    }
+    let compact = value.replace('_', "");
+    compact.len() > 1
+        && compact.starts_with('0')
+        && compact.bytes().all(|byte| byte.is_ascii_digit())
+        && compact.bytes().any(|byte| matches!(byte, b'8' | b'9'))
+}
+
+fn parse_prefixed_u64(value: &str) -> Option<u64> {
+    let value = value.strip_prefix('+').unwrap_or(value);
+    if value.is_empty() || value.starts_with('-') || !valid_numeric_underscores(value) {
+        return None;
+    }
+    let compact = value.replace('_', "");
+    let (digits, radix) = if let Some(digits) = compact
+        .strip_prefix("0x")
+        .or_else(|| compact.strip_prefix("0X"))
+    {
+        (digits, 16)
+    } else if let Some(digits) = compact
+        .strip_prefix("0b")
+        .or_else(|| compact.strip_prefix("0B"))
+    {
+        (digits, 2)
+    } else if let Some(digits) = compact
+        .strip_prefix("0o")
+        .or_else(|| compact.strip_prefix("0O"))
+    {
+        (digits, 8)
+    } else if compact.len() > 1 && compact.starts_with('0') {
+        (&compact[1..], 8)
+    } else {
+        (compact.as_str(), 10)
+    };
+    (!digits.is_empty())
+        .then(|| u64::from_str_radix(digits, radix).ok())
+        .flatten()
+}
+
+fn valid_numeric_underscores(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.first() == Some(&b'_') || bytes.last() == Some(&b'_') {
+        return false;
+    }
+    bytes.windows(2).all(|pair| pair != b"__")
+}
+
+fn parse_human_bytes(value: &str) -> Option<u64> {
+    parse_human_segments(
+        value,
+        &[
+            ("TiB", 1_u64 << 40),
+            ("GiB", 1_u64 << 30),
+            ("MiB", 1_u64 << 20),
+            ("KiB", 1_u64 << 10),
+            ("Ti", 1_u64 << 40),
+            ("Gi", 1_u64 << 30),
+            ("Mi", 1_u64 << 20),
+            ("Ki", 1_u64 << 10),
+            ("TB", 1_000_000_000_000),
+            ("GB", 1_000_000_000),
+            ("MB", 1_000_000),
+            ("KB", 1_000),
+            ("T", 1_000_000_000_000),
+            ("G", 1_000_000_000),
+            ("M", 1_000_000),
+            ("K", 1_000),
+            ("B", 1),
+        ],
+        true,
+    )
+}
+
+fn parse_human_duration_ns(value: &str) -> Option<u64> {
+    parse_human_segments(
+        value,
+        &[
+            ("ms", 1_000_000),
+            ("ns", 1),
+            ("µs", 1_000),
+            ("y", 365 * 24 * 3_600_000_000_000),
+            ("w", 7 * 24 * 3_600_000_000_000),
+            ("d", 24 * 3_600_000_000_000),
+            ("h", 3_600_000_000_000),
+            ("m", 60_000_000_000),
+            ("s", 1_000_000_000),
+        ],
+        false,
+    )
+}
+
+fn parse_human_segments(
+    value: &str,
+    units: &[(&str, u64)],
+    allow_unsuffixed_integer: bool,
+) -> Option<u64> {
+    if value.is_empty() {
+        return None;
+    }
+    let negative = value.starts_with('-');
+    let mut remaining = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
+    if remaining.is_empty() {
+        return None;
+    }
+    let mut total = 0_u64;
+    let mut saw_suffix = false;
+    while !remaining.is_empty() {
+        let (number, used) = parse_positive_float_prefix(remaining)?;
+        remaining = &remaining[used..];
+        let Some((suffix, multiplier)) = units
+            .iter()
+            .find(|(suffix, _)| remaining.starts_with(*suffix))
+            .copied()
+        else {
+            if allow_unsuffixed_integer && remaining.is_empty() && number.fract() == 0.0 {
+                total = saturating_human_sum(total, number);
+                break;
+            }
+            return None;
+        };
+        saw_suffix = true;
+        total = saturating_human_sum(total, number * multiplier as f64);
+        remaining = &remaining[suffix.len()..];
+    }
+    if negative && total != 0 {
+        None
+    } else {
+        (saw_suffix || allow_unsuffixed_integer).then_some(total)
+    }
+}
+
+fn parse_positive_float_prefix(value: &str) -> Option<(f64, usize)> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let mut digits = 0;
+    while matches!(bytes.get(index), Some(b'0'..=b'9' | b'_')) {
+        if bytes[index].is_ascii_digit() {
+            digits += 1;
+        }
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while matches!(bytes.get(index), Some(b'0'..=b'9' | b'_')) {
+            if bytes[index].is_ascii_digit() {
+                digits += 1;
+            }
+            index += 1;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        let exponent = index;
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while matches!(bytes.get(index), Some(b'0'..=b'9' | b'_')) {
+            index += 1;
+        }
+        if exponent_start == index {
+            index = exponent;
+        }
+    }
+    let token = &value[..index];
+    if !valid_numeric_underscores(token) {
+        return None;
+    }
+    let number = token.replace('_', "").parse::<f64>().ok()?;
+    number.is_finite().then_some((number, index))
+}
+
+fn saturating_human_sum(total: u64, component: f64) -> u64 {
+    const MAX: u64 = i64::MAX as u64;
+    if !component.is_finite() || component >= MAX as f64 {
+        return MAX;
+    }
+    total.saturating_add(component.trunc() as u64).min(MAX)
+}
+
 fn parse_exact_prefix_argument(value: &str) -> Result<Option<String>, LogsqlError> {
     if !value.ends_with('*') {
         return Ok(None);
@@ -2023,6 +2287,9 @@ fn compile_field_filter(
     if let Some(predicate) = parse_string_range_filter(value, field.clone())? {
         return Ok(predicate);
     }
+    if let Some(predicate) = parse_len_range_filter(value, field.clone())? {
+        return Ok(predicate);
+    }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
             field: field.clone(),
@@ -2087,6 +2354,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
         return Ok(predicate);
     }
     if let Some(predicate) = parse_string_range_filter(atom, field.clone())? {
+        return Ok(predicate);
+    }
+    if let Some(predicate) = parse_len_range_filter(atom, field.clone())? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
@@ -2529,6 +2799,7 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
                 "ipv4_range",
                 "ipv6_range",
                 "string_range",
+                "len_range",
             ]
             .iter()
             .any(|function| is_named_filter_call(value, function))
@@ -2581,6 +2852,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         append_predicate(spec, predicate);
         return Ok(());
     } else if let Some(predicate) = parse_string_range_filter(value, log_field(&path))? {
+        append_predicate(spec, predicate);
+        return Ok(());
+    } else if let Some(predicate) = parse_len_range_filter(value, log_field(&path))? {
         append_predicate(spec, predicate);
         return Ok(());
     }
@@ -3845,6 +4119,76 @@ mod tests {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
         }
+    }
+
+    #[test]
+    fn session_sixteen_len_range_grammar_is_complete_and_strict() {
+        for query in [
+            "len_range(1, 2)",
+            r#"probe:LeN_RaNgE("5", 0b110,)"#,
+            "probe:len_range(0x5, 1_0)",
+            "probe:len_range(5B, 6B)",
+            "probe:len_range(5ns, +Inf)",
+            "probe:len_range(18446744073709551616, inf)",
+            "service:len_range(5, 6)",
+            "probe:len_range(5, 6) AND NOT probe:len_range(6, 6)",
+            "* | filter nested.probe:len_range(5, 6)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            assert!(
+                format!("{:?}", plan.spec.predicate).contains("LenRange")
+                    || format!("{:?}", plan.pipeline).contains("LenRange"),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for word_filter in ["len_range", "probe:len_range"] {
+            assert!(
+                parse_at(word_filter, TimestampUnit::Microseconds, 0).is_ok(),
+                "{word_filter}"
+            );
+        }
+
+        for malformed in [
+            "len_range(",
+            "len_range()",
+            "len_range(1)",
+            "len_range(1, 2, 3)",
+            "len_range(foo, bar)",
+            "len_range(1, bar)",
+            "len_range(-1, 2)",
+            "len_range(1.2, 3.4)",
+            "len_range(1, 2",
+            "len_range(1 2)",
+            "len_range(1,,2)",
+            "len_range(08, 9)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+
+        let bounds = |query: &str| {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            match plan.spec.predicate.unwrap() {
+                LogPredicate::LenRange {
+                    minimum, maximum, ..
+                } => (minimum, maximum),
+                predicate => panic!("{query}: unexpected predicate {predicate:?}"),
+            }
+        };
+        assert_eq!(bounds("len_range(0x10, 0b100101)"), (16, 37));
+        assert_eq!(bounds("len_range(010, 010)"), (8, 8));
+        assert_eq!(bounds("len_range(1.5KB, 22MB100KB)"), (1_500, 22_100_000));
+        assert_eq!(
+            bounds("len_range(1h5m35s, +Inf)"),
+            (3_935_000_000_000, u64::MAX)
+        );
+        assert_eq!(
+            bounds("len_range(18446744073709551616, inf)"),
+            (i64::MAX as u64, u64::MAX),
+            "VictoriaLogs saturates a human-readable bound after integer overflow"
+        );
+        assert_eq!(bounds("len_range(-0s, -0B)"), (0, 0));
     }
 
     #[test]

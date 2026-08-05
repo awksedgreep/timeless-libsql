@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 263 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 290 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -231,6 +231,20 @@ model distinction covered by the real-extension regression. The grammar and
 ordering are source-audited against `filter_string_range.go`, `parser.go`, and
 their tests at VictoriaLogs commit
 `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+
+The seventeen successful and ten error `LQL-F28` cases pin inclusive
+`len_range(minimum, maximum)` bounds over Unicode codepoint counts. They cover
+multibyte characters, missing/null/empty length zero, strings, numbers,
+booleans, arrays, VictoriaLogs' flattened object child, arbitrary nested,
+service, and message fields, inverted ranges, logical/pipeline composition,
+case-insensitive function names, trailing commas, quoted bounds, base-
+prefixed integers (including base-zero octal), byte-size and duration
+expressions, accepted negative zero, `inf`, and strict
+arity/value/separator errors. VictoriaLogs flattens a retained object parent
+to dotted children; Timeless preserves the parent and compact-projects it only
+for evaluation. The behavior and bound grammar are source-audited against
+`filter_len_range.go`, `parser.go`, and `values_encoder.go` at VictoriaLogs
+commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

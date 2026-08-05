@@ -1453,6 +1453,108 @@
       "query": "ip_group:=\"string-range\" | filter ip:string_range(alpha, beta)",
       "status": 200,
       "expected_cases": ["string-range-lower", "string-range-inside", "string-range-comma"]
+    },
+    {
+      "id": "LQL-F28-inclusive-codepoint-length",
+      "query": "ip_group:=\"string-range\" ip:len_range(5, 6)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-inside", "string-range-uppercase"]
+    },
+    {
+      "id": "LQL-F28-multibyte-characters-count-once",
+      "query": "ip_group:=\"string-range\" ip:len_range(1, 1)",
+      "status": 200,
+      "expected_cases": ["string-range-unicode-lower", "string-range-unicode-upper"]
+    },
+    {
+      "id": "LQL-F28-missing-null-and-empty-have-zero-length",
+      "query": "ip_group:=\"string-range\" ip:len_range(0, 0)",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty", "string-range-object", "string-range-nested", "string-range-service", "string-range-message"]
+    },
+    {
+      "id": "LQL-F28-negative-zero-human-bounds-are-zero",
+      "query": "ip_group:=\"string-range\" ip:len_range(-0s, -0B)",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty", "string-range-object", "string-range-nested", "string-range-service", "string-range-message"]
+    },
+    {
+      "id": "LQL-F28-numeric-textual-projection",
+      "query": "ip_group:=\"string-range\" ip:len_range(3, 3)",
+      "status": 200,
+      "expected_cases": ["string-range-numeric"]
+    },
+    {
+      "id": "LQL-F28-boolean-and-string-textual-projection",
+      "query": "ip_group:=\"string-range\" ip:len_range(4, 4)",
+      "status": 200,
+      "expected_cases": ["string-range-upper", "string-range-boolean"]
+    },
+    {
+      "id": "LQL-F28-array-textual-projection",
+      "query": "ip_group:=\"string-range\" ip:len_range(9, 9)",
+      "status": 200,
+      "expected_cases": ["string-range-comma", "string-range-array"]
+    },
+    {
+      "id": "LQL-F28-flattened-object-child",
+      "query": "ip_group:=\"string-range\" ip.value:len_range(5, 5)",
+      "status": 200,
+      "expected_cases": ["string-range-object"]
+    },
+    {
+      "id": "LQL-F28-base-prefixed-bounds",
+      "query": "ip_group:=\"string-range\" ip:len_range(0x5, 0b110)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-inside", "string-range-uppercase"]
+    },
+    {
+      "id": "LQL-F28-byte-size-bounds",
+      "query": "ip_group:=\"string-range\" ip:len_range(1B4B, 6B)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-inside", "string-range-uppercase"]
+    },
+    {
+      "id": "LQL-F28-duration-and-infinite-bounds",
+      "query": "ip_group:=\"string-range\" ip:len_range(1ns, +Inf)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-inside", "string-range-upper", "string-range-uppercase", "string-range-comma", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array"]
+    },
+    {
+      "id": "LQL-F28-inverted-range-matches-nothing",
+      "query": "ip_group:=\"string-range\" ip:len_range(6, 5)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F28-arbitrary-nested-field",
+      "query": "ip_group:=\"string-range\" nested.ip:len_range(6, 6)",
+      "status": 200,
+      "expected_cases": ["string-range-nested"]
+    },
+    {
+      "id": "LQL-F28-service-case-insensitive-name-quoted-bound-and-trailing-comma",
+      "query": "ip_group:=\"string-range\" service:LeN_RaNgE(\"6\", 0b110,)",
+      "status": 200,
+      "expected_cases": ["string-range-service"]
+    },
+    {
+      "id": "LQL-F28-unqualified-message-length",
+      "query": "ip_group:=\"string-range\" len_range(6, 6)",
+      "status": 200,
+      "expected_cases": ["string-range-message"]
+    },
+    {
+      "id": "LQL-F28-logical-composition",
+      "query": "ip_group:=\"string-range\" ip:len_range(5, 6) AND NOT ip:len_range(6, 6)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-uppercase"]
+    },
+    {
+      "id": "LQL-F28-pipeline-composition",
+      "query": "ip_group:=\"string-range\" | filter ip:len_range(5, 6)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-inside", "string-range-uppercase"]
     }
   ],
   "stats_cases": [
@@ -1866,6 +1968,76 @@
     {
       "id": "LQL-F27-unterminated-range-is-invalid",
       "query": "string_range(alpha, beta",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-empty-range-is-invalid",
+      "query": "len_range()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-one-bound-is-invalid",
+      "query": "len_range(1)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-three-bounds-are-invalid",
+      "query": "len_range(1, 2, 3)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-nonnumeric-bounds-are-invalid",
+      "query": "len_range(foo, bar)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-negative-bound-is-invalid",
+      "query": "len_range(-1, 2)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-unsuffixed-fractions-are-invalid",
+      "query": "len_range(1.2, 3.4)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-unseparated-bounds-are-invalid",
+      "query": "len_range(1 2)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-empty-middle-bound-is-invalid",
+      "query": "len_range(1,,2)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-unterminated-range-is-invalid",
+      "query": "len_range(1, 2",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F28-invalid-base-zero-octal-is-invalid",
+      "query": "len_range(08, 9)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

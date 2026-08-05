@@ -377,6 +377,14 @@ object boundary. Exact-build evidence at commit
 `de7ccf8bf53b07c9ae7e381a1c595d442028f8a4` records narrow/wide retained-
 string and typed-field ranges with byte-identical same-run public reads and
 closes the row without an extension primitive.
+`LQL-F28` now has seventeen successful and ten error pinned `len_range`
+cases, source-audited inclusive Unicode-codepoint semantics and unsigned bound
+grammar, failing-then-passing parser and real-extension regressions, retained
+rich-value projection, strict errors, aliases, logical/pipeline composition,
+work limits, cancellation, durability, and reopen. Executable `SQL-LOG-020`
+proves the public retained-text foundation with SQLite `length(TEXT)` and
+documents the intentional rich-object boundary. Exact-build evidence is the
+remaining row exit criterion.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

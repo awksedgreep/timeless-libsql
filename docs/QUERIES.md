@@ -317,6 +317,26 @@ can compact-project a selected parent without losing its type. Both behaviors
 are pinned, and no extension primitive is added because the operation already
 uses the required public decoded rows.
 
+`field:len_range(minimum, maximum)` measures the complete textual projection
+in Unicode code points and includes both non-negative bounds. A multibyte
+character such as `é` therefore has length one. Missing and null project to
+length zero; strings retain their exact text; and retained numbers, booleans,
+arrays, and objects use compact JSON text only while this predicate runs. An
+inverted range matches nothing. Function names are case-insensitive, a
+trailing comma is accepted, and message/service/arbitrary nested fields plus
+logical and pipeline composition are supported.
+
+Bounds follow the pinned VictoriaLogs unsigned grammar: quoted or unquoted
+integers, base prefixes, digit separators, `inf`, byte-size expressions, and
+duration expressions are accepted; negative values, unsuffixed fractions,
+bad arity, missing separators, and unterminated calls fail explicitly.
+Executable `SQL-LOG-020` uses public `logs` rows, JSON1, and SQLite
+`length(TEXT)` for exact retained-string and missing/null-as-empty semantics.
+Portable SQL deliberately leaves rich-value projection and language grammar
+to the Rust API. VictoriaLogs flattens objects before filtering, while
+Timeless retains and can length-project the selected parent without losing
+its type. No new extension primitive or storage format is involved.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

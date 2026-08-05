@@ -55,7 +55,9 @@ phrase boundaries; retained-array primitive membership through
 `json_array_contains_any(v1, ..., vN)`; inclusive one-address, CIDR, or
 two-address `ipv4_range(...)` filtering over exact retained strings;
 inclusive-lower/exclusive-upper `string_range(minimum, maximum)` bytewise
-filtering over the retained rich textual projection; VictoriaLogs-compatible
+filtering over the retained rich textual projection; inclusive Unicode-
+codepoint `len_range(minimum, maximum)` filtering over that projection;
+VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
 names; time sort, limit, and
@@ -162,6 +164,18 @@ ms. Every narrow shape reads one block and 1,024 entries; every wide shape
 reads four blocks and all 8,192 entries. The range predicates therefore add
 no storage amplification or row crossing and do not justify an extension
 primitive.
+
+Length-range filters accept exactly two unsigned bounds. They count Unicode
+code points rather than UTF-8 bytes, include both endpoints, treat an inverted
+range as empty, and project missing/null to length zero. Strings retain their
+text while numbers, booleans, arrays, and objects use compact JSON only during
+evaluation. Bounds accept VictoriaLogs-compatible quoted integers, base
+prefixes, underscores, `inf`, byte-size expressions, duration expressions,
+and a trailing comma; malformed values fail explicitly. `SQL-LOG-020` gives
+direct SQLite/libSQL users the executable retained-string/missing/null form
+through public rows and `length(TEXT)`. Rich projection, LogsQL grammar,
+logical/pipeline composition, limits, cancellation, and errors remain bounded
+Rust API behavior; no extension or storage contract changed.
 
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept

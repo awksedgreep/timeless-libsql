@@ -858,6 +858,19 @@ fn predicate_matches(
             ensure_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::LenRange {
+            field,
+            minimum,
+            maximum,
+        } => {
+            let matched = minimum <= maximum
+                && projected_field_matches(row, field, |text| {
+                    let length = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+                    length >= *minimum && length <= *maximum
+                });
+            ensure_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => {
             Ok(projected_field_matches(row, field, |text| {
                 text.starts_with(value)
@@ -1235,6 +1248,11 @@ mod tests {
                 field: LogField::Message,
                 minimum: String::new(),
                 maximum: "z".into(),
+            },
+            LogPredicate::LenRange {
+                field: LogField::Message,
+                minimum: 0,
+                maximum: u64::MAX,
             },
         ] {
             assert_eq!(

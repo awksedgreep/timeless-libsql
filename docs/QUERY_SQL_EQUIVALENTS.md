@@ -127,6 +127,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-017`](#sql-log-017-json-array-primitive-membership) | `LQL-F23` | current foundation | exact primitive membership in a retained JSON array through public JSON1 rows; API owns function grammar, composition, and semantic-JSON compatibility policy |
 | [`SQL-LOG-018`](#sql-log-018-ipv4-range-over-retained-strings) | `LQL-F25` | current foundation | exact whole-string IPv4 membership between inclusive packed address bounds; API owns address/CIDR grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-019`](#sql-log-019-bytewise-string-range-over-retained-text) | `LQL-F27` | current foundation | lower-inclusive/upper-exclusive bytewise range over retained text plus missing/null-as-empty; API owns rich-value projection, grammar, composition, limits, cancellation, and envelopes |
+| [`SQL-LOG-020`](#sql-log-020-unicode-codepoint-length-range-over-retained-text) | `LQL-F28` | current foundation | inclusive Unicode-codepoint length over retained text plus missing/null-as-empty; API owns rich-value projection, bound grammar, composition, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5278,6 +5279,62 @@ Timeless preserves those objects and therefore can project a selected parent
 object as compact JSON. That retained-model distinction is explicit rather
 than hidden in this string-only SQL recipe. Ordinary public rows already
 provide the operation, so no extension primitive is warranted.
+
+### SQL-LOG-020: Unicode codepoint length range over retained text
+
+Bind `:length_min` and `:length_max` as non-negative integers and
+`:field_path` as a valid SQLite JSON path such as `$.deployment.region`. This
+statement implements the retained-text foundation for
+`field:len_range(minimum, maximum)`:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT *,
+    CASE
+      WHEN json_type(metadata, :field_path) = 'text'
+        THEN json_extract(metadata, :field_path)
+      WHEN json_type(metadata, :field_path) = 'null'
+        OR json_type(metadata, :field_path) IS NULL
+        THEN ''
+    END AS length_text
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM projected
+WHERE length(length_text) >= :length_min
+  AND length(length_text) <= :length_max
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+SQLite `length(TEXT)` counts Unicode code points, not UTF-8 bytes, matching
+VictoriaLogs' `utf8.RuneCountInString` behavior for valid retained JSON text.
+Both bounds are inclusive; an inverted range returns no rows. Bounds use the
+table's configured timestamp unit (milliseconds here), timestamp endpoints
+are inclusive, `max_work_entries` bounds public decode, output is newest
+first, and `:limit` is applied after the length predicate.
+
+For a missing metadata path or JSON null, `length_text` is the empty string and
+therefore has length zero. An actual empty string is indistinguishable only for
+this predicate. Non-string JSON numbers, booleans, arrays, and objects project
+SQL NULL and do not match in this portable retained-text recipe. To query the
+public message or level column, replace the `CASE` expression with
+`message AS length_text` or `level AS length_text`.
+
+The Rust API additionally parses quoted and unquoted integer bounds, base-
+prefixed and underscored integers, `inf`, byte-size and duration forms, and a
+trailing comma. It compact-projects retained rich values without mutating
+them, composes logical and pipeline expressions, and owns work/result/response
+limits, cancellation, and HTTP errors. VictoriaLogs flattens nested objects;
+Timeless preserves and can length-project a selected parent object. Public
+SQLite rows already provide the retained-text operation, so no extension
+primitive is warranted.
 
 ## Adding the next recipe
 

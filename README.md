@@ -638,14 +638,17 @@ public rows while retaining Timeless's rich JSON types, plus static
 disjunction over the same rich projection, plus exact top-level primitive
 membership for retained JSON arrays through `json_array_contains_any(...)`,
 plus lower-inclusive/upper-exclusive bytewise `string_range(...)` filtering
-over the same non-mutating rich projection.
+over the same non-mutating rich projection, plus inclusive Unicode-codepoint
+`len_range(...)` filtering with VictoriaLogs-compatible unsigned bound
+grammar.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally
 make no inexact `LIKE`/`GLOB` equivalence claim; direct SQLite/libSQL users have
 executable exact-prefix, parameterized-membership, constant-true, and JSON1
 array-membership recipes in `SQL-LOG-014` through `SQL-LOG-017`, plus the
-retained-text byte-range foundation in `SQL-LOG-019`, including the
+retained-text byte-range and codepoint-length foundations in `SQL-LOG-019`
+and `SQL-LOG-020`, including the
 existing public posting index for declared string-only keys. `contains_all`
 and `contains_any` remain honest API-only rows: portable SQLite does not supply
 their Unicode phrase-boundary predicate. JSON-array membership needs no new
