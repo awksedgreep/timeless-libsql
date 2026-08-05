@@ -665,6 +665,8 @@ multiline composition, literal hashes inside all three quoted forms, and one
 optional terminal semicolon. Malformed tails fail explicitly with lexical
 line/column locations. This bounded parser-only behavior never enters SQLite;
 direct users continue to compose the corresponding public-row SQL recipes.
+Exact-build p95 is 3.335/39.610 ms narrow/wide versus 3.504/41.410 ms for the
+same-run plain word forms, with byte-identical public storage reads.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

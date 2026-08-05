@@ -3803,3 +3803,55 @@ locally. The executable SQL command is the Rust harness used by CLI section
 batching, compression, index, rollup, retention, transaction, migration,
 maintenance, or public batch/SQL contract changed. No CI workflow was modified
 or invoked.
+
+## Session 16 LogsQL P2 closeout: comments and multiline source
+
+The checked-in
+[`2026-08-05_session16_lql_f40_comments_multiline.json`](evidence/2026-08-05_session16_lql_f40_comments_multiline.json)
+was captured from exact extension, metrics-server, and logs-server build
+`c23bd23428c2a87e49d60e57ac121b8a346ce3c7`. It closes `LQL-F40` and Session
+16 with VictoriaLogs-compatible attached/leading/trailing comments, LF/CRLF
+multiline composition, literal hashes inside double/single/backtick literals,
+one optional terminal semicolon, and strict malformed tails. Correctness
+separately pins one-based lexical line/Unicode-column errors, comment-erased
+arguments, ordinary-query no-copy behavior, request bounds, work-limit reader
+reuse, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| comments/multiline/semicolon, indexed host | 128 | 34,677 | 3.010 | 3.335 | 3.504 | 1 | 1,024 | 235,778 | 128 |
+| comments/multiline/semicolon, full fixture | 8,192 | 2,249,775 | 36.100 | 39.610 | 41.707 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The commented form's p95 is 4.8% below the same-run narrow word query and 4.3%
+below it over the full fixture. Narrow p99 is 3.504 ms versus 3.597 ms; wide
+p99 is 41.707 ms versus 45.926 ms. Both equal-cardinality paths read the same
+public blocks, entries, and bytes and return the same public rows. The timing
+difference is retained as run variation rather than credited to the bounded
+source scan.
+
+This row intentionally has no SQL recipe. Comments, multiline layout, and a
+terminal semicolon are LogsQL source grammar in the Rust API; direct
+SQLite/libSQL users already write ordinary parameterized SQL. The common path
+borrows source without a normalization copy, and only comments or a terminal
+semicolon allocate a request-bounded same-length copy. No parser syntax enters
+SQLite, and no extension primitive could remove a measured storage read,
+decode, allocation, copy, or row crossing.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+13.256 ms and the explicit durability barrier took 38.833 ms. The fixture,
+wire bytes, and storage are byte-identical to LQL-F34: four raw blocks,
+1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM bytes. Logs
+RSS HWM was 92,216 KiB, 1,144 KiB above LQL-F34; metrics HWM was 53,180 KiB,
+3,804 KiB higher. Both are retained as whole-process variation rather than
+attributed to parser source layout.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 402
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 28-test logs real-
+extension suite, 58 logs library tests, complete extension and Rust server
+workspaces, Clippy with warnings denied, formatting, the 29-test Rust query
+harness, documentation contracts, and all 90 SQL recipes (125 statements)
+pass locally. No private table, extension primitive, storage format,
+authoritative batching, compression, index, rollup, retention, transaction,
+migration, maintenance, or public batch/SQL contract changed. No CI workflow
+was modified or invoked.

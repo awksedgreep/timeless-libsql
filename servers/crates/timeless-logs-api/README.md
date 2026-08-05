@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -83,6 +83,13 @@ one-based line and Unicode-character column locations. The common one-line
 path is borrowed without copying. Comment/semicolon normalization is bounded by
 the request body, preserves byte offsets and newlines, and remains entirely in
 the Rust API rather than the extension.
+
+Exact-build evidence over 8,192 retained rows measures the combined comment,
+multiline, and terminal-semicolon form at 3.335/39.610 ms narrow/wide p95,
+versus 3.504/41.410 ms for equal-cardinality plain word queries in the same
+run. Both paths read exactly one/four blocks, 1,024/8,192 entries, and
+235,778/1,914,055 payload bytes. The small timing difference is retained as
+run variation; source preprocessing neither amplifies nor reduces storage work.
 
 The ordered pipeline also accepts `field_values`, `field_names`,
 `fields`/`keep`, `filter`/`where`, and `stats`. Projection accepts exact dotted

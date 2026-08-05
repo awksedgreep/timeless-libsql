@@ -440,8 +440,10 @@ terminal semicolon, strict malformed tails, lexical line/column errors, request-
 bounded scanning, ordinary-query no-copy behavior, work-limit reuse, durability,
 and reopen. This is parser-only `API` ownership: direct SQLite/libSQL users write
 ordinary SQL, so neither an SQL recipe nor an extension primitive is honest.
-Exact-build narrow/wide evidence remains before the row ships and Session 16
-closes.
+Exact-build evidence at commit
+`c23bd23428c2a87e49d60e57ac121b8a346ce3c7` records narrow/wide commented
+multiline evaluation with byte-identical public reads. It closes the row and
+Session 16 without an extension primitive or storage-contract change.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 
