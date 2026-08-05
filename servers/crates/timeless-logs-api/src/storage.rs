@@ -601,6 +601,14 @@ pub enum LogPredicate {
         minimum: [u8; 16],
         maximum: [u8; 16],
     },
+    /// VictoriaLogs bytewise `string_range(minimum, maximum)` over the rich
+    /// textual projection. The lower bound is inclusive and the upper bound
+    /// is exclusive; missing and null project to the empty string.
+    StringRange {
+        field: LogField,
+        minimum: String,
+        maximum: String,
+    },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
         field: LogField,
@@ -2359,6 +2367,18 @@ fn log_predicate_matches(
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::StringRange {
+            field,
+            minimum,
+            maximum,
+        } => {
+            let matched = minimum <= maximum
+                && log_field_projected_matches(field, message, level, metadata, |text| {
+                    text >= minimum.as_str() && text < maximum.as_str()
+                });
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
             field,
             message,
@@ -2423,6 +2443,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }
         | LogPredicate::Ipv6Range { field, .. }
+        | LogPredicate::StringRange { field, .. }
         | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
@@ -3115,6 +3136,11 @@ mod tests {
                 field: LogField::Message,
                 minimum: [0; 16],
                 maximum: [u8::MAX; 16],
+            },
+            LogPredicate::StringRange {
+                field: LogField::Message,
+                minimum: String::new(),
+                maximum: "z".into(),
             },
             LogPredicate::Regex {
                 field: LogField::Message,

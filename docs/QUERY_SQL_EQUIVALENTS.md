@@ -126,6 +126,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-016`](#sql-log-016-field-no-op) | `LQL-F20` | current foundation | exact field-independent true predicate; API owns wildcard-function grammar and composition |
 | [`SQL-LOG-017`](#sql-log-017-json-array-primitive-membership) | `LQL-F23` | current foundation | exact primitive membership in a retained JSON array through public JSON1 rows; API owns function grammar, composition, and semantic-JSON compatibility policy |
 | [`SQL-LOG-018`](#sql-log-018-ipv4-range-over-retained-strings) | `LQL-F25` | current foundation | exact whole-string IPv4 membership between inclusive packed address bounds; API owns address/CIDR grammar, composition, limits, cancellation, and envelopes |
+| [`SQL-LOG-019`](#sql-log-019-bytewise-string-range-over-retained-text) | `LQL-F27` | current foundation | lower-inclusive/upper-exclusive bytewise range over retained text plus missing/null-as-empty; API owns rich-value projection, grammar, composition, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5220,6 +5221,63 @@ rejects malformed input, and owns field scoping, logical/pipeline composition,
 limits, cancellation, and HTTP errors. Ordinary public SQL already provides
 the retained-string operation; no extension scalar or storage change is
 justified.
+
+### SQL-LOG-019: bytewise string range over retained text
+
+Bind `:string_min` and `:string_max` as UTF-8 strings and `:field_path` as a
+valid SQLite JSON path such as `$.deployment.region`. This statement implements
+the retained-text foundation for `field:string_range(minimum, maximum)`:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT *,
+    CASE
+      WHEN json_type(metadata, :field_path) = 'text'
+        THEN json_extract(metadata, :field_path)
+      WHEN json_type(metadata, :field_path) = 'null'
+        OR json_type(metadata, :field_path) IS NULL
+        THEN ''
+    END AS range_text
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM projected
+WHERE CAST(range_text AS BLOB) >= CAST(:string_min AS BLOB)
+  AND CAST(range_text AS BLOB) < CAST(:string_max AS BLOB)
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+The lower bound is inclusive and the upper bound is exclusive. Equal or
+inverted bounds therefore return no rows. Casting both sides to `BLOB` makes
+the comparison an exact unsigned byte ordering over the retained UTF-8 bytes,
+independent of connection collation. Bounds use the table's configured
+timestamp unit (milliseconds here), both timestamp endpoints are inclusive,
+`max_work_entries` bounds public decode, output is newest first, and `:limit`
+is applied after the range predicate.
+
+For a missing metadata path or JSON null, `range_text` is the empty string, as
+in the pinned LogsQL predicate. An actual empty string is indistinguishable
+only for this textual comparison. Non-string JSON numbers, booleans, arrays,
+and objects deliberately project SQL NULL in this portable recipe and do not
+match. To query the public message or level column, replace the `CASE`
+expression with `message AS range_text` or `level AS range_text`.
+
+The Rust API additionally parses quoted/unquoted bounds and trailing commas,
+selects arbitrary nested fields, applies the same compact textual projection
+to retained rich values without mutating them, composes logical/pipeline
+expressions, and owns work/result/response/deadline limits, cancellation, and
+HTTP errors. VictoriaLogs flattens nested objects before this predicate;
+Timeless preserves those objects and therefore can project a selected parent
+object as compact JSON. That retained-model distinction is explicit rather
+than hidden in this string-only SQL recipe. Ordinary public rows already
+provide the operation, so no extension primitive is warranted.
 
 ## Adding the next recipe
 

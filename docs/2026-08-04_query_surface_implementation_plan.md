@@ -367,7 +367,13 @@ SQLite has no built-in IPv6 parser, so no SQL or extension surface is claimed;
 exact-build evidence at commit
 `756ec7068ca25aef82ea6b1f7d6aa6f4c45b0c97` records narrow/wide CIDR and
 explicit-bound matching with byte-identical same-run public reads and closes
-the row without an extension primitive.
+the row without an extension primitive. `LQL-F27` now has sixteen successful
+and seven error pinned `string_range` cases, source-audited half-open byte
+ordering, failing-then-passing parser and real-extension regressions, retained
+rich-value projection, strict grammar, aliases, logical/pipeline composition,
+work limits, cancellation, durability, and reopen. Executable `SQL-LOG-019`
+proves the public retained-text foundation and documents the intentional rich-
+object boundary. Exact-build evidence remains before the row ships.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

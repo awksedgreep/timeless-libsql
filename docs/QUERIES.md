@@ -297,6 +297,26 @@ public row decode already required for arbitrary rich fields. Direct SQL users
 can compose intentionally looser substring predicates when that is their
 desired contract; those predicates are not labeled LogsQL parity.
 
+`field:string_range(minimum, maximum)` compares the complete textual field in
+plain unsigned UTF-8 byte order. It includes `minimum`, excludes `maximum`,
+and therefore makes equal or inverted bounds empty. The function accepts two
+quoted or unquoted bounds, a trailing comma, case-insensitive function names,
+message/service/arbitrary nested fields, and logical or pipeline composition.
+Missing and null project to the empty string; strings keep their exact bytes;
+retained numbers, booleans, arrays, and objects use compact JSON text only for
+this predicate. Invalid arity, separators, wildcards, and unterminated input
+fail instead of being ignored.
+
+Executable `SQL-LOG-019` implements the exact lower-inclusive/upper-exclusive
+byte range for retained text plus missing/null-as-empty using only public
+`logs` rows and SQLite JSON1. It casts both candidate and bounds to BLOB so
+connection collation cannot alter byte order. Portable SQL intentionally
+leaves non-string rich values to the Rust API. VictoriaLogs flattens nested
+objects into dotted children before filtering; Timeless retains the object and
+can compact-project a selected parent without losing its type. Both behaviors
+are pinned, and no extension primitive is added because the operation already
+uses the required public decoded rows.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 240 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 263 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -215,6 +215,21 @@ strict errors. VictoriaLogs maps IPv4 input into IPv4-mapped IPv6 space and
 applies CIDR prefixes across all 128 bits, so `1.2.3.99/120` selects the mapped
 `1.2.3.0/24` range. The behavior is source-audited against
 `filter_ipv6_range.go`, `parser.go`, and their tests at VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+
+The sixteen successful and seven error `LQL-F27` cases pin plain bytewise
+`string_range(minimum, maximum)` ordering with an inclusive lower and exclusive
+upper bound. They cover equal-prefix and inverted ranges, ASCII case, UTF-8,
+quoted commas, numbers, booleans, arrays, missing/null/empty projection,
+arbitrary nested/message/service fields, trailing commas, case-insensitive
+function names, logical/pipeline composition, and strict arity/separator/
+wildcard errors. VictoriaLogs flattens an ingested object such as
+`ip:{"value":"alpha"}` into `ip.value`, leaving `ip` missing; the oracle pins
+that behavior. Timeless retains the complete object and its API may compact-
+project the selected parent without discarding fidelity, an explicit retained-
+model distinction covered by the real-extension regression. The grammar and
+ordering are source-audited against `filter_string_range.go`, `parser.go`, and
+their tests at VictoriaLogs commit
 `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and

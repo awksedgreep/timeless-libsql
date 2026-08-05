@@ -715,6 +715,10 @@ pub fn parse_at(
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
+                    if let Some(predicate) = parse_string_range_filter(&token, LogField::Message)? {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
                     if let Some(predicate) = parse_case_insensitive_filter(&token)? {
                         append_predicate(&mut spec, predicate);
                         continue;
@@ -1373,6 +1377,60 @@ fn parse_ipv6_or_cidr(value: &str) -> Option<([u8; 16], [u8; 16])> {
     Some((minimum, maximum))
 }
 
+fn parse_string_range_filter(
+    token: &str,
+    field: LogField,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    const FUNCTION: &str = "string_range";
+
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    if !token[..open].eq_ignore_ascii_case(FUNCTION) {
+        return Ok(None);
+    }
+    let close = matching_parenthesis(token, open)?;
+    if close + 1 != token.len() {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected text after LogsQL {FUNCTION}() filter"
+        )));
+    }
+    let inner = token[open + 1..close].trim();
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    let arguments = if inner.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(inner, ',')?
+            .into_iter()
+            .map(|argument| {
+                let argument = argument.trim();
+                if argument.is_empty() {
+                    return Err(LogsqlError::malformed(format!(
+                        "empty LogsQL {FUNCTION}() argument"
+                    )));
+                }
+                let quoted = quoted_value(argument)?;
+                if quoted.is_none() && argument.contains('*') {
+                    return Err(LogsqlError::malformed(format!(
+                        "unquoted wildcard in LogsQL {FUNCTION}() argument"
+                    )));
+                }
+                Ok(quoted.unwrap_or_else(|| argument.to_owned()))
+            })
+            .collect::<Result<Vec<_>, LogsqlError>>()?
+    };
+    let [minimum, maximum] = arguments.as_slice() else {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {FUNCTION}() requires exactly two bounds"
+        )));
+    };
+    Ok(Some(LogPredicate::StringRange {
+        field,
+        minimum: minimum.clone(),
+        maximum: maximum.clone(),
+    }))
+}
+
 fn parse_exact_prefix_argument(value: &str) -> Result<Option<String>, LogsqlError> {
     if !value.ends_with('*') {
         return Ok(None);
@@ -1962,6 +2020,9 @@ fn compile_field_filter(
     if let Some(predicate) = parse_ipv6_range_filter(value, field.clone())? {
         return Ok(predicate);
     }
+    if let Some(predicate) = parse_string_range_filter(value, field.clone())? {
+        return Ok(predicate);
+    }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
             field: field.clone(),
@@ -2023,6 +2084,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
         return Ok(predicate);
     }
     if let Some(predicate) = parse_ipv6_range_filter(atom, field.clone())? {
+        return Ok(predicate);
+    }
+    if let Some(predicate) = parse_string_range_filter(atom, field.clone())? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
@@ -2464,6 +2528,7 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
                 "json_array_contains_any",
                 "ipv4_range",
                 "ipv6_range",
+                "string_range",
             ]
             .iter()
             .any(|function| is_named_filter_call(value, function))
@@ -2513,6 +2578,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         append_predicate(spec, predicate);
         return Ok(());
     } else if let Some(predicate) = parse_ipv6_range_filter(value, log_field(&path))? {
+        append_predicate(spec, predicate);
+        return Ok(());
+    } else if let Some(predicate) = parse_string_range_filter(value, log_field(&path))? {
         append_predicate(spec, predicate);
         return Ok(());
     }
@@ -3731,6 +3799,48 @@ mod tests {
             "ipv6_range(::1, ::2, ::3)",
             "ipv6_range(::1 ::2)",
             "ipv6_range(::1*)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_sixteen_string_range_grammar_is_complete_and_strict() {
+        for query in [
+            "string_range(alpha, beta)",
+            r#"probe:string_range("alpha,one", "beta) two")"#,
+            r#"probe:string_range("", beta)"#,
+            "probe:StRiNg_RaNgE(alpha, beta,)",
+            r#"probe:string_range("é", "ê")"#,
+            r#"probe:string_range("*", "**")"#,
+            "service:string_range(alpha, beta)",
+            "probe:string_range(alpha, beta) AND NOT probe:string_range(alphaz, beta)",
+            "* | filter nested.probe:string_range(alpha, beta)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            assert!(plan.spec.metadata_exact.is_empty(), "{query}: {plan:?}");
+            assert!(
+                plan.spec.predicate.is_some() || !plan.pipeline.is_empty(),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for word_filter in ["string_range", "probe:string_range"] {
+            assert!(
+                parse_at(word_filter, TimestampUnit::Microseconds, 0).is_ok(),
+                "{word_filter}"
+            );
+        }
+
+        for malformed in [
+            "string_range(",
+            "string_range()",
+            "string_range(alpha)",
+            "string_range(alpha, beta, gamma)",
+            "string_range(alpha beta)",
+            "string_range(alpha*, beta)",
+            "string_range(, beta)",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");

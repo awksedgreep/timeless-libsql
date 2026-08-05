@@ -99,6 +99,23 @@
     {"case": "ipv6-message-embedded", "_msg": "[2001:db8::42]:443", "ip_group": "ipv6"},
     {"case": "ipv6-mapped-low", "_msg": "v6 mapped low", "ip_group": "ipv6", "ip": "1.2.3.4"},
     {"case": "ipv6-mapped-outside", "_msg": "v6 mapped outside", "ip_group": "ipv6", "ip": "9.0.0.0"},
+    {"case": "string-range-missing", "_msg": "range missing", "ip_group": "string-range"},
+    {"case": "string-range-null", "_msg": "range null", "ip_group": "string-range", "ip": null},
+    {"case": "string-range-empty", "_msg": "range empty", "ip_group": "string-range", "ip": ""},
+    {"case": "string-range-lower", "_msg": "range lower", "ip_group": "string-range", "ip": "alpha"},
+    {"case": "string-range-inside", "_msg": "range inside", "ip_group": "string-range", "ip": "alpha2"},
+    {"case": "string-range-upper", "_msg": "range upper", "ip_group": "string-range", "ip": "beta"},
+    {"case": "string-range-uppercase", "_msg": "range uppercase", "ip_group": "string-range", "ip": "Alpha"},
+    {"case": "string-range-comma", "_msg": "range comma", "ip_group": "string-range", "ip": "alpha,one"},
+    {"case": "string-range-unicode-lower", "_msg": "range unicode low", "ip_group": "string-range", "ip": "é"},
+    {"case": "string-range-unicode-upper", "_msg": "range unicode high", "ip_group": "string-range", "ip": "ê"},
+    {"case": "string-range-numeric", "_msg": "range numeric", "ip_group": "string-range", "ip": 123},
+    {"case": "string-range-boolean", "_msg": "range boolean", "ip_group": "string-range", "ip": true},
+    {"case": "string-range-array", "_msg": "range array", "ip_group": "string-range", "ip": ["alpha"]},
+    {"case": "string-range-object", "_msg": "range object", "ip_group": "string-range", "ip": {"value": "alpha"}},
+    {"case": "string-range-nested", "_msg": "range nested", "ip_group": "string-range", "nested": {"ip": "alpha3"}},
+    {"case": "string-range-service", "_msg": "range service", "ip_group": "string-range", "service": "alpha4"},
+    {"case": "string-range-message", "_msg": "middle", "ip_group": "string-range"},
     {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
     {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
     {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
@@ -1114,6 +1131,13 @@
         "ipv6-low", "ipv6-uppercase", "ipv6-upper", "ipv6-outside",
         "ipv6-invalid", "ipv6-embedded", "ipv6-service", "ipv6-message",
         "ipv6-message-embedded", "ipv6-mapped-low", "ipv6-mapped-outside",
+        "string-range-missing", "string-range-null", "string-range-empty",
+        "string-range-lower", "string-range-inside", "string-range-upper",
+        "string-range-uppercase", "string-range-comma",
+        "string-range-unicode-lower", "string-range-unicode-upper",
+        "string-range-numeric", "string-range-boolean", "string-range-array",
+        "string-range-object", "string-range-nested", "string-range-service",
+        "string-range-message",
         "page-0", "page-1", "page-2", "page-3",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
@@ -1333,6 +1357,102 @@
       "query": "ip_group:=\"ipv6\" | filter ip:ipv6_range(2001:db8::/112)",
       "status": 200,
       "expected_cases": ["ipv6-network", "ipv6-low", "ipv6-uppercase", "ipv6-upper"]
+    },
+    {
+      "id": "LQL-F27-lower-inclusive-upper-exclusive",
+      "query": "ip_group:=\"string-range\" ip:string_range(alpha, beta)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-inside", "string-range-comma"]
+    },
+    {
+      "id": "LQL-F27-prefix-bound-is-exclusive",
+      "query": "ip_group:=\"string-range\" ip:string_range(alpha, alpha2)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-comma"]
+    },
+    {
+      "id": "LQL-F27-missing-null-and-empty-project-empty",
+      "query": "ip_group:=\"string-range\" ip:string_range(\"\", \"!\")",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty", "string-range-object", "string-range-nested", "string-range-service", "string-range-message"]
+    },
+    {
+      "id": "LQL-F27-uppercase-byte-order",
+      "query": "ip_group:=\"string-range\" ip:string_range(A, B)",
+      "status": 200,
+      "expected_cases": ["string-range-uppercase"]
+    },
+    {
+      "id": "LQL-F27-quoted-comma-bound",
+      "query": "ip_group:=\"string-range\" ip:string_range(\"alpha,one\", \"alpha,one!\")",
+      "status": 200,
+      "expected_cases": ["string-range-comma"]
+    },
+    {
+      "id": "LQL-F27-unicode-byte-order",
+      "query": "ip_group:=\"string-range\" ip:string_range(\"é\", \"ê\")",
+      "status": 200,
+      "expected_cases": ["string-range-unicode-lower"]
+    },
+    {
+      "id": "LQL-F27-numeric-textual-projection",
+      "query": "ip_group:=\"string-range\" ip:string_range(100, 200)",
+      "status": 200,
+      "expected_cases": ["string-range-numeric"]
+    },
+    {
+      "id": "LQL-F27-boolean-textual-projection",
+      "query": "ip_group:=\"string-range\" ip:string_range(true, truez)",
+      "status": 200,
+      "expected_cases": ["string-range-boolean"]
+    },
+    {
+      "id": "LQL-F27-array-textual-projection",
+      "query": "ip_group:=\"string-range\" ip:string_range(\"[\", \"\\\\\")",
+      "status": 200,
+      "expected_cases": ["string-range-array"]
+    },
+    {
+      "id": "LQL-F27-object-is-flattened-to-nested-field",
+      "query": "ip_group:=\"string-range\" ip.value:string_range(alpha, beta)",
+      "status": 200,
+      "expected_cases": ["string-range-object"]
+    },
+    {
+      "id": "LQL-F27-inverted-range-matches-nothing",
+      "query": "ip_group:=\"string-range\" ip:string_range(z, a)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F27-arbitrary-nested-field",
+      "query": "ip_group:=\"string-range\" nested.ip:string_range(alpha, beta)",
+      "status": 200,
+      "expected_cases": ["string-range-nested"]
+    },
+    {
+      "id": "LQL-F27-service-and-case-insensitive-name-with-trailing-comma",
+      "query": "ip_group:=\"string-range\" service:StRiNg_RaNgE(alpha, beta,)",
+      "status": 200,
+      "expected_cases": ["string-range-service"]
+    },
+    {
+      "id": "LQL-F27-unqualified-message-range",
+      "query": "ip_group:=\"string-range\" string_range(m, n)",
+      "status": 200,
+      "expected_cases": ["string-range-message"]
+    },
+    {
+      "id": "LQL-F27-logical-composition",
+      "query": "ip_group:=\"string-range\" ip:string_range(alpha, beta) AND NOT ip:string_range(alpha2, beta)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-comma"]
+    },
+    {
+      "id": "LQL-F27-pipeline-composition",
+      "query": "ip_group:=\"string-range\" | filter ip:string_range(alpha, beta)",
+      "status": 200,
+      "expected_cases": ["string-range-lower", "string-range-inside", "string-range-comma"]
     }
   ],
   "stats_cases": [
@@ -1697,6 +1817,55 @@
     {
       "id": "LQL-F26-unseparated-bounds-are-invalid",
       "query": "ipv6_range(::1 ::2)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F27-empty-range-is-invalid",
+      "query": "string_range()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F27-one-bound-is-invalid",
+      "query": "string_range(alpha)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F27-three-bounds-are-invalid",
+      "query": "string_range(alpha, beta, gamma)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F27-unseparated-bounds-are-invalid",
+      "query": "string_range(alpha beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F27-attached-wildcard-is-invalid",
+      "query": "string_range(alpha*, beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F27-leading-empty-bound-is-invalid",
+      "query": "string_range(, beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F27-unterminated-range-is-invalid",
+      "query": "string_range(alpha, beta",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -54,7 +54,8 @@ full-message exact, start-anchored exact-prefix, and static
 phrase boundaries; retained-array primitive membership through
 `json_array_contains_any(v1, ..., vN)`; inclusive one-address, CIDR, or
 two-address `ipv4_range(...)` filtering over exact retained strings;
-VictoriaLogs-compatible
+inclusive-lower/exclusive-upper `string_range(minimum, maximum)` bytewise
+filtering over the retained rich textual projection; VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
 names; time sort, limit, and
@@ -138,6 +139,21 @@ equivalent same-run word filter measures 3.117/36.940 ms. Every narrow shape
 reads one block and 1,024 entries; every wide shape reads four blocks and all
 8,192 entries. The difference is bounded 16-byte parsing/evaluation over
 byte-identical public reads, not a missing storage primitive.
+
+String-range filters accept exactly two quoted or unquoted bounds and compare
+the complete projected field in unsigned UTF-8 byte order. The lower bound is
+inclusive and the upper bound is exclusive; equal or inverted bounds match
+nothing. Missing and null project to empty, strings retain their bytes, and
+numbers, booleans, arrays, and objects use compact JSON text only while the
+predicate runs. Stored metadata is unchanged. Unqualified filters select the
+message, arbitrary dotted fields and service aliases are composable, a
+trailing comma is accepted, and malformed arity/separators/wildcards fail
+explicitly. `SQL-LOG-019` gives direct SQLite/libSQL users the executable
+string/missing/null foundation with binary BLOB comparison; rich projection,
+LogsQL grammar, logical/pipeline composition, limits, cancellation, and errors
+remain bounded Rust API work. VictoriaLogs flattens nested objects before
+querying them, while Timeless retains and can compact-project the selected
+parent object; this fidelity-preserving distinction is documented and tested.
 
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept

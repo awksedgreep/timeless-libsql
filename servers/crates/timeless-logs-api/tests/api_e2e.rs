@@ -2153,6 +2153,288 @@ async fn session_sixteen_ipv6_range_matches_retained_strings_and_reopens() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_string_range_matches_rich_fields_and_reopens() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("string-range-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(vec![
+            LogEntry {
+                ts: 1_814_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "missing".into(),
+                metadata_json: r#"{"case":"missing"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_002,
+                level: 1,
+                severity: "info".into(),
+                message: "null".into(),
+                metadata_json: r#"{"case":"null","probe":null}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_003,
+                level: 1,
+                severity: "info".into(),
+                message: "empty".into(),
+                metadata_json: r#"{"case":"empty","probe":""}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_004,
+                level: 1,
+                severity: "info".into(),
+                message: "lower".into(),
+                metadata_json: r#"{"case":"lower","probe":"alpha"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_005,
+                level: 1,
+                severity: "info".into(),
+                message: "inside".into(),
+                metadata_json: r#"{"case":"inside","probe":"alpha2"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_006,
+                level: 1,
+                severity: "info".into(),
+                message: "upper".into(),
+                metadata_json: r#"{"case":"upper","probe":"beta"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_007,
+                level: 1,
+                severity: "info".into(),
+                message: "case".into(),
+                metadata_json: r#"{"case":"case","probe":"Alpha"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_008,
+                level: 1,
+                severity: "info".into(),
+                message: "unicode low".into(),
+                metadata_json: r#"{"case":"unicode-low","probe":"éclair"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_009,
+                level: 1,
+                severity: "info".into(),
+                message: "unicode upper".into(),
+                metadata_json: r#"{"case":"unicode-upper","probe":"ê"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_010,
+                level: 1,
+                severity: "info".into(),
+                message: "numeric".into(),
+                metadata_json: r#"{"case":"numeric","probe":123}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_011,
+                level: 1,
+                severity: "info".into(),
+                message: "boolean".into(),
+                metadata_json: r#"{"case":"boolean","probe":true}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_012,
+                level: 1,
+                severity: "info".into(),
+                message: "array".into(),
+                metadata_json: r#"{"case":"array","probe":["alpha"]}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_013,
+                level: 1,
+                severity: "info".into(),
+                message: "object".into(),
+                metadata_json: r#"{"case":"object","probe":{"key":"alpha"}}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_014,
+                level: 1,
+                severity: "info".into(),
+                message: "nested".into(),
+                metadata_json: r#"{"case":"nested","nested":{"probe":"alpha3"}}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_015,
+                level: 1,
+                severity: "info".into(),
+                message: "service".into(),
+                metadata_json: r#"{"case":"service","service":"alpha4"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_016,
+                level: 1,
+                severity: "info".into(),
+                message: "middle".into(),
+                metadata_json: r#"{"case":"message"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_814_000_000_000_017,
+                level: 1,
+                severity: "info".into(),
+                message: "zulu".into(),
+                metadata_json: r#"{"case":"message-outside"}"#.into(),
+            },
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn cases(storage: &Storage, query: &str) -> Vec<String> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap()["case"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    let queries = [
+        ("probe:string_range(alpha, beta)", vec!["lower", "inside"]),
+        ("probe:string_range(alpha, alpha2)", vec!["lower"]),
+        (
+            r#"probe:string_range("", b)"#,
+            vec![
+                "missing",
+                "null",
+                "empty",
+                "lower",
+                "inside",
+                "case",
+                "numeric",
+                "array",
+                "nested",
+                "service",
+                "message",
+                "message-outside",
+            ],
+        ),
+        ("probe:string_range(A, B)", vec!["case"]),
+        (r#"probe:string_range("é", "ê")"#, vec!["unicode-low"]),
+        ("probe:string_range(100, 200)", vec!["numeric"]),
+        ("probe:string_range(true, truez)", vec!["boolean"]),
+        (r#"probe:string_range("[", "\\")"#, vec!["array"]),
+        (r#"probe:string_range("{", "|")"#, vec!["object"]),
+        ("probe:string_range(alpha, alpha)", Vec::new()),
+        ("probe:string_range(z, a)", Vec::new()),
+        ("nested.probe:string_range(alpha, beta)", vec!["nested"]),
+        ("service:string_range(alpha, beta)", vec!["service"]),
+        ("string_range(l, n)", vec!["missing", "lower", "message"]),
+        (
+            "probe:string_range(alpha, beta) AND NOT probe:string_range(alpha2, beta)",
+            vec!["lower"],
+        ),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(cases(&storage, query).await, *expected, "{query}");
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "* | filter probe:string_range(alpha, beta) | fields case | limit 100",
+        )
+        .await
+        .into_iter()
+        .map(|row| row["case"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>(),
+        ["lower", "inside"]
+    );
+
+    for malformed in [
+        "string_range(",
+        "string_range()",
+        "string_range(alpha)",
+        "string_range(alpha, beta, gamma)",
+        "string_range(alpha beta)",
+        "string_range(alpha*, beta)",
+        "string_range(, beta)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "probe:string_range(alpha, beta) | limit 100",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        cases(&storage, "probe:string_range(alpha, beta)")
+            .await
+            .len(),
+        2,
+        "the reader must remain reusable after a bounded-work rejection"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(cases(&reopened, query).await, expected, "reopened: {query}");
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

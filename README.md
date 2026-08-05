@@ -636,13 +636,16 @@ exact-prefix matching, and static multi-exact `in(...)` membership over bounded
 public rows while retaining Timeless's rich JSON types, plus static
 `contains_all(...)` phrase conjunction and `contains_any(...)` phrase
 disjunction over the same rich projection, plus exact top-level primitive
-membership for retained JSON arrays through `json_array_contains_any(...)`.
+membership for retained JSON arrays through `json_array_contains_any(...)`,
+plus lower-inclusive/upper-exclusive bytewise `string_range(...)` filtering
+over the same non-mutating rich projection.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally
 make no inexact `LIKE`/`GLOB` equivalence claim; direct SQLite/libSQL users have
 executable exact-prefix, parameterized-membership, constant-true, and JSON1
-array-membership recipes in `SQL-LOG-014` through `SQL-LOG-017`, including the
+array-membership recipes in `SQL-LOG-014` through `SQL-LOG-017`, plus the
+retained-text byte-range foundation in `SQL-LOG-019`, including the
 existing public posting index for declared string-only keys. `contains_all`
 and `contains_any` remain honest API-only rows: portable SQLite does not supply
 their Unicode phrase-boundary predicate. JSON-array membership needs no new
