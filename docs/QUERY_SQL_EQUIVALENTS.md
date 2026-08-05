@@ -3561,6 +3561,93 @@ Executable regression: Rust SQL-equivalent harness `SQL-MQL-003`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_union_alias_match_victoriametrics_and_reopen`.
 
+### SQL-MQL-004: `label_set` and `label_del`
+
+The public grid returns stored labels as JSON TEXT and the metric name as the
+separately bound identity. One `label_set` pair is an ordinary JSON projection;
+an empty value deletes the destination, including a missing destination as a
+no-op. Treat `__name__` as the separate name column rather than inserting it
+into the public labels object:
+
+```sql
+WITH input(name, labels, ts, value) AS MATERIALIZED (
+  SELECT :metric, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  CASE WHEN :label_name = '__name__'
+       THEN NULLIF(:label_value, '')
+       ELSE name
+  END AS name,
+  CASE WHEN :label_name = '__name__' THEN labels
+       WHEN :label_value = '' THEN json_remove(labels, :label_path)
+       ELSE json_set(labels, :label_path, :label_value)
+  END AS labels,
+  ts,
+  value
+FROM input
+ORDER BY name, labels, ts;
+```
+
+`label_del` uses the same identity split:
+
+```sql
+WITH input(name, labels, ts, value) AS MATERIALIZED (
+  SELECT :metric, labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT
+  CASE WHEN :delete_label = '__name__' THEN NULL ELSE name END AS name,
+  CASE WHEN :delete_label = '__name__' THEN labels
+       ELSE json_remove(labels, :delete_path)
+  END AS labels,
+  ts,
+  value
+FROM input
+ORDER BY name, labels, ts;
+```
+
+Bind `:label_name` or `:delete_label` as the decoded label name. For a
+non-name label, bind `:label_path` or `:delete_path` as the corresponding valid
+SQLite JSON path; for example, label `environment` uses `$.environment`.
+`:label_value` is TEXT. Repeating the projection CTE once per argument pair,
+in source order, implements multiple pairs and makes the last duplicate
+destination win. Repeating `json_remove` implements multiple deletions;
+missing paths remain no-ops. A direct caller must quote non-identifier label
+names correctly when constructing a JSON path rather than concatenating
+untrusted text into SQL.
+
+All timestamps use the metrics table's native unit. `:start` and `:end` are
+inclusive evaluation bounds, `:step` is positive, and `:lookback` is open-left
+and closed-right. `name` is nullable TEXT after name deletion, `labels` is
+JSON TEXT, `ts` is INTEGER, and `value` is REAL or NULL under the public-grid
+contract. Ordering is deterministic by the complete output identity and
+timestamp.
+
+Pinned VictoriaMetrics rejects a bare transformation that collapses multiple
+source identities to the same complete output labelset. Direct SQL users must
+check the projected `(name, labels)` identities—retaining source identity in a
+CTE and using `GROUP BY name, labels HAVING count(DISTINCT source_identity) >
+1`—before returning the result. The Rust API owns that error, scalar-to-vector
+conversion, case-insensitive function grammar, trailing commas,
+`keep_metric_names`, nested expression composition, response types, limits,
+cancellation, and diagnostics.
+
+These statements use only public extension surfaces and perform no additional
+storage read beyond their input grid. Label strings cloned across output
+series are charged incrementally to the Rust response limit. No extension
+primitive or storage-format change is warranted.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-004`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_label_set_del_match_victoriametrics_and_reopen`.
+
 ## LogsQL foundations and equivalents
 
 ### SQL-LOG-001: bounded filter, sort, and pagination

@@ -12391,6 +12391,308 @@ async fn session_fifteen_metricsql_union_alias_match_victoriametrics_and_reopen(
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_label_set_del_match_victoriametrics_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_fifteen_metricsql_labels.db");
+    let base = 1_785_908_006_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "mql_label_a{{host=\"shared\",zone=\"east\"}} 2 {}\n",
+            "mql_label_b{{host=\"shared\",zone=\"east\"}} 3 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let set = mql_query(
+        &app,
+        concat!(
+            "label_set(mql_label_a, \"environment\", \"production\", ",
+            "\"host\", \"rewritten\")"
+        ),
+        base,
+    )
+    .await;
+    assert_eq!(set.0, StatusCode::OK, "{}", set.1);
+    assert_eq!(
+        set.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {
+                "__name__": "mql_label_a",
+                "environment": "production",
+                "host": "rewritten",
+                "zone": "east"
+            },
+            "value": [base, "2"]
+        }])
+    );
+    let empty_removes = mql_query(
+        &app,
+        "label_set(mql_label_a, \"zone\", \"\", \"missing\", \"\")",
+        base,
+    )
+    .await;
+    assert_eq!(empty_removes.0, StatusCode::OK, "{}", empty_removes.1);
+    assert_eq!(
+        empty_removes.1["data"]["result"][0]["metric"],
+        serde_json::json!({"__name__": "mql_label_a", "host": "shared"})
+    );
+    let renamed = mql_query(
+        &app,
+        "label_set(mql_label_a, \"__name__\", \"mql_label_renamed\")",
+        base,
+    )
+    .await;
+    assert_eq!(renamed.0, StatusCode::OK, "{}", renamed.1);
+    assert_eq!(
+        renamed.1["data"]["result"][0]["metric"]["__name__"],
+        "mql_label_renamed"
+    );
+    let last_wins = mql_query(
+        &app,
+        "label_set(mql_label_a, \"host\", \"first\", \"host\", \"second\")",
+        base,
+    )
+    .await;
+    assert_eq!(last_wins.0, StatusCode::OK, "{}", last_wins.1);
+    assert_eq!(last_wins.1["data"]["result"][0]["metric"]["host"], "second");
+    assert_eq!(
+        mql_query(&app, "label_set(mql_label_a, \"host\", \"second\",)", base,).await,
+        mql_query(&app, "label_set(mql_label_a, \"host\", \"second\")", base,).await
+    );
+    assert_eq!(
+        mql_query(&app, "label_set(mql_label_a)", base).await.1["data"]["result"][0]["metric"],
+        serde_json::json!({"__name__": "mql_label_a", "host": "shared", "zone": "east"})
+    );
+
+    let deleted = mql_query(&app, "label_del(mql_label_a, \"zone\", \"missing\")", base).await;
+    assert_eq!(deleted.0, StatusCode::OK, "{}", deleted.1);
+    assert_eq!(
+        deleted.1["data"]["result"][0]["metric"],
+        serde_json::json!({"__name__": "mql_label_a", "host": "shared"})
+    );
+    let nameless = mql_query(&app, "label_del(mql_label_a, \"__name__\")", base).await;
+    assert_eq!(nameless.0, StatusCode::OK, "{}", nameless.1);
+    assert_eq!(
+        nameless.1["data"]["result"][0]["metric"],
+        serde_json::json!({"host": "shared", "zone": "east"})
+    );
+    assert_eq!(
+        mql_query(&app, "label_del(mql_label_a)", base).await.1["data"]["result"][0]["metric"],
+        serde_json::json!({"__name__": "mql_label_a", "host": "shared", "zone": "east"})
+    );
+
+    let nested = mql_query(
+        &app,
+        concat!(
+            "LABEL_DEL(LABEL_SET(mql_label_a, \"environment\", \"production\", ",
+            "\"host\", \"rewritten\"), \"zone\", \"missing\")"
+        ),
+        base,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"][0]["metric"],
+        serde_json::json!({
+            "__name__": "mql_label_a",
+            "environment": "production",
+            "host": "rewritten"
+        })
+    );
+    assert_eq!(
+        mql_query(
+            &app,
+            concat!(
+                "label_del(label_set(mql_label_a, \"environment\", \"production\", ",
+                "\"host\", \"rewritten\"), \"zone\", \"missing\") keep_metric_names"
+            ),
+            base,
+        )
+        .await,
+        nested
+    );
+    let scalar = mql_query(&app, "label_set(1, \"kind\", \"scalar\")", base).await;
+    assert_eq!(scalar.0, StatusCode::OK, "{}", scalar.1);
+    assert_eq!(
+        scalar.1["data"]["result"],
+        serde_json::json!([{"metric": {"kind": "scalar"}, "value": [base, "1"]}])
+    );
+    let aggregate = mql_query(
+        &app,
+        "sum(label_set(mql_label_a, \"host\", \"rewritten\"))",
+        base,
+    )
+    .await;
+    assert_eq!(aggregate.0, StatusCode::OK, "{}", aggregate.1);
+    assert_eq!(
+        aggregate.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base, "2"]}])
+    );
+
+    for query in [
+        "label_set({__name__=~\"mql_label_a|mql_label_b\"}, \"__name__\", \"mql_label_collision\")",
+        "label_del({__name__=~\"mql_label_a|mql_label_b\"}, \"__name__\")",
+    ] {
+        let collision = mql_query(&app, query, base).await;
+        assert_eq!(
+            collision.0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}: {}",
+            collision.1
+        );
+        assert_eq!(collision.1["errorType"], "execution");
+        assert!(collision.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate output timeseries"));
+    }
+    for query in [
+        "label_set(mql_label_a, \"host\")",
+        "label_set(mql_label_a, \"host\", 1)",
+        "label_del(mql_label_a, 1)",
+        "label_set()",
+        "label_del()",
+    ] {
+        let invalid = mql_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    for query in [
+        "label_set(mql_label_a, \"host\", \"rewritten\")",
+        "label_del(mql_label_a, \"zone\")",
+    ] {
+        let stable = prom_query(&app, query, base).await;
+        assert_eq!(stable.0, StatusCode::BAD_REQUEST, "{query}: {}", stable.1);
+        assert_eq!(stable.1["errorType"], "bad_data");
+    }
+
+    let range = mql_query_range(
+        &app,
+        "label_set(mql_label_a, \"environment\", \"production\")",
+        base,
+        base,
+        1,
+    )
+    .await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(range.1["data"]["resultType"], "matrix");
+    assert_eq!(
+        range.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "2"]])
+    );
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair(
+                "query",
+                "label_set(mql_label_a, \"environment\", \"production\", \"host\", \"rewritten\")",
+            )
+            .append_pair("time", &base.to_string())
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted, set);
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query(
+        &work_limited,
+        "label_set({__name__=~\"mql_label_a|mql_label_b\"}, \"host\", \"rewritten\")",
+        base,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_response_bytes: 350,
+            ..PromQueryLimits::default()
+        },
+    );
+    let long_value = "x".repeat(200);
+    assert_eq!(
+        mql_query(
+            &response_limited,
+            "{__name__=~\"mql_label_a|mql_label_b\"}",
+            base,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let rejected = mql_query(
+        &response_limited,
+        &format!(
+            "label_set({{__name__=~\"mql_label_a|mql_label_b\"}}, \"environment\", \"{long_value}\")"
+        ),
+        base,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("response-size limit"));
+    assert_eq!(
+        mql_query(&response_limited, "label_set(mql_label_a)", base)
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    drop((response_limited, work_limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 16, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query(
+            &reopened_app,
+            "label_set(mql_label_a, \"environment\", \"production\", \"host\", \"rewritten\")",
+            base,
+        )
+        .await,
+        set
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

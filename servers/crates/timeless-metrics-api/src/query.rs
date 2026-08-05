@@ -402,6 +402,7 @@ pub(crate) enum PromPlan {
     HistogramFraction(PromHistogramFractionPlan),
     MetricsUnion(metricsql::UnionPlan),
     MetricsAlias(metricsql::AliasPlan),
+    MetricsLabels(metricsql::LabelPlan),
     MetricsBinary(metricsql::BinaryPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
@@ -1396,7 +1397,9 @@ impl PromPlan {
             Self::Calendar(_) => PromValueType::Vector,
             Self::HistogramQuantile(_) => PromValueType::Vector,
             Self::HistogramFraction(_) => PromValueType::Vector,
-            Self::MetricsUnion(_) | Self::MetricsAlias(_) => PromValueType::Vector,
+            Self::MetricsUnion(_) | Self::MetricsAlias(_) | Self::MetricsLabels(_) => {
+                PromValueType::Vector
+            }
             Self::MetricsBinary(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
@@ -1939,6 +1942,9 @@ fn attach_promql_plan_source_positions(
         }
         PromPlan::MetricsAlias(alias) => {
             attach_promql_plan_source_positions(&mut alias.inner, calls)?;
+        }
+        PromPlan::MetricsLabels(labels) => {
+            attach_promql_plan_source_positions(&mut labels.inner, calls)?;
         }
         PromPlan::MetricsBinary(binary) => {
             attach_promql_plan_source_positions(&mut binary.lhs, calls)?;
@@ -4582,6 +4588,20 @@ fn execute_prometheus(
             conn,
             features,
             alias,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
+        PromPlan::MetricsLabels(labels) => metricsql::execute_labels(
+            conn,
+            features,
+            labels,
             start,
             stop,
             step,

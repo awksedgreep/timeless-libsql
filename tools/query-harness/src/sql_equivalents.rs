@@ -311,6 +311,11 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "collision_first_metric" => Value::Text("errors_total".to_owned()),
         "collision_second_metric" => Value::Text("requests_total".to_owned()),
         "collision_alias" => Value::Text("combined_total".to_owned()),
+        "label_name" => Value::Text("environment".to_owned()),
+        "label_path" => Value::Text("$.environment".to_owned()),
+        "label_value" => Value::Text("production".to_owned()),
+        "delete_label" => Value::Text("service".to_owned()),
+        "delete_path" => Value::Text("$.service".to_owned()),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
         "output_labels_json" => Value::Text(r#"{"case":"late","service":"api"}"#.to_owned()),
@@ -857,6 +862,107 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         }
     }
 
+    let label_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-004")
+        .context("SQL-MQL-004 recipe")?;
+    if label_recipe.statements.len() != 2 {
+        bail!("SQL-MQL-004 must retain label_set and label_del statements");
+    }
+    let expected_rows = [
+        vec![
+            (
+                Some("cpu"),
+                r#"{"host":"web-1","service":"api","environment":"production"}"#,
+                100_i64,
+                10.0_f64,
+            ),
+            (
+                Some("cpu"),
+                r#"{"host":"web-1","service":"api","environment":"production"}"#,
+                110_i64,
+                30.0_f64,
+            ),
+            (
+                Some("cpu"),
+                r#"{"host":"web-2","service":"api","environment":"production"}"#,
+                100_i64,
+                20.0_f64,
+            ),
+            (
+                Some("cpu"),
+                r#"{"host":"web-2","service":"api","environment":"production"}"#,
+                110_i64,
+                20.0_f64,
+            ),
+        ],
+        vec![
+            (Some("cpu"), r#"{"host":"web-1"}"#, 100_i64, 10.0_f64),
+            (Some("cpu"), r#"{"host":"web-1"}"#, 110_i64, 30.0_f64),
+            (Some("cpu"), r#"{"host":"web-2"}"#, 100_i64, 20.0_f64),
+            (Some("cpu"), r#"{"host":"web-2"}"#, 110_i64, 20.0_f64),
+        ],
+    ];
+    for (ordinal, expected) in expected_rows.iter().enumerate() {
+        let mut statement = connection.prepare(&label_recipe.statements[ordinal])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-004 parameter must be named")?
+                .trim_start_matches(':');
+            statement.raw_bind_parameter(index, parameter("SQL-MQL-004", name))?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected = expected
+            .iter()
+            .map(|(name, labels, ts, value)| {
+                (name.map(str::to_owned), (*labels).to_owned(), *ts, *value)
+            })
+            .collect::<Vec<_>>();
+        if rows != expected {
+            bail!("SQL-MQL-004 statement {} changed: {rows:?}", ordinal + 1);
+        }
+    }
+
+    for (ordinal, argument_name) in [(0_usize, "label_name"), (1_usize, "delete_label")] {
+        let mut statement = connection.prepare(&label_recipe.statements[ordinal])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-004 name parameter")?
+                .trim_start_matches(':');
+            let value = if name == argument_name {
+                Value::Text("__name__".to_owned())
+            } else if name == "label_value" {
+                Value::Text(String::new())
+            } else {
+                parameter("SQL-MQL-004", name)
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let name = statement
+            .raw_query()
+            .next()?
+            .context("SQL-MQL-004 name projection row")?
+            .get::<_, Option<String>>(0)?;
+        if name.is_some() {
+            bail!(
+                "SQL-MQL-004 statement {} did not delete __name__",
+                ordinal + 1
+            );
+        }
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1280,13 +1386,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 72);
+        assert_eq!(recipes.len(), 73);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            94
+            96
         );
         assert_eq!(
             recipes
@@ -1294,7 +1400,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            100
+            102
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -40,6 +40,18 @@ pub(crate) struct AliasPlan {
     pub(super) name: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct LabelPlan {
+    pub(super) inner: Box<PromPlan>,
+    pub(super) operation: LabelOperation,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum LabelOperation {
+    Set(Vec<(String, String)>),
+    Del(Vec<String>),
+}
+
 struct LowerContext<'a> {
     original: &'a str,
     lookback: i64,
@@ -140,6 +152,7 @@ fn supports_keep_metric_names(plan: &PromPlan, input: &str) -> bool {
         | PromPlan::HistogramQuantile(_)
         | PromPlan::HistogramFraction(_)
         | PromPlan::MetricsUnion(_)
+        | PromPlan::MetricsLabels(_)
         | PromPlan::MetricsBinary(_)
         | PromPlan::Binary(_)
         | PromPlan::RangeReduction(_) => true,
@@ -192,6 +205,10 @@ fn lower_union_or_alias(
         "union"
     } else if name == "alias" {
         "alias"
+    } else if name.eq_ignore_ascii_case("label_set") {
+        "label_set"
+    } else if name.eq_ignore_ascii_case("label_del") {
+        "label_del"
     } else {
         return Ok(None);
     };
@@ -218,7 +235,83 @@ fn lower_union_or_alias(
                 name,
             })))
         }
+        "label_set" => lower_label_set(arguments, context, depth).map(Some),
+        "label_del" => lower_label_del(arguments, context, depth).map(Some),
         _ => unreachable!("guarded MetricsQL function"),
+    }
+}
+
+fn lower_label_set(
+    arguments: Vec<&str>,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    let Some((inner, labels)) = arguments.split_first() else {
+        return Err("MetricsQL label_set requires an expression".into());
+    };
+    if labels.len() % 2 != 0 {
+        return Err(format!(
+            "MetricsQL label_set requires label/value pairs; got {} string arguments",
+            labels.len()
+        ));
+    }
+    let inner = lower_label_input(inner, "label_set", context, depth)?;
+    let mut pairs = Vec::with_capacity(labels.len() / 2);
+    for pair in labels.chunks_exact(2) {
+        pairs.push((
+            lower_string_argument(pair[0], "label_set", context.lookback)?,
+            lower_string_argument(pair[1], "label_set", context.lookback)?,
+        ));
+    }
+    Ok(PromPlan::MetricsLabels(LabelPlan {
+        inner: Box::new(inner),
+        operation: LabelOperation::Set(pairs),
+    }))
+}
+
+fn lower_label_del(
+    arguments: Vec<&str>,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    let Some((inner, labels)) = arguments.split_first() else {
+        return Err("MetricsQL label_del requires an expression".into());
+    };
+    let inner = lower_label_input(inner, "label_del", context, depth)?;
+    let labels = labels
+        .iter()
+        .map(|label| lower_string_argument(label, "label_del", context.lookback))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PromPlan::MetricsLabels(LabelPlan {
+        inner: Box::new(inner),
+        operation: LabelOperation::Del(labels),
+    }))
+}
+
+fn lower_label_input(
+    input: &str,
+    function: &str,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    let plan = lower_expr(input, context, depth + 1)?;
+    if !matches!(
+        plan.value_type(),
+        PromValueType::Scalar | PromValueType::Vector
+    ) {
+        return Err(format!(
+            "MetricsQL {function} requires a scalar or instant vector"
+        ));
+    }
+    Ok(plan)
+}
+
+fn lower_string_argument(input: &str, function: &str, lookback: i64) -> Result<String, String> {
+    match lower_promql(input, lookback)? {
+        PromPlan::String(value) => Ok(value),
+        _ => Err(format!(
+            "MetricsQL {function} label names and values must be string literals"
+        )),
     }
 }
 
@@ -624,8 +717,12 @@ fn rewrite_nested(
                 let inner = &input[index + 1..close];
                 let identifier = previous_identifier(input, index);
                 let identifier_name = identifier.map(|(_, value)| value.to_ascii_lowercase());
-                let special_call = identifier
-                    .is_some_and(|(_, name)| name.eq_ignore_ascii_case("union") || name == "alias");
+                let special_call = identifier.is_some_and(|(_, name)| {
+                    name.eq_ignore_ascii_case("union")
+                        || name == "alias"
+                        || name.eq_ignore_ascii_case("label_set")
+                        || name.eq_ignore_ascii_case("label_del")
+                });
                 if special_call || contains_custom_syntax(inner) {
                     let modifier = identifier_name.as_deref().is_some_and(|name| {
                         matches!(
@@ -774,6 +871,8 @@ fn contains_custom_word(input: &str) -> bool {
                     || word.eq_ignore_ascii_case("keep_metric_names")
                     || word.eq_ignore_ascii_case("union")
                     || word == "alias"
+                    || word.eq_ignore_ascii_case("label_set")
+                    || word.eq_ignore_ascii_case("label_del")
                 {
                     return true;
                 }
@@ -894,6 +993,7 @@ fn replace_placeholders(
             }
         }
         PromPlan::MetricsAlias(plan) => replace_placeholders(&mut plan.inner, placeholders)?,
+        PromPlan::MetricsLabels(plan) => replace_placeholders(&mut plan.inner, placeholders)?,
         PromPlan::MetricsBinary(plan) => {
             replace_placeholders(&mut plan.lhs, placeholders)?;
             replace_placeholders(&mut plan.rhs, placeholders)?;
@@ -1135,6 +1235,100 @@ pub(super) fn execute_alias(
         }
         if !labels_seen.insert(item.labels.clone()) {
             return Err("duplicate output timeseries: aliased labelset".into());
+        }
+    }
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        instant,
+        child.frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_labels(
+    conn: &Connection,
+    features: QueryFeatures,
+    plan: &LabelPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    if let LabelOperation::Set(pairs) = &plan.operation {
+        let minimum_generated_bytes = pairs
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .try_fold(0_usize, |bytes, (name, value)| {
+                bytes
+                    .checked_add(name.len())
+                    .and_then(|bytes| bytes.checked_add(value.len()))
+            })
+            .filter(|bytes| *bytes <= limits.max_response_bytes)
+            .ok_or_else(|| prometheus_response_limit_error(limits))?;
+        debug_assert!(minimum_generated_bytes <= limits.max_response_bytes);
+    }
+    let input_type = plan.inner.value_type();
+    let child = execute_prometheus(
+        conn,
+        features,
+        &plan.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    let intermediate_points = child.intermediate_points.saturating_add(child.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let mut series = into_series(decode_prometheus_intermediate(
+        &child.body,
+        input_type,
+        instant,
+        limits,
+        cancelled,
+    )?);
+    let mut labels_seen = BTreeSet::new();
+    let mut generated_label_bytes = 0_usize;
+    for item in &mut series {
+        check_cancelled(cancelled)?;
+        match &plan.operation {
+            LabelOperation::Set(pairs) => {
+                for (name, value) in pairs {
+                    check_cancelled(cancelled)?;
+                    if value.is_empty() {
+                        item.labels.remove(name);
+                    } else {
+                        generated_label_bytes = generated_label_bytes
+                            .checked_add(name.len())
+                            .and_then(|bytes| bytes.checked_add(value.len()))
+                            .filter(|bytes| *bytes <= limits.max_response_bytes)
+                            .ok_or_else(|| prometheus_response_limit_error(limits))?;
+                        item.labels.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+            LabelOperation::Del(labels) => {
+                for name in labels {
+                    check_cancelled(cancelled)?;
+                    item.labels.remove(name);
+                }
+            }
+        }
+        if !labels_seen.insert(item.labels.clone()) {
+            return Err("duplicate output timeseries: label transformation".into());
         }
     }
     encode_prometheus_intermediate(
@@ -1738,6 +1932,32 @@ mod tests {
             "alias(cpu, \"a\", \"b\")",
             "(cpu,,memory)",
             "ALIAS(cpu, \"renamed\")",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
+        }
+    }
+
+    #[test]
+    fn label_manipulation_grammar_matches_metricsql_transform_rules() {
+        for query in [
+            "label_set(cpu, \"environment\", \"production\", \"host\", \"rewritten\")",
+            "label_set(cpu)",
+            "label_set(1, \"kind\", \"scalar\")",
+            "label_set(cpu, \"host\", \"rewritten\",)",
+            "label_del(cpu, \"host\", \"missing\")",
+            "label_del(cpu)",
+            "LABEL_DEL(LABEL_SET(cpu, \"host\", \"rewritten\"), \"job\")",
+            "label_del(label_set(cpu, \"host\", \"rewritten\"), \"job\") keep_metric_names",
+            "sum(label_del(label_set(cpu, \"host\", \"rewritten\"), \"job\"))",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_ok(), "{query}");
+        }
+        for query in [
+            "label_set(cpu, \"host\")",
+            "label_set(cpu, \"host\", 1)",
+            "label_del(cpu, 1)",
+            "label_set()",
+            "label_del()",
         ] {
             assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
         }

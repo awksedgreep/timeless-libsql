@@ -251,7 +251,10 @@ matching semantics, executable `SQL-MQL-002`, and measured storage-equivalent
 composition. `MQL-03` is shipped with named and shorthand union, alias
 rename/removal, first-labelset precedence, duplicate-output errors, executable
 `SQL-MQL-003`, stable-route isolation, and bounded public-plan composition.
-The remaining rows continue in their listed order; `MQL-11` is
+`MQL-04` is shipped with ordered `label_set`/`label_del`, scalar
+vectorization, exact name/empty/collision behavior, executable `SQL-MQL-004`,
+stable-route isolation, and bounded label projection over one public read. The
+remaining rows continue in their listed order; `MQL-11` is
 already corrected
 to deferred because the pinned oracle rejects `min_of` and `max_of`.
 

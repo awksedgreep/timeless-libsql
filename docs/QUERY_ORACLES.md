@@ -133,7 +133,12 @@ commas, aliases that rename or remove the metric name, nested composition,
 first-argument labelset precedence, case-insensitive `union` versus lowercase
 template-only `alias`, malformed arguments, and the distinct
 duplicate-output behavior of a bare alias or scalar union. The fixture now
-contains 47 MetricsQL cases in total. Timeless compares exact
+adds thirteen successful `MQL-04` label-transform cases and five errors. They
+pin add/replace/delete behavior, empty-value deletion, metric-name handling,
+last-duplicate precedence, identity forms, nesting, scalar vectorization,
+case-insensitive transform names, trailing commas, `keep_metric_names`, typed
+arguments, and duplicate-output failures. The fixture now contains 65
+MetricsQL cases in total. Timeless compares exact
 result labels, timestamp grids, and
 float values while retaining its documented HTTP 400 `bad_data` envelope in
 place of VictoriaMetrics's HTTP 422/error-type-`422` wire policy.

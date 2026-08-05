@@ -391,6 +391,149 @@
           "value": 3
         }
       ]
+    },
+    {
+      "id": "MQL-04-label-set-adds-and-replaces-labels",
+      "query": "label_set(oracle_keep_a, \"environment\", \"production\", \"host\", \"rewritten\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "environment": "production", "host": "rewritten", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-set-empty-values-delete-labels",
+      "query": "label_set(oracle_keep_a, \"host\", \"\", \"environment\", \"\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-set-can-replace-the-metric-name",
+      "query": "label_set(oracle_keep_a, \"__name__\", \"oracle_label_set\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_label_set", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-set-last-duplicate-destination-wins",
+      "query": "label_set(oracle_keep_a, \"host\", \"first\", \"host\", \"second\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "second", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-set-without-pairs-is-identity",
+      "query": "label_set(oracle_keep_a)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-del-removes-existing-and-ignores-missing-labels",
+      "query": "label_del(oracle_keep_a, \"host\", \"missing\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-del-can-remove-the-metric-name",
+      "query": "label_del(oracle_keep_a, \"__name__\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-del-without-labels-is-identity",
+      "query": "label_del(oracle_keep_a)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "shared", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-functions-compose-in-argument-order",
+      "query": "label_del(label_set(oracle_keep_a, \"environment\", \"production\", \"host\", \"rewritten\"), \"job\", \"missing\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "environment": "production", "host": "rewritten"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-set-vectorizes-a-scalar",
+      "query": "label_set(1, \"kind\", \"scalar\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"kind": "scalar"},
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-functions-are-case-insensitive-transforms",
+      "query": "LABEL_DEL(LABEL_SET(oracle_keep_a, \"host\", \"rewritten\"), \"job\")",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "rewritten"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-set-allows-a-trailing-comma",
+      "query": "label_set(oracle_keep_a, \"host\", \"rewritten\",)",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "rewritten", "job": "oracle"},
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "MQL-04-label-function-allows-keep-metric-names-modifier",
+      "query": "label_del(label_set(oracle_keep_a, \"host\", \"rewritten\"), \"job\") keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_keep_a", "host": "rewritten"},
+          "value": 2
+        }
+      ]
     }
   ],
   "operator_error_cases": [
@@ -489,6 +632,46 @@
       "status": 422,
       "error_type": "422",
       "error_contains": "unsupported function \"ALIAS\""
+    },
+    {
+      "id": "MQL-04-label-set-requires-even-string-pairs",
+      "query": "label_set(oracle_keep_a, \"host\")",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "the number of string args must be even; got 1"
+    },
+    {
+      "id": "MQL-04-label-set-requires-string-values",
+      "query": "label_set(oracle_keep_a, \"host\", 1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "arg #2 must be a string"
+    },
+    {
+      "id": "MQL-04-label-del-requires-string-labels",
+      "query": "label_del(oracle_keep_a, 1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "arg #2 must be a string"
+    },
+    {
+      "id": "MQL-04-label-set-collision-is-an-error",
+      "query": "label_set({__name__=~\"oracle_keep_a|oracle_keep_b\"}, \"__name__\", \"oracle_label_collision\")",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "duplicate output timeseries"
+    },
+    {
+      "id": "MQL-04-label-del-collision-is-an-error",
+      "query": "label_del({__name__=~\"oracle_keep_a|oracle_keep_b\"}, \"__name__\")",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "duplicate output timeseries"
     }
   ],
   "error_cases": [

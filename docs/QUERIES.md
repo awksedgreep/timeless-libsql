@@ -1390,6 +1390,46 @@ and select the lowest branch for duplicate complete labelsets. The executable
 [`SQL-MQL-003`](QUERY_SQL_EQUIVALENTS.md#sql-mql-003-union-and-alias) recipe
 pins that behavior and explains the bare-alias collision check.
 
+### Setting and deleting MetricsQL labels
+
+The explicit MetricsQL routes support bounded label transformation after any
+scalar or instant-vector expression:
+
+```text
+label_set(cpu_usage, "environment", "production", "host", "rewritten")
+label_del(cpu_usage, "pod", "instance")
+label_set(cpu_usage, "__name__", "host_cpu_usage")
+label_del(cpu_usage, "__name__")
+```
+
+`label_set` applies label/value pairs from left to right, so the last repeated
+destination wins. An empty value deletes that label rather than retaining an
+empty string. Both functions accept no label arguments as an identity
+operation, ignore deletion of a missing label, and treat `__name__` as the
+metric name. A scalar input becomes a nameless instant vector before the label
+operation, matching pinned VictoriaMetrics 1.148.0.
+
+The function names are case-insensitive built-in transforms, in contrast to
+VictoriaMetrics's lowercase-only `alias` template. Trailing commas and the
+otherwise redundant `keep_metric_names` modifier are accepted. Multiple
+functions compose in argument order beneath ordinary operations and
+aggregations. Invalid pair counts, non-string names or values, and empty
+function calls fail explicitly.
+
+Transforming multiple source series to the same complete output labelset is an
+error; the API does not silently choose a winner. Generated label bytes,
+intermediate points, response bytes, and cancellation checks use the existing
+bounded Rust query envelope. GET and form-encoded POST, instant and range
+responses, flush, shutdown, and reopen share that path. The stable PromQL
+routes retain their parser and reject both functions.
+
+The extension does not parse this syntax. Direct SQLite/libSQL users can
+project the metric-name column and use standard `json_set`/`json_remove` over
+public-grid labels. The executable
+[`SQL-MQL-004`](QUERY_SQL_EQUIVALENTS.md#sql-mql-004-label_set-and-label_del)
+recipe pins empty-value deletion, name handling, JSON paths, ordering, types,
+and the duplicate-output check.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when
