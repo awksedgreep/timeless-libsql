@@ -1286,6 +1286,38 @@ diagnostics. This does not affect the shipped selector modifiers
 `@ start()` and `@ end()`. MetricsQL variants remain separately tracked and
 are never enabled by silently broadening PromQL.
 
+## Explicit MetricsQL binary operators
+
+MetricsQL-only syntax is accepted only on the explicitly named Rust API
+routes:
+
+```text
+GET /metricsql/api/v1/query?query=%28cpu_usage+%3E+90%29+default+0&time=1700100010
+GET /metricsql/api/v1/query_range?query=cpu_usage+if+on%28host%29+host_up&start=1700100000&end=1700100060&step=10s
+```
+
+`default` fills a missing left value from the matching right value at the
+same evaluation step. `if` retains a left value only while a matching right
+value exists; `ifnot` retains it only while the right value does not exist.
+Matching ignores the metric name by default and accepts `on(...)` and
+`ignoring(...)`. A scalar operand is a nameless vector, so a scalar RHS can
+broadcast across left label sets. The contributing left series keeps its
+labels and metric name. As in pinned VictoriaMetrics 1.148.0, a join modifier
+on these set-style operators does not rewrite those labels.
+
+This differs deliberately from the stable PromQL routes, which continue to
+reject `default`, `if`, and `ifnot`. MetricsQL scalar instant expressions also
+return a nameless vector rather than a PromQL scalar. Timeless retains its
+normal JSON error policy: invalid input is HTTP 400 `bad_data`, while
+VictoriaMetrics uses HTTP 422 with error type `422`. Execution limits and
+cancellation use the same bounded Rust reader path as PromQL.
+
+The extension does not parse MetricsQL. Direct SQLite/libSQL users can express
+the storage-visible mechanics with the executable public-grid statements in
+[`SQL-MQL-001`](QUERY_SQL_EQUIVALENTS.md#sql-mql-001-default-if-and-ifnot).
+The API remains responsible for precedence, implicit scalar vectors, label
+policy, response envelopes, limits, and cancellation.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

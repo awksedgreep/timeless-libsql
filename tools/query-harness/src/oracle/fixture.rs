@@ -548,5 +548,21 @@ pub(super) fn prometheus_remote_write(timestamp_ms: i64) -> Vec<u8> {
             ],
         );
     }
+    request.series(
+        "oracle_mql_cpu",
+        &[(1.0, 10_000), (3.0, 30_000)],
+        &[("host", "a"), ("zone", "east")],
+    );
+    request.series(
+        "oracle_mql_cpu",
+        &[(2.0, 20_000), (4.0, 30_000)],
+        &[("host", "b"), ("zone", "west")],
+    );
+    request.series(
+        "oracle_mql_sparse",
+        &[(10.0, 10_000), (30.0, 30_000)],
+        &[("host", "a")],
+    );
+    request.series("oracle_mql_sparse", &[(20.0, 20_000)], &[("host", "b")]);
     snappy_literal(&request.encoded)
 }

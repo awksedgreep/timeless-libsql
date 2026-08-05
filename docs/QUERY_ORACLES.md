@@ -117,8 +117,14 @@ series, then evaluates MetricsQL-only cases with explicit range-query steps.
 It pins `Ni` lookbehind and subquery durations against the request step,
 including millisecond steps, and records the exact Prometheus rejection of the
 same syntax separately. This oracle is used only for rows explicitly assigned
-to the MetricsQL compatibility tier. The first fixture contains five success
-cases and one explicit syntax error for `MQL-09`.
+to the MetricsQL compatibility tier. The fixture contains five success cases
+and one explicit syntax error for `MQL-09`. Its `MQL-01` corpus adds nine
+operator success cases and three syntax errors covering sparse and completely
+filtered identity, vector/scalar behavior, `on(...)`, a join modifier,
+comparison matching, nesting, precedence, and the pinned upstream error
+classification. Timeless compares exact result labels, timestamp grids, and
+float values while retaining its documented HTTP 400 `bad_data` envelope in
+place of VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
 
 Session 14 also pins Prometheus 3 quoted UTF-8 metric and label names, comments
 and source positions, and classic-bucket `histogram_fraction` grouping and
@@ -129,6 +135,14 @@ interpolation. Its classification cases prove that query-context
 Prometheus. These are explicit experimental or MetricsQL rows; the stable
 Timeless endpoint must not enable them merely because the parser recognizes a
 similar construct.
+
+An exact Session 15 audit corrected two roadmap assumptions against the pinned
+VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
+query-context functions `start()`, `end()`, and `step()`, but rejects
+`start_timestamp()` and `range()` as unsupported functions. It also rejects
+`min_of()` and `max_of()`; those names are not stable MetricsQL functions in
+the pinned tier. The matrix records those dispositions instead of turning a
+previous planning assumption into a compatibility claim.
 
 The following Timeless compatibility choices intentionally differ from the
 pinned VictoriaLogs wire/storage model and are asserted on both sides rather

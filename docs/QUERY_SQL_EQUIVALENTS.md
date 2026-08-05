@@ -98,6 +98,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-054`](#sql-prom-054-histogram_quantile-over-classic-buckets) | `PQL-H01` | current foundation | bounded classic-bucket grouping, monotonic correction, and linear interpolation; API owns strict bound parsing, tolerance, annotations, IEEE, names, limits, and envelopes |
 | [`SQL-PROM-055`](#sql-prom-055-atan2) | `PQL-O08` | current foundation | bounded SQLite `atan2(Y,X)` over scalar/vector or label-matched vectors; API owns Go-compatible last-bit rounding, types, names, matching errors, limits, and envelopes |
 | [`SQL-PROM-056`](#sql-prom-056-histogram_fraction-over-classic-buckets) | `PQL-H02` | current foundation | bounded classic-bucket grouping and linear CDF interpolation; API owns strict bounds, scalar ASTs, IEEE values, names, limits, cancellation, and envelopes |
+| [`SQL-MQL-001`](#sql-mql-001-default-if-and-ifnot) | `MQL-01` | current foundation | bounded gap filling and step-local label membership; API owns MetricsQL syntax, implicit scalar vectors, full label/name policy, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -3310,6 +3311,108 @@ after numeric values for both directions, within-group instant rank ordering
 series assembly, limits, cancellation, and envelopes. This statement executes
 in `tests/cli.sh` section 45; the exact API contract is
 `session_five_promql_topk_bottomk_rank_per_step_and_reopen`.
+
+## MetricsQL foundations and equivalents
+
+### SQL-MQL-001: `default`, `if`, and `ifnot`
+
+The public grid retains a row for every discovered series at every evaluation
+step where lookback finds a value. A SQL `CASE` can preserve series identity
+while a comparison filters every value, then `COALESCE` implements a scalar
+`default` broadcast:
+
+```sql
+WITH lhs AS MATERIALIZED (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+), filtered AS (
+  SELECT labels, ts,
+         CASE WHEN value > :threshold THEN value END AS value
+  FROM lhs
+)
+SELECT labels, ts, COALESCE(value, :default_value) AS value
+FROM filtered
+ORDER BY labels, ts;
+```
+
+For `if on(host)`, retain a left sample only when a right sample with the same
+evaluation timestamp and projected label exists:
+
+```sql
+WITH lhs AS MATERIALIZED (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+), rhs AS MATERIALIZED (
+  SELECT labels, ts
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT lhs.labels, lhs.ts, lhs.value
+FROM lhs
+WHERE EXISTS (
+  SELECT 1
+  FROM rhs
+  WHERE rhs.ts = lhs.ts
+    AND COALESCE(json_extract(rhs.labels, '$.host'), '')
+        = COALESCE(json_extract(lhs.labels, '$.host'), '')
+)
+ORDER BY lhs.labels, lhs.ts;
+```
+
+`ifnot on(host)` is the corresponding step-local anti-membership operation:
+
+```sql
+WITH lhs AS MATERIALIZED (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+), rhs AS MATERIALIZED (
+  SELECT labels, ts
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT lhs.labels, lhs.ts, lhs.value
+FROM lhs
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM rhs
+  WHERE rhs.ts = lhs.ts
+    AND COALESCE(json_extract(rhs.labels, '$.host'), '')
+        = COALESCE(json_extract(lhs.labels, '$.host'), '')
+)
+ORDER BY lhs.labels, lhs.ts;
+```
+
+All times use the metrics table's native unit; `:start` and `:end` are
+inclusive evaluation bounds, `:step` is positive, and lookback is open-left
+and closed-right. `:lhs_filter` and `:rhs_filter` are public matcher JSON or
+NULL. The explicit `COALESCE` makes missing labels compare as empty strings.
+Replace the projected `$.host` path with every label named by `on(...)`; for
+`ignoring(...)`, compare every retained label instead. SQL NULL represents a
+missing step, not a stored float value.
+
+These statements are exact mechanical foundations, not a claim that SQL
+parses MetricsQL. The Rust API owns operator precedence, implicit scalar
+vectors, scalar fallback for every left labelset, metric-name matching policy,
+many-series collision behavior, all-NaN identity preservation, response
+types, limits, cancellation, and errors. No extension primitive is warranted:
+the public grid has already performed the bounded storage read and decode.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-001`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

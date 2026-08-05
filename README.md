@@ -614,7 +614,9 @@ must be tested before it can be marked shipped:
 - [Query benchmark and evidence protocol](docs/QUERY_EVIDENCE.md)
 - [Sequential query implementation plan](docs/2026-08-04_query_surface_implementation_plan.md)
 
-PromQL and LogsQL parsing/evaluation live in the Rust signal APIs. The
+PromQL, the explicitly named MetricsQL compatibility tier, and LogsQL
+parsing/evaluation live in the Rust signal APIs. MetricsQL-only syntax never
+changes the default PromQL routes and never enters SQLite as query syntax. The
 extension exposes general SQLite/libSQL primitives and receives a new query
 vector only when measurements prove that storage-aware pushdown materially
 avoids reads, decode, copies, or row crossings. Saved queries, subscriptions,

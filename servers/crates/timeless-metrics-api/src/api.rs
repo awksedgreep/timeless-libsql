@@ -52,6 +52,14 @@ pub fn router_with_limits(storage: Storage, limits: PromQueryLimits) -> Router {
             "/prometheus/api/v1/query_range",
             get(prometheus_range).post(prometheus_range),
         )
+        .route(
+            "/metricsql/api/v1/query",
+            get(metricsql_instant).post(metricsql_instant),
+        )
+        .route(
+            "/metricsql/api/v1/query_range",
+            get(metricsql_range).post(metricsql_range),
+        )
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(Extension(limits))
@@ -122,6 +130,34 @@ async fn prometheus_range(
         storage,
         limits,
         query::prometheus_range_request(&params(query, &body)),
+    )
+    .await
+}
+
+async fn metricsql_instant(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    prometheus_read_route(
+        storage,
+        limits,
+        query::metricsql_instant_request(&params(query, &body)),
+    )
+    .await
+}
+
+async fn metricsql_range(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    prometheus_read_route(
+        storage,
+        limits,
+        query::metricsql_range_request(&params(query, &body)),
     )
     .await
 }

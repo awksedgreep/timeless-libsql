@@ -11652,6 +11652,289 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_fifteen_metricsql_binary.db");
+    let base = 1_785_901_638_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "mql_cpu{{host=\"a\",zone=\"east\"}} 1 {}\n",
+            "mql_cpu{{host=\"a\",zone=\"east\"}} 3 {}\n",
+            "mql_cpu{{host=\"b\",zone=\"west\"}} 2 {}\n",
+            "mql_cpu{{host=\"b\",zone=\"west\"}} 4 {}\n",
+            "mql_sparse{{host=\"a\"}} 10 {}\n",
+            "mql_sparse{{host=\"a\"}} 30 {}\n",
+            "mql_sparse{{host=\"b\"}} 20 {}\n"
+        ),
+        (base - 20) * 1_000,
+        base * 1_000,
+        (base - 10) * 1_000,
+        base * 1_000,
+        (base - 20) * 1_000,
+        base * 1_000,
+        (base - 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let defaulted = mql_query_range(&app, "(mql_cpu > 2) default 0", base - 20, base, 10).await;
+    assert_eq!(defaulted.0, StatusCode::OK, "{}", defaulted.1);
+    assert_eq!(defaulted.1["data"]["resultType"], "matrix");
+    assert_eq!(
+        defaulted.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "mql_cpu", "host": "a", "zone": "east"},
+                "values": [[base - 20, "0"], [base - 10, "0"], [base, "3"]]
+            },
+            {
+                "metric": {"__name__": "mql_cpu", "host": "b", "zone": "west"},
+                "values": [[base - 20, "0"], [base - 10, "0"], [base, "4"]]
+            }
+        ])
+    );
+    let completely_filtered =
+        mql_query_range(&app, "(mql_cpu > 5) default 0", base - 20, base, 10).await;
+    assert_eq!(
+        completely_filtered.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "mql_cpu", "host": "a", "zone": "east"},
+                "values": [[base - 20, "0"], [base - 10, "0"], [base, "0"]]
+            },
+            {
+                "metric": {"__name__": "mql_cpu", "host": "b", "zone": "west"},
+                "values": [[base - 20, "0"], [base - 10, "0"], [base, "0"]]
+            }
+        ])
+    );
+    let vector_filtered = mql_query_range(
+        &app,
+        "(mql_cpu > on(host) mql_sparse) default 0",
+        base - 20,
+        base,
+        10,
+    )
+    .await;
+    assert_eq!(vector_filtered.0, StatusCode::OK, "{}", vector_filtered.1);
+    assert_eq!(
+        vector_filtered.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"host": "a"},
+                "values": [[base - 20, "0"], [base - 10, "0"], [base, "0"]]
+            },
+            {
+                "metric": {"host": "b"},
+                "values": [[base - 20, "0"], [base - 10, "0"], [base, "0"]]
+            }
+        ])
+    );
+
+    let selector_default = mql_query_range(&app, "mql_cpu default 0", base - 20, base, 10).await;
+    assert_eq!(selector_default.0, StatusCode::OK, "{}", selector_default.1);
+    assert_eq!(
+        selector_default.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "mql_cpu", "host": "a", "zone": "east"},
+                "values": [[base - 20, "1"], [base - 10, "1"], [base, "3"]]
+            },
+            {
+                "metric": {"__name__": "mql_cpu", "host": "b", "zone": "west"},
+                "values": [[base - 20, "0"], [base - 10, "2"], [base, "4"]]
+            }
+        ])
+    );
+
+    let matching = mql_query_range(
+        &app,
+        "(mql_cpu > 2) default on(host) mql_sparse",
+        base - 20,
+        base,
+        10,
+    )
+    .await;
+    assert_eq!(matching.0, StatusCode::OK, "{}", matching.1);
+    assert_eq!(
+        matching.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "mql_cpu", "host": "a", "zone": "east"},
+                "values": [[base - 20, "10"], [base - 10, "10"], [base, "3"]]
+            },
+            {
+                "metric": {"__name__": "mql_cpu", "host": "b", "zone": "west"},
+                "values": [[base - 10, "20"], [base, "4"]]
+            }
+        ])
+    );
+
+    let conditional =
+        mql_query_range(&app, "mql_cpu if on(host) mql_sparse", base - 20, base, 10).await;
+    assert_eq!(conditional.0, StatusCode::OK, "{}", conditional.1);
+    assert_eq!(
+        conditional.1["data"]["result"],
+        serde_json::json!([
+            {
+                "metric": {"__name__": "mql_cpu", "host": "a", "zone": "east"},
+                "values": [[base - 20, "1"], [base - 10, "1"], [base, "3"]]
+            },
+            {
+                "metric": {"__name__": "mql_cpu", "host": "b", "zone": "west"},
+                "values": [[base - 10, "2"], [base, "4"]]
+            }
+        ])
+    );
+    let conditional_join = mql_query_range(
+        &app,
+        "mql_cpu if on(host) group_left(zone) mql_sparse",
+        base - 20,
+        base,
+        10,
+    )
+    .await;
+    assert_eq!(conditional_join, conditional);
+    let unmatched = mql_query_range(&app, "mql_cpu if mql_sparse", base - 20, base, 10).await;
+    assert_eq!(unmatched.0, StatusCode::OK, "{}", unmatched.1);
+    assert_eq!(unmatched.1["data"]["result"], serde_json::json!([]));
+    let inverse = mql_query_range(
+        &app,
+        "mql_cpu ifnot on(host) mql_sparse",
+        base - 20,
+        base,
+        10,
+    )
+    .await;
+    assert_eq!(inverse.0, StatusCode::OK, "{}", inverse.1);
+    assert_eq!(inverse.1["data"]["result"], serde_json::json!([]));
+    let inverse_unmatched =
+        mql_query_range(&app, "mql_cpu ifnot mql_sparse", base - 20, base, 10).await;
+    assert_eq!(
+        inverse_unmatched.0,
+        StatusCode::OK,
+        "{}",
+        inverse_unmatched.1
+    );
+    assert_eq!(
+        inverse_unmatched.1["data"]["result"],
+        conditional.1["data"]["result"]
+    );
+
+    let missing = mql_query(&app, "mql_missing default 7", base).await;
+    assert_eq!(missing.0, StatusCode::OK, "{}", missing.1);
+    assert_eq!(missing.1["data"]["resultType"], "vector");
+    assert_eq!(
+        missing.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base, "7"]}])
+    );
+    assert_eq!(
+        mql_query(&app, "1 default 2", base).await.1["data"]["result"],
+        serde_json::json!([{"metric": {}, "value": [base, "1"]}])
+    );
+    assert_eq!(
+        mql_query(&app, "1 ifnot 2", base).await.1["data"]["result"],
+        serde_json::json!([])
+    );
+
+    let nested = mql_query_range(&app, "sum((mql_cpu > 2) default 0)", base - 20, base, 10).await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(
+        nested.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [[base - 20, "0"], [base - 10, "0"], [base, "7"]]
+        }])
+    );
+    let precedence =
+        mql_query_range(&app, "(mql_cpu > 2) default 0 + 1", base - 20, base, 10).await;
+    assert_eq!(precedence.0, StatusCode::OK, "{}", precedence.1);
+    assert_eq!(precedence.1["data"]["result"][0]["values"][0][1], "1");
+    assert_eq!(precedence.1["data"]["result"][0]["values"][2][1], "3");
+
+    let stable_promql = prom_query(&app, "mql_cpu default 0", base).await;
+    assert_eq!(
+        stable_promql.0,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        stable_promql.1
+    );
+    assert_eq!(stable_promql.1["errorType"], "bad_data");
+    for query in [
+        "mql_cpu default",
+        "mql_cpu default on(host",
+        "mql_cpu default bool 0",
+    ] {
+        let invalid = mql_query(&app, query, base).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert_eq!(invalid.1["errorType"], "bad_data");
+    }
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "mql_missing default 7")
+            .append_pair("time", &base.to_string())
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted, missing);
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 3,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query_range(&limited, "(mql_cpu > 2) default 0", base - 20, base, 10).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+    let limit_error = rejected.1["error"].as_str().unwrap();
+    assert!(
+        limit_error.contains("intermediate-work limit") || limit_error.contains("work point limit"),
+        "{}",
+        rejected.1
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 16, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query_range(
+            &reopened_app,
+            "(mql_cpu > 2) default 0",
+            base - 20,
+            base,
+            10,
+        )
+        .await,
+        defaulted
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
@@ -11835,6 +12118,30 @@ async fn prom_query_range(
         .append_pair("step", &step.to_string())
         .finish();
     get_json(app, &format!("/prometheus/api/v1/query_range?{params}")).await
+}
+
+async fn mql_query(app: &axum::Router, query: &str, time: i64) -> (StatusCode, Value) {
+    let params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", query)
+        .append_pair("time", &time.to_string())
+        .finish();
+    get_json(app, &format!("/metricsql/api/v1/query?{params}")).await
+}
+
+async fn mql_query_range(
+    app: &axum::Router,
+    query: &str,
+    start: i64,
+    end: i64,
+    step: i64,
+) -> (StatusCode, Value) {
+    let params = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", query)
+        .append_pair("start", &start.to_string())
+        .append_pair("end", &end.to_string())
+        .append_pair("step", &step.to_string())
+        .finish();
+    get_json(app, &format!("/metricsql/api/v1/query_range?{params}")).await
 }
 
 fn assert_no_content(response: (StatusCode, Vec<u8>)) {

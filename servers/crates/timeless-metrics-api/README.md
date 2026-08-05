@@ -18,6 +18,8 @@ retention commands.
 - `GET|POST /api/v1/query` (native `metric=` exact latest or `query=` PromQL)
 - `GET /api/v1/export` (VictoriaMetrics JSON-line raw export)
 - `GET|POST /api/v1/query_range` (native exact range aggregation or `query=` PromQL)
+- `GET|POST /metricsql/api/v1/query` (explicit MetricsQL compatibility tier)
+- `GET|POST /metricsql/api/v1/query_range` (explicit MetricsQL compatibility tier)
 - `GET /api/v1/labels`
 - `GET /api/v1/label/{name}/values`
 - `GET /api/v1/series`
@@ -123,6 +125,24 @@ define `start_timestamp`. The stable endpoint preserves those exact failures,
 while selector modifiers `@ start()` and `@ end()` remain supported. Their
 MetricsQL forms are tracked separately rather than silently broadening the
 PromQL endpoint.
+The explicitly named MetricsQL routes currently add `default`, `if`, and
+`ifnot`. They preserve the left series identity, operate step by step, accept
+`on(...)` and `ignoring(...)`, and treat an RHS scalar as a nameless vector
+broadcast. A `default` can therefore fill gaps left by a filtered comparison,
+including a series whose comparison produced no values. MetricsQL scalar
+instant results are nameless vectors, matching VictoriaMetrics rather than
+the PromQL scalar envelope. Join modifiers accepted by VictoriaMetrics on
+these set-style operators do not rewrite the contributing left labels.
+
+MetricsQL never enters the SQLite extension as language syntax. The Rust API
+parses and composes it over the same public bounded grid used by PromQL; direct
+SQLite/libSQL users can execute the corresponding
+[`SQL-MQL-001`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-001-default-if-and-ifnot)
+recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
+envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
+`422`. Limits and cancellation continue to use Timeless's existing execution
+envelope. The default PromQL routes reject MetricsQL-only operators instead of
+silently changing languages.
 Unary minus and arithmetic `+ - * / % ^` plus trigonometric binary `atan2`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves

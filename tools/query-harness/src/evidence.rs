@@ -445,7 +445,14 @@ fn hwm_kib(pid: u32) -> Result<u64> {
 enum MetricRequest {
     Instant(String),
     InstantPost(String),
+    MetricsQlInstant(String),
     Range {
+        expression: String,
+        start: i64,
+        end: i64,
+        step: String,
+    },
+    MetricsQlRange {
         expression: String,
         start: i64,
         end: i64,
@@ -505,6 +512,13 @@ fn metric_request(
                 Some((body.as_bytes(), "application/x-www-form-urlencoded")),
             )?
         }
+        MetricRequest::MetricsQlInstant(expression) => {
+            let url = reqwest::Url::parse_with_params(
+                &format!("{base}/metricsql/api/v1/query"),
+                [("query", expression.as_str()), ("time", &at.to_string())],
+            )?;
+            request_bytes(client, reqwest::Method::GET, url.as_str(), None)?
+        }
         MetricRequest::Range {
             expression,
             start,
@@ -513,6 +527,23 @@ fn metric_request(
         } => {
             let url = reqwest::Url::parse_with_params(
                 &format!("{base}/api/v1/query_range"),
+                [
+                    ("query", expression.as_str()),
+                    ("start", &start.to_string()),
+                    ("end", &end.to_string()),
+                    ("step", step),
+                ],
+            )?;
+            request_bytes(client, reqwest::Method::GET, url.as_str(), None)?
+        }
+        MetricRequest::MetricsQlRange {
+            expression,
+            start,
+            end,
+            step,
+        } => {
+            let url = reqwest::Url::parse_with_params(
+                &format!("{base}/metricsql/api/v1/query_range"),
                 [
                     ("query", expression.as_str()),
                     ("start", &start.to_string()),
@@ -610,6 +641,42 @@ fn range(
         key: key.into(),
         name: name.into(),
         request: MetricRequest::Range {
+            expression: expression.into(),
+            start: at - 30,
+            end: at,
+            step: "10".to_owned(),
+        },
+        cardinality: Cardinality::MatrixPoints,
+        expected,
+    }
+}
+
+fn metricsql_instant(
+    key: impl Into<String>,
+    name: impl Into<String>,
+    expression: impl Into<String>,
+    expected: usize,
+) -> MetricSpec {
+    MetricSpec {
+        key: key.into(),
+        name: name.into(),
+        request: MetricRequest::MetricsQlInstant(expression.into()),
+        cardinality: Cardinality::ResultSeries,
+        expected,
+    }
+}
+
+fn metricsql_range(
+    key: impl Into<String>,
+    name: impl Into<String>,
+    expression: impl Into<String>,
+    at: i64,
+    expected: usize,
+) -> MetricSpec {
+    MetricSpec {
+        key: key.into(),
+        name: name.into(),
+        request: MetricRequest::MetricsQlRange {
             expression: expression.into(),
             start: at - 30,
             end: at,
@@ -823,6 +890,8 @@ fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec
         range("atan2_wide", "metrics-atan2-wide", "query_contract_cpu atan2 2", at, series * 4),
         instant("annotations_narrow", "metrics-annotations-warning-narrow", r#"quantile(-1, query_contract_cpu{host="h0000"})"#, 1),
         range("annotations_wide", "metrics-annotations-info-wide", "rate(query_contract_cpu[5m])", at, series * 4),
+        metricsql_instant("metricsql_default_narrow", "metrics-metricsql-default-narrow", r#"(query_contract_cpu{host="h0000"} > 10000) default 0"#, 1),
+        metricsql_range("metricsql_default_wide", "metrics-metricsql-default-wide", "(query_contract_cpu > 10000) default 0", at, series * 4),
         instant("arithmetic_vector_scalar_narrow", "metrics-arithmetic-vector-scalar-narrow", r#"query_contract_cpu{host="h0000"} * 2"#, 1),
         range("arithmetic_one_to_one_wide", "metrics-arithmetic-one-to-one-wide", "query_contract_cpu + query_contract_cpu", at, series * 4),
         instant("comparison_filter_narrow", "metrics-comparison-filter-narrow", r#"query_contract_cpu{host="h0000"} > 30"#, 1),
@@ -1721,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn metric_spec_keys_are_unique_and_include_session_fourteen_rows() {
+    fn metric_spec_keys_are_unique_and_include_session_fifteen_rows() {
         let specs = metric_specs(512, 64, 1_800_000_310);
         let mut keys = std::collections::BTreeSet::new();
         for spec in &specs {
@@ -1730,7 +1799,7 @@ mod tests {
         // The work-limit query is appended only after its 100,025-point
         // fixture crosses the second durability barrier.
         assert!(keys.insert("work_limit_rejected"));
-        assert_eq!(keys.len(), 141);
+        assert_eq!(keys.len(), 143);
         assert!(keys.contains("histogram_quantile_narrow"));
         assert!(keys.contains("histogram_quantile_wide"));
         assert!(keys.contains("quoted_name_narrow"));
@@ -1743,6 +1812,8 @@ mod tests {
         assert!(keys.contains("atan2_wide"));
         assert!(keys.contains("annotations_narrow"));
         assert!(keys.contains("annotations_wide"));
+        assert!(keys.contains("metricsql_default_narrow"));
+        assert!(keys.contains("metricsql_default_wide"));
         assert!(keys.contains("result_limit_rejected"));
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1774,6 +1845,8 @@ mod tests {
             "comments_wide",
             "histogram_fraction_narrow",
             "histogram_fraction_wide",
+            "metricsql_default_narrow",
+            "metricsql_default_wide",
         ]);
         assert_eq!(keys, expected);
     }

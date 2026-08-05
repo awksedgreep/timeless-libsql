@@ -3,41 +3,195 @@
   "oracle": "victoriametrics-v1.148.0",
   "cases": [
     {
-      "id": "PQL-S10-direct-window-one-second-step",
+      "id": "MQL-09-direct-window-one-second-step",
       "query": "count_over_time(oracle_step[5i])",
       "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "1s"},
       "expected_metric": {"job": "oracle"},
       "expected_values": [5, 5, 5, 5, 5]
     },
     {
-      "id": "PQL-S10-direct-window-two-second-step",
+      "id": "MQL-09-direct-window-two-second-step",
       "query": "count_over_time(oracle_step[5i])",
       "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
       "expected_metric": {"job": "oracle"},
       "expected_values": [10, 10, 10]
     },
     {
-      "id": "PQL-S10-subquery-window-and-resolution",
+      "id": "MQL-09-subquery-window-and-resolution",
       "query": "max_over_time(vector(time())[5i:1i]) - min_over_time(vector(time())[5i:1i])",
       "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
       "expected_values": [8, 8, 8]
     },
     {
-      "id": "PQL-S10-millisecond-step",
+      "id": "MQL-09-millisecond-step",
       "query": "max_over_time(vector(time())[5i:1i]) - min_over_time(vector(time())[5i:1i])",
       "range": {"start_offset_ms": 0, "end_offset_ms": 3000, "step": "1500ms"},
       "expected_values": [6, 6, 6]
     },
     {
-      "id": "PQL-S10-zero-step-relative-window",
+      "id": "MQL-09-zero-step-relative-window",
       "query": "count_over_time(vector(time())[0i:1i])",
       "range": {"start_offset_ms": 0, "end_offset_ms": 2000, "step": "1s"},
       "expected_values": [1, 1, 1]
     }
   ],
+  "operator_cases": [
+    {
+      "id": "MQL-01-default-fills-filtered-and-missing-grid-points",
+      "query": "(oracle_mql_cpu > 2) default 0",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "a", "job": "oracle", "zone": "east"},
+          "values": [0, 0, 3]
+        },
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "b", "job": "oracle", "zone": "west"},
+          "values": [0, 0, 4]
+        }
+      ]
+    },
+    {
+      "id": "MQL-01-default-preserves-completely-filtered-series-identity",
+      "query": "(oracle_mql_cpu > 5) default 0",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "a", "job": "oracle", "zone": "east"},
+          "values": [0, 0, 0]
+        },
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "b", "job": "oracle", "zone": "west"},
+          "values": [0, 0, 0]
+        }
+      ]
+    },
+    {
+      "id": "MQL-01-default-matches-vectors-on-explicit-labels",
+      "query": "(oracle_mql_cpu > 2) default on(host) oracle_mql_sparse",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "a", "job": "oracle", "zone": "east"},
+          "values": [10, 10, 3]
+        },
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "b", "job": "oracle", "zone": "west"},
+          "offsets_ms": [20000, 30000],
+          "values": [20, 4]
+        }
+      ]
+    },
+    {
+      "id": "MQL-01-default-preserves-vector-comparison-identities",
+      "query": "(oracle_mql_cpu > on(host) oracle_mql_sparse) default 0",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {"metric": {"host": "a"}, "values": [0, 0, 0]},
+        {"metric": {"host": "b"}, "values": [0, 0, 0]}
+      ]
+    },
+    {
+      "id": "MQL-01-if-keeps-left-values-only-where-right-exists",
+      "query": "oracle_mql_cpu if on(host) oracle_mql_sparse",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "a", "job": "oracle", "zone": "east"},
+          "values": [1, 1, 3]
+        },
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "b", "job": "oracle", "zone": "west"},
+          "offsets_ms": [20000, 30000],
+          "values": [2, 4]
+        }
+      ]
+    },
+    {
+      "id": "MQL-01-set-join-modifier-does-not-rewrite-left-labels",
+      "query": "oracle_mql_cpu if on(host) group_left(zone) oracle_mql_sparse",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "a", "job": "oracle", "zone": "east"},
+          "values": [1, 1, 3]
+        },
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "b", "job": "oracle", "zone": "west"},
+          "offsets_ms": [20000, 30000],
+          "values": [2, 4]
+        }
+      ]
+    },
+    {
+      "id": "MQL-01-ifnot-keeps-unmatched-left-series",
+      "query": "oracle_mql_cpu ifnot oracle_mql_sparse",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "a", "job": "oracle", "zone": "east"},
+          "values": [1, 1, 3]
+        },
+        {
+          "metric": {"__name__": "oracle_mql_cpu", "host": "b", "job": "oracle", "zone": "west"},
+          "offsets_ms": [20000, 30000],
+          "values": [2, 4]
+        }
+      ]
+    },
+    {
+      "id": "MQL-01-default-composes-under-aggregation",
+      "query": "sum((oracle_mql_cpu > 2) default 0)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {"metric": {}, "values": [0, 0, 7]}
+      ]
+    },
+    {
+      "id": "MQL-01-scalars-are-nameless-vectors",
+      "query": "1 default 2",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    }
+  ],
+  "operator_error_cases": [
+    {
+      "id": "MQL-01-incomplete-default-fails",
+      "query": "oracle_mql_cpu default",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "singleExpr: unexpected token"
+    },
+    {
+      "id": "MQL-01-unclosed-matching-modifier-fails",
+      "query": "oracle_mql_cpu default on(host",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "ModifierExpr: identList"
+    },
+    {
+      "id": "MQL-01-bool-modifier-is-invalid",
+      "query": "oracle_mql_cpu default bool 0",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "bool modifier cannot be applied to"
+    }
+  ],
   "error_cases": [
     {
-      "id": "PQL-S10-bare-i-is-not-a-duration",
+      "id": "MQL-09-bare-i-is-not-a-duration",
       "params": {
         "query": "count_over_time(vector(time())[5i:i])",
         "start": "0",

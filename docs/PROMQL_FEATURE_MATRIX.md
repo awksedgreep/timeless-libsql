@@ -184,7 +184,7 @@ the P0 PromQL rows. They remain `API` composition, not extension syntax.
 
 | ID | construct | Rust now | Elixir | target | priority |
 |---|---|---|---|---|---|
-| `MQL-01` | binary `default`, `if`, `ifnot` | missing | yes | `API` | P2 |
+| `MQL-01` | binary `default`, `if`, `ifnot` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-001-default-if-and-ifnot)) | in progress | yes | `API` | P2 |
 | `MQL-02` | `keep_metric_names` | missing | yes | `API` | P2 |
 | `MQL-03` | `union` and `alias` | missing | yes | `API` | P2 |
 | `MQL-04` | `label_set` and `label_del` | missing | yes | `API` | P2 |
@@ -193,9 +193,15 @@ the P0 PromQL rows. They remain `API` composition, not extension syntax.
 | `MQL-07` | `running_avg/min/max/sum` | missing | yes | `API` | P2 |
 | `MQL-08` | remaining MetricsQL functions/operators | missing | partial | `API` | DEFER |
 | `MQL-09` | request-step-relative durations such as `[5i]`, `[5i:1i]`, and `offset 5i` | missing | yes | `API` | P2 |
-| `MQL-10` | query-context `start`, `end`, `start_timestamp`, `step`, and `range` with MetricsQL semantics | missing | partial | `API` | P2 |
-| `MQL-11` | stable MetricsQL `min_of` and `max_of` | missing | no | `API` | P2 |
+| `MQL-10` | query-context `start()`, `end()`, and `step()`; explicit rejection of unsupported `start_timestamp()` and `range()` | missing | partial | `API` | P2 |
+| `MQL-11` | `min_of` and `max_of` | deferred | no | `DEFER` | DEFER |
 | `MQL-12` | VictoriaMetrics `histogram_quantiles("label", phi..., buckets)` argument order and labels | missing | no | `API` | P2 |
+
+The MetricsQL tier uses only `/metricsql/api/v1/query` and
+`/metricsql/api/v1/query_range`; the stable PromQL routes never opt into it
+implicitly. Pinned VictoriaMetrics 1.148.0 rejects both `min_of` and `max_of`,
+so `MQL-11` is deferred unless a later immutable upstream tier or an explicit
+Timeless-only contract supplies a real semantic oracle.
 
 ## Higher-order library boundary
 

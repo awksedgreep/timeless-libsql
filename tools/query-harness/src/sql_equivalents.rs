@@ -26,7 +26,7 @@ struct Recipe {
 }
 
 fn parse_recipes(path: &Path) -> Result<Vec<Recipe>> {
-    let heading = Regex::new(r"^### (SQL-(?:PROM|LOG)-\d{3}):")?;
+    let heading = Regex::new(r"^### (SQL-(?:PROM|MQL|LOG)-\d{3}):")?;
     let content = fs::read_to_string(path)?;
     let mut recipes = Vec::new();
     let mut current: Option<Recipe> = None;
@@ -275,7 +275,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
     };
     match name {
         "metric" => Value::Text(metric.to_owned()),
-        "lhs_metric" | "rhs_metric" | "many_metric" => Value::Text("cpu".to_owned()),
+        "lhs_metric" | "many_metric" => Value::Text("cpu".to_owned()),
+        "rhs_metric" if identifier == "SQL-MQL-001" => Value::Text("requests_total".to_owned()),
+        "rhs_metric" => Value::Text("cpu".to_owned()),
         "one_metric" => Value::Text("requests_total".to_owned()),
         "filter_json" | "lhs_filter" | "rhs_filter" | "many_filter" | "one_filter" => Value::Null,
         "error_filter" => Value::Text(r#"{"host":"web-1"}"#.to_owned()),
@@ -289,7 +291,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "offset" => Value::Integer(10),
         "max_work_points" => Value::Integer(100_000),
         "max_work_entries" => Value::Integer(100_000),
+        "threshold" if identifier == "SQL-MQL-001" => Value::Real(15.0),
         "threshold" => Value::Real(0.0),
+        "default_value" => Value::Real(0.0),
         "scalar" | "scalar_value" | "value" => Value::Real(2.0),
         "q" | "quantile" => Value::Real(0.5),
         "k" => Value::Integer(1),
@@ -638,6 +642,57 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-PROM-056 histogram fraction changed: {fractions:?}");
+    }
+
+    let metricsql_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-001")
+        .context("SQL-MQL-001 recipe")?;
+    if metricsql_recipe.statements.len() != 3 {
+        bail!("SQL-MQL-001 must retain default, if, and ifnot statements");
+    }
+    let expected_rows = [
+        vec![
+            (r#"{"host":"web-1","service":"api"}"#, 100_i64, 0.0_f64),
+            (r#"{"host":"web-1","service":"api"}"#, 110_i64, 30.0_f64),
+            (r#"{"host":"web-2","service":"api"}"#, 100_i64, 20.0_f64),
+            (r#"{"host":"web-2","service":"api"}"#, 110_i64, 20.0_f64),
+        ],
+        vec![
+            (r#"{"host":"web-1","service":"api"}"#, 100_i64, 10.0_f64),
+            (r#"{"host":"web-1","service":"api"}"#, 110_i64, 30.0_f64),
+        ],
+        vec![
+            (r#"{"host":"web-2","service":"api"}"#, 100_i64, 20.0_f64),
+            (r#"{"host":"web-2","service":"api"}"#, 110_i64, 20.0_f64),
+        ],
+    ];
+    for (ordinal, expected) in expected_rows.iter().enumerate() {
+        let mut statement = connection.prepare(&metricsql_recipe.statements[ordinal])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-001 parameter must be named")?
+                .trim_start_matches(':');
+            statement.raw_bind_parameter(index, parameter("SQL-MQL-001", name))?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected = expected
+            .iter()
+            .map(|(labels, ts, value)| ((*labels).to_owned(), *ts, *value))
+            .collect::<Vec<_>>();
+        if rows != expected {
+            bail!("SQL-MQL-001 statement {} changed: {rows:?}", ordinal + 1);
+        }
     }
 
     let bounded: i64 = connection.query_row(
@@ -1063,13 +1118,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 69);
+        assert_eq!(recipes.len(), 70);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            87
+            90
         );
         assert_eq!(
             recipes
@@ -1077,7 +1132,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            93
+            96
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }
@@ -1102,7 +1157,7 @@ mod tests {
             .into_iter()
             .map(|recipe| recipe.identifier)
             .collect();
-        let links = Regex::new(r"QUERY_SQL_EQUIVALENTS\.md#(sql-(?:prom|log)-\d{3})").unwrap();
+        let links = Regex::new(r"QUERY_SQL_EQUIVALENTS\.md#(sql-(?:prom|mql|log)-\d{3})").unwrap();
         for matrix in ["PROMQL_FEATURE_MATRIX.md", "LOGSQL_FEATURE_MATRIX.md"] {
             let content = fs::read_to_string(root().join("docs").join(matrix)).unwrap();
             for captures in links.captures_iter(&content) {

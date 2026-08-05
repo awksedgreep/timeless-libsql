@@ -13,6 +13,8 @@ use serde_json::{json, Map, Value};
 use crate::promql;
 use crate::storage::MetricsTable;
 
+mod metricsql;
+
 const RESERVED_PARAMS: &[&str] = &[
     "metric",
     "metrics",
@@ -397,6 +399,7 @@ pub(crate) enum PromPlan {
     Calendar(PromCalendarPlan),
     HistogramQuantile(PromHistogramQuantilePlan),
     HistogramFraction(PromHistogramFractionPlan),
+    MetricsBinary(metricsql::BinaryPlan),
     Binary(PromBinaryPlan),
     Aggregate(PromAggregatePlan),
     Selector { selector: Selector, lookback: i64 },
@@ -1380,6 +1383,7 @@ impl PromPlan {
             Self::Calendar(_) => PromValueType::Vector,
             Self::HistogramQuantile(_) => PromValueType::Vector,
             Self::HistogramFraction(_) => PromValueType::Vector,
+            Self::MetricsBinary(_) => PromValueType::Vector,
             Self::Aggregate(_) => PromValueType::Vector,
             Self::Binary(binary) => {
                 if binary.lhs.value_type() == PromValueType::Scalar
@@ -1565,6 +1569,92 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
         PromQueryLimits::default().max_points_per_series,
     )?;
     let plan = lower_promql(query, lookback)
+        .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
+    match plan.value_type() {
+        PromValueType::Matrix => {
+            return Err("invalid parameter \"query\": invalid expression type \"range vector\" for range query, must be Scalar or instant Vector".into());
+        }
+        PromValueType::String => {
+            return Err("invalid parameter \"query\": invalid expression type \"string\" for range query, must be Scalar or instant Vector".into());
+        }
+        _ => {}
+    }
+    Ok(ReadRequest::Prometheus {
+        query: query.to_owned(),
+        plan,
+        start,
+        stop,
+        step,
+        instant: false,
+        limits: PromQueryLimits::default(),
+    })
+}
+
+pub(crate) fn metricsql_instant_request(params: &Params) -> Result<ReadRequest, String> {
+    params.ensure_prometheus_only(&["query", "time", "step", "lookback_delta"])?;
+    let query = params.get("query").unwrap_or("");
+    let time = match params.get("time") {
+        Some(value) => parse_prom_time(Some(value), 0).map_err(|_| {
+            format!(
+                "invalid parameter \"time\": invalid time value for 'time': cannot parse \"{value}\" to a valid timestamp"
+            )
+        })?,
+        None => now_millis(),
+    };
+    let step = match params.get("step") {
+        Some(value) => parse_prom_step(Some(value), 0).map_err(|_| {
+            format!("invalid parameter \"step\": cannot parse \"{value}\" to a valid duration")
+        })?,
+        None => 300_000,
+    };
+    if step <= 0 {
+        return Err("step must be positive".into());
+    }
+    let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
+    let plan = metricsql::lower(query, lookback, step)
+        .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
+    Ok(ReadRequest::Prometheus {
+        query: query.to_owned(),
+        plan: metricsql::vectorize_scalar(plan),
+        start: time,
+        stop: time,
+        step,
+        instant: true,
+        limits: PromQueryLimits::default(),
+    })
+}
+
+pub(crate) fn metricsql_range_request(params: &Params) -> Result<ReadRequest, String> {
+    params.ensure_prometheus_only(&["query", "start", "end", "step", "lookback_delta"])?;
+    let query = params.get("query").unwrap_or("");
+    let start_input = params.get("start").unwrap_or("");
+    let start = parse_prom_time(Some(start_input), 0).map_err(|_| {
+        format!("invalid parameter \"start\": cannot parse \"{start_input}\" to a valid timestamp")
+    })?;
+    let stop_input = params.get("end").unwrap_or("");
+    let stop = parse_prom_time(Some(stop_input), 0).map_err(|_| {
+        format!("invalid parameter \"end\": cannot parse \"{stop_input}\" to a valid timestamp")
+    })?;
+    let step_input = params.get("step").unwrap_or("");
+    let step = parse_prom_step(Some(step_input), 0).map_err(|_| {
+        format!("invalid parameter \"step\": cannot parse \"{step_input}\" to a valid duration")
+    })?;
+    let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
+    if stop < start {
+        return Err(
+            "invalid parameter \"end\": end timestamp must not be before start time".into(),
+        );
+    }
+    if step <= 0 {
+        return Err("step must be positive".into());
+    }
+    enforce_prometheus_grid(
+        start,
+        stop,
+        step,
+        PromQueryLimits::default().max_points_per_series,
+    )?;
+    let plan = metricsql::lower(query, lookback, step)
         .map_err(|error| format!("invalid parameter \"query\": {error}"))?;
     match plan.value_type() {
         PromValueType::Matrix => {
@@ -1825,6 +1915,10 @@ fn attach_promql_plan_source_positions(
             attach_promql_plan_source_positions(&mut histogram.lower, calls)?;
             attach_promql_plan_source_positions(&mut histogram.upper, calls)?;
             attach_promql_plan_source_positions(&mut histogram.inner, calls)?;
+        }
+        PromPlan::MetricsBinary(binary) => {
+            attach_promql_plan_source_positions(&mut binary.lhs, calls)?;
+            attach_promql_plan_source_positions(&mut binary.rhs, calls)?;
         }
         PromPlan::Binary(binary) => {
             attach_promql_plan_source_positions(&mut binary.lhs, calls)?;
@@ -4417,6 +4511,20 @@ fn execute_prometheus(
             conn,
             features,
             histogram,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
+        PromPlan::MetricsBinary(binary) => metricsql::execute_binary(
+            conn,
+            features,
+            binary,
             start,
             stop,
             step,

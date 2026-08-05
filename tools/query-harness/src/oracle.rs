@@ -1170,7 +1170,9 @@ fn victoriametrics_api(root: &Path, runtime: &str, oracle: &OracleDefinition) ->
     }
 
     let failures = victoriametrics_cases(&client, &base, &fixture, sample_ms)?
-        + victoriametrics_error_cases(&client, &base, &fixture)?;
+        + victoriametrics_error_cases(&client, &base, &fixture)?
+        + operator_cases(&client, &base, &fixture, sample_ms)?
+        + operator_error_cases(&client, &base, &fixture, sample_ms)?;
     if failures != 0 {
         bail!("{failures} VictoriaMetrics API oracle case(s) failed");
     }
