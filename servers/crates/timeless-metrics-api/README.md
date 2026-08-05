@@ -210,6 +210,23 @@ Leading gaps, overflow, infinity, signed zero, collisions, limits,
 cancellation, GET/POST, and reopen are pinned against VictoriaMetrics through
 one public child evaluation.
 
+Request-step-relative MetricsQL durations resolve each `i` component against
+the current request step. Direct ranges, subquery windows and resolutions,
+and negative offsets accept decimal, compound, and case-insensitive forms;
+compound leading minus signs are inherited exactly as in VictoriaMetrics.
+The complete binary64 duration is truncated to milliseconds and saturated to
+`int64`. Quoted strings and comments are isolated, including comments between
+a delimiter and duration. Bare `i` fails explicitly, while the stable PromQL
+routes retain the pinned rejection of all `i` syntax.
+
+For ordinary reductions, `0i` resolves to one request step. For adaptive
+`default_rollup`, `rate`, `irate`, and `deriv`, direct and subquery `0i`
+retains the automatic cadence-inference behavior rather than becoming a fixed
+window. Collision-checked lowering prevents a legitimate explicit duration
+from being confused with this zero marker. Limits, cancellation, one-public-
+read behavior, GET/POST, durability, and reopen use the existing query
+contract.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding
@@ -226,6 +243,8 @@ and
 [`SQL-MQL-006`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-006-range-aggregates)
 and
 [`SQL-MQL-007`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-007-running-aggregates)
+and
+[`SQL-MQL-009`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-009-request-step-relative-durations)
 recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
 envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
 `422`. Limits and cancellation continue to use Timeless's existing execution

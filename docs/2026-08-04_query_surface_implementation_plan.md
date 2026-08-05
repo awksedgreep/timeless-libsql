@@ -265,8 +265,12 @@ generated-result/work limits, cancellation, and stable-route isolation.
 `MQL-07` is shipped with cumulative `running_avg/min/max/sum`, pinned
 missing/stale carry, slot-index, IEEE/name/collision behavior, executable
 `SQL-MQL-007`, one bounded child evaluation, exact-build evidence, limits,
-cancellation, and stable route isolation. The remaining rows continue in
-their listed order; `MQL-11`
+cancellation, and stable route isolation. `MQL-09` is implemented pending
+exact-build evidence with request-step-relative direct/subquery windows and
+resolutions, signed compound offsets, exact float/truncation/saturation rules,
+collision-free `0i` lowering, adaptive direct/subquery rollups, executable
+`SQL-MQL-009`, stable-route isolation, limits, cancellation, durability, and
+reopen. The remaining rows continue in their listed order; `MQL-11`
 is already corrected to deferred because the pinned oracle rejects `min_of`
 and `max_of`.
 

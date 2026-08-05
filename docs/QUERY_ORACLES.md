@@ -112,12 +112,14 @@ VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
 
-The VictoriaMetrics API fixture Remote Writes a deterministic one-second
-series, then evaluates MetricsQL-only cases with explicit range-query steps.
-It pins `Ni` lookbehind and subquery durations against the request step,
-including millisecond steps, and records the exact Prometheus rejection of the
-same syntax separately. This oracle is used only for rows explicitly assigned
-to the MetricsQL compatibility tier. The fixture contains five success cases
+The VictoriaMetrics API fixture Remote Writes deterministic one-second and
+slow-cadence series, then evaluates MetricsQL-only cases with explicit
+range-query steps. It pins decimal, compound, and case-insensitive `Ni`
+lookbehind/subquery durations, millisecond steps, positive and inherited-
+negative offsets, direct and subquery adaptive `0i` rollups, and the exact
+bare-`i` syntax error. The exact Prometheus rejection of the same language is
+recorded separately. This oracle is used only for rows explicitly assigned to
+the MetricsQL compatibility tier. The fixture contains sixteen success cases
 and one explicit syntax error for `MQL-09`. Its `MQL-01` corpus adds ten
 operator success cases and three syntax errors covering sparse and completely
 filtered identity, non-overlapping samples, vector/scalar behavior,
@@ -153,7 +155,7 @@ running-aggregate cases and three errors. It pins cumulative average/minimum/
 maximum/sum, slot-indexed arithmetic, missing and stale carry, computed-NaN
 omission, overflow, infinity, signed zero, scalar/expression composition,
 case/trailing-comma grammar, unconditional name removal, arity, and duplicate
-outputs. The fixture now contains 140 MetricsQL cases in total.
+outputs. The fixture now contains 151 MetricsQL cases in total.
 Timeless compares exact result labels, timestamp grids, and float values while
 retaining its documented HTTP 400 `bad_data` envelope in place of
 VictoriaMetrics's HTTP 422/error-type-`422` wire policy.

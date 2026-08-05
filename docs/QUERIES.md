@@ -1585,6 +1585,53 @@ MetricsQL parsing, arbitrary expression composition, packed missing/NaN
 behavior, collisions, limits, cancellation, and HTTP envelopes remain Rust
 API responsibilities; no extension syntax or storage format changed.
 
+### Request-step-relative MetricsQL durations
+
+The explicit MetricsQL routes resolve the `i` duration suffix against the
+positive `step` parameter of the current request:
+
+```text
+count_over_time(cpu_usage[5i])
+max_over_time(vector(time())[5i:1i])
+cpu_usage offset 5i
+cpu_usage offset -1i-1s
+rate(http_requests_total[0i])
+rate(http_requests_total[0i:1i])
+```
+
+Each `Ni` component contributes `N * request_step` milliseconds. Decimal and
+compound components are accumulated as binary64 and the complete duration is
+then truncated toward zero to a signed 64-bit millisecond value. Overflow
+saturates at the corresponding `int64` limit. Duration suffixes other than an
+uppercase standalone `M` are case-insensitive; uppercase `M` remains the
+VictoriaMetrics numeric multiplier, while `Ms` is milliseconds. A minus on
+the first offset component is inherited by later positive components, so
+`offset -1i-1s` means `-(request_step + 1s)`, not `-request_step + 1s`.
+
+Direct selector windows, subquery windows and resolutions, and signed offsets
+all use the same request-owned resolution. A zero subquery resolution becomes
+one request step. For ordinary range reductions, a resolved zero window also
+becomes one request step. For `default_rollup`, `rate`, `irate`, and `deriv`,
+an explicit `0i` remains the upstream automatic-window signal: direct
+selectors and subqueries retain the scrape-cadence inference documented in
+the preceding rollup section. A zero offset remains zero.
+
+The lowering pass ignores quoted strings and comments while accepting
+comments between the range/offset delimiter and the duration. It uses a
+collision-checked internal marker so a legitimate explicit duration with the
+same millisecond value cannot be mistaken for `0i`. Bare `i` is invalid and
+returns the pinned parser diagnostic. The stable PromQL endpoints continue to
+reject all `i` durations; the syntax never leaks into the primary language
+tier.
+
+All forms retain existing work, result, response, deadline, cancellation,
+GET/POST, flush, shutdown, and reopen contracts. The extension receives no
+MetricsQL grammar or new storage primitive. Direct SQLite/libSQL users can
+bind request-step multiplication into the existing public window, grid, and
+subquery recipes in
+[`SQL-MQL-009`](QUERY_SQL_EQUIVALENTS.md#sql-mql-009-request-step-relative-durations);
+adaptive zero-window rollups reuse `SQL-MQL-005`.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

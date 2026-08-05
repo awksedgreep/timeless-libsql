@@ -916,6 +916,12 @@ fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec
         metricsql_range("metricsql_running_avg_wide", "metrics-metricsql-running-avg-wide", "running_avg(query_contract_cpu)", at, series * 4),
         metricsql_range("metricsql_running_sum_narrow", "metrics-metricsql-running-sum-narrow", r#"running_sum(query_contract_cpu{host="h0000"})"#, at, 4),
         metricsql_range("metricsql_running_sum_wide", "metrics-metricsql-running-sum-wide", "running_sum(query_contract_cpu)", at, series * 4),
+        metricsql_range("metricsql_step_window_narrow", "metrics-metricsql-step-window-narrow", r#"count_over_time(query_contract_cpu{host="h0000"}[5i])"#, at, 4),
+        metricsql_range("metricsql_step_window_wide", "metrics-metricsql-step-window-wide", "count_over_time(query_contract_cpu[5i])", at, series * 4),
+        metricsql_range("metricsql_step_offset_narrow", "metrics-metricsql-step-offset-narrow", r#"query_contract_cpu{host="h0000"} offset 5i"#, at, 4),
+        metricsql_range("metricsql_step_offset_wide", "metrics-metricsql-step-offset-wide", "query_contract_cpu offset 5i", at, series * 4),
+        metricsql_range("metricsql_step_zero_rate_narrow", "metrics-metricsql-step-zero-rate-narrow", r#"rate(query_contract_cpu{host="h0000"}[0i])"#, at, 4),
+        metricsql_range("metricsql_step_zero_rate_wide", "metrics-metricsql-step-zero-rate-wide", "rate(query_contract_cpu[0i])", at, series * 4),
         instant("arithmetic_vector_scalar_narrow", "metrics-arithmetic-vector-scalar-narrow", r#"query_contract_cpu{host="h0000"} * 2"#, 1),
         range("arithmetic_one_to_one_wide", "metrics-arithmetic-one-to-one-wide", "query_contract_cpu + query_contract_cpu", at, series * 4),
         instant("comparison_filter_narrow", "metrics-comparison-filter-narrow", r#"query_contract_cpu{host="h0000"} > 30"#, 1),
@@ -1823,7 +1829,7 @@ mod tests {
         // The work-limit query is appended only after its 100,025-point
         // fixture crosses the second durability barrier.
         assert!(keys.insert("work_limit_rejected"));
-        assert_eq!(keys.len(), 167);
+        assert_eq!(keys.len(), 173);
         assert!(keys.contains("histogram_quantile_narrow"));
         assert!(keys.contains("histogram_quantile_wide"));
         assert!(keys.contains("quoted_name_narrow"));
@@ -1862,6 +1868,12 @@ mod tests {
         assert!(keys.contains("metricsql_running_avg_wide"));
         assert!(keys.contains("metricsql_running_sum_narrow"));
         assert!(keys.contains("metricsql_running_sum_wide"));
+        assert!(keys.contains("metricsql_step_window_narrow"));
+        assert!(keys.contains("metricsql_step_window_wide"));
+        assert!(keys.contains("metricsql_step_offset_narrow"));
+        assert!(keys.contains("metricsql_step_offset_wide"));
+        assert!(keys.contains("metricsql_step_zero_rate_narrow"));
+        assert!(keys.contains("metricsql_step_zero_rate_wide"));
         assert!(keys.contains("result_limit_rejected"));
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1919,6 +1931,12 @@ mod tests {
             "metricsql_running_avg_wide",
             "metricsql_running_sum_narrow",
             "metricsql_running_sum_wide",
+            "metricsql_step_window_narrow",
+            "metricsql_step_window_wide",
+            "metricsql_step_offset_narrow",
+            "metricsql_step_offset_wide",
+            "metricsql_step_zero_rate_narrow",
+            "metricsql_step_zero_rate_wide",
         ]);
         assert_eq!(keys, expected);
     }

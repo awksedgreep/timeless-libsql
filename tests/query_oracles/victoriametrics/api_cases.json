@@ -33,6 +33,83 @@
       "query": "count_over_time(vector(time())[0i:1i])",
       "range": {"start_offset_ms": 0, "end_offset_ms": 2000, "step": "1s"},
       "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-09-zero-window-retains-adaptive-rate",
+      "query": "rate(oracle_mql_slow_counter[0i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-09-zero-window-retains-adaptive-default-rollup",
+      "query": "default_rollup(oracle_step[0i])",
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 24000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [31, 31, 31]
+    },
+    {
+      "id": "MQL-09-zero-subquery-window-retains-adaptive-rate",
+      "query": "rate(oracle_mql_slow_counter[0i:1i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-09-offset-one-second-step",
+      "query": "oracle_step offset 5i",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "1s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [6, 7, 8, 9, 10]
+    },
+    {
+      "id": "MQL-09-offset-two-second-step",
+      "query": "oracle_step offset 5i",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [1, 3, 5]
+    },
+    {
+      "id": "MQL-09-decimal-step-multiple",
+      "query": "count_over_time(oracle_step[1.5i])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [3, 3, 3]
+    },
+    {
+      "id": "MQL-09-compound-step-relative-window",
+      "query": "count_over_time(oracle_step[2i-500ms])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 2000, "step": "1s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [2, 2, 2]
+    },
+    {
+      "id": "MQL-09-uppercase-step-suffix",
+      "query": "count_over_time(oracle_step[5I])",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 2000, "step": "1s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [5, 5, 5]
+    },
+    {
+      "id": "MQL-09-compound-offset",
+      "query": "oracle_step offset 1i1s",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [8, 10, 12]
+    },
+    {
+      "id": "MQL-09-negative-offset",
+      "query": "oracle_step offset -1i",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [13, 15, 17]
+    },
+    {
+      "id": "MQL-09-negative-compound-offset-inherits-the-sign",
+      "query": "oracle_step offset -1i-1s",
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"__name__": "oracle_step", "job": "oracle"},
+      "expected_values": [14, 16, 18]
     }
   ],
   "operator_cases": [

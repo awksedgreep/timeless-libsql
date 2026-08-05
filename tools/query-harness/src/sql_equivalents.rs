@@ -313,6 +313,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "start" => Value::Integer(if counter_window { 60 } else { 100 }),
         "end" => Value::Integer(if counter_window { 60 } else { 110 }),
         "step" | "resolution" => Value::Integer(10),
+        "request_step" => Value::Integer(10),
+        "multiple" => Value::Real(1.0),
+        "fixed_offset" => Value::Integer(0),
         "lookback" | "window" => Value::Integer(if counter_window { 60 } else { 20 }),
         "history" => Value::Integer(300),
         "max_lookback" => Value::Integer(0),
@@ -1271,6 +1274,74 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         bail!("SQL-MQL-007 slot-indexed average changed: {running_precision:?}");
     }
 
+    let relative_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-009")
+        .context("SQL-MQL-009 recipe")?;
+    if relative_recipe.statements.len() != 2 {
+        bail!("SQL-MQL-009 must retain window and offset statements");
+    }
+    let expected_relative_rows = [
+        vec![
+            (
+                None,
+                r#"{"host":"web-1","service":"api"}"#.to_owned(),
+                100_i64,
+                1.0_f64,
+            ),
+            (
+                None,
+                r#"{"host":"web-1","service":"api"}"#.to_owned(),
+                110_i64,
+                1.0_f64,
+            ),
+            (
+                None,
+                r#"{"host":"web-2","service":"api"}"#.to_owned(),
+                100_i64,
+                1.0_f64,
+            ),
+        ],
+        vec![
+            (
+                Some("cpu".to_owned()),
+                r#"{"host":"web-1","service":"api"}"#.to_owned(),
+                110_i64,
+                10.0_f64,
+            ),
+            (
+                Some("cpu".to_owned()),
+                r#"{"host":"web-2","service":"api"}"#.to_owned(),
+                110_i64,
+                20.0_f64,
+            ),
+        ],
+    ];
+    for (ordinal, expected) in expected_relative_rows.iter().enumerate() {
+        let mut statement = connection.prepare(&relative_recipe.statements[ordinal])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-009 parameter must be named")?
+                .trim_start_matches(':');
+            statement.raw_bind_parameter(index, parameter("SQL-MQL-009", name))?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows != *expected {
+            bail!("SQL-MQL-009 statement {} changed: {rows:?}", ordinal + 1);
+        }
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1694,13 +1765,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 76);
+        assert_eq!(recipes.len(), 77);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            100
+            102
         );
         assert_eq!(
             recipes
@@ -1708,7 +1779,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            106
+            108
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

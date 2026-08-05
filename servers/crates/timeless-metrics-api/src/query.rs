@@ -810,6 +810,7 @@ pub(crate) struct PromRangePlan {
     input: PromRangeInput,
     parameter: Option<Box<PromPlan>>,
     source: Option<PromSourceCall>,
+    metricsql_dynamic: Option<metricsql::DynamicSubqueryRollupPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2554,6 +2555,7 @@ fn lower_promql_expr(
                 input,
                 parameter: None,
                 source: None,
+                metricsql_dynamic: None,
             });
             Ok(PromPlan::Absent(PromAbsentPlan {
                 inner: Box::new(present),
@@ -2696,6 +2698,7 @@ fn lower_promql_expr(
                 input,
                 parameter: Some(Box::new(parameter)),
                 source: None,
+                metricsql_dynamic: None,
             }))
         }
         promql::Expr::Call(call) if call.func.name == "predict_linear" => {
@@ -2725,6 +2728,7 @@ fn lower_promql_expr(
                 input,
                 parameter: Some(Box::new(parameter)),
                 source: None,
+                metricsql_dynamic: None,
             }))
         }
         promql::Expr::Call(call)
@@ -2791,6 +2795,7 @@ fn lower_promql_expr(
                 input,
                 parameter: None,
                 source: None,
+                metricsql_dynamic: None,
             }))
         }
         other => Err(format!(
@@ -5072,6 +5077,7 @@ fn execute_prometheus_range_reduction_plan(
             conn,
             features,
             subquery,
+            range.metricsql_dynamic.as_ref(),
             start,
             stop,
             step,
@@ -7917,6 +7923,7 @@ fn execute_prometheus_range_subquery(
     conn: &Connection,
     features: QueryFeatures,
     subquery: &SubqueryPlan,
+    metricsql_dynamic: Option<&metricsql::DynamicSubqueryRollupPlan>,
     start: i64,
     stop: i64,
     step: i64,
@@ -7938,10 +7945,13 @@ fn execute_prometheus_range_subquery(
         .timing
         .selection_time(stop, query_start, query_end)?;
     let resolution = subquery_resolution(subquery, limits)?;
+    let source_window = metricsql_dynamic.map_or(subquery.window, |plan| {
+        metricsql::dynamic_subquery_history(plan, step)
+    });
     let Some((inner_start, inner_stop, points_per_series)) = aligned_subquery_grid(
         effective_start.min(effective_stop),
         effective_start.max(effective_stop),
-        subquery.window,
+        source_window,
         resolution,
     )?
     else {
@@ -7981,9 +7991,24 @@ fn execute_prometheus_range_subquery(
     for mut series in intermediate {
         check_cancelled(cancelled)?;
         let metric = series.labels.get("__name__").cloned();
-        if !keep_metric_names && !op.retains_metric_name() {
+        let retains_metric_name = metricsql_dynamic.map_or_else(
+            || op.retains_metric_name(),
+            metricsql::dynamic_subquery_retains_metric_name,
+        );
+        if !keep_metric_names && !retains_metric_name {
             series.labels.remove("__name__");
         }
+        let (window, max_previous) = if let Some(plan) = metricsql_dynamic {
+            metricsql::prepare_dynamic_subquery_samples(plan, &mut series.points);
+            let timestamps = series
+                .points
+                .iter()
+                .map(|(timestamp, _)| *timestamp)
+                .collect::<Vec<_>>();
+            metricsql::dynamic_subquery_window(plan, &timestamps, step, instant)
+        } else {
+            (subquery.window, 0)
+        };
         let item_start = body.len();
         comma(&mut body, emitted);
         write_prometheus_item_prefix(&mut body, None, &series.labels, instant, limits)?;
@@ -7999,12 +8024,22 @@ fn execute_prometheus_range_subquery(
             while hi < series.points.len() && series.points[hi].0 <= effective {
                 hi += 1;
             }
-            let lower = checked_timestamp_sub(effective, subquery.window, "subquery range")?;
+            let lower = checked_timestamp_sub(effective, window, "subquery range")?;
             while lo < hi && series.points[lo].0 <= lower {
                 lo += 1;
             }
-            if hi > lo {
-                let value = prometheus_range_reduction(
+            let value = if let Some(plan) = metricsql_dynamic {
+                metricsql::dynamic_subquery_value(
+                    plan,
+                    &series.points,
+                    lo,
+                    hi,
+                    lower,
+                    max_previous,
+                    cancelled,
+                )?
+            } else if hi > lo {
+                prometheus_range_reduction(
                     &series.points[lo..hi],
                     op,
                     parameters.get(&outer).copied(),
@@ -8012,20 +8047,22 @@ fn execute_prometheus_range_subquery(
                     effective,
                     outer,
                     cancelled,
-                )?;
-                if let Some(value) = value {
-                    admit_prometheus_point(result_points.saturating_add(item_points), limits)?;
-                    if !instant {
-                        comma(&mut body, item_points as usize);
-                    }
-                    write_prometheus_sample(&mut body, outer, value)?;
-                    item_points += 1;
-                    enforce_prometheus_output(
-                        &body,
-                        result_points.saturating_add(item_points),
-                        limits,
-                    )?;
+                )?
+            } else {
+                None
+            };
+            if let Some(value) = value {
+                admit_prometheus_point(result_points.saturating_add(item_points), limits)?;
+                if !instant {
+                    comma(&mut body, item_points as usize);
                 }
+                write_prometheus_sample(&mut body, outer, value)?;
+                item_points += 1;
+                enforce_prometheus_output(
+                    &body,
+                    result_points.saturating_add(item_points),
+                    limits,
+                )?;
             }
             if outer >= stop {
                 break;
@@ -8038,7 +8075,9 @@ fn execute_prometheus_range_subquery(
         if item_points == 0 {
             body.truncate(item_start);
         } else {
-            if matches!(op, PromRangeOp::Rate | PromRangeOp::Increase) {
+            if metricsql_dynamic.is_none()
+                && matches!(op, PromRangeOp::Rate | PromRangeOp::Increase)
+            {
                 if let Some(metric) = metric
                     .as_deref()
                     .filter(|metric| !metric.is_empty() && !prometheus_counter_name(metric))

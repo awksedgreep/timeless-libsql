@@ -105,6 +105,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-MQL-005`](#sql-mql-005-default_rollup-and-window-less-rollups) | `MQL-05` | current foundation | automatic finite-series last-sample window and step-sized public window reductions; API owns packed stale/NaN fidelity, carry-in/reset semantics, language, limits, cancellation, and envelopes |
 | [`SQL-MQL-006`](#sql-mql-006-range-aggregates) | `MQL-06` | current foundation | slot-indexed full-grid average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, implicit windows, duplicate outputs, limits, cancellation, and envelopes |
 | [`SQL-MQL-007`](#sql-mql-007-running-aggregates) | `MQL-07` | current foundation | slot-indexed cumulative average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, packed missing/NaN semantics, collisions, limits, cancellation, and envelopes |
+| [`SQL-MQL-009`](#sql-mql-009-request-step-relative-durations) | `MQL-09` | current foundation | exact request-step multiplication for public windows, subquery timing, and signed offsets; API owns MetricsQL duration grammar, millisecond composition, saturation, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -4045,6 +4046,82 @@ of selecting the final state and filling the complete grid.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-007`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_running_aggregates_match_victoriametrics_and_reopen`.
+
+### SQL-MQL-009: request-step-relative durations
+
+MetricsQL resolves each `Ni` component to `N * request_step` before executing
+the expression. Direct SQLite/libSQL users can perform the same arithmetic in
+the arguments to an existing public window. For
+`count_over_time(metric[:multiple i])` on the default seconds table:
+
+```sql
+SELECT NULL AS name, labels, ts, value
+FROM timeless_window(
+  'metrics', :metric, :filter_json,
+  :start, :end, :request_step,
+  CASE
+    WHEN CAST(:multiple * :request_step AS INTEGER) = 0
+      THEN :request_step
+    ELSE CAST(:multiple * :request_step AS INTEGER)
+  END,
+  'count'
+)
+ORDER BY labels, ts;
+```
+
+`:request_step` is a positive INTEGER in the table's declared timestamp unit
+and `:multiple` is a non-negative INTEGER or REAL. Multiplication uses SQLite
+REAL arithmetic and `CAST(... AS INTEGER)` truncates toward zero, matching the
+millisecond result of VictoriaMetrics duration composition for ordinary
+finite values. A resolved zero window becomes one request step, matching the
+pinned ordinary-reduction `0i` rule. The public window is open on the left and closed on
+the right, output-grid bounds are inclusive, empty windows emit no row, the
+metric name is SQL NULL for `count_over_time`, and rows are deterministic by
+canonical labels then timestamp. Substitute any documented public aggregate
+for `count` and apply its documented metric-name policy. Adaptive zero-window
+`rate`, `irate`, `deriv`, and `default_rollup`—including their direct and
+subquery forms—use the cadence-inference recipe in `SQL-MQL-005`; the Rust API
+selects that plan rather than pretending a fixed SQL window is equivalent.
+
+For a selector offset such as `metric offset :multiple i`, shift lookup times
+by the resolved signed duration and restore each outer timestamp:
+
+```sql
+WITH timing(offset) AS (
+  SELECT CAST(:multiple * :request_step + :fixed_offset AS INTEGER)
+)
+SELECT :metric AS name, labels, ts + timing.offset AS ts, value
+FROM timing,
+     timeless_grid(
+       'metrics', :metric, :filter_json,
+       :start - timing.offset, :end - timing.offset,
+       :request_step, :lookback
+     )
+ORDER BY name, labels, ts;
+```
+
+Bind a negative `:multiple` for negative offset and bind any ordinary duration
+components already converted to the table unit as signed `:fixed_offset`.
+Selection uses the shifted open-left lookback; output timestamps remain on the
+original inclusive request grid. Missing selections remain sparse. For
+`[Ni:Mi]` subqueries, bind `:window = N * :request_step` and
+`:resolution = M * :request_step` in `SQL-PROM-009`; a resolved zero window or
+resolution becomes `:request_step`. The default metrics table stores integer
+seconds. To reproduce a millisecond request directly, construct the recursive
+outer grid in milliseconds, multiply public raw `ts` values by 1,000, and use
+the exact predicates from `SQL-PROM-006`; the release Rust API owns that
+bounded millisecond composition and preserves its result timestamps.
+
+These statements expose the direct-user mechanics but do not make SQLite a
+MetricsQL parser. The Rust API owns decimal/compound/case-insensitive `i`
+grammar, comment/string isolation, VictoriaMetrics float accumulation and
+`int64` saturation, collision-free `0i` lowering, stable-PromQL isolation,
+subquery AST composition, work/result/response limits, cancellation, and HTTP
+errors. No private table or new extension primitive is involved.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-009`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_step_relative_durations_match_victoriametrics_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

@@ -140,12 +140,20 @@ pub(crate) struct DynamicRollupPlan {
     pub(super) max_lookback: i64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DynamicSubqueryRollupPlan {
+    pub(super) op: DynamicRollupOp,
+    pub(super) max_lookback: i64,
+}
+
 struct LowerContext<'a> {
     original: &'a str,
     lookback: i64,
     #[allow(dead_code)]
     step: i64,
     max_lookback: i64,
+    zero_duration_marker: i64,
+    consumed_zero_duration_markers: usize,
     next_placeholder: usize,
     placeholders: HashMap<String, PromPlan>,
 }
@@ -161,21 +169,705 @@ pub(super) fn lower_with_max_lookback(
     step: i64,
     max_lookback: i64,
 ) -> Result<PromPlan, String> {
-    let mut context = LowerContext {
-        original: input,
-        lookback,
-        step,
-        max_lookback,
-        next_placeholder: 0,
-        placeholders: HashMap::new(),
-    };
-    let mut plan = lower_expr(input, &mut context, 0)?;
-    replace_placeholders(&mut plan, &mut context.placeholders)?;
-    if !context.placeholders.is_empty() {
-        return Err("internal MetricsQL placeholder was not consumed".into());
+    if step <= 0 {
+        return Err("MetricsQL request step must be positive".into());
     }
-    apply_implicit_rollups(&mut plan, max_lookback)?;
-    Ok(plan)
+    for attempt in 0..64_i64 {
+        let zero_marker = i64::from(u32::MAX) - attempt * 3;
+        let max_marker = zero_marker - 1;
+        let min_marker = zero_marker - 2;
+        let rewritten = rewrite_step_relative_durations(
+            input,
+            step,
+            StepDurationMarkers {
+                zero: zero_marker,
+                max: max_marker,
+                min: min_marker,
+            },
+        )?;
+        let mut context = LowerContext {
+            original: input,
+            lookback,
+            step,
+            max_lookback,
+            zero_duration_marker: zero_marker,
+            consumed_zero_duration_markers: 0,
+            next_placeholder: 0,
+            placeholders: HashMap::new(),
+        };
+        let mut plan = lower_expr(&rewritten.query, &mut context, 0)?;
+        replace_placeholders(&mut plan, &mut context.placeholders)?;
+        if !context.placeholders.is_empty() {
+            return Err("internal MetricsQL placeholder was not consumed".into());
+        }
+        if rewritten.zero_count > 0 || context.consumed_zero_duration_markers > 0 {
+            if count_duration_marker(&plan, zero_marker)
+                .saturating_add(context.consumed_zero_duration_markers)
+                != rewritten.zero_count
+            {
+                continue;
+            }
+            replace_duration_marker(&mut plan, zero_marker, 0, step);
+        }
+        if rewritten.max_count > 0 {
+            if count_duration_marker(&plan, max_marker) != rewritten.max_count {
+                continue;
+            }
+            replace_duration_marker(&mut plan, max_marker, i64::MAX, i64::MAX);
+        }
+        if rewritten.min_count > 0 {
+            if count_duration_marker(&plan, -min_marker) != rewritten.min_count {
+                continue;
+            }
+            replace_duration_marker(&mut plan, -min_marker, i64::MIN, i64::MIN);
+        }
+        apply_implicit_rollups(&mut plan, max_lookback)?;
+        return Ok(plan);
+    }
+    Err("MetricsQL query exhausted collision-free zero-duration markers".into())
+}
+
+struct StepDurationRewrite {
+    query: String,
+    zero_count: usize,
+    max_count: usize,
+    min_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct StepDurationMarkers {
+    zero: i64,
+    max: i64,
+    min: i64,
+}
+
+fn rewrite_step_relative_durations(
+    input: &str,
+    step: i64,
+    markers: StepDurationMarkers,
+) -> Result<StepDurationRewrite, String> {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut copied = 0_usize;
+    let mut index = 0_usize;
+    let mut brackets = 0_i32;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut zero_count = 0_usize;
+    let mut max_count = 0_usize;
+    let mut min_count = 0_usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if delimiter != b'`' && escaped {
+                escaped = false;
+            } else if delimiter != b'`' && byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'#' => {
+                comment = true;
+                index += 1;
+            }
+            b'"' | b'\'' | b'`' => {
+                quote = Some(byte);
+                index += 1;
+            }
+            b'[' => {
+                brackets += 1;
+                index += 1;
+            }
+            b']' => {
+                brackets -= 1;
+                index += 1;
+            }
+            byte if byte.is_ascii_digit() => {
+                let start = index;
+                let offset = follows_offset_keyword(input, start);
+                if !offset && !follows_range_duration_delimiter(input, start, brackets) {
+                    index += 1;
+                    continue;
+                }
+                let end = duration_token_end(input, start);
+                let sign_start = offset.then(|| offset_sign_start(input, start)).flatten();
+                let signed_token;
+                let token = if sign_start.is_some() {
+                    signed_token = format!("-{}", &input[start..end]);
+                    signed_token.as_str()
+                } else {
+                    &input[start..end]
+                };
+                let Some(millis) = metricsql_step_duration_value(token, step)? else {
+                    index = end;
+                    continue;
+                };
+                if !offset && millis < 0 {
+                    return Err(format!(
+                        "unexpected negative MetricsQL range duration {millis}ms"
+                    ));
+                }
+                let replacement_start = sign_start.unwrap_or(start);
+                output.push_str(&input[copied..replacement_start]);
+                if millis == 0 {
+                    output.push_str(&format!("{}ms", markers.zero));
+                    zero_count += 1;
+                } else if millis == i64::MAX {
+                    output.push_str(&format!("{}ms", markers.max));
+                    max_count += 1;
+                } else if millis == i64::MIN {
+                    output.push_str(&format!("-{}ms", markers.min));
+                    min_count += 1;
+                } else {
+                    output.push_str(&display_metricsql_duration_millis(millis));
+                }
+                index = end;
+                copied = end;
+            }
+            b'i' | b'I' if is_bare_step_duration(input, index, brackets) => {
+                return Err("cannot find WITH template for \"i\"".into());
+            }
+            _ => index += 1,
+        }
+    }
+    output.push_str(&input[copied..]);
+    Ok(StepDurationRewrite {
+        query: output,
+        zero_count,
+        max_count,
+        min_count,
+    })
+}
+
+fn follows_range_duration_delimiter(input: &str, at: usize, brackets: i32) -> bool {
+    if brackets <= 0 {
+        return false;
+    }
+    let bytes = input.as_bytes();
+    let before = skip_metricsql_trivia_backward(input, at);
+    matches!(
+        before.checked_sub(1).and_then(|at| bytes.get(at)),
+        Some(b'[' | b':')
+    )
+}
+
+fn skip_metricsql_trivia_backward(input: &str, before: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut last_code_end = 0_usize;
+    for (index, byte) in bytes[..before].iter().copied().enumerate() {
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            last_code_end = index + 1;
+            if delimiter != b'`' && escaped {
+                escaped = false;
+            } else if delimiter != b'`' && byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'#' => comment = true,
+            b'"' | b'\'' | b'`' => {
+                quote = Some(byte);
+                last_code_end = index + 1;
+            }
+            _ if byte.is_ascii_whitespace() => {}
+            _ => last_code_end = index + 1,
+        }
+    }
+    last_code_end
+}
+
+fn duration_token_end(input: &str, start: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut end = start;
+    while bytes.get(end).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'$' | b'-')
+    }) {
+        end += 1;
+    }
+    end
+}
+
+fn metricsql_step_duration_value(token: &str, step: i64) -> Result<Option<i64>, String> {
+    let bytes = token.as_bytes();
+    let mut at = 0_usize;
+    let mut total = 0.0_f64;
+    let mut inherited_minus = false;
+    let mut saw_step = false;
+    while at < bytes.len() {
+        let negative = bytes[at] == b'-';
+        if negative {
+            at += 1;
+        }
+        let number_start = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        if at == number_start {
+            return if saw_step || token.bytes().any(|byte| matches!(byte, b'i' | b'I')) {
+                Err(format!("cannot parse MetricsQL duration {token:?}"))
+            } else {
+                Ok(None)
+            };
+        }
+        if bytes.get(at) == Some(&b'.') {
+            at += 1;
+            let fraction_start = at;
+            while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+                at += 1;
+            }
+            if at == fraction_start {
+                return Err(format!("cannot parse MetricsQL duration {token:?}"));
+            }
+        }
+        let number = token[number_start..at]
+            .parse::<f64>()
+            .map_err(|_| format!("cannot parse MetricsQL duration {token:?}"))?;
+        let unit = *bytes
+            .get(at)
+            .ok_or_else(|| format!("cannot parse MetricsQL duration {token:?}"))?;
+        let (multiplier, width) = match unit {
+            b'm' | b'M'
+                if bytes
+                    .get(at + 1)
+                    .is_some_and(|byte| matches!(byte, b's' | b'S')) =>
+            {
+                (1.0, 2)
+            }
+            b'm' => (60_000.0, 1),
+            b's' | b'S' => (1_000.0, 1),
+            b'h' | b'H' => (3_600_000.0, 1),
+            b'd' | b'D' => (86_400_000.0, 1),
+            b'w' | b'W' => (604_800_000.0, 1),
+            b'y' | b'Y' => (31_536_000_000.0, 1),
+            b'i' | b'I' => {
+                saw_step = true;
+                (step as f64, 1)
+            }
+            _ => {
+                return if saw_step || token.bytes().any(|byte| matches!(byte, b'i' | b'I')) {
+                    Err(format!("cannot parse MetricsQL duration {token:?}"))
+                } else {
+                    Ok(None)
+                };
+            }
+        };
+        at += width;
+        let mut local = number * multiplier;
+        if negative {
+            local = -local;
+        }
+        if inherited_minus && local > 0.0 {
+            local = -local;
+        }
+        total += local;
+        if local < 0.0 {
+            inherited_minus = true;
+        }
+    }
+    if !saw_step {
+        return Ok(None);
+    }
+    Ok(Some(if total >= i64::MAX as f64 {
+        i64::MAX
+    } else if total <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        total as i64
+    }))
+}
+
+fn display_metricsql_duration_millis(millis: i64) -> String {
+    let duration = promql_parser::util::display_duration(&std::time::Duration::from_millis(
+        millis.unsigned_abs(),
+    ));
+    if millis < 0 {
+        format!("-{duration}")
+    } else {
+        duration
+    }
+}
+
+fn follows_offset_keyword(input: &str, before: usize) -> bool {
+    let bytes = input.as_bytes();
+    let mut end = skip_metricsql_trivia_backward(input, before);
+    if end > 0 && bytes[end - 1] == b'-' {
+        end = skip_metricsql_trivia_backward(input, end - 1);
+    }
+    let mut start = end;
+    while start > 0 && is_ident_continue(bytes[start - 1]) {
+        start -= 1;
+    }
+    start < end && input[start..end].eq_ignore_ascii_case("offset")
+}
+
+fn offset_sign_start(input: &str, before: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let at = skip_metricsql_trivia_backward(input, before);
+    (at > 0 && bytes[at - 1] == b'-').then_some(at - 1)
+}
+
+fn is_bare_step_duration(input: &str, at: usize, brackets: i32) -> bool {
+    if follows_offset_keyword(input, at) {
+        return true;
+    }
+    follows_range_duration_delimiter(input, at, brackets)
+}
+
+fn count_duration_marker(plan: &PromPlan, marker: i64) -> usize {
+    let timing = |timing: SelectorTiming| usize::from(timing.offset_ms == marker);
+    match plan {
+        PromPlan::Scalar(_) | PromPlan::String(_) | PromPlan::Time => 0,
+        PromPlan::KeepMetricNames(inner) | PromPlan::Unary(inner) => {
+            count_duration_marker(inner, marker)
+        }
+        PromPlan::Function(function) => {
+            count_duration_marker(&function.inner, marker)
+                + function
+                    .parameters
+                    .iter()
+                    .map(|parameter| count_duration_marker(parameter, marker))
+                    .sum::<usize>()
+        }
+        PromPlan::LabelReplace(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::LabelJoin(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::Absent(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::Sort(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::Conversion(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::Timestamp(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::Calendar(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::HistogramQuantile(plan) => {
+            count_duration_marker(&plan.quantile, marker)
+                + count_duration_marker(&plan.inner, marker)
+        }
+        PromPlan::HistogramFraction(plan) => {
+            count_duration_marker(&plan.lower, marker)
+                + count_duration_marker(&plan.upper, marker)
+                + count_duration_marker(&plan.inner, marker)
+        }
+        PromPlan::MetricsUnion(plan) => plan
+            .inputs
+            .iter()
+            .map(|input| count_duration_marker(input, marker))
+            .sum(),
+        PromPlan::MetricsAlias(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::MetricsLabels(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::MetricsDynamicRollup(plan) => timing(plan.selector.timing),
+        PromPlan::MetricsRangeAggregate(plan) => count_duration_marker(&plan.inner, marker),
+        PromPlan::MetricsBinary(plan) => {
+            count_duration_marker(&plan.lhs, marker) + count_duration_marker(&plan.rhs, marker)
+        }
+        PromPlan::Binary(plan) => {
+            count_duration_marker(&plan.lhs, marker) + count_duration_marker(&plan.rhs, marker)
+        }
+        PromPlan::Aggregate(plan) => {
+            count_duration_marker(&plan.inner, marker)
+                + plan
+                    .param
+                    .as_deref()
+                    .map_or(0, |parameter| count_duration_marker(parameter, marker))
+        }
+        PromPlan::Selector { selector, .. } => timing(selector.timing),
+        PromPlan::RangeSelector { selector, window } => {
+            timing(selector.timing) + usize::from(*window == marker)
+        }
+        PromPlan::RangeReduction(plan) => {
+            let parameter = plan
+                .parameter
+                .as_deref()
+                .map_or(0, |parameter| count_duration_marker(parameter, marker));
+            parameter + count_range_input_duration_markers(&plan.input, marker)
+        }
+        PromPlan::Subquery(plan) => count_subquery_duration_markers(plan, marker),
+    }
+}
+
+fn count_range_input_duration_markers(input: &PromRangeInput, marker: i64) -> usize {
+    match input {
+        PromRangeInput::Selector { selector, window } => {
+            usize::from(selector.timing.offset_ms == marker) + usize::from(*window == marker)
+        }
+        PromRangeInput::Subquery(plan) => count_subquery_duration_markers(plan, marker),
+    }
+}
+
+fn count_subquery_duration_markers(plan: &SubqueryPlan, marker: i64) -> usize {
+    count_duration_marker(&plan.inner, marker)
+        + usize::from(plan.window == marker)
+        + usize::from(plan.resolution == Some(marker))
+        + usize::from(plan.timing.offset_ms == marker)
+}
+
+fn replace_duration_marker(
+    plan: &mut PromPlan,
+    marker: i64,
+    offset_replacement: i64,
+    duration_replacement: i64,
+) {
+    let replace_timing = |timing: &mut SelectorTiming| {
+        if timing.offset_ms == marker {
+            timing.offset_ms = offset_replacement;
+        }
+    };
+    match plan {
+        PromPlan::Scalar(_) | PromPlan::String(_) | PromPlan::Time => {}
+        PromPlan::KeepMetricNames(inner) | PromPlan::Unary(inner) => {
+            replace_duration_marker(inner, marker, offset_replacement, duration_replacement)
+        }
+        PromPlan::Function(function) => {
+            replace_duration_marker(
+                &mut function.inner,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+            for parameter in &mut function.parameters {
+                replace_duration_marker(
+                    parameter,
+                    marker,
+                    offset_replacement,
+                    duration_replacement,
+                );
+            }
+        }
+        PromPlan::LabelReplace(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::LabelJoin(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::Absent(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::Sort(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::Conversion(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::Timestamp(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::Calendar(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::HistogramQuantile(plan) => {
+            replace_duration_marker(
+                &mut plan.quantile,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+            replace_duration_marker(
+                &mut plan.inner,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+        }
+        PromPlan::HistogramFraction(plan) => {
+            replace_duration_marker(
+                &mut plan.lower,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+            replace_duration_marker(
+                &mut plan.upper,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+            replace_duration_marker(
+                &mut plan.inner,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+        }
+        PromPlan::MetricsUnion(plan) => {
+            for input in &mut plan.inputs {
+                replace_duration_marker(input, marker, offset_replacement, duration_replacement);
+            }
+        }
+        PromPlan::MetricsAlias(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::MetricsLabels(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::MetricsDynamicRollup(plan) => replace_timing(&mut plan.selector.timing),
+        PromPlan::MetricsRangeAggregate(plan) => replace_duration_marker(
+            &mut plan.inner,
+            marker,
+            offset_replacement,
+            duration_replacement,
+        ),
+        PromPlan::MetricsBinary(plan) => {
+            replace_duration_marker(
+                &mut plan.lhs,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+            replace_duration_marker(
+                &mut plan.rhs,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+        }
+        PromPlan::Binary(plan) => {
+            replace_duration_marker(
+                &mut plan.lhs,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+            replace_duration_marker(
+                &mut plan.rhs,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+        }
+        PromPlan::Aggregate(plan) => {
+            replace_duration_marker(
+                &mut plan.inner,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+            if let Some(parameter) = &mut plan.param {
+                replace_duration_marker(
+                    parameter,
+                    marker,
+                    offset_replacement,
+                    duration_replacement,
+                );
+            }
+        }
+        PromPlan::Selector { selector, .. } => replace_timing(&mut selector.timing),
+        PromPlan::RangeSelector { selector, window } => {
+            replace_timing(&mut selector.timing);
+            if *window == marker {
+                *window = duration_replacement;
+            }
+        }
+        PromPlan::RangeReduction(plan) => {
+            if let Some(parameter) = &mut plan.parameter {
+                replace_duration_marker(
+                    parameter,
+                    marker,
+                    offset_replacement,
+                    duration_replacement,
+                );
+            }
+            replace_range_input_duration_marker(
+                &mut plan.input,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+        }
+        PromPlan::Subquery(plan) => {
+            replace_subquery_duration_marker(plan, marker, offset_replacement, duration_replacement)
+        }
+    }
+}
+
+fn replace_range_input_duration_marker(
+    input: &mut PromRangeInput,
+    marker: i64,
+    offset_replacement: i64,
+    duration_replacement: i64,
+) {
+    match input {
+        PromRangeInput::Selector { selector, window } => {
+            if selector.timing.offset_ms == marker {
+                selector.timing.offset_ms = offset_replacement;
+            }
+            if *window == marker {
+                *window = duration_replacement;
+            }
+        }
+        PromRangeInput::Subquery(plan) => {
+            replace_subquery_duration_marker(plan, marker, offset_replacement, duration_replacement)
+        }
+    }
+}
+
+fn replace_subquery_duration_marker(
+    plan: &mut SubqueryPlan,
+    marker: i64,
+    offset_replacement: i64,
+    duration_replacement: i64,
+) {
+    replace_duration_marker(
+        &mut plan.inner,
+        marker,
+        offset_replacement,
+        duration_replacement,
+    );
+    if plan.window == marker {
+        plan.window = duration_replacement;
+    }
+    if plan.resolution == Some(marker) {
+        plan.resolution = Some(duration_replacement);
+    }
+    if plan.timing.offset_ms == marker {
+        plan.timing.offset_ms = offset_replacement;
+    }
 }
 
 pub(super) fn vectorize_scalar(plan: PromPlan) -> PromPlan {
@@ -473,19 +1165,42 @@ fn lower_default_rollup(
             }))
         }
         PromPlan::RangeSelector { selector, window } => {
+            if window == context.zero_duration_marker {
+                context.consumed_zero_duration_markers += 1;
+                Ok(PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                    op: DynamicRollupOp::Default,
+                    selector,
+                    max_lookback: context.max_lookback,
+                }))
+            } else {
+                Ok(PromPlan::RangeReduction(PromRangePlan {
+                    op: PromRangeOp::Last,
+                    input: PromRangeInput::Selector { selector, window },
+                    parameter: None,
+                    source: None,
+                    metricsql_dynamic: None,
+                }))
+            }
+        }
+        PromPlan::Subquery(mut subquery) => {
+            let metricsql_dynamic = if subquery.window == context.zero_duration_marker {
+                context.consumed_zero_duration_markers += 1;
+                subquery.window = 0;
+                Some(DynamicSubqueryRollupPlan {
+                    op: DynamicRollupOp::Default,
+                    max_lookback: context.max_lookback,
+                })
+            } else {
+                None
+            };
             Ok(PromPlan::RangeReduction(PromRangePlan {
                 op: PromRangeOp::Last,
-                input: PromRangeInput::Selector { selector, window },
+                input: PromRangeInput::Subquery(subquery),
                 parameter: None,
                 source: None,
+                metricsql_dynamic,
             }))
         }
-        PromPlan::Subquery(subquery) => Ok(PromPlan::RangeReduction(PromRangePlan {
-            op: PromRangeOp::Last,
-            input: PromRangeInput::Subquery(subquery),
-            parameter: None,
-            source: None,
-        })),
         plan if matches!(
             plan.value_type(),
             PromValueType::Scalar | PromValueType::Vector
@@ -520,18 +1235,43 @@ fn lower_metricsql_rollup(
             selector,
             max_lookback: context.max_lookback,
         }),
-        PromPlan::RangeSelector { selector, window } => PromPlan::RangeReduction(PromRangePlan {
-            op,
-            input: PromRangeInput::Selector { selector, window },
-            parameter: None,
-            source: None,
-        }),
-        PromPlan::Subquery(subquery) => PromPlan::RangeReduction(PromRangePlan {
-            op,
-            input: PromRangeInput::Subquery(subquery),
-            parameter: None,
-            source: None,
-        }),
+        PromPlan::RangeSelector { selector, window } => {
+            if window == context.zero_duration_marker {
+                context.consumed_zero_duration_markers += 1;
+                PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                    op: dynamic,
+                    selector,
+                    max_lookback: context.max_lookback,
+                })
+            } else {
+                PromPlan::RangeReduction(PromRangePlan {
+                    op,
+                    input: PromRangeInput::Selector { selector, window },
+                    parameter: None,
+                    source: None,
+                    metricsql_dynamic: None,
+                })
+            }
+        }
+        PromPlan::Subquery(mut subquery) => {
+            let metricsql_dynamic = if subquery.window == context.zero_duration_marker {
+                context.consumed_zero_duration_markers += 1;
+                subquery.window = 0;
+                Some(DynamicSubqueryRollupPlan {
+                    op: dynamic,
+                    max_lookback: context.max_lookback,
+                })
+            } else {
+                None
+            };
+            PromPlan::RangeReduction(PromRangePlan {
+                op,
+                input: PromRangeInput::Subquery(subquery),
+                parameter: None,
+                source: None,
+                metricsql_dynamic,
+            })
+        }
         plan if matches!(
             plan.value_type(),
             PromValueType::Scalar | PromValueType::Vector
@@ -547,6 +1287,7 @@ fn lower_metricsql_rollup(
                 }),
                 parameter: None,
                 source: None,
+                metricsql_dynamic: None,
             })
         }
         _ => {
@@ -1893,6 +2634,58 @@ fn metricsql_dynamic_value(
     }
 }
 
+pub(super) fn dynamic_subquery_history(plan: &DynamicSubqueryRollupPlan, step: i64) -> i64 {
+    DEFAULT_MAX_SILENCE_INTERVAL_MS
+        .max(plan.max_lookback)
+        .saturating_add(step)
+}
+
+pub(super) fn prepare_dynamic_subquery_samples(
+    plan: &DynamicSubqueryRollupPlan,
+    samples: &mut [(i64, f64)],
+) {
+    if plan.op.removes_counter_resets() {
+        correct_metricsql_counter_resets(samples, plan.max_lookback);
+    }
+}
+
+pub(super) fn dynamic_subquery_window(
+    plan: &DynamicSubqueryRollupPlan,
+    timestamps: &[i64],
+    step: i64,
+    instant: bool,
+) -> (i64, i64) {
+    dynamic_rollup_window(plan.op, timestamps, step, instant, plan.max_lookback)
+}
+
+pub(super) fn dynamic_subquery_retains_metric_name(plan: &DynamicSubqueryRollupPlan) -> bool {
+    plan.op.retains_metric_name()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dynamic_subquery_value(
+    plan: &DynamicSubqueryRollupPlan,
+    samples: &[(i64, f64)],
+    lo: usize,
+    hi: usize,
+    lower: i64,
+    max_previous: i64,
+    cancelled: &AtomicBool,
+) -> Result<Option<f64>, String> {
+    metricsql_dynamic_value(
+        plan.op,
+        samples,
+        DynamicWindow {
+            lo,
+            hi,
+            lower,
+            max_previous,
+            max_lookback: plan.max_lookback,
+        },
+        cancelled,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute_dynamic_rollup(
     conn: &Connection,
@@ -3201,5 +3994,258 @@ mod tests {
         ] {
             assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
         }
+    }
+
+    #[test]
+    fn step_relative_durations_use_the_request_step_only_in_metricsql() {
+        for (query, step) in [
+            ("count_over_time(cpu[5i])", 1_000),
+            (
+                "max_over_time(vector(time())[5i:1i]) - min_over_time(vector(time())[5i:1i])",
+                2_000,
+            ),
+            ("count_over_time(vector(time())[0i:1i])", 1_000),
+            ("cpu offset 5i", 1_500),
+            ("cpu offset -1i", 2_000),
+            ("cpu offset -1i-1s", 2_000),
+            ("cpu offset -0i", 2_000),
+            ("count_over_time(cpu[1.5i])", 2_000),
+            ("count_over_time(cpu[2i-500ms])", 1_000),
+            ("count_over_time(cpu[5I])", 1_000),
+            ("cpu offset 1i1s", 2_000),
+        ] {
+            if let Err(error) = lower(query, 300_000, step) {
+                panic!("{query}: {error}");
+            }
+        }
+
+        let PromPlan::RangeReduction(direct) =
+            lower("count_over_time(cpu[5i])", 300_000, 2_000).unwrap()
+        else {
+            panic!("direct range reduction expected")
+        };
+        assert!(matches!(
+            direct.input,
+            PromRangeInput::Selector { window: 10_000, .. }
+        ));
+
+        let PromPlan::RangeReduction(zero) =
+            lower("count_over_time(vector(time())[0i:1i])", 300_000, 1_500).unwrap()
+        else {
+            panic!("subquery range reduction expected")
+        };
+        assert!(matches!(
+            zero.input,
+            PromRangeInput::Subquery(SubqueryPlan {
+                window: 0,
+                resolution: Some(1_500),
+                ..
+            })
+        ));
+        assert!(matches!(
+            zero.metricsql_dynamic,
+            Some(DynamicSubqueryRollupPlan {
+                op: DynamicRollupOp::Count,
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            lower("rate(cpu[0i])", 300_000, 2_000).unwrap(),
+            PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Rate,
+                ..
+            })
+        ));
+        assert!(matches!(
+            lower("default_rollup(cpu[0i])", 300_000, 2_000).unwrap(),
+            PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Default,
+                ..
+            })
+        ));
+        let PromPlan::RangeReduction(adaptive_subquery) =
+            lower("rate(cpu[0i:1i])", 300_000, 2_000).unwrap()
+        else {
+            panic!("adaptive subquery range reduction expected")
+        };
+        assert!(matches!(
+            adaptive_subquery.input,
+            PromRangeInput::Subquery(SubqueryPlan {
+                window: 0,
+                resolution: Some(2_000),
+                ..
+            })
+        ));
+        assert!(matches!(
+            adaptive_subquery.metricsql_dynamic,
+            Some(DynamicSubqueryRollupPlan {
+                op: DynamicRollupOp::Rate,
+                ..
+            })
+        ));
+
+        let PromPlan::MetricsDynamicRollup(offset) =
+            lower("cpu offset 5i", 300_000, 1_500).unwrap()
+        else {
+            panic!("implicit MetricsQL rollup expected")
+        };
+        assert_eq!(offset.selector.timing.offset_ms, 7_500);
+        let PromPlan::MetricsDynamicRollup(negative) =
+            lower("cpu offset -1i", 300_000, 2_000).unwrap()
+        else {
+            panic!("negative-offset rollup expected")
+        };
+        assert_eq!(negative.selector.timing.offset_ms, -2_000);
+        let PromPlan::MetricsDynamicRollup(compound_negative) =
+            lower("cpu offset -1i-1s", 300_000, 2_000).unwrap()
+        else {
+            panic!("compound negative-offset rollup expected")
+        };
+        assert_eq!(compound_negative.selector.timing.offset_ms, -3_000);
+        let PromPlan::MetricsDynamicRollup(zero_offset) =
+            lower("cpu offset -0i", 300_000, 2_000).unwrap()
+        else {
+            panic!("zero-offset rollup expected")
+        };
+        assert_eq!(zero_offset.selector.timing.offset_ms, 0);
+
+        let collision = lower(
+            "count_over_time(cpu[0i]) + count_over_time(cpu[4294967295ms])",
+            300_000,
+            2_000,
+        )
+        .unwrap();
+        let PromPlan::Binary(collision) = collision else {
+            panic!("collision-check binary expected")
+        };
+        assert!(matches!(
+            *collision.lhs,
+            PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Count,
+                ..
+            })
+        ));
+        assert!(matches!(
+            *collision.rhs,
+            PromPlan::RangeReduction(PromRangePlan {
+                input: PromRangeInput::Selector {
+                    window: 4_294_967_295,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        assert_eq!(
+            metricsql_step_duration_value("0.5i500ms", 1_001).unwrap(),
+            Some(1_000)
+        );
+        assert_eq!(
+            metricsql_step_duration_value("2i-500ms", 1_000).unwrap(),
+            Some(1_500)
+        );
+        assert_eq!(
+            metricsql_step_duration_value("-1i-1s", 2_000).unwrap(),
+            Some(-3_000)
+        );
+        assert_eq!(
+            metricsql_step_duration_value("999999999999999999999999999999i", 2_000).unwrap(),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            metricsql_step_duration_value("-999999999999999999999999999999i", 2_000).unwrap(),
+            Some(i64::MIN)
+        );
+        let PromPlan::RangeReduction(saturated_positive) = lower(
+            "count_over_time(cpu[999999999999999999999999999999i])",
+            300_000,
+            2_000,
+        )
+        .unwrap() else {
+            panic!("saturated positive-window reduction expected")
+        };
+        assert!(matches!(
+            saturated_positive.input,
+            PromRangeInput::Selector {
+                window: i64::MAX,
+                ..
+            }
+        ));
+        let PromPlan::MetricsDynamicRollup(saturated_negative) = lower(
+            "cpu offset -999999999999999999999999999999i",
+            300_000,
+            2_000,
+        )
+        .unwrap() else {
+            panic!("saturated negative-offset rollup expected")
+        };
+        assert_eq!(saturated_negative.selector.timing.offset_ms, i64::MIN);
+        let PromPlan::Binary(saturation_collision) = lower(
+            "count_over_time(cpu[999999999999999999999999999999i]) + count_over_time(cpu[4294967294ms])",
+            300_000,
+            2_000,
+        )
+        .unwrap()
+        else {
+            panic!("saturation collision-check binary expected")
+        };
+        assert!(matches!(
+            *saturation_collision.lhs,
+            PromPlan::RangeReduction(PromRangePlan {
+                input: PromRangeInput::Selector {
+                    window: i64::MAX,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            *saturation_collision.rhs,
+            PromPlan::RangeReduction(PromRangePlan {
+                input: PromRangeInput::Selector {
+                    window: 4_294_967_294,
+                    ..
+                },
+                ..
+            })
+        ));
+        let markers = StepDurationMarkers {
+            zero: i64::from(u32::MAX),
+            max: i64::from(u32::MAX) - 1,
+            min: i64::from(u32::MAX) - 2,
+        };
+        assert_eq!(
+            rewrite_step_relative_durations(r#"cpu{note="5i"}[1.5i] # offset 9i"#, 2_000, markers,)
+                .unwrap()
+                .query,
+            r#"cpu{note="5i"}[3s] # offset 9i"#
+        );
+        assert_eq!(
+            rewrite_step_relative_durations(
+                "count_over_time(cpu[ # range comment\n 2i]) + cpu offset # offset comment\n -1i",
+                2_000,
+                markers,
+            )
+            .unwrap()
+            .query,
+            "count_over_time(cpu[ # range comment\n 4s]) + cpu offset # offset comment\n -2s"
+        );
+        assert_eq!(
+            rewrite_step_relative_durations(
+                r#"cpu{note="literal#hash"} offset 1i"#,
+                2_000,
+                markers,
+            )
+            .unwrap()
+            .query,
+            r#"cpu{note="literal#hash"} offset 2s"#
+        );
+        assert_eq!(
+            metricsql_step_duration_value("1i1Ms", 2_000).unwrap(),
+            Some(2_001)
+        );
+        assert!(metricsql_step_duration_value("1i1M", 2_000).is_err());
+        assert!(lower("count_over_time(vector(time())[5i:i])", 300_000, 1_000).is_err());
     }
 }

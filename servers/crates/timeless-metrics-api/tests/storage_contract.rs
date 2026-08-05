@@ -13814,6 +13814,325 @@ async fn session_fifteen_metricsql_running_aggregates_match_victoriametrics_and_
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_step_relative_durations_match_victoriametrics_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fifteen_metricsql_step_relative.db");
+    let base = 1_785_909_100_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        64,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let points = (-10_i64..=20)
+        .enumerate()
+        .map(|(index, offset)| (base + offset, index as f64 + 1.0))
+        .collect::<Vec<_>>();
+    storage
+        .submit_named_batch(named_series_batch("mql_step", &points), points.len())
+        .await
+        .unwrap();
+    let slow_points = [
+        (base - 20, 0.0),
+        (base - 10, 10.0),
+        (base, 20.0),
+        (base + 10, 30.0),
+        (base + 20, 40.0),
+    ];
+    storage
+        .submit_named_batch(
+            named_series_batch("mql_step_slow_counter", &slow_points),
+            slow_points.len(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let direct = mql_query_range(&app, "count_over_time(mql_step[5i])", base, base + 4, 1).await;
+    assert_eq!(direct.0, StatusCode::OK, "{}", direct.1);
+    assert_eq!(
+        direct.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base, "5"],
+            [base + 1, "5"],
+            [base + 2, "5"],
+            [base + 3, "5"],
+            [base + 4, "5"]
+        ])
+    );
+    let doubled = mql_query_range(&app, "count_over_time(mql_step[5i])", base, base + 4, 2).await;
+    assert_eq!(doubled.0, StatusCode::OK, "{}", doubled.1);
+    assert_eq!(
+        doubled.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "10"], [base + 2, "10"], [base + 4, "10"]])
+    );
+    for (query, step, end, expected) in [
+        (
+            "count_over_time(mql_step[1.5i])",
+            2,
+            base + 4,
+            serde_json::json!([[base, "3"], [base + 2, "3"], [base + 4, "3"]]),
+        ),
+        (
+            "count_over_time(mql_step[2i-500ms])",
+            1,
+            base + 2,
+            serde_json::json!([[base, "2"], [base + 1, "2"], [base + 2, "2"]]),
+        ),
+        (
+            "count_over_time(mql_step[5I])",
+            1,
+            base + 2,
+            serde_json::json!([[base, "5"], [base + 1, "5"], [base + 2, "5"]]),
+        ),
+        (
+            "mql_step offset 1i1s",
+            2,
+            base + 4,
+            serde_json::json!([[base, "8"], [base + 2, "10"], [base + 4, "12"]]),
+        ),
+        (
+            "mql_step offset -1i",
+            2,
+            base + 4,
+            serde_json::json!([[base, "13"], [base + 2, "15"], [base + 4, "17"]]),
+        ),
+        (
+            "mql_step offset -1i-1s",
+            2,
+            base + 4,
+            serde_json::json!([[base, "14"], [base + 2, "16"], [base + 4, "18"]]),
+        ),
+    ] {
+        let response = mql_query_range(&app, query, base, end, step).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"][0]["values"], expected,
+            "{query}"
+        );
+    }
+
+    let subquery = mql_query_range(
+        &app,
+        "max_over_time(vector(time())[5i:1i]) - min_over_time(vector(time())[5i:1i])",
+        base,
+        base + 4,
+        2,
+    )
+    .await;
+    assert_eq!(subquery.0, StatusCode::OK, "{}", subquery.1);
+    assert_eq!(
+        subquery.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "8"], [base + 2, "8"], [base + 4, "8"]])
+    );
+
+    let millisecond_params = form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "query",
+            "max_over_time(vector(time())[5i:1i]) - min_over_time(vector(time())[5i:1i])",
+        )
+        .append_pair("start", &base.to_string())
+        .append_pair("end", &(base + 3).to_string())
+        .append_pair("step", "1500ms")
+        .finish();
+    let millisecond = get_json(
+        &app,
+        &format!("/metricsql/api/v1/query_range?{millisecond_params}"),
+    )
+    .await;
+    assert_eq!(millisecond.0, StatusCode::OK, "{}", millisecond.1);
+    assert_eq!(
+        millisecond.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "6"], [base as f64 + 1.5, "6"], [base + 3, "6"]])
+    );
+
+    let zero = mql_query_range(
+        &app,
+        "count_over_time(vector(time())[0i:1i])",
+        base,
+        base + 2,
+        1,
+    )
+    .await;
+    assert_eq!(zero.0, StatusCode::OK, "{}", zero.1);
+    assert_eq!(
+        zero.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "1"], [base + 1, "1"], [base + 2, "1"]])
+    );
+
+    for query in [
+        "rate(mql_step_slow_counter[0i])",
+        "rate(mql_step_slow_counter[0i:1i])",
+    ] {
+        let adaptive = mql_query_range(&app, query, base, base + 4, 2).await;
+        assert_eq!(adaptive.0, StatusCode::OK, "{query}: {}", adaptive.1);
+        assert_eq!(
+            adaptive.1["data"]["result"][0]["values"],
+            serde_json::json!([[base, "1"], [base + 2, "1"], [base + 4, "1"]]),
+            "{query}"
+        );
+    }
+    let adaptive_default =
+        mql_query_range(&app, "default_rollup(mql_step[0i])", base, base + 4, 2).await;
+    assert_eq!(adaptive_default.0, StatusCode::OK, "{}", adaptive_default.1);
+    assert_eq!(
+        adaptive_default.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "11"], [base + 2, "13"], [base + 4, "15"]])
+    );
+
+    let offset = mql_query_range(&app, "mql_step offset 5i", base, base + 4, 1).await;
+    assert_eq!(offset.0, StatusCode::OK, "{}", offset.1);
+    assert_eq!(
+        offset.1["data"]["result"][0]["values"],
+        serde_json::json!([
+            [base, "6"],
+            [base + 1, "7"],
+            [base + 2, "8"],
+            [base + 3, "9"],
+            [base + 4, "10"]
+        ])
+    );
+
+    let invalid = mql_query_range(
+        &app,
+        "count_over_time(vector(time())[5i:i])",
+        base,
+        base + 2,
+        1,
+    )
+    .await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
+    assert_eq!(
+        invalid.1,
+        serde_json::json!({
+            "status": "error",
+            "errorType": "bad_data",
+            "error": "invalid parameter \"query\": cannot find WITH template for \"i\""
+        })
+    );
+    assert_eq!(
+        prom_query_range(&app, "count_over_time(mql_step[5i])", base, base + 4, 1)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let stats_before = storage.stats().await.unwrap();
+    assert_eq!(
+        mql_query_range(&app, "count_over_time(mql_step[5i])", base, base + 4, 1)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let stats_after = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after.extension_raw_batch_query_count - stats_before.extension_raw_batch_query_count
+            + stats_after.extension_window_batch_query_count
+            - stats_before.extension_window_batch_query_count,
+        1,
+        "step-relative durations must retain one public extension read"
+    );
+
+    let result_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_result_points: 2,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query_range(
+        &result_limited,
+        "count_over_time(mql_step[5i])",
+        base,
+        base + 4,
+        1,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(rejected.1["errorType"], "execution");
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("result-point limit of 2"));
+
+    let deadline_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            deadline: std::time::Duration::from_nanos(1),
+            ..PromQueryLimits::default()
+        },
+    );
+    let timed_out = mql_query_range(
+        &deadline_limited,
+        "count_over_time(vector(time())[5i:1i])",
+        base,
+        base + 10_999,
+        1,
+    )
+    .await;
+    assert_eq!(timed_out.0, StatusCode::GATEWAY_TIMEOUT, "{}", timed_out.1);
+    assert_eq!(timed_out.1["errorType"], "timeout");
+    assert_eq!(
+        mql_query_range(&app, "count_over_time(mql_step[5i])", base, base + 4, 1)
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    let saturated = mql_query_range(
+        &app,
+        "count_over_time(mql_step[999999999999999999999999999999i])",
+        base,
+        base + 2,
+        1,
+    )
+    .await;
+    assert_eq!(saturated.0, StatusCode::OK, "{}", saturated.1);
+    assert_eq!(
+        saturated.1["data"]["result"][0]["values"],
+        serde_json::json!([[base, "11"], [base + 1, "12"], [base + 2, "13"]])
+    );
+
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query_range",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "mql_step offset 5i")
+            .append_pair("start", &base.to_string())
+            .append_pair("end", &(base + 4).to_string())
+            .append_pair("step", "1")
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted, offset);
+
+    drop((deadline_limited, result_limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 64, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query_range(&reopened_app, "mql_step offset 5i", base, base + 4, 1).await,
+        offset
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());
