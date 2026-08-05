@@ -2208,3 +2208,61 @@ reopen. The pinned VictoriaLogs 1.52.0 run passed all 25 applicable cases.
 removed every logs-server dependency on private shadow layout. No storage
 format, authoritative batching, compression, index, retention, transaction,
 migration, or maintenance command changed.
+
+## Session 11 stable PromQL P1 completion
+
+The checked-in
+[`2026-08-04_session11_pql_p1.json`](evidence/2026-08-04_session11_pql_p1.json)
+was captured from exact extension, metrics-server, and logs-server build
+`350f50713a57ed79727c1db7a95a4ab1cea1c37b`. `PQL-O08` measures the new
+Go-compatible `atan2` evaluator. `PQL-S23` measures one invalid-quantile
+warning and a wide range `rate` query that emits one deduplicated
+non-counter-name info annotation.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| exact host, instant `metric atan2 2` | 1 | 147 | 0.463 | 0.880 | 0.940 | 1 | 32 | 131 |
+| 512 series, four-step `metric atan2 2` | 2,048 | 98,160 | 4.732 | 4.963 | 5.046 | 512 | 16,384 | 53,831 |
+| exact host, invalid aggregate quantile warning | 1 | 191 | 0.612 | 0.682 | 0.855 | 1 | 32 | 131 |
+| 512 series, four-step non-counter `rate` info | 2,048 | 69,090 | 3.928 | 4.274 | 4.723 | 512 | 16,384 | 53,831 |
+
+The wide `atan2` shape performs one existing packed read and 2,052 bounded
+API intermediate points per query: 2,048 vector points plus one scalar at
+each of four steps. Its 4.963 ms p95 is effectively the same as the
+same-run `sin` shape's 4.981 ms p95, with identical storage work. The exact
+Prometheus last-bit behavior therefore remains API-local; neither another
+read nor an extension primitive is justified.
+
+The wide annotation shape has exactly the same query and storage work as the
+pre-annotation Session 9 `range_rate_wide` shape. Adding the top-level info
+increased the response by 134 bytes. This run's 4.274 ms p95 is 8.2% above
+the earlier run's 3.949 ms p95, while candidate chunks, decoded points,
+payload bytes, cardinality, and storage are unchanged. The identical query
+also ran later in this same Session 11 process as `range_rate_wide` at 4.663
+ms p95, demonstrating appreciable run-order noise. The conservative verdict
+retains the observed cross-run increase and accepts the bounded parser,
+deduplication, and serialization cost; there is no evidence of storage
+amplification. The narrow warning shape is below the same-run valid-quantile
+p95 despite its 89 additional response bytes, so no narrow slowdown is
+claimed.
+
+All 20,544 primary fixture points completed durably with zero failed or queued
+work. Logical and physical storage are byte-for-byte unchanged from Session 9:
+170,857 extension bytes, 2,651 chunks/series, 360,448 SQLite index bytes, and
+1,279,784 database/WAL/SHM bytes. The one-request admission measurement was
+8.331 ms versus 6.797 ms in Session 9, while the durability barrier was
+68.010 ms versus 67.439 ms; no ingestion code changed, so these samples are
+preserved without calling them a throughput regression. Whole-process RSS HWM
+was 46,356 KiB, 1,112 KiB (2.46%) above Session 9 after the expanded query
+suite.
+
+The complete 496-case pinned Prometheus 3.13.2 oracle and all 75 metrics
+real-extension tests passed. They include exact annotation text, type, source
+positions, deterministic local deduplication, the ten-item cap and omission
+summary, repair merge, GET/POST instant/range envelopes, response limits,
+shutdown/reopen, and unaffected omission. `PQL-S17` remains deferred until a
+bit-preserving stale-marker ingress and marker-aware selectors/windows exist.
+`PQL-R21` is correctly classified experimental and is rejected by default,
+matching the pinned oracle; neither disposition performs storage work. No
+extension, storage format, batching, compression, index, rollup, retention,
+transaction, migration, or public batch/SQL contract changed.
