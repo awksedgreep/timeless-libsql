@@ -640,7 +640,8 @@ membership for retained JSON arrays through `json_array_contains_any(...)`,
 plus lower-inclusive/upper-exclusive bytewise `string_range(...)` filtering
 over the same non-mutating rich projection, plus inclusive Unicode-codepoint
 `len_range(...)` filtering with VictoriaLogs-compatible unsigned bound
-grammar.
+grammar, plus same-row `eq_field`, `le_field`, and `lt_field` comparisons with
+exact equality and VictoriaLogs math-value-or-bytewise ordering.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally
@@ -648,7 +649,8 @@ make no inexact `LIKE`/`GLOB` equivalence claim; direct SQLite/libSQL users have
 executable exact-prefix, parameterized-membership, constant-true, and JSON1
 array-membership recipes in `SQL-LOG-014` through `SQL-LOG-017`, plus the
 retained-text byte-range and codepoint-length foundations in `SQL-LOG-019`
-and `SQL-LOG-020`, including the
+and `SQL-LOG-020`, plus complete retained-model field equality and the
+bytewise ordering fallback in `SQL-LOG-021`, including the
 existing public posting index for declared string-only keys. `contains_all`
 and `contains_any` remain honest API-only rows: portable SQLite does not supply
 their Unicode phrase-boundary predicate. JSON-array membership needs no new

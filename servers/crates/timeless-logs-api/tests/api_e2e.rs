@@ -2639,6 +2639,378 @@ async fn session_sixteen_len_range_matches_codepoints_rich_fields_and_reopens() 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_field_comparisons_match_numeric_lexical_and_rich_rows_after_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("field-comparison-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let entry = |offset: i64, message: &str, metadata_json: &str| LogEntry {
+        ts: 1_816_000_000_000_000 + offset,
+        level: 1,
+        severity: "info".into(),
+        message: message.into(),
+        metadata_json: metadata_json.into(),
+    };
+    storage
+        .ingest(vec![
+            entry(1, "missing", r#"{"case":"missing"}"#),
+            entry(
+                2,
+                "nulls",
+                r#"{"case":"nulls","left":null,"right":null}"#,
+            ),
+            entry(
+                3,
+                "empty",
+                r#"{"case":"empty","left":"","right":""}"#,
+            ),
+            entry(
+                4,
+                "left only",
+                r#"{"case":"left-only","left":"x"}"#,
+            ),
+            entry(
+                5,
+                "right only",
+                r#"{"case":"right-only","right":"x"}"#,
+            ),
+            entry(
+                6,
+                "equal text",
+                r#"{"case":"equal-text","left":"alpha","right":"alpha"}"#,
+            ),
+            entry(
+                7,
+                "lexical less",
+                r#"{"case":"lexical-less","left":"bar","right":"foo"}"#,
+            ),
+            entry(
+                8,
+                "lexical greater",
+                r#"{"case":"lexical-greater","left":"foo","right":"bar"}"#,
+            ),
+            entry(
+                9,
+                "numeric less",
+                r#"{"case":"numeric-less","left":2,"right":"10"}"#,
+            ),
+            entry(
+                10,
+                "numeric greater",
+                r#"{"case":"numeric-greater","left":"10","right":2}"#,
+            ),
+            entry(
+                11,
+                "numeric equal",
+                r#"{"case":"numeric-equal","left":2,"right":"2"}"#,
+            ),
+            entry(
+                12,
+                "duration less",
+                r#"{"case":"duration-less","left":"500ms","right":"1s"}"#,
+            ),
+            entry(
+                13,
+                "duration greater",
+                r#"{"case":"duration-greater","left":"1s","right":"500ms"}"#,
+            ),
+            entry(
+                14,
+                "bytes less",
+                r#"{"case":"bytes-less","left":"1000B","right":"1KiB"}"#,
+            ),
+            entry(
+                15,
+                "timestamp less",
+                r#"{"case":"timestamp-less","left":"2026-01-01T00:00:00Z","right":"2026-01-01T00:00:01Z"}"#,
+            ),
+            entry(
+                16,
+                "ipv4 less",
+                r#"{"case":"ipv4-less","left":"10.0.0.2","right":"10.0.0.10"}"#,
+            ),
+            entry(
+                17,
+                "fallback less",
+                r#"{"case":"fallback-less","left":"10x","right":"2"}"#,
+            ),
+            entry(
+                18,
+                "boolean equal",
+                r#"{"case":"boolean-equal","left":true,"right":"true"}"#,
+            ),
+            entry(
+                19,
+                "array equal",
+                r#"{"case":"array-equal","left":[1],"right":"[1]"}"#,
+            ),
+            entry(
+                20,
+                "object equal",
+                r#"{"case":"object-equal","left":{"k":"v"},"right":"{\"k\":\"v\"}"}"#,
+            ),
+            entry(
+                21,
+                "echo",
+                r#"{"case":"message-equal","left":"z","right":"echo"}"#,
+            ),
+            entry(
+                22,
+                "service equal",
+                r#"{"case":"service-equal","left":"z","right":"api","service":"api"}"#,
+            ),
+            entry(
+                23,
+                "nested less",
+                r#"{"case":"nested-less","left":"z","right":"a","nested":{"left":2,"right":"10"}}"#,
+            ),
+            entry(
+                24,
+                "integer precision less",
+                r#"{"case":"integer-precision-less","left":9007199254740992,"right":9007199254740993}"#,
+            ),
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn cases(storage: &Storage, query: &str) -> Vec<String> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap()["case"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    let equality = vec![
+        "missing",
+        "nulls",
+        "empty",
+        "equal-text",
+        "numeric-equal",
+        "boolean-equal",
+        "array-equal",
+        "object-equal",
+    ];
+    let less = vec![
+        "right-only",
+        "lexical-less",
+        "numeric-less",
+        "duration-less",
+        "bytes-less",
+        "timestamp-less",
+        "ipv4-less",
+        "fallback-less",
+        "integer-precision-less",
+    ];
+    let mut less_or_equal = equality.clone();
+    less_or_equal.extend(less.iter().copied());
+    less_or_equal.sort_by_key(|case| {
+        [
+            "missing",
+            "nulls",
+            "empty",
+            "right-only",
+            "equal-text",
+            "lexical-less",
+            "numeric-less",
+            "numeric-equal",
+            "duration-less",
+            "bytes-less",
+            "timestamp-less",
+            "ipv4-less",
+            "fallback-less",
+            "boolean-equal",
+            "array-equal",
+            "object-equal",
+            "integer-precision-less",
+        ]
+        .iter()
+        .position(|candidate| candidate == case)
+        .unwrap()
+    });
+    let all = vec![
+        "missing",
+        "nulls",
+        "empty",
+        "left-only",
+        "right-only",
+        "equal-text",
+        "lexical-less",
+        "lexical-greater",
+        "numeric-less",
+        "numeric-greater",
+        "numeric-equal",
+        "duration-less",
+        "duration-greater",
+        "bytes-less",
+        "timestamp-less",
+        "ipv4-less",
+        "fallback-less",
+        "boolean-equal",
+        "array-equal",
+        "object-equal",
+        "message-equal",
+        "service-equal",
+        "nested-less",
+        "integer-precision-less",
+    ];
+    let queries = [
+        ("left:eq_field(right)", equality),
+        ("left:le_field(right)", less_or_equal),
+        ("left:lt_field(right)", less),
+        ("left:lt_field(left)", Vec::new()),
+        ("left:le_field(left)", all),
+        (
+            "case:=\"timestamp-less\" left:lt_field(_time)",
+            vec!["timestamp-less"],
+        ),
+        ("eq_field(right)", vec!["message-equal"]),
+        (
+            "service:eq_field(right)",
+            vec!["missing", "nulls", "empty", "left-only", "service-equal"],
+        ),
+        ("nested.left:lt_field(nested.right)", vec!["nested-less"]),
+        (
+            "left:le_field(right) AND NOT left:eq_field(right)",
+            vec![
+                "right-only",
+                "lexical-less",
+                "numeric-less",
+                "duration-less",
+                "bytes-less",
+                "timestamp-less",
+                "ipv4-less",
+                "fallback-less",
+                "integer-precision-less",
+            ],
+        ),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(cases(&storage, query).await, *expected, "{query}");
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "* | filter left:lt_field(right) | fields case | limit 100",
+        )
+        .await
+        .into_iter()
+        .map(|row| row["case"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>(),
+        [
+            "right-only",
+            "lexical-less",
+            "numeric-less",
+            "duration-less",
+            "bytes-less",
+            "timestamp-less",
+            "ipv4-less",
+            "fallback-less",
+            "integer-precision-less",
+        ]
+    );
+
+    for malformed in [
+        "eq_field(",
+        "eq_field()",
+        "eq_field(left, right)",
+        "eq_field(left right)",
+        "eq_field(*)",
+        "le_field()",
+        "le_field(left, right)",
+        "lt_field()",
+        "lt_field(left right)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("left:le_field(right) | limit 100"))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        cases(&storage, "left:lt_field(right)").await,
+        [
+            "right-only",
+            "lexical-less",
+            "numeric-less",
+            "duration-less",
+            "bytes-less",
+            "timestamp-less",
+            "ipv4-less",
+            "fallback-less",
+            "integer-precision-less",
+        ],
+        "the reader must remain reusable after a bounded-work rejection"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(cases(&reopened, query).await, expected, "reopened: {query}");
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

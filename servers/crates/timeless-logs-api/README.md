@@ -57,6 +57,8 @@ two-address `ipv4_range(...)` filtering over exact retained strings;
 inclusive-lower/exclusive-upper `string_range(minimum, maximum)` bytewise
 filtering over the retained rich textual projection; inclusive Unicode-
 codepoint `len_range(minimum, maximum)` filtering over that projection;
+same-row `eq_field`, `le_field`, and `lt_field` comparisons with exact
+equality and VictoriaLogs math-value-or-bytewise ordering;
 VictoriaLogs-compatible
 any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
 `<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
@@ -184,6 +186,29 @@ length matching at 4.335/47.566 ms. The same-run word filter measures
 wide shape reads four blocks and all 8,192 entries. Storage is byte-identical
 to the preceding string-range capture, so the operation remains bounded API
 composition rather than a missing extension primitive.
+
+Same-row field comparisons accept exactly one right-hand field:
+`left:eq_field(right)`, `left:le_field(right)`, or
+`left:lt_field(right)`. An omitted left field selects the message; quoted
+identifiers, service/level aliases, nested fields, case-insensitive function
+names, one trailing comma, logical composition, and `filter`/`where` pipelines
+are supported. `_time` is allowed on the right and rendered in RFC3339 at the
+configured timestamp precision. It is rejected on the left because
+`_time:` belongs to the time-filter grammar. Invalid arity, separators,
+wildcards, and unterminated calls fail before storage work.
+
+Equality compares complete textual projections exactly. Ordering first parses
+both projections as VictoriaLogs math values—decimal or base-zero numbers,
+durations, byte sizes, RFC3339 timestamps, and IPv4 addresses—and otherwise
+uses unsigned UTF-8 byte order. Missing/null project to empty; strings retain
+their bytes; and retained numbers, booleans, arrays, and objects use compact
+JSON only during evaluation. When both values are retained JSON numbers,
+Timeless compares the exact JSON numbers first so integers beyond binary64
+precision remain ordered correctly. Stored metadata is never mutated.
+`SQL-LOG-021` provides direct SQLite/libSQL users with complete retained-model
+equality and the exact bytewise ordering fallback over public rows. The full
+math-value ordering branch remains language-owned Rust API behavior; no
+extension primitive or storage contract changed.
 
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept

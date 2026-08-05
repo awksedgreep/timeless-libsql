@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 290 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 314 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -245,6 +245,26 @@ to dotted children; Timeless preserves the parent and compact-projects it only
 for evaluation. The behavior and bound grammar are source-audited against
 `filter_len_range.go`, `parser.go`, and `values_encoder.go` at VictoriaLogs
 commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+
+The twelve successful and twelve error `LQL-F30` cases pin same-row
+`eq_field`, `le_field`, and `lt_field` comparisons. Equality compares the two
+complete textual projections exactly. Ordering first parses both projections
+as VictoriaLogs math values—decimal or base-zero numbers, durations, byte
+sizes, RFC3339 timestamps, and IPv4 addresses—and otherwise compares unsigned
+UTF-8 bytes. The cases cover equal and ordered values, same-field identities,
+missing/null/empty projection, quoted fields, unqualified message scope,
+service and nested fields, a right-hand `_time`, case-insensitive function
+names, logical/pipeline composition, and strict arity, separator, wildcard,
+and unterminated-call errors. `_time:` is reserved for time-filter grammar and
+is therefore rejected as the left field even though `_time` is a valid
+right-hand projection. VictoriaLogs flattens retained objects; Timeless keeps
+the complete typed parent and compact-projects it only for comparison. When
+both Timeless values are retained JSON numbers, their exact number ordering is
+used before textual math parsing so integers beyond binary64 precision remain
+correct. The grammar, projection, and ordering are source-audited against
+`filter_eq_field.go`, `filter_le_field.go`, `pipe_math.go`,
+`values_encoder.go`, and `parser.go` at VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

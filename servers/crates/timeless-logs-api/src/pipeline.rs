@@ -12,7 +12,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
-    parse_ipv4_address, parse_ipv6_address, PipelineField, PipelineOp, StatsExpression, StatsKind,
+    logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, PipelineField, PipelineOp,
+    StatsExpression, StatsKind,
 };
 use crate::storage::QueryRow;
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -64,7 +65,7 @@ pub(crate) fn response_row(row: QueryRow, timestamp_unit: TimestampUnit) -> Resu
     Ok(Value::Object(object))
 }
 
-fn format_timestamp(ts: i64, timestamp_unit: TimestampUnit) -> Result<String, String> {
+pub(crate) fn format_timestamp(ts: i64, timestamp_unit: TimestampUnit) -> Result<String, String> {
     let (datetime, format) = match timestamp_unit {
         TimestampUnit::Milliseconds => (
             DateTime::<Utc>::from_timestamp_millis(ts),
@@ -871,6 +872,26 @@ fn predicate_matches(
             ensure_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::FieldCompare {
+            left,
+            right,
+            operator,
+        } => {
+            let exact_numeric = (!matches!(operator, crate::FieldCompareOp::Equal))
+                .then(|| {
+                    let left = field_json(row, left)?.as_number()?;
+                    let right = field_json(row, right)?.as_number()?;
+                    compare_numbers(left, right).map(|ordering| operator.matches(ordering))
+                })
+                .flatten();
+            let matched = exact_numeric.unwrap_or_else(|| {
+                projected_field_pair_matches(row, left, right, |left, right| {
+                    logsql_field_comparison(left, right, *operator)
+                })
+            });
+            ensure_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => {
             Ok(projected_field_matches(row, field, |text| {
                 text.starts_with(value)
@@ -931,10 +952,23 @@ fn projected_field_matches(
     }
 }
 
+fn projected_field_pair_matches(
+    row: &Value,
+    left: &LogField,
+    right: &LogField,
+    predicate: impl FnOnce(&str, &str) -> bool,
+) -> bool {
+    let mut predicate = Some(predicate);
+    projected_field_matches(row, left, |left| {
+        projected_field_matches(row, right, |right| predicate.take().unwrap()(left, right))
+    })
+}
+
 fn field_json<'a>(row: &'a Value, field: &LogField) -> Option<&'a Value> {
     match field {
         LogField::Message => row.get("_msg"),
         LogField::Level => row.get("level"),
+        LogField::Time => row.get("_time"),
         LogField::Metadata(path) => field_value(row, path),
     }
 }
@@ -1253,6 +1287,11 @@ mod tests {
                 field: LogField::Message,
                 minimum: 0,
                 maximum: u64::MAX,
+            },
+            LogPredicate::FieldCompare {
+                left: LogField::Message,
+                right: LogField::Level,
+                operator: crate::FieldCompareOp::LessOrEqual,
             },
         ] {
             assert_eq!(

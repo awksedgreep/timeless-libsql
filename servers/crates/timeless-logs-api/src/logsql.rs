@@ -13,8 +13,8 @@ use regex::RegexBuilder;
 use serde_json::Value;
 
 use crate::{
-    LogField, LogPredicate, MetadataExact, NumericOp, PatternMatchMode, PatternMatcher, QuerySpec,
-    TimestampUnit, ValueTypeKind,
+    FieldCompareOp, LogField, LogPredicate, MetadataExact, NumericOp, PatternMatchMode,
+    PatternMatcher, QuerySpec, TimestampUnit, ValueTypeKind,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -720,6 +720,12 @@ pub fn parse_at(
                         continue;
                     }
                     if let Some(predicate) = parse_len_range_filter(&token, LogField::Message)? {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
+                    if let Some(predicate) =
+                        parse_field_comparison_filter(&token, LogField::Message)?
+                    {
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
@@ -1503,6 +1509,359 @@ fn parse_len_range_bound(value: &str) -> Option<u64> {
     parse_prefixed_u64(value)
         .or_else(|| parse_human_bytes(value))
         .or_else(|| parse_human_duration_ns(value))
+}
+
+fn parse_field_comparison_filter(
+    token: &str,
+    left: LogField,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    let Some(operator) = ([
+        ("eq_field", FieldCompareOp::Equal),
+        ("le_field", FieldCompareOp::LessOrEqual),
+        ("lt_field", FieldCompareOp::Less),
+    ])
+    .into_iter()
+    .find_map(|(name, operator)| token[..open].eq_ignore_ascii_case(name).then_some(operator)) else {
+        return Ok(None);
+    };
+    let close = matching_parenthesis(token, open)?;
+    if close + 1 != token.len() {
+        return Err(LogsqlError::malformed(
+            "unexpected text after LogsQL field-comparison filter",
+        ));
+    }
+    let inner = token[open + 1..close].trim();
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    let arguments = if inner.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(inner, ',')?
+    };
+    let [right] = arguments.as_slice() else {
+        return Err(LogsqlError::malformed(
+            "LogsQL field-comparison filter requires exactly one field",
+        ));
+    };
+    let right = right.trim();
+    if right.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL field-comparison filter requires a non-empty field",
+        ));
+    }
+    if quoted_value(right)?.is_none() && right.contains('*') {
+        return Err(LogsqlError::malformed(
+            "unquoted wildcard in LogsQL field-comparison field",
+        ));
+    }
+    let right = log_field(&parse_field_path(right)?);
+    Ok(Some(LogPredicate::FieldCompare {
+        left,
+        right,
+        operator,
+    }))
+}
+
+pub(crate) fn logsql_field_comparison(left: &str, right: &str, operator: FieldCompareOp) -> bool {
+    match operator {
+        FieldCompareOp::Equal => left == right,
+        FieldCompareOp::LessOrEqual | FieldCompareOp::Less => {
+            let ordering = match (
+                parse_logsql_math_number(left),
+                parse_logsql_math_number(right),
+            ) {
+                (Some(left), Some(right)) => left.partial_cmp(&right),
+                _ => Some(left.as_bytes().cmp(right.as_bytes())),
+            };
+            match (operator, ordering) {
+                (FieldCompareOp::LessOrEqual, Some(ordering)) => !ordering.is_gt(),
+                (FieldCompareOp::Less, Some(ordering)) => ordering.is_lt(),
+                _ => false,
+            }
+        }
+    }
+}
+
+fn parse_logsql_math_number(value: &str) -> Option<f64> {
+    parse_victorialogs_decimal(value)
+        .or_else(|| parse_victorialogs_human_duration(value).map(|value| value as f64))
+        .or_else(|| parse_victorialogs_human_bytes(value).map(|value| value as f64))
+        .or_else(|| {
+            is_likely_math_number(value)
+                .then(|| parse_go_number(value))
+                .flatten()
+        })
+        .or_else(|| parse_victorialogs_timestamp(value).map(|value| value as f64))
+        .or_else(|| parse_victorialogs_ipv4(value).map(|value| value as f64))
+        .filter(|value| !value.is_nan())
+}
+
+fn parse_victorialogs_decimal(value: &str) -> Option<f64> {
+    const MAX_TEXT: usize = "-18_446_744_073_709_551_615".len();
+    if value.is_empty() || value.len() > MAX_TEXT || value.starts_with('+') {
+        return None;
+    }
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    if unsigned.is_empty() {
+        return None;
+    }
+    let mut parts = unsigned.split('.');
+    let integer = parts.next()?;
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+    parse_victorialogs_uint(integer)?;
+    if let Some(fraction) = fraction {
+        if fraction.is_empty() {
+            return None;
+        }
+        let trimmed = fraction
+            .char_indices()
+            .find(|(index, character)| *character != '0' || *index + 1 == fraction.len())
+            .map(|(index, _)| &fraction[index..])
+            .unwrap_or(fraction);
+        parse_victorialogs_uint(trimmed)?;
+    }
+    value.replace('_', "").parse::<f64>().ok()
+}
+
+fn parse_victorialogs_uint(value: &str) -> Option<u64> {
+    if value.is_empty()
+        || value.len() > "18_446_744_073_709_551_615".len()
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return None;
+    }
+    let mut result = 0u64;
+    for byte in value.bytes() {
+        if byte == b'_' {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        result = result
+            .checked_mul(10)?
+            .checked_add(u64::from(byte - b'0'))?;
+    }
+    Some(result)
+}
+
+fn parse_victorialogs_human_duration(value: &str) -> Option<i64> {
+    parse_victorialogs_human_segments(
+        value,
+        &[
+            ("ms", 1_000_000),
+            ("ns", 1),
+            ("µs", 1_000),
+            ("y", 365 * 24 * 3_600_000_000_000),
+            ("w", 7 * 24 * 3_600_000_000_000),
+            ("d", 24 * 3_600_000_000_000),
+            ("h", 3_600_000_000_000),
+            ("m", 60_000_000_000),
+            ("s", 1_000_000_000),
+        ],
+        false,
+    )
+}
+
+fn parse_victorialogs_human_bytes(value: &str) -> Option<i64> {
+    parse_victorialogs_human_segments(
+        value,
+        &[
+            ("TiB", 1_i64 << 40),
+            ("GiB", 1_i64 << 30),
+            ("MiB", 1_i64 << 20),
+            ("KiB", 1_i64 << 10),
+            ("Ti", 1_i64 << 40),
+            ("Gi", 1_i64 << 30),
+            ("Mi", 1_i64 << 20),
+            ("Ki", 1_i64 << 10),
+            ("TB", 1_000_000_000_000),
+            ("GB", 1_000_000_000),
+            ("MB", 1_000_000),
+            ("KB", 1_000),
+            ("T", 1_000_000_000_000),
+            ("G", 1_000_000_000),
+            ("M", 1_000_000),
+            ("K", 1_000),
+            ("B", 1),
+        ],
+        true,
+    )
+}
+
+fn parse_victorialogs_human_segments(
+    value: &str,
+    units: &[(&str, i64)],
+    allow_unsuffixed_integer: bool,
+) -> Option<i64> {
+    if value.is_empty() || value.starts_with('+') {
+        return None;
+    }
+    let negative = value.starts_with('-');
+    let mut remaining = value.strip_prefix('-').unwrap_or(value);
+    if remaining.is_empty() {
+        return None;
+    }
+    let mut total = 0i64;
+    while !remaining.is_empty() {
+        let (number, used) = parse_victorialogs_float_prefix(remaining)?;
+        remaining = &remaining[used..];
+        let Some((suffix, multiplier)) = units
+            .iter()
+            .find(|(suffix, _)| remaining.starts_with(*suffix))
+            .copied()
+        else {
+            if allow_unsuffixed_integer && remaining.is_empty() && number.fract() == 0.0 {
+                total = saturating_victorialogs_sum(total, number);
+                break;
+            }
+            return None;
+        };
+        total = saturating_victorialogs_sum(total, number * multiplier as f64);
+        remaining = &remaining[suffix.len()..];
+    }
+    Some(if negative { -total } else { total })
+}
+
+fn parse_victorialogs_float_prefix(value: &str) -> Option<(f64, usize)> {
+    let mut used = 0usize;
+    for (index, byte) in value.bytes().enumerate() {
+        if byte.is_ascii_digit() || byte == b'.' || byte == b'_' {
+            used = index + 1;
+        } else {
+            break;
+        }
+    }
+    (used > 0)
+        .then(|| parse_victorialogs_decimal(&value[..used]).map(|value| (value, used)))
+        .flatten()
+}
+
+fn saturating_victorialogs_sum(total: i64, component: f64) -> i64 {
+    if !component.is_finite() || component < 0.0 || component >= i64::MAX as f64 {
+        return i64::MAX;
+    }
+    total.saturating_add(component.trunc() as i64)
+}
+
+fn is_likely_math_number(value: &str) -> bool {
+    let value = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
+    if value.is_empty() {
+        return false;
+    }
+    if value.eq_ignore_ascii_case("inf") {
+        return true;
+    }
+    let value = value.strip_prefix('.').unwrap_or(value);
+    !value.is_empty()
+        && value.as_bytes()[0].is_ascii_digit()
+        && value.matches('.').count() <= 1
+        && !value.contains(':')
+        && value.matches('-').count() <= 2
+}
+
+fn parse_go_number(value: &str) -> Option<f64> {
+    let compact = value.replace('_', "");
+    let floating = match compact.to_ascii_lowercase().as_str() {
+        "inf" | "+inf" => Some(f64::INFINITY),
+        "-inf" => Some(f64::NEG_INFINITY),
+        "nan" | "+nan" | "-nan" => Some(f64::NAN),
+        _ => compact.parse::<f64>().ok(),
+    };
+    floating.or_else(|| parse_go_base_zero_i64(&compact).map(|value| value as f64))
+}
+
+fn parse_go_base_zero_i64(value: &str) -> Option<i64> {
+    let (negative, unsigned) = if let Some(value) = value.strip_prefix('-') {
+        (true, value)
+    } else {
+        (false, value.strip_prefix('+').unwrap_or(value))
+    };
+    let (digits, radix) = if let Some(digits) = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
+        (digits, 16)
+    } else if let Some(digits) = unsigned
+        .strip_prefix("0b")
+        .or_else(|| unsigned.strip_prefix("0B"))
+    {
+        (digits, 2)
+    } else if let Some(digits) = unsigned
+        .strip_prefix("0o")
+        .or_else(|| unsigned.strip_prefix("0O"))
+    {
+        (digits, 8)
+    } else if unsigned.len() > 1 && unsigned.starts_with('0') {
+        (&unsigned[1..], 8)
+    } else {
+        (unsigned, 10)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let magnitude = i128::from_str_radix(digits, radix).ok()?;
+    let signed = if negative { -magnitude } else { magnitude };
+    i64::try_from(signed).ok()
+}
+
+fn parse_victorialogs_timestamp(value: &str) -> Option<i64> {
+    if value.len() < "2006-01-02T15:04:05".len() {
+        return None;
+    }
+    let mut normalized = value.to_owned();
+    if normalized.as_bytes().get(10) == Some(&b' ') {
+        normalized.replace_range(10..11, "T");
+    }
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(&normalized) {
+        return timestamp.timestamp_nanos_opt();
+    }
+    if normalized.len() >= 5 {
+        let offset = normalized.len() - 5;
+        if matches!(normalized.as_bytes().get(offset), Some(b'+' | b'-'))
+            && normalized.as_bytes()[offset + 1..]
+                .iter()
+                .all(u8::is_ascii_digit)
+        {
+            normalized.insert(offset + 3, ':');
+            if let Ok(timestamp) = DateTime::parse_from_rfc3339(&normalized) {
+                return timestamp.timestamp_nanos_opt();
+            }
+        }
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(timestamp) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return timestamp.and_utc().timestamp_nanos_opt();
+        }
+    }
+    None
+}
+
+fn parse_victorialogs_ipv4(value: &str) -> Option<u32> {
+    let octets = value
+        .split('.')
+        .map(|octet| {
+            (!octet.is_empty()
+                && octet.len() <= 3
+                && octet.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| octet.parse::<u16>().ok())
+            .flatten()
+            .filter(|octet| *octet <= 255)
+            .map(|octet| octet as u8)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let [a, b, c, d] = octets.as_slice() else {
+        return None;
+    };
+    Some(u32::from_be_bytes([*a, *b, *c, *d]))
 }
 
 fn invalid_base_zero_integer(value: &str) -> bool {
@@ -2290,6 +2649,9 @@ fn compile_field_filter(
     if let Some(predicate) = parse_len_range_filter(value, field.clone())? {
         return Ok(predicate);
     }
+    if let Some(predicate) = parse_field_comparison_filter(value, field.clone())? {
+        return Ok(predicate);
+    }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
             field: field.clone(),
@@ -2357,6 +2719,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
         return Ok(predicate);
     }
     if let Some(predicate) = parse_len_range_filter(atom, field.clone())? {
+        return Ok(predicate);
+    }
+    if let Some(predicate) = parse_field_comparison_filter(atom, field.clone())? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
@@ -2590,7 +2955,7 @@ fn apply_exact_pushdown(
         {
             spec.metadata_eq.insert(path[0].clone(), value.to_owned());
         }
-        LogField::Message | LogField::Metadata(_) => {}
+        LogField::Message | LogField::Time | LogField::Metadata(_) => {}
     }
     Ok(())
 }
@@ -2800,6 +3165,9 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
                 "ipv6_range",
                 "string_range",
                 "len_range",
+                "eq_field",
+                "le_field",
+                "lt_field",
             ]
             .iter()
             .any(|function| is_named_filter_call(value, function))
@@ -2855,6 +3223,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         append_predicate(spec, predicate);
         return Ok(());
     } else if let Some(predicate) = parse_len_range_filter(value, log_field(&path))? {
+        append_predicate(spec, predicate);
+        return Ok(());
+    } else if let Some(predicate) = parse_field_comparison_filter(value, log_field(&path))? {
         append_predicate(spec, predicate);
         return Ok(());
     }
@@ -3008,6 +3379,7 @@ fn log_field(path: &[String]) -> LogField {
     match path {
         [field] if field == "_msg" || field == "message" => LogField::Message,
         [field] if field == "level" => LogField::Level,
+        [field] if field == "_time" => LogField::Time,
         _ => LogField::Metadata(path.to_vec()),
     }
 }
@@ -4189,6 +4561,85 @@ mod tests {
             "VictoriaLogs saturates a human-readable bound after integer overflow"
         );
         assert_eq!(bounds("len_range(-0s, -0B)"), (0, 0));
+    }
+
+    #[test]
+    fn session_sixteen_field_comparison_grammar_is_complete_and_strict() {
+        for query in [
+            "eq_field(peer)",
+            r#""left field":Eq_FiElD('right field')"#,
+            "left:le_field(right,)",
+            "left:Lt_FiElD(right)",
+            "service:eq_field(peer)",
+            "left:eq_field(right) AND NOT left:lt_field(right)",
+            "* | filter nested.left:le_field(nested.right)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            assert!(
+                format!("{:?}", plan.spec.predicate).contains("FieldCompare")
+                    || format!("{:?}", plan.pipeline).contains("FieldCompare"),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for word_filter in [
+            "eq_field",
+            "left:eq_field",
+            "le_field",
+            "left:le_field",
+            "lt_field",
+            "left:lt_field",
+        ] {
+            assert!(
+                parse_at(word_filter, TimestampUnit::Microseconds, 0).is_ok(),
+                "{word_filter}"
+            );
+        }
+
+        for malformed in [
+            "eq_field(",
+            "eq_field()",
+            "eq_field(left, right)",
+            "eq_field(left right)",
+            "eq_field(*)",
+            "eq_field(left*)",
+            "le_field(",
+            "le_field()",
+            "le_field(left, right)",
+            "le_field(left right)",
+            "lt_field(",
+            "lt_field()",
+            "lt_field(left, right)",
+            "lt_field(left right)",
+            "_time:eq_field(_time)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+
+        let eq = |left, right| logsql_field_comparison(left, right, FieldCompareOp::Equal);
+        let le = |left, right| logsql_field_comparison(left, right, FieldCompareOp::LessOrEqual);
+        let lt = |left, right| logsql_field_comparison(left, right, FieldCompareOp::Less);
+        assert!(eq("2", "2"));
+        assert!(!eq("2", "2.0"));
+        assert!(lt("2", "10"), "both numeric projections use numeric order");
+        assert!(!le("10", "2"));
+        assert!(lt("500ms", "1s"));
+        assert!(lt("1000B", "1KiB"));
+        assert!(lt("2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z"));
+        assert!(lt("10.0.0.2", "10.0.0.10"));
+        assert!(
+            lt("0b1111", "0x10"),
+            "base-zero integers compare numerically"
+        );
+        assert!(
+            lt("10x", "2"),
+            "one failed numeric parse selects byte order"
+        );
+        assert!(
+            lt("+Inf", "NaN"),
+            "NaN selects byte order instead of float order"
+        );
     }
 
     #[test]

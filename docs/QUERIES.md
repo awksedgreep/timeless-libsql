@@ -337,6 +337,40 @@ to the Rust API. VictoriaLogs flattens objects before filtering, while
 Timeless retains and can length-project the selected parent without losing
 its type. No new extension primitive or storage format is involved.
 
+`left:eq_field(right)`, `left:le_field(right)`, and
+`left:lt_field(right)` compare two fields from the same bounded public log
+row. An omitted left field selects the message. Field identifiers may be
+quoted, function names are case-insensitive, and one trailing comma is
+accepted. Message, level, service, and arbitrary dotted metadata are valid on
+either side. `_time` is valid only on the right because a leading `_time:` is
+reserved for the time-filter grammar. Logical expressions and ordered
+`filter`/`where` pipelines compose these predicates; malformed arity,
+separators, wildcards, and unterminated calls fail explicitly.
+
+Both operands use the same non-mutating textual projection as other LogsQL
+text filters. Missing and JSON null become empty text; strings retain their
+bytes; numbers and booleans use compact JSON spelling; arrays and objects use
+compact JSON only while the predicate runs; and a right-hand `_time` uses the
+API's RFC3339 rendering in the table's configured timestamp unit. Equality is
+exact textual equality, so `2` and `2.0` differ. Ordering first interprets
+*both* projections as VictoriaLogs math values—decimal and base-zero numbers,
+durations, byte sizes, RFC3339 timestamps, or IPv4 addresses—and otherwise
+uses unsigned UTF-8 byte order. When both Timeless operands are retained JSON
+numbers, exact JSON-number ordering takes precedence, preserving integers
+beyond binary64 precision. A comparison with itself is therefore true for
+`eq_field` and `le_field`, and false for `lt_field`, including when the field
+is missing.
+
+Executable `SQL-LOG-021` uses only public `logs` rows and JSON1. It is the
+complete retained-model SQL equivalent for `eq_field` and exposes the exact
+bytewise fallback for `le_field`/`lt_field`. Portable SQL is not labeled as a
+complete ordering equivalent because the language-specific math-value parser
+remains in the Rust API. VictoriaLogs flattens objects before filtering;
+Timeless retains and can compact-project a selected parent without losing its
+type. Both operands already cross the same decoded public row, so a new
+extension primitive would not avoid storage reads, decode, allocation, copy,
+or row crossing.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

@@ -128,6 +128,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-018`](#sql-log-018-ipv4-range-over-retained-strings) | `LQL-F25` | current foundation | exact whole-string IPv4 membership between inclusive packed address bounds; API owns address/CIDR grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-019`](#sql-log-019-bytewise-string-range-over-retained-text) | `LQL-F27` | current foundation | lower-inclusive/upper-exclusive bytewise range over retained text plus missing/null-as-empty; API owns rich-value projection, grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-020`](#sql-log-020-unicode-codepoint-length-range-over-retained-text) | `LQL-F28` | current foundation | inclusive Unicode-codepoint length over retained text plus missing/null-as-empty; API owns rich-value projection, bound grammar, composition, limits, cancellation, and envelopes |
+| [`SQL-LOG-021`](#sql-log-021-same-row-textual-field-comparison) | `LQL-F30` | current foundation | exact textual equality and explicit bytewise fallback ordering over two public-row fields; API owns VictoriaLogs math-value detection, `_time` rendering, grammar, composition, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5335,6 +5336,84 @@ limits, cancellation, and HTTP errors. VictoriaLogs flattens nested objects;
 Timeless preserves and can length-project a selected parent object. Public
 SQLite rows already provide the retained-text operation, so no extension
 primitive is warranted.
+
+### SQL-LOG-021: same-row textual field comparison
+
+Bind `:left_path` and `:right_path` as valid SQLite JSON paths, such as
+`$.actual_duration` and `$.maximum_duration`. Bind `:comparison` to `eq`,
+`le_text`, or `lt_text`. This statement projects both retained metadata fields
+without changing their stored types, then performs exact textual equality or
+an explicitly bytewise ordering comparison:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT *,
+    CASE json_type(metadata, :left_path)
+      WHEN 'text' THEN json_extract(metadata, :left_path)
+      WHEN 'true' THEN 'true'
+      WHEN 'false' THEN 'false'
+      WHEN 'integer' THEN metadata -> :left_path
+      WHEN 'real' THEN metadata -> :left_path
+      WHEN 'array' THEN json(json_extract(metadata, :left_path))
+      WHEN 'object' THEN json(json_extract(metadata, :left_path))
+      ELSE ''
+    END AS left_text,
+    CASE json_type(metadata, :right_path)
+      WHEN 'text' THEN json_extract(metadata, :right_path)
+      WHEN 'true' THEN 'true'
+      WHEN 'false' THEN 'false'
+      WHEN 'integer' THEN metadata -> :right_path
+      WHEN 'real' THEN metadata -> :right_path
+      WHEN 'array' THEN json(json_extract(metadata, :right_path))
+      WHEN 'object' THEN json(json_extract(metadata, :right_path))
+      ELSE ''
+    END AS right_text
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM projected
+WHERE CASE :comparison
+  WHEN 'eq' THEN left_text = right_text COLLATE BINARY
+  WHEN 'le_text' THEN CAST(left_text AS BLOB) <= CAST(right_text AS BLOB)
+  WHEN 'lt_text' THEN CAST(left_text AS BLOB) < CAST(right_text AS BLOB)
+  ELSE 0
+END
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+`eq` is the complete retained-model SQL equivalent of
+`left:eq_field(right)`: strings remain strings; numbers and booleans use their
+compact JSON spelling; arrays and objects use compact JSON; and missing and
+JSON null both project to the empty string. An actual empty string is therefore
+equal to either state for this operator. To compare the public message or level
+column, replace the corresponding `CASE` expression with `message AS
+left_text`/`right_text` or `level AS left_text`/`right_text`.
+The JSON `->` operator deliberately retains the exact numeric token instead of
+letting `json_extract()` convert unsigned integers above `i64::MAX` to an
+indistinguishable binary64 value.
+
+`le_text` and `lt_text` expose the exact unsigned-byte fallback used by
+`le_field` and `lt_field`, but are not claimed as complete LogsQL equivalents.
+VictoriaLogs first attempts to parse *both* projections as math values:
+decimal and base-zero numbers, durations, byte sizes, RFC3339 timestamps, and
+IPv4 addresses compare numerically; byte ordering is used only when either
+parse fails. The Rust API owns that language-specific branch, function grammar,
+case-insensitive names, field aliases, `_time` rendering on the right,
+logical/pipeline composition, limits, cancellation, and errors. `_time:` stays
+reserved for time filters and therefore cannot be a comparison's left field.
+
+The table's configured timestamp unit is milliseconds in this example, both
+timestamp endpoints are inclusive, `max_work_entries` bounds public decode,
+output is newest first, and `:limit` is applied after comparison. Both operands
+already arrive in the same decoded public row, so an extension primitive would
+not remove a block read, decode, allocation, copy, or row crossing.
 
 ## Adding the next recipe
 

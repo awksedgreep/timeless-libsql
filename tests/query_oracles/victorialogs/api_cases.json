@@ -100,22 +100,22 @@
     {"case": "ipv6-mapped-low", "_msg": "v6 mapped low", "ip_group": "ipv6", "ip": "1.2.3.4"},
     {"case": "ipv6-mapped-outside", "_msg": "v6 mapped outside", "ip_group": "ipv6", "ip": "9.0.0.0"},
     {"case": "string-range-missing", "_msg": "range missing", "ip_group": "string-range"},
-    {"case": "string-range-null", "_msg": "range null", "ip_group": "string-range", "ip": null},
-    {"case": "string-range-empty", "_msg": "range empty", "ip_group": "string-range", "ip": ""},
-    {"case": "string-range-lower", "_msg": "range lower", "ip_group": "string-range", "ip": "alpha"},
-    {"case": "string-range-inside", "_msg": "range inside", "ip_group": "string-range", "ip": "alpha2"},
-    {"case": "string-range-upper", "_msg": "range upper", "ip_group": "string-range", "ip": "beta"},
-    {"case": "string-range-uppercase", "_msg": "range uppercase", "ip_group": "string-range", "ip": "Alpha"},
-    {"case": "string-range-comma", "_msg": "range comma", "ip_group": "string-range", "ip": "alpha,one"},
-    {"case": "string-range-unicode-lower", "_msg": "range unicode low", "ip_group": "string-range", "ip": "é"},
-    {"case": "string-range-unicode-upper", "_msg": "range unicode high", "ip_group": "string-range", "ip": "ê"},
-    {"case": "string-range-numeric", "_msg": "range numeric", "ip_group": "string-range", "ip": 123},
-    {"case": "string-range-boolean", "_msg": "range boolean", "ip_group": "string-range", "ip": true},
-    {"case": "string-range-array", "_msg": "range array", "ip_group": "string-range", "ip": ["alpha"]},
-    {"case": "string-range-object", "_msg": "range object", "ip_group": "string-range", "ip": {"value": "alpha"}},
-    {"case": "string-range-nested", "_msg": "range nested", "ip_group": "string-range", "nested": {"ip": "alpha3"}},
-    {"case": "string-range-service", "_msg": "range service", "ip_group": "string-range", "service": "alpha4"},
-    {"case": "string-range-message", "_msg": "middle", "ip_group": "string-range"},
+    {"case": "string-range-null", "_msg": "range null", "ip_group": "string-range", "ip": null, "cmp_left": null, "cmp_right": null},
+    {"case": "string-range-empty", "_msg": "range empty", "ip_group": "string-range", "ip": "", "cmp_left": "", "cmp_right": ""},
+    {"case": "string-range-lower", "_msg": "range lower", "ip_group": "string-range", "ip": "alpha", "cmp_left": "alpha", "cmp_right": "alpha", "left field": "x", "right field": "x"},
+    {"case": "string-range-inside", "_msg": "range inside", "ip_group": "string-range", "ip": "alpha2", "cmp_left": "bar", "cmp_right": "foo"},
+    {"case": "string-range-upper", "_msg": "range upper", "ip_group": "string-range", "ip": "beta", "cmp_left": "foo", "cmp_right": "bar"},
+    {"case": "string-range-uppercase", "_msg": "range uppercase", "ip_group": "string-range", "ip": "Alpha", "cmp_left": 2, "cmp_right": "10"},
+    {"case": "string-range-comma", "_msg": "range comma", "ip_group": "string-range", "ip": "alpha,one", "cmp_left": "10", "cmp_right": 2},
+    {"case": "string-range-unicode-lower", "_msg": "range unicode low", "ip_group": "string-range", "ip": "é", "cmp_left": "500ms", "cmp_right": "1s"},
+    {"case": "string-range-unicode-upper", "_msg": "range unicode high", "ip_group": "string-range", "ip": "ê", "cmp_left": "1000B", "cmp_right": "1KiB"},
+    {"case": "string-range-numeric", "_msg": "range numeric", "ip_group": "string-range", "ip": 123, "cmp_left": "2026-01-01T00:00:00Z", "cmp_right": "2026-01-01T00:00:01Z"},
+    {"case": "string-range-boolean", "_msg": "range boolean", "ip_group": "string-range", "ip": true, "cmp_left": "10.0.0.2", "cmp_right": "10.0.0.10"},
+    {"case": "string-range-array", "_msg": "range array", "ip_group": "string-range", "ip": ["alpha"], "cmp_left": "10x", "cmp_right": "2"},
+    {"case": "string-range-object", "_msg": "range object", "ip_group": "string-range", "ip": {"value": "alpha"}, "cmp_left": [1], "cmp_right": "[1]"},
+    {"case": "string-range-nested", "_msg": "range nested", "ip_group": "string-range", "nested": {"ip": "alpha3"}, "cmp_left": true, "cmp_right": "true"},
+    {"case": "string-range-service", "_msg": "range service", "ip_group": "string-range", "service": "alpha4", "cmp_left": "alpha4", "cmp_right": "alpha4"},
+    {"case": "string-range-message", "_msg": "middle", "ip_group": "string-range", "cmp_left": "middle", "cmp_right": "middle"},
     {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
     {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
     {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
@@ -1555,6 +1555,78 @@
       "query": "ip_group:=\"string-range\" | filter ip:len_range(5, 6)",
       "status": 200,
       "expected_cases": ["string-range-lower", "string-range-inside", "string-range-uppercase"]
+    },
+    {
+      "id": "LQL-F30-equality-projects-missing-null-and-rich-values",
+      "query": "ip_group:=\"string-range\" cmp_left:eq_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty", "string-range-lower", "string-range-object", "string-range-nested", "string-range-service", "string-range-message"]
+    },
+    {
+      "id": "LQL-F30-less-or-equal-uses-numeric-then-byte-order",
+      "query": "ip_group:=\"string-range\" cmp_left:le_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty", "string-range-lower", "string-range-inside", "string-range-uppercase", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array", "string-range-object", "string-range-nested", "string-range-service", "string-range-message"]
+    },
+    {
+      "id": "LQL-F30-less-than-uses-number-duration-bytes-time-ip-and-fallback",
+      "query": "ip_group:=\"string-range\" cmp_left:lt_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-inside", "string-range-uppercase", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array"]
+    },
+    {
+      "id": "LQL-F30-same-field-is-equal",
+      "query": "ip_group:=\"string-range\" cmp_left:eq_field(cmp_left)",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty", "string-range-lower", "string-range-inside", "string-range-upper", "string-range-uppercase", "string-range-comma", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array", "string-range-object", "string-range-nested", "string-range-service", "string-range-message"]
+    },
+    {
+      "id": "LQL-F30-same-field-is-never-less",
+      "query": "ip_group:=\"string-range\" cmp_left:lt_field(cmp_left)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F30-time-field-is-valid-on-the-right",
+      "query": "case:=\"string-range-numeric\" cmp_left:lt_field(_time)",
+      "status": 200,
+      "expected_cases": ["string-range-numeric"]
+    },
+    {
+      "id": "LQL-F30-quoted-field-names",
+      "query": "case:=\"string-range-lower\" \"left field\":eq_field(\"right field\")",
+      "status": 200,
+      "expected_cases": ["string-range-lower"]
+    },
+    {
+      "id": "LQL-F30-unqualified-left-is-message",
+      "query": "ip_group:=\"string-range\" eq_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-message"]
+    },
+    {
+      "id": "LQL-F30-service-left-and-missing-projection",
+      "query": "ip_group:=\"string-range\" service:eq_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-missing", "string-range-null", "string-range-empty", "string-range-service"]
+    },
+    {
+      "id": "LQL-F30-function-name-is-case-insensitive",
+      "query": "ip_group:=\"string-range\" cmp_left:Lt_FiElD(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-inside", "string-range-uppercase", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array"]
+    },
+    {
+      "id": "LQL-F30-logical-composition",
+      "query": "ip_group:=\"string-range\" cmp_left:le_field(cmp_right) AND NOT cmp_left:eq_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-inside", "string-range-uppercase", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array"]
+    },
+    {
+      "id": "LQL-F30-pipeline-composition",
+      "query": "ip_group:=\"string-range\" | filter cmp_left:lt_field(cmp_right)",
+      "status": 200,
+      "expected_cases": ["string-range-inside", "string-range-uppercase", "string-range-unicode-lower", "string-range-unicode-upper", "string-range-numeric", "string-range-boolean", "string-range-array"]
     }
   ],
   "stats_cases": [
@@ -2038,6 +2110,90 @@
     {
       "id": "LQL-F28-invalid-base-zero-octal-is-invalid",
       "query": "len_range(08, 9)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-eq-field-requires-one-argument",
+      "query": "eq_field()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-eq-field-rejects-two-arguments",
+      "query": "eq_field(left, right)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-eq-field-rejects-space-separated-fields",
+      "query": "eq_field(left right)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-eq-field-rejects-wildcards",
+      "query": "eq_field(left*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-eq-field-rejects-unterminated-call",
+      "query": "eq_field(left",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-le-field-requires-one-argument",
+      "query": "le_field()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-le-field-rejects-two-arguments",
+      "query": "le_field(left, right)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-le-field-rejects-space-separated-fields",
+      "query": "le_field(left right)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-lt-field-requires-one-argument",
+      "query": "lt_field()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-lt-field-rejects-two-arguments",
+      "query": "lt_field(left, right)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-lt-field-rejects-space-separated-fields",
+      "query": "lt_field(left right)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F30-time-left-remains-reserved-for-time-filters",
+      "query": "_time:eq_field(_time)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

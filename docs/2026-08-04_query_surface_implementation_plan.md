@@ -387,6 +387,16 @@ documents the intentional rich-object boundary. Exact-build evidence at commit
 `e624a15faf99690975515d7958428819f37aad84` now records narrow/wide retained-
 string and typed-field codepoint lengths with byte-identical same-run public
 reads and closes the row without an extension primitive.
+`LQL-F30` now has twelve successful and twelve error pinned same-row field-
+comparison cases, source-audited exact equality and math-value-or-bytewise
+ordering, failing-then-passing parser and real-extension regressions, retained
+rich projection with exact large-integer ordering, quoted/message/service/
+nested/right-`_time` fields, strict errors, aliases, logical/pipeline
+composition, work limits, cancellation, durability, and reopen. Executable
+`SQL-LOG-021` proves complete retained-model equality plus the bytewise
+ordering fallback and documents why language-specific math parsing remains in
+the Rust API. Exact-build evidence is the remaining row-specific exit item;
+the implementation changes no extension or storage contract.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

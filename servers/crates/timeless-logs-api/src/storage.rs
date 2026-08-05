@@ -20,7 +20,7 @@ use timeless_api_common::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::logsql::{parse_ipv4_address, parse_ipv6_address, PipelineOp};
+use crate::logsql::{logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, PipelineOp};
 use crate::pipeline::{self, PipelineLimits};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +93,7 @@ impl Default for QuerySpec {
 pub enum LogField {
     Message,
     Level,
+    Time,
     Metadata(Vec<String>),
 }
 
@@ -102,6 +103,23 @@ pub enum NumericOp {
     GreaterOrEqual,
     Less,
     LessOrEqual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldCompareOp {
+    Equal,
+    LessOrEqual,
+    Less,
+}
+
+impl FieldCompareOp {
+    pub(crate) fn matches(self, ordering: CmpOrdering) -> bool {
+        match self {
+            Self::Equal => ordering == CmpOrdering::Equal,
+            Self::LessOrEqual => ordering != CmpOrdering::Greater,
+            Self::Less => ordering == CmpOrdering::Less,
+        }
+    }
 }
 
 impl NumericOp {
@@ -617,6 +635,14 @@ pub enum LogPredicate {
         minimum: u64,
         maximum: u64,
     },
+    /// VictoriaLogs same-row field comparison over each field's public
+    /// textual projection. Equality is exact; ordering is numeric only when
+    /// both values parse as VictoriaLogs math values and otherwise bytewise.
+    FieldCompare {
+        left: LogField,
+        right: LogField,
+        operator: FieldCompareOp,
+    },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
         field: LogField,
@@ -960,7 +986,14 @@ impl Storage {
             let join = thread::Builder::new()
                 .name(format!("timeless-logs-reader-{number}"))
                 .spawn(move || {
-                    reader_main(reader_db, reader_ext, reader_rx, ready_tx, reader_profile)
+                    reader_main(
+                        reader_db,
+                        reader_ext,
+                        reader_rx,
+                        ready_tx,
+                        reader_profile,
+                        timestamp_unit,
+                    )
                 })
                 .map_err(|e| format!("spawn SQLite reader {number}: {e}"))?;
             ready_rx
@@ -1562,6 +1595,7 @@ fn reader_main(
     mut commands: mpsc::Receiver<ReadCommand>,
     ready: std_mpsc::Sender<Result<(), String>>,
     profile: Arc<StdMutex<QueueProfile>>,
+    timestamp_unit: TimestampUnit,
 ) -> Result<(), String> {
     let conn = match open_connection(&database_path, &extension_path, None) {
         Ok(conn) => {
@@ -1582,7 +1616,7 @@ fn reader_main(
             } => {
                 let started = Instant::now();
                 let result = cancellable_read(&conn, &cancelled, || {
-                    query_rows(&conn, &spec, cancelled.as_ref())
+                    query_rows(&conn, &spec, cancelled.as_ref(), timestamp_unit)
                 });
                 let rows = result.as_ref().map_or(0, Vec::len);
                 record_query(&profile, started.elapsed(), result.is_err(), rows);
@@ -1600,7 +1634,8 @@ fn reader_main(
             } => {
                 let started = Instant::now();
                 let result = cancellable_read(&conn, &cancelled, || {
-                    let rows = query_pipeline_rows(&conn, &spec, cancelled.as_ref())?;
+                    let rows =
+                        query_pipeline_rows(&conn, &spec, cancelled.as_ref(), timestamp_unit)?;
                     pipeline::execute_query_rows(
                         rows,
                         &operations,
@@ -1622,7 +1657,7 @@ fn reader_main(
             } => {
                 let started = Instant::now();
                 let result = cancellable_read(&conn, &cancelled, || {
-                    query_count(&conn, &spec, cancelled.as_ref())
+                    query_count(&conn, &spec, cancelled.as_ref(), timestamp_unit)
                 });
                 let rows = usize::from(result.is_ok());
                 record_query(&profile, started.elapsed(), result.is_err(), rows);
@@ -1945,12 +1980,13 @@ fn query_rows(
     conn: &Connection,
     spec: &QuerySpec,
     cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
 ) -> Result<Vec<QueryRow>, String> {
     if spec.limit == 0 {
         return Ok(Vec::new());
     }
     if has_api_postfilter(spec) {
-        return query_rows_with_postfilters(conn, spec, cancelled);
+        return query_rows_with_postfilters(conn, spec, cancelled, timestamp_unit);
     }
     let (where_sql, mut values) = query_parts(spec)?;
     let order = if spec.descending { "DESC" } else { "ASC" };
@@ -1984,6 +2020,7 @@ fn query_rows_with_postfilters(
     conn: &Connection,
     spec: &QuerySpec,
     cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
 ) -> Result<Vec<QueryRow>, String> {
     if spec.limit == 0 {
         return Ok(Vec::new());
@@ -2034,7 +2071,15 @@ fn query_rows_with_postfilters(
         let timestamp: i64 = row
             .get(0)
             .map_err(|error| format!("read post-filtered log timestamp: {error}"))?;
-        if api_postfilters_match(timestamp, &message, &level, &metadata_json, spec, cancelled)? {
+        if api_postfilters_match(
+            timestamp,
+            &message,
+            &level,
+            &metadata_json,
+            spec,
+            cancelled,
+            timestamp_unit,
+        )? {
             if matched < spec.offset {
                 matched += 1;
                 continue;
@@ -2057,6 +2102,7 @@ fn query_pipeline_rows(
     conn: &Connection,
     spec: &QuerySpec,
     cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
 ) -> Result<Vec<QueryRow>, String> {
     let mut scan = spec.clone();
     scan.offset = 0;
@@ -2064,7 +2110,7 @@ fn query_pipeline_rows(
         .max_work_rows
         .checked_add(1)
         .ok_or_else(|| "LogsQL max_work_rows overflows internal sentinel limit".to_string())?;
-    let rows = query_rows(conn, &scan, cancelled)?;
+    let rows = query_rows(conn, &scan, cancelled, timestamp_unit)?;
     if rows.len() > spec.max_work_rows {
         return Err(format!(
             "LogsQL pipeline exceeded max_work_rows={}",
@@ -2074,9 +2120,14 @@ fn query_pipeline_rows(
     Ok(rows)
 }
 
-fn query_count(conn: &Connection, spec: &QuerySpec, cancelled: &AtomicBool) -> Result<i64, String> {
+fn query_count(
+    conn: &Connection,
+    spec: &QuerySpec,
+    cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
+) -> Result<i64, String> {
     if has_api_postfilter(spec) {
-        return query_count_with_postfilters(conn, spec, cancelled);
+        return query_count_with_postfilters(conn, spec, cancelled, timestamp_unit);
     }
     let mut filter = BTreeMap::new();
     if let Some(level) = &spec.level {
@@ -2115,6 +2166,7 @@ fn query_count_with_postfilters(
     conn: &Connection,
     spec: &QuerySpec,
     cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
 ) -> Result<i64, String> {
     let (where_sql, mut values) = query_parts(spec)?;
     let sql =
@@ -2157,7 +2209,15 @@ fn query_count_with_postfilters(
         let metadata_json: String = row
             .get(3)
             .map_err(|error| format!("read post-filter count metadata: {error}"))?;
-        if api_postfilters_match(timestamp, &message, &level, &metadata_json, spec, cancelled)? {
+        if api_postfilters_match(
+            timestamp,
+            &message,
+            &level,
+            &metadata_json,
+            spec,
+            cancelled,
+            timestamp_unit,
+        )? {
             total = total.saturating_add(1);
         }
     }
@@ -2175,6 +2235,7 @@ fn api_postfilters_match(
     metadata_json: &str,
     spec: &QuerySpec,
     cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
 ) -> Result<bool, String> {
     ensure_query_active(cancelled)?;
     if spec
@@ -2207,6 +2268,7 @@ fn api_postfilters_match(
             level,
             metadata.as_ref(),
             cancelled,
+            timestamp_unit,
         ),
     }
 }
@@ -2218,6 +2280,7 @@ fn log_predicate_matches(
     level: &str,
     metadata: Option<&JsonValue>,
     cancelled: &AtomicBool,
+    timestamp_unit: TimestampUnit,
 ) -> Result<bool, String> {
     ensure_query_active(cancelled)?;
     match predicate {
@@ -2225,7 +2288,13 @@ fn log_predicate_matches(
         LogPredicate::And(predicates) => {
             for predicate in predicates {
                 if !log_predicate_matches(
-                    predicate, timestamp, message, level, metadata, cancelled,
+                    predicate,
+                    timestamp,
+                    message,
+                    level,
+                    metadata,
+                    cancelled,
+                    timestamp_unit,
                 )? {
                     return Ok(false);
                 }
@@ -2234,15 +2303,28 @@ fn log_predicate_matches(
         }
         LogPredicate::Or(predicates) => {
             for predicate in predicates {
-                if log_predicate_matches(predicate, timestamp, message, level, metadata, cancelled)?
-                {
+                if log_predicate_matches(
+                    predicate,
+                    timestamp,
+                    message,
+                    level,
+                    metadata,
+                    cancelled,
+                    timestamp_unit,
+                )? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
         LogPredicate::Not(predicate) => Ok(!log_predicate_matches(
-            predicate, timestamp, message, level, metadata, cancelled,
+            predicate,
+            timestamp,
+            message,
+            level,
+            metadata,
+            cancelled,
+            timestamp_unit,
         )?),
         LogPredicate::Word {
             field,
@@ -2346,7 +2428,7 @@ fn log_predicate_matches(
                             .iter()
                             .any(|value| json_array_primitive_in(values, value))
                     }),
-                LogField::Message | LogField::Level => false,
+                LogField::Message | LogField::Level | LogField::Time => false,
             };
             ensure_query_active(cancelled)?;
             Ok(matched)
@@ -2397,6 +2479,33 @@ fn log_predicate_matches(
                     let length = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
                     length >= *minimum && length <= *maximum
                 });
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
+        LogPredicate::FieldCompare {
+            left,
+            right,
+            operator,
+        } => {
+            let exact_numeric = (!matches!(operator, FieldCompareOp::Equal))
+                .then(|| {
+                    let left = log_field_value(left, message, level, metadata)?.number()?;
+                    let right = log_field_value(right, message, level, metadata)?.number()?;
+                    compare_json_numbers(left, right).map(|ordering| operator.matches(ordering))
+                })
+                .flatten();
+            let matched = match exact_numeric {
+                Some(matched) => matched,
+                None => log_field_pair_projected_matches(
+                    (left, right),
+                    timestamp,
+                    timestamp_unit,
+                    message,
+                    level,
+                    metadata,
+                    |left, right| logsql_field_comparison(left, right, *operator),
+                )?,
+            };
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
@@ -2474,6 +2583,9 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::ValueType { field, .. }
         | LogPredicate::Regex { field, .. }
         | LogPredicate::PatternMatch { field, .. } => matches!(field, LogField::Metadata(_)),
+        LogPredicate::FieldCompare { left, right, .. } => {
+            matches!(left, LogField::Metadata(_)) || matches!(right, LogField::Metadata(_))
+        }
     }
 }
 
@@ -2624,6 +2736,7 @@ fn log_field_value<'a>(
     match field {
         LogField::Message => Some(LogFieldValue::Text(message)),
         LogField::Level => Some(LogFieldValue::Text(level)),
+        LogField::Time => None,
         LogField::Metadata(path) => Some(LogFieldValue::Json(metadata_path(metadata?, path)?)),
     }
 }
@@ -2645,6 +2758,7 @@ fn log_field_text<'a>(
     match field {
         LogField::Message => Some(message),
         LogField::Level => Some(level),
+        LogField::Time => None,
         LogField::Metadata(path) => metadata_path(metadata?, path)?.as_str(),
     }
 }
@@ -2671,10 +2785,64 @@ fn log_field_projected_matches(
     match field {
         LogField::Message => predicate(message),
         LogField::Level => predicate(level),
+        LogField::Time => false,
         LogField::Metadata(path) => match metadata.and_then(|value| metadata_path(value, path)) {
             None | Some(JsonValue::Null) => predicate(""),
             Some(JsonValue::String(value)) => predicate(value),
             Some(value) => predicate(&value.to_string()),
+        },
+    }
+}
+
+fn log_field_pair_projected_matches(
+    fields: (&LogField, &LogField),
+    timestamp: i64,
+    timestamp_unit: TimestampUnit,
+    message: &str,
+    level: &str,
+    metadata: Option<&JsonValue>,
+    predicate: impl FnOnce(&str, &str) -> bool,
+) -> Result<bool, String> {
+    let (left, right) = fields;
+    let mut predicate = Some(predicate);
+    project_log_field(
+        left,
+        timestamp,
+        timestamp_unit,
+        message,
+        level,
+        metadata,
+        |left| {
+            project_log_field(
+                right,
+                timestamp,
+                timestamp_unit,
+                message,
+                level,
+                metadata,
+                |right| Ok(predicate.take().unwrap()(left, right)),
+            )
+        },
+    )
+}
+
+fn project_log_field<T>(
+    field: &LogField,
+    timestamp: i64,
+    timestamp_unit: TimestampUnit,
+    message: &str,
+    level: &str,
+    metadata: Option<&JsonValue>,
+    callback: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    match field {
+        LogField::Message => callback(message),
+        LogField::Level => callback(level),
+        LogField::Time => callback(&pipeline::format_timestamp(timestamp, timestamp_unit)?),
+        LogField::Metadata(path) => match metadata.and_then(|value| metadata_path(value, path)) {
+            None | Some(JsonValue::Null) => callback(""),
+            Some(JsonValue::String(value)) => callback(value),
+            Some(value) => callback(&value.to_string()),
         },
     }
 }
@@ -3169,6 +3337,11 @@ mod tests {
                 minimum: 0,
                 maximum: u64::MAX,
             },
+            LogPredicate::FieldCompare {
+                left: LogField::Message,
+                right: LogField::Level,
+                operator: FieldCompareOp::LessOrEqual,
+            },
             LogPredicate::Regex {
                 field: LogField::Message,
                 regex: regex::Regex::new("request").unwrap(),
@@ -3179,8 +3352,16 @@ mod tests {
             },
         ] {
             assert_eq!(
-                log_predicate_matches(&predicate, 0, "request 42", "info", None, &cancelled)
-                    .unwrap_err(),
+                log_predicate_matches(
+                    &predicate,
+                    0,
+                    "request 42",
+                    "info",
+                    None,
+                    &cancelled,
+                    TimestampUnit::Microseconds,
+                )
+                .unwrap_err(),
                 "logs query cancelled"
             );
         }
@@ -3247,6 +3428,7 @@ mod tests {
             "info",
             Some(&metadata),
             &cancelled,
+            TimestampUnit::Microseconds,
         )
         .unwrap());
         assert_eq!(metadata["n"], 42);
@@ -3255,10 +3437,16 @@ mod tests {
             field: LogField::Metadata(vec!["missing".into()]),
             matcher: PatternMatcher::new("", PatternMatchMode::Full),
         };
-        assert!(
-            log_predicate_matches(&missing, 0, "message", "info", Some(&metadata), &cancelled,)
-                .unwrap()
-        );
+        assert!(log_predicate_matches(
+            &missing,
+            0,
+            "message",
+            "info",
+            Some(&metadata),
+            &cancelled,
+            TimestampUnit::Microseconds,
+        )
+        .unwrap());
     }
 
     #[test]
@@ -3293,6 +3481,7 @@ mod tests {
                     "info",
                     Some(&metadata),
                     &cancelled,
+                    TimestampUnit::Microseconds,
                 )
                 .unwrap(),
                 "{path}: {prefix:?}"

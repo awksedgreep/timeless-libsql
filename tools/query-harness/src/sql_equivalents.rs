@@ -380,6 +380,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
             }
             .to_owned(),
         ),
+        "left_path" | "right_path" => Value::Text("$.deployment.region".to_owned()),
+        "comparison" => Value::Text("eq".to_owned()),
         "field_prefix" => Value::Text("us-".to_owned()),
         "field_value_1" => Value::Text("us-east".to_owned()),
         "field_value_2" => Value::Text("us-west".to_owned()),
@@ -1604,6 +1606,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let ipv4_range_rows = recipe_values("SQL-LOG-018", 0)?;
     let string_range_rows = recipe_values("SQL-LOG-019", 0)?;
     let len_range_rows = recipe_values("SQL-LOG-020", 0)?;
+    let field_compare_rows = recipe_values("SQL-LOG-021", 0)?;
     if [
         bounded,
         substring,
@@ -1693,6 +1696,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if len_range_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
         bail!("SQL-LOG-020 length range changed: {len_range_rows:?}");
+    }
+    let field_compare_timestamps = field_compare_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if field_compare_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
+        bail!("SQL-LOG-021 field equality changed: {field_compare_rows:?}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2132,6 +2142,73 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             );
         }
     }
+
+    connection.execute(
+        "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+        params![
+            4000_i64,
+            "info",
+            "field comparison fixture",
+            r#"{"left":2,"right":"2","null_left":null,"array_left":[1],"array_right":"[1]","lex_left":"bar","lex_right":"foo","numeric_left":"10","numeric_right":"2","large_left":18446744073709551615,"large_copy":18446744073709551615,"large_right":18446744073709551614}"#
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+        params![
+            5000_i64,
+            "info",
+            "newest nonmatching field comparison fixture",
+            r#"{"left":2,"right":"3","null_left":"x","array_left":[2],"array_right":"[3]","lex_left":"z","lex_right":"a","numeric_left":"9","numeric_right":"2","large_left":18446744073709551615,"large_copy":18446744073709551614,"large_right":18446744073709551614}"#
+        ],
+    )?;
+    connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
+    let field_compare_sql = recipe_sql("SQL-LOG-021", 0)?;
+    let field_compare_timestamps =
+        |comparison: &str, left_path: &str, right_path: &str| -> Result<Vec<i64>> {
+            let mut statement = connection.prepare(&field_compare_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-021 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "comparison" => Value::Text(comparison.to_owned()),
+                    "left_path" => Value::Text(left_path.to_owned()),
+                    "right_path" => Value::Text(right_path.to_owned()),
+                    "start_ms" => Value::Integer(4000),
+                    "end_ms" => Value::Integer(5000),
+                    "limit" => Value::Integer(1),
+                    _ => parameter("SQL-LOG-021", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            Ok(statement
+                .raw_query()
+                .mapped(|row| row.get::<_, i64>(0))
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+    for (comparison, left, right) in [
+        ("eq", "$.left", "$.right"),
+        ("eq", "$.null_left", "$.absent"),
+        ("eq", "$.array_left", "$.array_right"),
+        ("le_text", "$.lex_left", "$.lex_right"),
+        ("lt_text", "$.lex_left", "$.lex_right"),
+        ("lt_text", "$.numeric_left", "$.numeric_right"),
+        ("eq", "$.large_left", "$.large_copy"),
+    ] {
+        let actual = field_compare_timestamps(comparison, left, right)?;
+        if actual != [4000] {
+            bail!(
+                "SQL-LOG-021 {comparison} comparison between {left:?} and {right:?} changed: {actual:?}"
+            );
+        }
+    }
+    if !field_compare_timestamps("eq", "$.large_left", "$.large_right")?.is_empty() {
+        bail!("SQL-LOG-021 collapsed distinct retained u64 values through binary64");
+    }
+    if !field_compare_timestamps("unknown", "$.left", "$.right")?.is_empty() {
+        bail!("SQL-LOG-021 must reject an unknown comparison selector");
+    }
     Ok(())
 }
 
@@ -2173,13 +2250,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 86);
+        assert_eq!(recipes.len(), 87);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            115
+            116
         );
         assert_eq!(
             recipes
@@ -2187,7 +2264,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            121
+            122
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }
