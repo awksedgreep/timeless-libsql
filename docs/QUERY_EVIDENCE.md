@@ -2773,3 +2773,61 @@ limits, deadline cancellation and recovery, shutdown, durability, and reopen.
 No extension primitive, private table access, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed. No CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: cumulative running aggregates
+
+The checked-in
+[`2026-08-05_session15_mql_07_running_aggregates.json`](evidence/2026-08-05_session15_mql_07_running_aggregates.json)
+was captured from exact extension, metrics-server, and logs-server build
+`0e0f73d942c887123bb6c11105168a0ca6e328c4`. It closes `MQL-07` with
+cumulative running-average and running-sum shapes; the same correctness suite
+also pins `running_min` and `running_max`.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | intermediate points/query | candidate chunks/query | decoded points/query | extension payload bytes/query | extension frame bytes/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `running_avg`, exact host / four steps | 4 | 193 | 0.855 | 1.058 | 1.104 | 12 | 1 | 32 | 131 | 540 |
+| `running_avg`, 512 series / four steps | 2,048 | 69,664 | 4.745 | 5.260 | 5.722 | 6,144 | 512 | 16,384 | 53,831 | 268,304 |
+| `running_sum`, exact host / four steps | 4 | 190 | 0.895 | 1.057 | 1.071 | 12 | 1 | 32 | 131 | 540 |
+| `running_sum`, 512 series / four steps | 2,048 | 68,341 | 4.755 | 5.202 | 5.507 | 6,144 | 512 | 16,384 | 53,831 | 268,304 |
+
+Every shape performs one child evaluation through one public packed-raw
+query. Narrow paths read one chunk and 32 stored points; wide paths read 512
+chunks and 16,384 stored points. Cumulative folding, stale/missing carry, and
+computed-NaN omission cause no second storage query. Work accounting charges
+the child, each evaluated grid slot, and each emitted result: 12 points for a
+four-step narrow series and 6,144 for the 2,048-point wide result. Existing
+result, response, deadline, and cancellation limits therefore bound the
+complete operation.
+
+The same-run MetricsQL selector measured 0.931 ms narrow and 3.927 ms wide
+p95. `running_avg` is 13.6% and 34.0% above those references;
+`running_sum` is 13.5% and 32.5% above. Candidate chunks, decoded points,
+persisted payload bytes, and packed-frame bytes are identical, so the measured
+difference is bounded Rust cumulative evaluation, name/collision handling,
+and response encoding—not storage amplification. No measured path justifies
+an extension primitive; direct SQLite/libSQL users already have the
+executable recursive public-grid form in `SQL-MQL-007`.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 7.864 ms and the explicit durability barrier took 88.825 ms. Metrics
+storage remained 224,688 payload bytes, 409,600 index bytes, and 1,542,312
+physical database/WAL/SHM bytes. Logs remained 1,088,919 logical and 1,190,496
+physical bytes. Metrics RSS HWM was 52,184 KiB, 2,076 KiB above MQL-06; logs
+HWM was 64,328 KiB, 244 KiB below it. Both are whole-process variations and
+neither direction is attributed to the four added query shapes.
+
+All 528 pinned Prometheus 3.13.2 cases and all 140 pinned VictoriaMetrics
+1.148.0 cases pass, as does the pinned VictoriaLogs corpus. The complete
+87-test metrics real-extension suite, 56 metrics library tests, both complete
+Rust workspaces, clippy with warnings denied, formatting, the 25-test Rust
+query harness, documentation contracts, and all 76 SQL recipes (106
+statements) pass locally. Regressions cover cumulative average/minimum/
+maximum/sum, instant identity, slot-index arithmetic, leading and stale/
+missing carry, computed NaN omission and propagation, infinity, overflow,
+Timeless signed-zero fidelity, unconditional name removal,
+`keep_metric_names`, scalar/expression/case/trailing-comma forms, arity,
+duplicate outputs, stable PromQL isolation, one public read, work/result
+limits, deadline cancellation and recovery, GET/POST, durability, shutdown,
+and reopen. No extension primitive, private table access, storage format,
+batching, compression, index, rollup, retention, transaction, migration,
+maintenance, or public batch/SQL contract changed. No CI workflow was invoked.
