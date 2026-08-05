@@ -3520,3 +3520,60 @@ documentation contracts, and all 85 SQL recipes (120 statements) pass
 locally. No private table, extension primitive, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed.
+
+## Session 16 LogsQL P2 progress: Unicode codepoint length ranges
+
+The checked-in
+[`2026-08-05_session16_lql_f28_len_range.json`](evidence/2026-08-05_session16_lql_f28_len_range.json)
+was captured from exact extension, metrics-server, and logs-server build
+`e624a15faf99690975515d7958428819f37aad84`. It closes `LQL-F28` with
+inclusive Unicode-codepoint counts over the selected rich textual projection.
+Correctness separately pins multibyte characters, missing/null/empty length
+zero, strings, numbers, booleans, arrays, retained objects, nested/message/
+service fields, base-prefixed and human-readable unsigned bounds, `inf`,
+negative zero, inverted ranges, aliases, logical/pipeline composition, strict
+errors, work limits, cancellation, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `range_key:len_range(8,8)`, indexed host | 128 | 34,677 | 3.486 | 3.786 | 3.826 | 1 | 1,024 | 235,778 | 128 |
+| `range_key:len_range(8,8)`, full fixture | 8,192 | 2,249,775 | 46.252 | 48.626 | 49.298 | 4 | 8,192 | 1,914,055 | 8,192 |
+| numeric `context.attempt:len_range(1,1)`, indexed host | 128 | 34,677 | 3.257 | 4.335 | 4.933 | 1 | 1,024 | 235,778 | 128 |
+| numeric `context.attempt:len_range(1,1)`, full fixture | 8,192 | 2,249,775 | 42.206 | 47.566 | 47.903 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The retained-string p95 is 5.4% below the same-run word query at narrow
+cardinality and 12.1% below it over the full fixture. Typed numeric projection
+is 8.3% above/14.0% below that word comparison. Against the more similar
+same-run `string_range`, retained-string length is 7.3% above/1.5% below and
+typed length is 13.7% above/3.3% below at narrow/wide cardinality. These are
+single-run CPU/tail variations after byte-identical public reads, not evidence
+of storage amplification or a missing query vector.
+
+Executable `SQL-LOG-020` exposes exact inclusive Unicode-codepoint length for
+retained text and missing/null-as-empty through public `logs` rows, JSON1, and
+SQLite `length(TEXT)`. The Rust API owns rich projection, VictoriaLogs bound
+grammar, composition, limits, cancellation, and response semantics.
+VictoriaLogs flattens an ingested object into dotted children before
+filtering; Timeless preserves the complete object and compact-projects a
+selected parent only for the predicate. An extension primitive would not
+remove any measured block read, decode, allocation, copy, or row crossing, so
+it is rejected by the documented primitive gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+15.488 ms and the explicit durability barrier took 40.488 ms. The fixture and
+storage are byte-identical to LQL-F27: four raw blocks, 1,914,055 logical
+bytes, and 2,022,736 physical database/WAL/SHM bytes. Logs RSS HWM was 91,544
+KiB, 868 KiB below LQL-F27 despite four additional full-response query shapes;
+metrics HWM was 53,608 KiB, 120 KiB higher. Both are retained as whole-process
+variation rather than attributed to the predicate.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 290
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 23-test logs real-
+extension suite, 51 logs library tests, both complete Rust workspaces, Clippy
+with warnings denied, formatting, the 29-test Rust query harness,
+documentation contracts, all 86 SQL recipes (121 statements), and the full
+45-section CLI/crash suite pass locally. No private table, extension
+primitive, storage format, batching, compression, index, rollup, retention,
+transaction, migration, maintenance, or public batch/SQL contract changed.
+No CI workflow was modified or invoked.

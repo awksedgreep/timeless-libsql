@@ -383,8 +383,10 @@ grammar, failing-then-passing parser and real-extension regressions, retained
 rich-value projection, strict errors, aliases, logical/pipeline composition,
 work limits, cancellation, durability, and reopen. Executable `SQL-LOG-020`
 proves the public retained-text foundation with SQLite `length(TEXT)` and
-documents the intentional rich-object boundary. Exact-build evidence is the
-remaining row exit criterion.
+documents the intentional rich-object boundary. Exact-build evidence at commit
+`e624a15faf99690975515d7958428819f37aad84` now records narrow/wide retained-
+string and typed-field codepoint lengths with byte-identical same-run public
+reads and closes the row without an extension primitive.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 
