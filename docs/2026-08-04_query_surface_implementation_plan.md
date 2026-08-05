@@ -246,10 +246,10 @@ PromQL interpretation silently.
 Progress: `MQL-01` is shipped on explicit MetricsQL routes with pinned
 VictoriaMetrics parity, executable `SQL-MQL-001`, bounded single-read
 comparison-identity retention, and stable PromQL route isolation. `MQL-02` is
-in progress with operation-level name retention, pinned transform/rollup/
-binary matching semantics, and executable `SQL-MQL-002`; evidence and final
-row gates remain before shipment. The remaining rows continue in their listed
-order; `MQL-11` is already corrected
+shipped with operation-level name retention, pinned transform/rollup/binary
+matching semantics, executable `SQL-MQL-002`, and measured storage-equivalent
+composition. The remaining rows continue in their listed order; `MQL-11` is
+already corrected
 to deferred because the pinned oracle rejects `min_of` and `max_of`.
 
 ### Session 16: LogsQL P2 filters

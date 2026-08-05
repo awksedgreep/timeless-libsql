@@ -7074,6 +7074,7 @@ fn execute_prometheus_binary(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_prometheus_binary(
     op: PromBinaryOp,
     return_bool: bool,
@@ -7305,6 +7306,7 @@ fn duplicate_matching_error(key: &[(String, String)]) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_vector_vectors(
     op: PromBinaryOp,
     return_bool: bool,

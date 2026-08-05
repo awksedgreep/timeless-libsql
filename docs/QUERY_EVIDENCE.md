@@ -2487,3 +2487,50 @@ errors, limits, cancellation boundary, flush, shutdown, and reopen. No
 extension primitive, private table access, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed.
+
+## Session 15 MetricsQL P2 progress: operation-level metric names
+
+The checked-in
+[`2026-08-05_session15_mql_02_keep_metric_names.json`](evidence/2026-08-05_session15_mql_02_keep_metric_names.json)
+was captured from exact extension, metrics-server, and logs-server build
+`770301a41b16248f319000a1e4415d95487ec9ab`. It closes `MQL-02` with a
+same-run comparison against the stable `abs` operation.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query | intermediate work/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `abs` + `keep_metric_names`, exact host | 1 | 164 | 0.924 | 1.263 | 1.823 | 1 | 32 | 131 | 1 |
+| stable `abs`, exact host | 1 | 132 | 0.862 | 1.012 | 1.054 | 1 | 32 | 131 | 1 |
+| `abs` + `keep_metric_names`, 512 series / four steps | 2,048 | 84,004 | 4.470 | 5.142 | 7.008 | 512 | 16,384 | 53,831 | 2,048 |
+| stable `abs`, 512 series / four steps | 2,048 | 67,620 | 4.604 | 5.296 | 8.385 | 512 | 16,384 | 53,831 | 2,048 |
+
+Name retention adds no storage read, decode, frame crossing, or intermediate
+point. The wide named response contains 16,384 additional bytes, yet its p95
+was 2.9% below the same-run stable transform; that difference is treated as
+noise, not an optimization claim. Narrow p95 was 24.8% higher, covering the
+explicit MetricsQL parser path and 32 additional response bytes. There is no
+evidence for a new extension primitive: direct users already select the
+public metric identity as shown by `SQL-MQL-002`.
+
+The 36,928-point fixture completed with zero failed or queued work. Admission
+took 11.781 ms and the durability barrier took 86.462 ms. Metrics storage is
+byte-identical to the preceding Session 15 capture: 224,688 payload bytes,
+409,600 index bytes, and 1,542,312 physical database/WAL/SHM bytes. Logs
+remain 1,088,919 logical and 1,190,496 physical bytes. Metrics RSS HWM was
+52,740 KiB, 864 KiB (1.67%) above the preceding capture; logs HWM was
+64,320 KiB, 216 KiB lower. These whole-process observations are retained
+without attributing the metrics increase to the modifier.
+
+Pinned VictoriaMetrics covers six success and three error cases: multi-name
+transforms, rollups, scalar and vector binaries, default name-aware matching,
+the explicit-`on(...)` exception, nested aggregation, and invalid bare,
+aggregate, and unary targets. The real-extension contract additionally covers
+stable PromQL isolation, GET/form POST, work limits, flush, shutdown, and
+reopen. No extension syntax, private table access, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed.
+
+All 528 pinned Prometheus cases and all 28 pinned VictoriaMetrics cases pass.
+The complete 82-test metrics real-extension suite, 51 metrics library/binary
+unit tests, both complete Rust workspaces, clippy with warnings denied,
+formatting, the 24-test Rust query harness, documentation contracts, and all
+71 SQL recipes (97 statements) pass locally. No CI workflow was invoked.
