@@ -1541,13 +1541,8 @@ fn previous_numeric_sample(
     before: usize,
     lower: i64,
 ) -> Option<(i64, f64)> {
-    for &(timestamp, value) in samples[..before].iter().rev() {
-        if timestamp <= lower || value.is_nan() {
-            return None;
-        }
-        return Some((timestamp, value));
-    }
-    None
+    let &(timestamp, value) = samples[..before].last()?;
+    (timestamp > lower && !value.is_nan()).then_some((timestamp, value))
 }
 
 fn real_previous_numeric_sample(
@@ -1632,17 +1627,22 @@ fn metricsql_changed(previous: f64, current: f64) -> bool {
     current != previous && (current - previous).abs() >= 1e-12 * current.abs()
 }
 
-fn metricsql_dynamic_value(
-    op: DynamicRollupOp,
-    samples: &[(i64, f64)],
+#[derive(Clone, Copy)]
+struct DynamicWindow {
     lo: usize,
     hi: usize,
     lower: i64,
     max_previous: i64,
     max_lookback: i64,
+}
+
+fn metricsql_dynamic_value(
+    op: DynamicRollupOp,
+    samples: &[(i64, f64)],
+    window: DynamicWindow,
     cancelled: &AtomicBool,
 ) -> Result<Option<f64>, String> {
-    let values = &samples[lo..hi];
+    let values = &samples[window.lo..window.hi];
     if op == DynamicRollupOp::Default {
         return Ok(values
             .last()
@@ -1669,10 +1669,17 @@ fn metricsql_dynamic_value(
     }
 
     let numeric = metricsql_numeric_window(values);
-    let previous = previous_numeric_sample(samples, lo, lower.saturating_sub(max_previous));
-    let current = numeric.first().map_or(lower, |(timestamp, _)| *timestamp);
-    let real_previous = real_previous_numeric_sample(samples, lo, current, max_lookback);
-    let real_next = real_next_numeric_sample(samples, hi);
+    let previous = previous_numeric_sample(
+        samples,
+        window.lo,
+        window.lower.saturating_sub(window.max_previous),
+    );
+    let current = numeric
+        .first()
+        .map_or(window.lower, |(timestamp, _)| *timestamp);
+    let real_previous =
+        real_previous_numeric_sample(samples, window.lo, current, window.max_lookback);
+    let real_next = real_next_numeric_sample(samples, window.hi);
     match op {
         DynamicRollupOp::Avg => metricsql_aggregate(PromAggregateOp::Avg, &numeric, cancelled),
         DynamicRollupOp::Min => metricsql_aggregate(PromAggregateOp::Min, &numeric, cancelled),
@@ -1900,11 +1907,13 @@ pub(super) fn execute_dynamic_rollup(
                 if let Some(value) = metricsql_dynamic_value(
                     plan.op,
                     &samples,
-                    lo,
-                    hi,
-                    lower,
-                    max_previous,
-                    plan.max_lookback,
+                    DynamicWindow {
+                        lo,
+                        hi,
+                        lower,
+                        max_previous,
+                        max_lookback: plan.max_lookback,
+                    },
                     cancelled,
                 )? {
                     admit_prometheus_point(points.saturating_add(item_points), limits)?;
