@@ -3199,3 +3199,54 @@ harness, documentation contracts, and all 82 SQL recipes (116 statements)
 pass locally. No private table, extension primitive, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed. No CI workflow was invoked.
+
+## Session 16 LogsQL P2 progress: static `contains_all`
+
+The checked-in
+[`2026-08-05_session16_lql_f21_contains_all.json`](evidence/2026-08-05_session16_lql_f21_contains_all.json)
+was captured from exact extension, metrics-server, and logs-server build
+`16b372ac31bd01e18dafd3aa29244577a0fcf993`. It closes `LQL-F21` with static,
+case-sensitive all-phrase matching over messages and retained rich fields.
+Correctness separately pins Unicode word boundaries, independent arguments,
+empty-list/empty-string identity, duplicates, trailing commas, quoted stars,
+case-insensitive function names, missing fields, service/level aliases,
+logical/pipeline composition, malformed errors, explicit LQL-F38 deferral,
+limits, cancellation, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| message `contains_all(query, contract)`, indexed host | 128 | 21,826 | 1.895 | 2.073 | 2.290 | 1 | 1,024 | 132,676 | 128 |
+| message `contains_all(query, contract)`, full fixture | 8,192 | 1,424,639 | 21.561 | 26.408 | 31.261 | 4 | 8,192 | 1,088,919 | 8,192 |
+| rich object `contains_all(attempt, retry)`, indexed host | 128 | 21,826 | 1.997 | 2.664 | 3.339 | 1 | 1,024 | 132,676 | 128 |
+| rich object `contains_all(attempt, retry)`, full fixture | 8,192 | 1,424,639 | 28.772 | 30.442 | 31.148 | 4 | 8,192 | 1,088,919 | 8,192 |
+
+Message p95 is 15.1% below the same-run word query at narrow cardinality and
+11.0% above it over the full fixture; it is within 0.5% of the narrow field
+no-op and 16.3% above its wide run. Rich-object p95 is 22.5%/11.1% above the
+same-run rich-pattern narrow/wide comparison because each row is compact-JSON
+projected and checked against two phrases. Every equal-cardinality comparison
+reads byte-identical public storage and emits the same response bytes. The
+measured difference is bounded language work after decode, not evidence of a
+missing storage primitive.
+
+Portable SQLite has no exact substitute for the required Unicode-category
+phrase boundaries. `LIKE`, `GLOB`, and `instr` can implement intentionally
+different substring contracts but are not documented as LogsQL parity. A new
+extension scalar or query vector would not avoid the public row decode and is
+therefore rejected under the extension-primitive gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+8.811 ms and the explicit durability barrier took 22.812 ms. Logs storage
+remained four raw blocks, 1,088,919 logical bytes, and 1,190,496 physical
+database/WAL/SHM bytes. Logs RSS HWM was 65,004 KiB, 888 KiB below the prior
+capture; metrics HWM was 53,124 KiB, 3,684 KiB higher. Both are whole-process
+variations, and metrics storage remained byte-identical.
+
+All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
+cases, and all 159 pinned VictoriaLogs 1.52.0 cases pass. The complete 19-test
+logs real-extension suite, 44 logs library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 28-test Rust query
+harness, documentation contracts, and all 82 SQL recipes (116 statements)
+pass locally. No private table, extension primitive, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed. No CI workflow was invoked.
