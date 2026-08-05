@@ -3465,3 +3465,58 @@ documentation contracts, and all 84 SQL recipes (119 statements) pass
 locally. No private table, extension primitive, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed. No CI workflow was invoked.
+
+## Session 16 LogsQL P2 progress: bytewise string-range filtering
+
+The checked-in
+[`2026-08-05_session16_lql_f27_string_range.json`](evidence/2026-08-05_session16_lql_f27_string_range.json)
+was captured from exact extension, metrics-server, and logs-server build
+`de7ccf8bf53b07c9ae7e381a1c595d442028f8a4`. It closes `LQL-F27` with
+lower-inclusive/upper-exclusive plain-byte comparison over the selected rich
+textual projection. Correctness separately pins equal-prefix and inverted
+ranges, ASCII case, UTF-8, quoted commas, missing/null/empty, numbers,
+booleans, arrays, retained objects, nested/message/service fields, aliases,
+logical/pipeline composition, strict errors, work limits, cancellation,
+durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `range_key:string_range(key-0000,key-2000)`, indexed host | 128 | 34,677 | 3.231 | 3.471 | 3.680 | 1 | 1,024 | 235,778 | 128 |
+| `range_key:string_range(key-0000,key-2000)`, full fixture | 8,192 | 2,249,775 | 41.442 | 46.353 | 46.944 | 4 | 8,192 | 1,914,055 | 8,192 |
+| numeric `context.attempt:string_range(0,5)`, indexed host | 128 | 34,677 | 3.321 | 3.581 | 3.661 | 1 | 1,024 | 235,778 | 128 |
+| numeric `context.attempt:string_range(0,5)`, full fixture | 8,192 | 2,249,775 | 43.428 | 45.926 | 47.882 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The retained-string p95 is 4.3% below the same-run word query at narrow
+cardinality and 7.3% above it over the full fixture. Typed numeric projection
+is 1.3% below/6.3% above that word comparison. Every equal-cardinality shape
+reads the same public blocks, entries, and bytes and returns the same public
+rows. The difference is bounded comparison/projection after decode, not
+storage amplification.
+
+Executable `SQL-LOG-019` exposes the exact retained-text and missing/null-as-
+empty foundation with public `logs` rows, JSON1, and BLOB byte ordering. The
+Rust API owns rich projection, grammar, composition, limits, cancellation,
+and response semantics. VictoriaLogs flattens an ingested object into dotted
+children before filtering; Timeless preserves the complete object and compact-
+projects a selected parent only for the predicate. An extension primitive
+would not remove any measured block read, decode, allocation, copy, or row
+crossing, so it is rejected by the documented primitive gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+13.515 ms and the explicit durability barrier took 37.430 ms. Adding exact
+`range_key` to every evidence row increased wire, logical payload, and wide
+response size by 188,416 bytes; logs storage is four raw blocks, 1,914,055
+logical bytes, and 2,022,736 physical database/WAL/SHM bytes. Logs RSS HWM was
+92,412 KiB, 9,928 KiB above LQL-F26 after four additional full-response shapes
+and wider rows; metrics HWM was 53,488 KiB, 1,684 KiB higher. Both are retained
+as whole-process variation rather than attributed to the predicate.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 263
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 22-test logs real-
+extension suite, 50 logs library tests, both complete Rust workspaces, Clippy
+with warnings denied, formatting, the 29-test Rust query harness,
+documentation contracts, and all 85 SQL recipes (120 statements) pass
+locally. No private table, extension primitive, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed.
