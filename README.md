@@ -627,9 +627,10 @@ and IEEE behavior, plus cumulative `running_avg/min/max/sum` with pinned carry
 and computed-NaN behavior, plus request-step-relative direct/subquery windows,
 resolutions, signed offsets, and adaptive `0i` rollups, plus request-owned
 `start()`/`end()`/`step()` context values with explicit unsupported-function
-errors; direct SQL users retain
-the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`
-and `SQL-MQL-009` through `SQL-MQL-010` recipes. The
+errors, plus VictoriaMetrics plural histogram quantiles over cumulative and
+`vmrange` buckets with one shared bucket read; direct SQL users retain
+the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`,
+`SQL-MQL-009` through `SQL-MQL-010`, and `SQL-MQL-012` recipes. The
 extension exposes general SQLite/libSQL primitives and receives a new query
 vector only when measurements prove that storage-aware pushdown materially
 avoids reads, decode, copies, or row crossings. Saved queries, subscriptions,

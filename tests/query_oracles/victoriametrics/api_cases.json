@@ -1284,6 +1284,121 @@
         {"metric": {"case": "zero", "job": "oracle"}, "values": [0, 0]},
         {"metric": {"case": "zero_reverse", "job": "oracle"}, "values": [0, 0]}
       ]
+    },
+    {
+      "id": "MQL-12-multiple-quantiles-add-the-requested-label",
+      "query": "histogram_quantiles(\"phi\", 0.25, 0.75, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle", "phi": "0.25"}, "value": 0.1},
+        {"metric": {"host": "a", "job": "oracle", "phi": "0.75"}, "value": 1}
+      ]
+    },
+    {
+      "id": "MQL-12-time-varying-phi-uses-the-first-value-as-the-label",
+      "query": "histogram_quantiles(\"phi\", (time() - start()) / 20, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle", "phi": "0"}, "values": [0, 0.5, 1]}
+      ]
+    },
+    {
+      "id": "MQL-12-destination-label-replaces-an-input-label",
+      "query": "histogram_quantiles(\"host\", 0.5, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "0.5", "job": "oracle"},
+      "expected_values": [0.5]
+    },
+    {
+      "id": "MQL-12-missing-infinite-bucket-uses-the-last-finite-total",
+      "query": "histogram_quantiles(\"phi\", 0.5, oracle_histogram_special_bucket{case=\"missing_inf\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "missing_inf", "job": "oracle", "phi": "0.5"},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-12-negative-first-bucket-interpolates-from-zero",
+      "query": "histogram_quantiles(\"phi\", 0.25, oracle_histogram_special_bucket{case=\"negative_first\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "negative_first", "job": "oracle", "phi": "0.25"},
+      "expected_values": [-2.5]
+    },
+    {
+      "id": "MQL-12-nan-buckets-are-repaired-before-interpolation",
+      "query": "histogram_quantiles(\"phi\", 0.25, oracle_histogram_special_bucket{case=\"nan_count\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"case": "nan_count", "job": "oracle", "phi": "0.25"},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-12-out-of-range-phis-return-infinities-and-labels",
+      "query": "histogram_quantiles(\"rank\", -1, 2, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle", "rank": "-1"}, "value": "-Inf"},
+        {"metric": {"host": "a", "job": "oracle", "rank": "2"}, "value": "+Inf"}
+      ]
+    },
+    {
+      "id": "MQL-12-function-name-is-case-insensitive-and-allows-trailing-comma",
+      "query": "HISTOGRAM_QUANTILES(\"q\", 0.5, oracle_histogram_bucket{host=\"a\"},)",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle", "q": "0.5"},
+      "expected_values": [0.5]
+    },
+    {
+      "id": "MQL-12-empty-buckets-return-an-empty-vector",
+      "query": "histogram_quantiles(\"phi\", 0.5, oracle_histogram_bucket{host=\"missing\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
+    },
+    {
+      "id": "MQL-12-keep-metric-names-does-not-restore-the-bucket-family-name",
+      "query": "histogram_quantiles(\"phi\", 0.5, oracle_histogram_bucket{host=\"a\"}) keep_metric_names",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle", "phi": "0.5"},
+      "expected_values": [0.5]
+    },
+    {
+      "id": "MQL-12-vmrange-buckets-are-converted-before-quantile-evaluation",
+      "query": "histogram_quantiles(\"phi\", 0.5, label_set(2, \"job\", \"oracle\", \"vmrange\", \"0...1\") or label_set(3, \"job\", \"oracle\", \"vmrange\", \"1...2\"))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"job": "oracle", "phi": "0.5"},
+      "expected_values": [1.1666666666666667]
+    },
+    {
+      "id": "MQL-12-phi-labels-use-victoriametrics-float-formatting",
+      "query": "histogram_quantiles(\"phi\", 1000000, 0.00001, NaN, +Inf, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle", "phi": "1e+06"}, "value": "+Inf"},
+        {"metric": {"host": "a", "job": "oracle", "phi": "1e-05"}, "value": "0.000004000000000000001"},
+        {"metric": {"host": "a", "job": "oracle", "phi": "+Inf"}, "value": "+Inf"}
+      ]
+    },
+    {
+      "id": "MQL-12-destination-name-label-sets-the-output-metric-name",
+      "query": "histogram_quantiles(\"__name__\", 0.5, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"__name__": "0.5", "host": "a", "job": "oracle"},
+      "expected_values": [0.5]
+    },
+    {
+      "id": "MQL-12-empty-destination-label-is-preserved",
+      "query": "histogram_quantiles(\"\", 0.5, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"": "0.5", "host": "a", "job": "oracle"},
+      "expected_values": [0.5]
+    },
+    {
+      "id": "MQL-12-scalar-bucket-argument-produces-an-empty-vector",
+      "query": "histogram_quantiles(\"phi\", 0.5, 1)",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true
     }
   ],
   "operator_error_cases": [
@@ -1526,6 +1641,46 @@
       "status": 422,
       "error_type": "422",
       "error_contains": "unsupported function \"range\""
+    },
+    {
+      "id": "MQL-12-requires-at-least-one-phi-and-buckets",
+      "query": "histogram_quantiles(\"phi\", oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected number of args: 2; expecting at least 3 args"
+    },
+    {
+      "id": "MQL-12-destination-label-must-be-a-string",
+      "query": "histogram_quantiles(1, 0.5, oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "cannot obtain dstLabel"
+    },
+    {
+      "id": "MQL-12-each-phi-must-be-a-scalar",
+      "query": "histogram_quantiles(\"phi\", 1 or label_set(2, \"branch\", \"other\"), oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "cannot parse phi"
+    },
+    {
+      "id": "MQL-12-duplicate-phis-reject-duplicate-output-labelsets",
+      "query": "histogram_quantiles(\"phi\", 0.5, 0.5, oracle_histogram_bucket{host=\"a\"})",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "duplicate output timeseries"
+    },
+    {
+      "id": "MQL-12-destination-replacement-rejects-duplicate-output-labelsets",
+      "query": "histogram_quantiles(\"host\", 0.5, oracle_histogram_bucket)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "duplicate output timeseries"
     }
   ],
   "error_cases": [

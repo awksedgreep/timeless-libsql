@@ -295,7 +295,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "SQL-PROM-047" | "SQL-PROM-048" => "absent_late",
         "SQL-PROM-052" => "calendar_metric",
         "SQL-PROM-053" => "calendar_leap_metric",
-        "SQL-PROM-054" | "SQL-PROM-056" => "sql_histogram_bucket",
+        "SQL-PROM-054" | "SQL-PROM-056" | "SQL-MQL-012" => "sql_histogram_bucket",
         "SQL-PROM-055" => "cpu",
         _ => "cpu",
     };
@@ -327,6 +327,11 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "default_value" => Value::Real(0.0),
         "scalar" | "scalar_value" | "value" => Value::Real(2.0),
         "q" | "quantile" => Value::Real(0.5),
+        "first_quantile" => Value::Real(0.25),
+        "second_quantile" => Value::Real(0.75),
+        "first_phi_label" => Value::Text("0.25".to_owned()),
+        "second_phi_label" => Value::Text("0.75".to_owned()),
+        "destination_path" => Value::Text("$.phi".to_owned()),
         "k" => Value::Integer(1),
         "horizon" => Value::Real(10.0),
         "nearest" => Value::Real(0.5),
@@ -1383,6 +1388,57 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         bail!("SQL-MQL-010 request context changed: {context_rows:?}");
     }
 
+    let histogram_quantiles_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-012")
+        .context("SQL-MQL-012 recipe")?;
+    if histogram_quantiles_recipe.statements.len() != 1 {
+        bail!("SQL-MQL-012 must retain one parameterized histogram statement");
+    }
+    let mut histogram_quantiles = connection.prepare(&histogram_quantiles_recipe.statements[0])?;
+    for index in 1..=histogram_quantiles.parameter_count() {
+        let name = histogram_quantiles
+            .parameter_name(index)
+            .context("SQL-MQL-012 parameter must be named")?
+            .trim_start_matches(':');
+        histogram_quantiles.raw_bind_parameter(index, parameter("SQL-MQL-012", name))?;
+    }
+    let histogram_quantile_rows = histogram_quantiles
+        .raw_query()
+        .mapped(|row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let expected_histogram_quantile_rows = [
+        (
+            r#"{"host":"web-1","phi":"0.25"}"#.to_owned(),
+            100_i64,
+            0.1_f64,
+        ),
+        (
+            r#"{"host":"web-1","phi":"0.25"}"#.to_owned(),
+            110_i64,
+            0.1_f64,
+        ),
+        (
+            r#"{"host":"web-1","phi":"0.75"}"#.to_owned(),
+            100_i64,
+            1.0_f64,
+        ),
+        (
+            r#"{"host":"web-1","phi":"0.75"}"#.to_owned(),
+            110_i64,
+            1.0_f64,
+        ),
+    ];
+    if histogram_quantile_rows != expected_histogram_quantile_rows {
+        bail!("SQL-MQL-012 histogram quantiles changed: {histogram_quantile_rows:?}");
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1806,13 +1862,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 78);
+        assert_eq!(recipes.len(), 79);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            103
+            104
         );
         assert_eq!(
             recipes
@@ -1820,7 +1876,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            109
+            110
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

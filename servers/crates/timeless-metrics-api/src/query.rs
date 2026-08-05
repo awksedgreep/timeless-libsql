@@ -400,6 +400,7 @@ pub(crate) enum PromPlan {
     Calendar(PromCalendarPlan),
     HistogramQuantile(PromHistogramQuantilePlan),
     HistogramFraction(PromHistogramFractionPlan),
+    MetricsHistogramQuantiles(metricsql::HistogramQuantilesPlan),
     MetricsUnion(metricsql::UnionPlan),
     MetricsAlias(metricsql::AliasPlan),
     MetricsLabels(metricsql::LabelPlan),
@@ -1404,6 +1405,7 @@ impl PromPlan {
             Self::Calendar(_) => PromValueType::Vector,
             Self::HistogramQuantile(_) => PromValueType::Vector,
             Self::HistogramFraction(_) => PromValueType::Vector,
+            Self::MetricsHistogramQuantiles(_) => PromValueType::Vector,
             Self::MetricsUnion(_)
             | Self::MetricsAlias(_)
             | Self::MetricsLabels(_)
@@ -1949,6 +1951,12 @@ fn attach_promql_plan_source_positions(
             })?);
             attach_promql_plan_source_positions(&mut histogram.lower, calls)?;
             attach_promql_plan_source_positions(&mut histogram.upper, calls)?;
+            attach_promql_plan_source_positions(&mut histogram.inner, calls)?;
+        }
+        PromPlan::MetricsHistogramQuantiles(histogram) => {
+            for quantile in &mut histogram.quantiles {
+                attach_promql_plan_source_positions(quantile, calls)?;
+            }
             attach_promql_plan_source_positions(&mut histogram.inner, calls)?;
         }
         PromPlan::MetricsUnion(union) => {
@@ -4611,6 +4619,20 @@ fn execute_prometheus(
             false,
             cancelled,
         ),
+        PromPlan::MetricsHistogramQuantiles(histogram) => metricsql::execute_histogram_quantiles(
+            conn,
+            features,
+            histogram,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        ),
         PromPlan::MetricsUnion(union) => metricsql::execute_union(
             conn,
             features,
@@ -4870,6 +4892,20 @@ fn execute_prometheus_keep_metric_names(
             limits,
             annotations,
             true,
+            cancelled,
+        ),
+        PromPlan::MetricsHistogramQuantiles(histogram) => metricsql::execute_histogram_quantiles(
+            conn,
+            features,
+            histogram,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
             cancelled,
         ),
         PromPlan::MetricsBinary(binary) => metricsql::execute_binary(

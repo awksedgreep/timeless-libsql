@@ -1667,6 +1667,52 @@ the executable
 [`SQL-MQL-010`](QUERY_SQL_EQUIVALENTS.md#sql-mql-010-query-context-values)
 recipe.
 
+### MetricsQL histogram quantiles
+
+The explicit MetricsQL routes support VictoriaMetrics' plural classic-
+histogram form, whose destination label comes first and whose bucket expression
+comes last:
+
+```text
+histogram_quantiles("phi", 0.25, 0.75, http_request_duration_seconds_bucket)
+histogram_quantiles("phi", (time() - start()) / 20, histogram_bucket)
+histogram_quantiles("rank", 0.5, native_vmrange_histogram)
+```
+
+Every rank is a scalar expression evaluated across the request grid. The
+output label uses the first rank value with VictoriaMetrics formatting (for
+example `1e+06`, `1e-05`, `NaN`, and `+Inf`), while the rank itself may vary at
+later steps. The destination replaces an existing label; `"__name__"` sets a
+new metric name and `""` creates an empty-name label. The source bucket-family
+name is otherwise always removed, even with `keep_metric_names`.
+
+Classic cumulative `le` buckets and VictoriaMetrics non-cumulative
+`vmrange="lower...upper"` buckets are accepted. `vmrange` groups are converted
+to cumulative bounds in bounded Rust memory before quantile evaluation. Equal
+numeric bounds are summed, the first NaN count becomes zero, later NaNs and
+decreases are clamped to the preceding count, and the last bucket supplies the
+total even when `+Inf` is absent. Interpolation starts from zero even when the
+first bound is negative. A rank below zero returns `-Inf`, one above one
+returns `+Inf`, and a rank landing in the infinite bucket returns the last
+finite bound. Zero totals, NaN ranks, and other computed NaN samples are
+omitted, matching the pinned VictoriaMetrics response behavior.
+
+The bucket expression executes once regardless of the number of ranks.
+Duplicate rank labels or destination replacement that collapses two bucket
+groups fail as duplicate output timeseries. Malformed bounds are ignored,
+invalid argument types fail explicitly, and all existing work, result,
+response, deadline, and cancellation limits apply. The stable PromQL routes
+continue to reject this MetricsQL argument order; Prometheus' experimental
+vector-first function remains a separate `PQL-H03` disposition.
+
+Timeless preserves ordinary stored NaN bucket bits that VictoriaMetrics Remote
+Write drops. The query therefore repairs those stored counts according to the
+pinned VictoriaMetrics source algorithm, an intentional stronger-fidelity
+storage boundary. No histogram state, MetricsQL syntax, or private-table access
+was added to the extension. Direct SQLite/libSQL users can apply the executable
+[`SQL-MQL-012`](QUERY_SQL_EQUIVALENTS.md#sql-mql-012-histogram_quantiles)
+multi-rank recipe over public cumulative buckets.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

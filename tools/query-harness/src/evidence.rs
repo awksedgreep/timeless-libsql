@@ -925,6 +925,10 @@ fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec
         metricsql_range("metricsql_context_scalar", "metrics-metricsql-context-scalar", "time() - start() + step() - step()", at, 4),
         metricsql_range("metricsql_context_narrow", "metrics-metricsql-context-narrow", r#"query_contract_cpu{host="h0000"} + (end() - end())"#, at, 4),
         metricsql_range("metricsql_context_wide", "metrics-metricsql-context-wide", "query_contract_cpu + (start() - start())", at, series * 4),
+        metricsql_instant("metricsql_histogram_quantiles_one_narrow", "metrics-metricsql-histogram-quantiles-one-narrow", r#"histogram_quantiles("phi", 0.95, query_contract_histogram_bucket{host="h0000"})"#, 1),
+        metricsql_instant("metricsql_histogram_quantiles_one_wide", "metrics-metricsql-histogram-quantiles-one-wide", r#"histogram_quantiles("phi", 0.95, query_contract_histogram_bucket)"#, series),
+        metricsql_instant("metricsql_histogram_quantiles_multi_narrow", "metrics-metricsql-histogram-quantiles-multi-narrow", r#"histogram_quantiles("phi", 0.25, 0.75, query_contract_histogram_bucket{host="h0000"})"#, 2),
+        metricsql_instant("metricsql_histogram_quantiles_multi_wide", "metrics-metricsql-histogram-quantiles-multi-wide", r#"histogram_quantiles("phi", 0.25, 0.75, query_contract_histogram_bucket)"#, series * 2),
         instant("arithmetic_vector_scalar_narrow", "metrics-arithmetic-vector-scalar-narrow", r#"query_contract_cpu{host="h0000"} * 2"#, 1),
         range("arithmetic_one_to_one_wide", "metrics-arithmetic-one-to-one-wide", "query_contract_cpu + query_contract_cpu", at, series * 4),
         instant("comparison_filter_narrow", "metrics-comparison-filter-narrow", r#"query_contract_cpu{host="h0000"} > 30"#, 1),
@@ -1832,7 +1836,7 @@ mod tests {
         // The work-limit query is appended only after its 100,025-point
         // fixture crosses the second durability barrier.
         assert!(keys.insert("work_limit_rejected"));
-        assert_eq!(keys.len(), 176);
+        assert_eq!(keys.len(), 180);
         assert!(keys.contains("histogram_quantile_narrow"));
         assert!(keys.contains("histogram_quantile_wide"));
         assert!(keys.contains("quoted_name_narrow"));
@@ -1880,6 +1884,10 @@ mod tests {
         assert!(keys.contains("metricsql_context_scalar"));
         assert!(keys.contains("metricsql_context_narrow"));
         assert!(keys.contains("metricsql_context_wide"));
+        assert!(keys.contains("metricsql_histogram_quantiles_one_narrow"));
+        assert!(keys.contains("metricsql_histogram_quantiles_one_wide"));
+        assert!(keys.contains("metricsql_histogram_quantiles_multi_narrow"));
+        assert!(keys.contains("metricsql_histogram_quantiles_multi_wide"));
         assert!(keys.contains("result_limit_rejected"));
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1946,6 +1954,10 @@ mod tests {
             "metricsql_context_scalar",
             "metricsql_context_narrow",
             "metricsql_context_wide",
+            "metricsql_histogram_quantiles_one_narrow",
+            "metricsql_histogram_quantiles_one_wide",
+            "metricsql_histogram_quantiles_multi_narrow",
+            "metricsql_histogram_quantiles_multi_wide",
         ]);
         assert_eq!(keys, expected);
     }

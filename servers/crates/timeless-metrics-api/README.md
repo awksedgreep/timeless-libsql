@@ -236,6 +236,15 @@ rejects `start_timestamp()` and `range()`, so Timeless rejects them explicitly
 too. Existing direct selector `@ start()`/`@ end()` modifiers and the stable
 PromQL feature gates remain unchanged.
 
+VictoriaMetrics `histogram_quantiles("label", phi..., buckets)` is available
+only on these MetricsQL routes. It evaluates every scalar rank over one shared
+bucket result, formats the destination label from the rank's first value,
+accepts cumulative `le` and non-cumulative `vmrange` buckets, and applies the
+pinned missing-`+Inf`, monotonic-repair, interpolation, computed-NaN omission,
+name-removal, and duplicate-output rules. Timeless retains exact stored NaN
+bucket bits that VictoriaMetrics Remote Write omits. Work/result/response
+limits and cancellation bound both bucket conversion and every rank.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding
@@ -256,6 +265,8 @@ and
 [`SQL-MQL-009`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-009-request-step-relative-durations)
 and
 [`SQL-MQL-010`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-010-query-context-values)
+and
+[`SQL-MQL-012`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-012-histogram_quantiles)
 recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
 envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
 `422`. Limits and cancellation continue to use Timeless's existing execution
@@ -306,7 +317,7 @@ Rust API rows at this revision are listed below for the local documentation
 contract checker; prose in this README must not imply a broader language
 surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S14 PQL-S15 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-S23 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O08 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 PQL-H02 MQL-01 MQL-02 MQL-03 MQL-04 MQL-05 MQL-06 MQL-07 MQL-09 MQL-10 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S14 PQL-S15 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-S23 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O08 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 PQL-H02 MQL-01 MQL-02 MQL-03 MQL-04 MQL-05 MQL-06 MQL-07 MQL-09 MQL-10 MQL-12 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are

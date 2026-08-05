@@ -14401,6 +14401,418 @@ async fn session_fifteen_metricsql_query_context_matches_victoriametrics_and_reo
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_fifteen_metricsql_histogram_quantiles_match_victoriametrics_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_fifteen_metricsql_histogram_quantiles.db");
+    let base = 1_785_925_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        64,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "mql_hist_bucket{{host=\"a\",le=\"0.1\"}} 5 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"0.1\"}} 8 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"0.1\"}} 10 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"0.5\"}} 10 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"0.5\"}} 16 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"0.5\"}} 20 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"1\"}} 15 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"1\"}} 24 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"1\"}} 30 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"+Inf\"}} 20 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"+Inf\"}} 32 {}\n",
+            "mql_hist_bucket{{host=\"a\",le=\"+Inf\"}} 40 {}\n",
+            "mql_hist_bucket{{host=\"b\",le=\"0.1\"}} 3 {}\n",
+            "mql_hist_bucket{{host=\"b\",le=\"0.5\"}} 6 {}\n",
+            "mql_hist_bucket{{host=\"b\",le=\"1\"}} 9 {}\n",
+            "mql_hist_bucket{{host=\"b\",le=\"+Inf\"}} 10 {}\n",
+            "mql_hist_special_bucket{{case=\"missing_inf\",le=\"1\"}} 10 {}\n",
+            "mql_hist_special_bucket{{case=\"missing_inf\",le=\"2\"}} 20 {}\n",
+            "mql_hist_special_bucket{{case=\"negative_first\",le=\"-5\"}} 2 {}\n",
+            "mql_hist_special_bucket{{case=\"negative_first\",le=\"-1\"}} 4 {}\n",
+            "mql_hist_special_bucket{{case=\"negative_first\",le=\"+Inf\"}} 4 {}\n",
+            "mql_hist_special_bucket{{case=\"nan_count\",le=\"1\"}} NaN {}\n",
+            "mql_hist_special_bucket{{case=\"nan_count\",le=\"2\"}} 10 {}\n",
+            "mql_hist_special_bucket{{case=\"nan_count\",le=\"+Inf\"}} 20 {}\n",
+            "mql_hist_special_bucket{{case=\"duplicate\",le=\"1\"}} 3 {}\n",
+            "mql_hist_special_bucket{{case=\"duplicate\",le=\"1.0\"}} 4 {}\n",
+            "mql_hist_special_bucket{{case=\"duplicate\",le=\"2\"}} 10 {}\n",
+            "mql_hist_special_bucket{{case=\"duplicate\",le=\"+Inf\"}} 10 {}\n",
+            "mql_hist_special_bucket{{case=\"zero\",le=\"1\"}} 0 {}\n",
+            "mql_hist_special_bucket{{case=\"zero\",le=\"+Inf\"}} 0 {}\n",
+            "mql_hist_special_bucket{{case=\"malformed\",le=\"bogus\"}} 9 {}\n",
+            "mql_hist_special_bucket{{case=\"malformed\",le=\"1\"}} 5 {}\n",
+            "mql_hist_special_bucket{{case=\"malformed\",le=\"+Inf\"}} 10 {}\n",
+            "mql_vmrange_bucket{{vmrange=\"0...1\"}} 2 {}\n",
+            "mql_vmrange_bucket{{vmrange=\"1...2\"}} 3 {}\n"
+        ),
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 10) * 1_000,
+        (base + 20) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+        (base + 30) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let multiple = mql_query(
+        &app,
+        "histogram_quantiles(\"phi\", 0.25, 0.75, mql_hist_bucket{host=\"a\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(multiple.0, StatusCode::OK, "{}", multiple.1);
+    assert_eq!(
+        multiple.1["data"]["result"],
+        serde_json::json!([
+            {"metric": {"host": "a", "phi": "0.25"}, "value": [base + 30, "0.1"]},
+            {"metric": {"host": "a", "phi": "0.75"}, "value": [base + 30, "1"]}
+        ])
+    );
+    let varying = mql_query_range(
+        &app,
+        "histogram_quantiles(\"phi\", (time() - start()) / 20, mql_hist_bucket{host=\"a\"})",
+        base + 10,
+        base + 30,
+        10,
+    )
+    .await;
+    assert_eq!(varying.0, StatusCode::OK, "{}", varying.1);
+    assert_eq!(
+        varying.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a", "phi": "0"},
+            "values": [[base + 10, "0"], [base + 20, "0.5"], [base + 30, "1"]]
+        }])
+    );
+    for (query, expected) in [
+        (
+            "histogram_quantiles(\"phi\", 0.5, mql_hist_special_bucket{case=\"missing_inf\"})",
+            "1",
+        ),
+        (
+            "histogram_quantiles(\"phi\", 0.25, mql_hist_special_bucket{case=\"negative_first\"})",
+            "-2.5",
+        ),
+        (
+            "histogram_quantiles(\"phi\", 0.25, mql_hist_special_bucket{case=\"nan_count\"})",
+            "1.5",
+        ),
+        (
+            "histogram_quantiles(\"phi\", 0.5, mql_hist_special_bucket{case=\"duplicate\"})",
+            "0.7142857142857143",
+        ),
+        (
+            "histogram_quantiles(\"phi\", 0.5, mql_vmrange_bucket)",
+            "1.1666666666666667",
+        ),
+    ] {
+        let response = mql_query(&app, query, base + 30).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+        assert!(
+            response.1.get("warnings").is_none(),
+            "{query}: {}",
+            response.1
+        );
+        assert!(response.1.get("infos").is_none(), "{query}: {}", response.1);
+    }
+    let generated_vmrange = mql_query(
+        &app,
+        concat!(
+            "histogram_quantiles(\"phi\", 0.5, ",
+            "label_set(2, \"vmrange\", \"0...1\") or ",
+            "label_set(3, \"vmrange\", \"1...2\"))"
+        ),
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        generated_vmrange.0,
+        StatusCode::OK,
+        "{}",
+        generated_vmrange.1
+    );
+    assert_eq!(
+        generated_vmrange.1["data"]["result"][0]["value"][1],
+        "1.1666666666666667"
+    );
+    let nested = mql_query(
+        &app,
+        "abs(histogram_quantiles(\"phi\", 0.5, mql_hist_bucket{host=\"a\"}))",
+        base + 30,
+    )
+    .await;
+    assert_eq!(nested.0, StatusCode::OK, "{}", nested.1);
+    assert_eq!(nested.1["data"]["result"][0]["value"][1], "0.5");
+    let keep = mql_query(
+        &app,
+        "HISTOGRAM_QUANTILES(\"phi\", 0.5, mql_hist_bucket{host=\"a\"},) keep_metric_names",
+        base + 30,
+    )
+    .await;
+    assert_eq!(keep.0, StatusCode::OK, "{}", keep.1);
+    assert!(keep.1["data"]["result"][0]["metric"]
+        .get("__name__")
+        .is_none());
+    for (quantile, label, value) in [
+        ("1000000", "1e+06", "+Inf"),
+        ("0.00001", "1e-05", "0.000004000000000000001"),
+        ("+Inf", "+Inf", "+Inf"),
+    ] {
+        let query =
+            format!("histogram_quantiles(\"phi\", {quantile}, mql_hist_bucket{{host=\"a\"}})");
+        let response = mql_query(&app, &query, base + 30).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["metric"]["phi"], label);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], value);
+    }
+    assert_eq!(
+        mql_query(
+            &app,
+            "histogram_quantiles(\"phi\", NaN, mql_hist_bucket{host=\"a\"})",
+            base + 30,
+        )
+        .await
+        .1["data"]["result"],
+        serde_json::json!([]),
+        "computed NaN results follow VictoriaMetrics omission semantics"
+    );
+    let destination_name = mql_query(
+        &app,
+        "histogram_quantiles(\"__name__\", 0.5, mql_hist_bucket{host=\"a\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        destination_name.1["data"]["result"][0]["metric"],
+        serde_json::json!({"__name__": "0.5", "host": "a"})
+    );
+    let empty_destination = mql_query(
+        &app,
+        "histogram_quantiles(\"\", 0.5, mql_hist_bucket{host=\"a\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        empty_destination.1["data"]["result"][0]["metric"],
+        serde_json::json!({"": "0.5", "host": "a"})
+    );
+    assert_eq!(
+        mql_query(
+            &app,
+            "histogram_quantiles(\"phi\", 0.5, mql_hist_special_bucket{case=\"zero\"})",
+            base + 30,
+        )
+        .await
+        .1["data"]["result"],
+        serde_json::json!([])
+    );
+    let malformed = mql_query(
+        &app,
+        "histogram_quantiles(\"phi\", 0.5, mql_hist_special_bucket{case=\"malformed\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(malformed.1["data"]["result"][0]["value"][1], "1");
+    assert!(malformed.1.get("warnings").is_none());
+    assert_eq!(
+        mql_query(&app, "histogram_quantiles(\"phi\", 0.5, 1)", base + 30)
+            .await
+            .1["data"]["result"],
+        serde_json::json!([])
+    );
+    for query in [
+        "histogram_quantiles(\"phi\", 0.5, 0.5, mql_hist_bucket{host=\"a\"})",
+        "histogram_quantiles(\"host\", 0.5, mql_hist_bucket)",
+    ] {
+        let collision = mql_query(&app, query, base + 30).await;
+        assert_eq!(
+            collision.0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}: {}",
+            collision.1
+        );
+        assert!(collision.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate output timeseries"));
+    }
+    for (query, diagnostic) in [
+        (
+            "histogram_quantiles(\"phi\", mql_hist_bucket)",
+            "unexpected number of args: 2; expecting at least 3 args",
+        ),
+        (
+            "histogram_quantiles(1, 0.5, mql_hist_bucket)",
+            "cannot obtain dstLabel",
+        ),
+        (
+            "histogram_quantiles(\"phi\", mql_hist_bucket, mql_hist_bucket)",
+            "cannot parse phi",
+        ),
+    ] {
+        let invalid = mql_query(&app, query, base + 30).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{query}: {}", invalid.1);
+        assert!(invalid.1["error"].as_str().unwrap().contains(diagnostic));
+    }
+    assert_eq!(
+        prom_query(
+            &app,
+            "histogram_quantiles(\"phi\", 0.5, mql_hist_bucket)",
+            base + 30,
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let stats_before = storage.stats().await.unwrap();
+    assert_eq!(
+        mql_query(
+            &app,
+            "histogram_quantiles(\"phi\", 0.25, 0.75, mql_hist_bucket{host=\"a\"})",
+            base + 30,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let stats_after = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after.extension_raw_batch_query_count - stats_before.extension_raw_batch_query_count
+            + stats_after.extension_window_batch_query_count
+            - stats_before.extension_window_batch_query_count,
+        1,
+        "all quantiles must share the bucket expression's one public read"
+    );
+
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 5,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = mql_query(
+        &limited,
+        "histogram_quantiles(\"phi\", 0.25, 0.75, mql_hist_bucket{host=\"a\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("work point limit"));
+
+    let deadline_limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            deadline: std::time::Duration::from_nanos(1),
+            ..PromQueryLimits::default()
+        },
+    );
+    let timed_out = mql_query_range(
+        &deadline_limited,
+        "histogram_quantiles(\"phi\", 0.25, 0.75, mql_hist_bucket{host=\"a\"})",
+        base,
+        base + 10_999,
+        1,
+    )
+    .await;
+    assert_eq!(timed_out.0, StatusCode::GATEWAY_TIMEOUT, "{}", timed_out.1);
+    assert_eq!(
+        mql_query(
+            &app,
+            "histogram_quantiles(\"phi\", 0.5, mql_hist_bucket{host=\"a\"})",
+            base + 30,
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "a cancelled request must not poison the reader"
+    );
+
+    let posted = post_form(
+        &app,
+        "/metricsql/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair(
+                "query",
+                "histogram_quantiles(\"phi\", 0.25, 0.75, mql_hist_bucket{host=\"a\"})",
+            )
+            .append_pair("time", &(base + 30).to_string())
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted, multiple);
+
+    drop((deadline_limited, limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 64, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        mql_query(
+            &reopened_app,
+            "histogram_quantiles(\"phi\", 0.25, 0.75, mql_hist_bucket{host=\"a\"})",
+            base + 30,
+        )
+        .await,
+        multiple
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

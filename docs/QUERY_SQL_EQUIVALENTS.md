@@ -107,6 +107,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-MQL-007`](#sql-mql-007-running-aggregates) | `MQL-07` | current foundation | slot-indexed cumulative average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, packed missing/NaN semantics, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-009`](#sql-mql-009-request-step-relative-durations) | `MQL-09` | current foundation | exact request-step multiplication for public windows, subquery timing, and signed offsets; API owns MetricsQL duration grammar, millisecond composition, saturation, limits, cancellation, and envelopes |
 | [`SQL-MQL-010`](#sql-mql-010-query-context-values) | `MQL-10` | current foundation | exact request start, end, and step projection in seconds over a bounded evaluation grid; API owns MetricsQL grammar, scalar/vector composition, limits, cancellation, and envelopes |
+| [`SQL-MQL-012`](#sql-mql-012-histogram_quantiles) | `MQL-12` | current foundation | bounded multi-quantile evaluation over public cumulative classic buckets with VictoriaMetrics missing-`+Inf`, monotonic-repair, and interpolation rules; API owns MetricsQL/vmrange grammar, exact float labels and IEEE bits, collisions, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -4179,6 +4180,139 @@ new storage primitive is involved.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-010`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_query_context_matches_victoriametrics_and_reopens`.
+
+### SQL-MQL-012: `histogram_quantiles`
+
+For cumulative classic buckets with valid numeric `le` labels, one bounded
+public grid can calculate multiple VictoriaMetrics-style quantiles without
+rereading storage. This example binds two ranks and their already formatted
+destination-label values:
+
+```sql
+WITH
+quantiles(phi_label, quantile) AS (
+  VALUES
+    (CAST(:first_phi_label AS TEXT), CAST(:first_quantile AS REAL)),
+    (CAST(:second_phi_label AS TEXT), CAST(:second_quantile AS REAL))
+),
+selected AS (
+  SELECT json_remove(labels, '$.le') AS labels, ts,
+         json_extract(labels, '$.le') AS le, value AS count
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+),
+parsed AS (
+  SELECT labels, ts,
+         CASE WHEN le IN ('+Inf','Inf') THEN 1 ELSE 0 END AS is_inf,
+         CASE
+           WHEN le IN ('+Inf','Inf') THEN NULL
+           WHEN le = '-Inf' THEN -1e999
+           ELSE CAST(le AS REAL)
+         END AS upper_bound,
+         count
+  FROM selected
+  WHERE le IS NOT NULL
+),
+coalesced AS (
+  SELECT labels, ts, is_inf, upper_bound, SUM(count) AS count
+  FROM parsed
+  GROUP BY labels, ts, is_inf, upper_bound
+),
+monotonic AS (
+  SELECT labels, ts, is_inf, upper_bound,
+         MAX(COALESCE(count, 0.0)) OVER (
+           PARTITION BY labels, ts
+           ORDER BY is_inf, upper_bound
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) AS count
+  FROM coalesced
+),
+positioned AS (
+  SELECT *,
+         LAG(upper_bound) OVER (
+           PARTITION BY labels, ts ORDER BY is_inf, upper_bound
+         ) AS lower_bound,
+         LAG(count) OVER (
+           PARTITION BY labels, ts ORDER BY is_inf, upper_bound
+         ) AS lower_count
+  FROM monotonic
+),
+stats AS (
+  SELECT labels, ts, MAX(count) AS total,
+         MAX(CASE WHEN is_inf = 0 THEN upper_bound END) AS last_finite
+  FROM positioned
+  GROUP BY labels, ts
+),
+chosen AS (
+  SELECT p.*, q.phi_label, q.quantile,
+         ROW_NUMBER() OVER (
+           PARTITION BY p.labels, p.ts, q.phi_label
+           ORDER BY p.upper_bound
+         ) AS choice
+  FROM positioned AS p
+  JOIN stats AS s USING (labels, ts)
+  CROSS JOIN quantiles AS q
+  WHERE p.is_inf = 0 AND p.count > 0
+    AND p.count >= q.quantile * s.total
+),
+evaluated AS (
+  SELECT json_set(s.labels, :destination_path, q.phi_label) AS labels,
+         s.ts,
+         CASE
+           WHEN s.total = 0 THEN NULL
+           WHEN q.quantile < 0 THEN -1e999
+           WHEN q.quantile > 1 THEN 1e999
+           WHEN c.choice IS NULL THEN s.last_finite
+           WHEN c.count = COALESCE(c.lower_count, 0)
+             THEN COALESCE(c.lower_bound, 0)
+           ELSE COALESCE(c.lower_bound, 0)
+                + (c.upper_bound - COALESCE(c.lower_bound, 0))
+                * ((q.quantile * s.total - COALESCE(c.lower_count, 0))
+                   / (c.count - COALESCE(c.lower_count, 0)))
+         END AS value
+  FROM stats AS s
+  CROSS JOIN quantiles AS q
+  LEFT JOIN chosen AS c
+    ON c.labels = s.labels AND c.ts = s.ts
+   AND c.phi_label = q.phi_label AND c.choice = 1
+)
+SELECT labels, ts, value
+FROM evaluated
+WHERE value IS NOT NULL
+ORDER BY labels, ts;
+```
+
+`:metric`, `:filter_json`, and the inclusive epoch-second grid parameters use
+the same public contracts as `SQL-PROM-054`. Bind unique ranks in
+`:first_quantile` and `:second_quantile`, their VictoriaMetrics `%g` spellings
+in `:first_phi_label` and `:second_phi_label`, and a SQLite JSON path such as
+`$.phi` in `:destination_path`. Add more `VALUES` rows for more ranks. The
+statement removes `le`, replaces the destination label, merges numerically
+equal bounds by sum, repairs a leading NULL count to zero and later decreases
+with a running maximum, treats the last bucket count as the total even without
+`+Inf`, interpolates from zero even when the first finite bound is negative,
+returns the final finite bound for a rank landing in an infinite bucket, and
+omits NULL results. Rows are deterministic by canonical output labels then
+timestamp.
+
+The finite row-visible restriction is deliberate. SQLite projects a stored
+NaN count as NULL and cannot distinguish its payload, while the Rust API reads
+the public packed frame and preserves Timeless's exact NaN bits before applying
+VictoriaMetrics repair. The API also converts native `vmrange="low...high"`
+buckets to cumulative `le` buckets, evaluates scalar rank ASTs per step,
+formats their first values exactly (`1e+06`, `1e-05`, `NaN`, `+Inf`), mutates
+empty or `__name__` destinations, omits computed NaN samples, rejects duplicate
+output labelsets, and owns MetricsQL grammar, implicit rollups, work/result/
+response limits, cancellation, and HTTP envelopes. Those language and packed
+IEEE behaviors are not mislabeled as ordinary SQL. The bucket expression is
+executed once for every rank, so a new extension primitive would not reduce a
+public storage read or row crossing.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-012`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_histogram_quantiles_match_victoriametrics_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

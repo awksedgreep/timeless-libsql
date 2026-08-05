@@ -160,7 +160,13 @@ five errors. It pins range and instant `start()`/`end()`/`step()` values,
 subsecond request steps, pre-epoch bounds, case-insensitive names,
 scalar/vector composition, zero-argument arity, and explicit rejection of
 `start_timestamp()` and `range()`. The fixture now contains 164 MetricsQL
-cases in total.
+cases before `MQL-12`. The `MQL-12` corpus adds fifteen successful plural-
+histogram cases and five errors. It pins multiple and time-varying ranks,
+first-value `%g` labels, destination replacement/empty/`__name__`, source-name
+removal under `keep_metric_names`, cumulative and `vmrange` buckets, missing
+`+Inf`, negative-first interpolation, monotonic/NaN repair, computed-NaN
+omission, scalar/empty inputs, arity/type errors, and duplicate-output
+collisions. The fixture now contains 184 MetricsQL cases in total.
 Timeless compares exact result labels, timestamp grids, and float values while
 retaining its documented HTTP 400 `bad_data` envelope in place of
 VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
@@ -219,6 +225,17 @@ equal the evaluation timestamp while instant step remains the explicit
 request parameter. Timeless implements the same values in the Rust MetricsQL
 planner. The language syntax does not enter SQLite, and the stable PromQL
 endpoint retains its separate feature-gate behavior.
+
+For `MQL-12`, pinned VictoriaMetrics source evaluates the bucket expression
+once, copies it per rank, converts `vmrange` buckets to cumulative `le`, groups
+after removing the bucket-family name, and formats each destination label from
+the rank's first value. Its public Remote Write path drops an ordinary NaN
+bucket before evaluation and its API omits computed NaN samples. Timeless
+preserves the stored ordinary NaN bits, applies the same source-level repair
+(leading NaN to zero; later NaN/decrease to the preceding count), and omits
+only the computed NaN output. The resulting stored-NaN case is an intentional
+stronger-fidelity representation divergence, while finite inputs and all
+public language behavior match the live oracle.
 
 The following Timeless compatibility choices intentionally differ from the
 pinned VictoriaLogs wire/storage model and are asserted on both sides rather

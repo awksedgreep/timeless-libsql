@@ -70,6 +70,13 @@ pub(crate) struct RangeAggregatePlan {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct HistogramQuantilesPlan {
+    pub(super) destination: String,
+    pub(super) quantiles: Vec<PromPlan>,
+    pub(super) inner: Box<PromPlan>,
+}
+
+#[derive(Clone, Debug)]
 pub(super) enum LabelOperation {
     Set(Vec<(String, String)>),
     Del(Vec<String>),
@@ -716,6 +723,13 @@ fn count_duration_marker(plan: &PromPlan, marker: i64) -> usize {
                 + count_duration_marker(&plan.upper, marker)
                 + count_duration_marker(&plan.inner, marker)
         }
+        PromPlan::MetricsHistogramQuantiles(plan) => {
+            plan.quantiles
+                .iter()
+                .map(|quantile| count_duration_marker(quantile, marker))
+                .sum::<usize>()
+                + count_duration_marker(&plan.inner, marker)
+        }
         PromPlan::MetricsUnion(plan) => plan
             .inputs
             .iter()
@@ -870,6 +884,17 @@ fn replace_duration_marker(
                 offset_replacement,
                 duration_replacement,
             );
+            replace_duration_marker(
+                &mut plan.inner,
+                marker,
+                offset_replacement,
+                duration_replacement,
+            );
+        }
+        PromPlan::MetricsHistogramQuantiles(plan) => {
+            for quantile in &mut plan.quantiles {
+                replace_duration_marker(quantile, marker, offset_replacement, duration_replacement);
+            }
             replace_duration_marker(
                 &mut plan.inner,
                 marker,
@@ -1092,6 +1117,7 @@ fn supports_keep_metric_names(plan: &PromPlan, input: &str) -> bool {
         | PromPlan::Calendar(_)
         | PromPlan::HistogramQuantile(_)
         | PromPlan::HistogramFraction(_)
+        | PromPlan::MetricsHistogramQuantiles(_)
         | PromPlan::MetricsUnion(_)
         | PromPlan::MetricsLabels(_)
         | PromPlan::MetricsDynamicRollup(_)
@@ -1148,6 +1174,10 @@ fn lower_union_or_alias(
     if normalized == "default_rollup" {
         let arguments = metric_sql_arguments(&input[open + 1..close], "default_rollup")?;
         return lower_default_rollup(arguments, context, depth).map(Some);
+    }
+    if normalized == "histogram_quantiles" {
+        let arguments = metric_sql_arguments(&input[open + 1..close], "histogram_quantiles")?;
+        return lower_histogram_quantiles(arguments, context, depth).map(Some);
     }
     if let Some(op) = range_aggregate_op(&normalized) {
         let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
@@ -1216,6 +1246,48 @@ fn lower_union_or_alias(
         "label_del" => lower_label_del(arguments, context, depth).map(Some),
         _ => unreachable!("guarded MetricsQL function"),
     }
+}
+
+fn lower_histogram_quantiles(
+    arguments: Vec<&str>,
+    context: &mut LowerContext<'_>,
+    depth: usize,
+) -> Result<PromPlan, String> {
+    if arguments.len() < 3 {
+        return Err(format!(
+            "unexpected number of args: {}; expecting at least 3 args",
+            arguments.len()
+        ));
+    }
+    let destination = match lower_promql(arguments[0], context.lookback)? {
+        PromPlan::String(value) => value,
+        _ => return Err("cannot obtain dstLabel: expecting a string literal".into()),
+    };
+    let bucket_index = arguments.len() - 1;
+    let mut quantiles = Vec::with_capacity(arguments.len() - 2);
+    for argument in &arguments[1..bucket_index] {
+        let quantile = lower_expr(argument, context, depth + 1)?;
+        if quantile.value_type() != PromValueType::Scalar {
+            return Err("cannot parse phi: expecting a scalar expression".into());
+        }
+        quantiles.push(quantile);
+    }
+    let inner = lower_expr(arguments[bucket_index], context, depth + 1)?;
+    if !matches!(
+        inner.value_type(),
+        PromValueType::Scalar | PromValueType::Vector
+    ) {
+        return Err(
+            "MetricsQL histogram_quantiles buckets must be a scalar or instant vector".into(),
+        );
+    }
+    Ok(PromPlan::MetricsHistogramQuantiles(
+        HistogramQuantilesPlan {
+            destination,
+            quantiles,
+            inner: Box::new(inner),
+        },
+    ))
 }
 
 fn windowless_rollup_op(name: &str) -> Option<(DynamicRollupOp, PromRangeOp)> {
@@ -1579,6 +1651,7 @@ fn is_metricsql_special_call(name: &str) -> bool {
         || name.eq_ignore_ascii_case("label_set")
         || name.eq_ignore_ascii_case("label_del")
         || name.eq_ignore_ascii_case("default_rollup")
+        || name.eq_ignore_ascii_case("histogram_quantiles")
         || windowless_rollup_op(&name.to_ascii_lowercase()).is_some()
 }
 
@@ -2091,6 +2164,7 @@ fn contains_custom_word(input: &str) -> bool {
                     || word.eq_ignore_ascii_case("label_set")
                     || word.eq_ignore_ascii_case("label_del")
                     || word.eq_ignore_ascii_case("default_rollup")
+                    || word.eq_ignore_ascii_case("histogram_quantiles")
                     || range_aggregate_op(&word.to_ascii_lowercase()).is_some()
                     || running_aggregate_op(&word.to_ascii_lowercase()).is_some()
                     || windowless_rollup_op(&word.to_ascii_lowercase()).is_some()
@@ -2152,6 +2226,12 @@ fn apply_implicit_rollups(plan: &mut PromPlan, max_lookback: i64) -> Result<(), 
         PromPlan::HistogramFraction(plan) => {
             apply_implicit_rollups(&mut plan.lower, max_lookback)?;
             apply_implicit_rollups(&mut plan.upper, max_lookback)?;
+            apply_implicit_rollups(&mut plan.inner, max_lookback)?;
+        }
+        PromPlan::MetricsHistogramQuantiles(plan) => {
+            for quantile in &mut plan.quantiles {
+                apply_implicit_rollups(quantile, max_lookback)?;
+            }
             apply_implicit_rollups(&mut plan.inner, max_lookback)?;
         }
         PromPlan::MetricsUnion(plan) => {
@@ -2294,6 +2374,12 @@ fn replace_placeholders(
         PromPlan::HistogramFraction(plan) => {
             replace_placeholders(&mut plan.lower, placeholders)?;
             replace_placeholders(&mut plan.upper, placeholders)?;
+            replace_placeholders(&mut plan.inner, placeholders)?;
+        }
+        PromPlan::MetricsHistogramQuantiles(plan) => {
+            for quantile in &mut plan.quantiles {
+                replace_placeholders(quantile, placeholders)?;
+            }
             replace_placeholders(&mut plan.inner, placeholders)?;
         }
         PromPlan::MetricsUnion(plan) => {
@@ -3183,6 +3269,419 @@ pub(super) fn execute_range_aggregate(
         IntermediateValue::Vector(output),
         instant,
         child.frame_bytes,
+        intermediate_points,
+        limits,
+        cancelled,
+    )
+}
+
+#[derive(Clone)]
+struct MetricsHistogramBucket {
+    upper_bound: f64,
+    count: f64,
+}
+
+struct VmRangeSeries {
+    start_label: String,
+    end_label: String,
+    start: f64,
+    end: f64,
+    points: BTreeMap<i64, f64>,
+}
+
+struct VmLeSeries {
+    upper_label: String,
+    points: BTreeMap<i64, f64>,
+}
+
+fn metricsql_phi_label(value: f64) -> String {
+    if !value.is_finite() {
+        return format_prometheus_value(value);
+    }
+    let absolute = value.abs();
+    if absolute != 0.0 && !(1e-4..1e6).contains(&absolute) {
+        let rendered = format!("{value:e}");
+        let (mantissa, exponent) = rendered
+            .split_once('e')
+            .expect("Rust scientific float formatting includes an exponent");
+        let exponent: i32 = exponent
+            .parse()
+            .expect("Rust scientific float formatting emits a decimal exponent");
+        return format!("{mantissa}e{exponent:+03}");
+    }
+    format_prometheus_label_value(value)
+}
+
+fn metricsql_vmrange_buckets_to_le(
+    series: Vec<IntermediateSeries>,
+    intermediate_points: &mut u64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<IntermediateSeries>, String> {
+    let mut output = Vec::new();
+    let mut groups: BTreeMap<BTreeMap<String, String>, Vec<VmRangeSeries>> = BTreeMap::new();
+    for mut item in series {
+        check_cancelled(cancelled)?;
+        let vmrange = item.labels.get("vmrange").cloned().unwrap_or_default();
+        if vmrange.is_empty() {
+            if item.labels.get("le").is_some_and(|value| !value.is_empty()) {
+                output.push(item);
+            }
+            continue;
+        }
+        let Some((start_label, end_label)) = vmrange.split_once("...") else {
+            continue;
+        };
+        let Ok(start) = start_label.parse::<f64>() else {
+            continue;
+        };
+        let Ok(end) = end_label.parse::<f64>() else {
+            continue;
+        };
+        item.labels.remove("le");
+        item.labels.remove("vmrange");
+        groups.entry(item.labels).or_default().push(VmRangeSeries {
+            start_label: start_label.to_owned(),
+            end_label: end_label.to_owned(),
+            start,
+            end,
+            points: item.points.into_iter().collect(),
+        });
+    }
+
+    for (labels, mut ranges) in groups {
+        check_cancelled(cancelled)?;
+        ranges.sort_by(|lhs, rhs| {
+            lhs.end
+                .partial_cmp(&rhs.end)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut converted: Vec<VmLeSeries> = Vec::with_capacity(ranges.len() + 2);
+        let mut positions: BTreeMap<String, usize> = BTreeMap::new();
+        let mut previous_end = 0.0;
+        let mut previous: Option<(f64, BTreeMap<i64, f64>)> = None;
+        for range in ranges {
+            check_cancelled(cancelled)?;
+            if !range.points.values().any(|value| *value > 0.0) {
+                continue;
+            }
+            if range.start != previous_end && !positions.contains_key(&range.start_label) {
+                positions.insert(range.start_label.clone(), converted.len());
+                converted.push(VmLeSeries {
+                    upper_label: range.start_label.clone(),
+                    points: range
+                        .points
+                        .keys()
+                        .copied()
+                        .map(|timestamp| (timestamp, 0.0))
+                        .collect(),
+                });
+            }
+            if let Some(position) = positions.get(&range.end_label).copied() {
+                let destination = &mut converted[position].points;
+                for (timestamp, value) in &range.points {
+                    *destination.entry(*timestamp).or_insert(0.0) += *value;
+                }
+            } else {
+                positions.insert(range.end_label.clone(), converted.len());
+                converted.push(VmLeSeries {
+                    upper_label: range.end_label,
+                    points: range.points.clone(),
+                });
+            }
+            previous_end = range.end;
+            previous = Some((range.end, range.points));
+        }
+        if let Some((last_end, points)) = previous {
+            if last_end != f64::INFINITY && !positions.contains_key("+Inf") {
+                converted.push(VmLeSeries {
+                    upper_label: "+Inf".into(),
+                    points: points
+                        .keys()
+                        .copied()
+                        .map(|timestamp| (timestamp, 0.0))
+                        .collect(),
+                });
+            }
+        }
+        if converted.is_empty() {
+            continue;
+        }
+        let timestamps: BTreeSet<i64> = converted
+            .iter()
+            .flat_map(|bucket| bucket.points.keys().copied())
+            .collect();
+        let mut cumulative = BTreeMap::new();
+        for bucket in converted {
+            check_cancelled(cancelled)?;
+            let mut points = Vec::with_capacity(timestamps.len());
+            for timestamp in &timestamps {
+                check_cancelled(cancelled)?;
+                *intermediate_points = intermediate_points.saturating_add(1);
+                enforce_intermediate_work(*intermediate_points, limits)?;
+                let count = cumulative.entry(*timestamp).or_insert(0.0);
+                if let Some(value) = bucket.points.get(timestamp) {
+                    if !value.is_nan() && *value > 0.0 {
+                        *count += *value;
+                    }
+                }
+                points.push((*timestamp, *count));
+            }
+            let mut bucket_labels = labels.clone();
+            bucket_labels.insert("le".into(), bucket.upper_label);
+            output.push(IntermediateSeries {
+                labels: bucket_labels,
+                points,
+            });
+        }
+    }
+    Ok(output)
+}
+
+fn metricsql_bucket_quantile(
+    quantile: f64,
+    mut buckets: Vec<MetricsHistogramBucket>,
+    intermediate_points: &mut u64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<f64, String> {
+    if quantile.is_nan() {
+        return Ok(f64::NAN);
+    }
+    buckets.sort_by(|lhs, rhs| {
+        lhs.upper_bound
+            .partial_cmp(&rhs.upper_bound)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut coalesced: Vec<MetricsHistogramBucket> = Vec::with_capacity(buckets.len());
+    for bucket in buckets {
+        check_cancelled(cancelled)?;
+        *intermediate_points = intermediate_points.saturating_add(1);
+        enforce_intermediate_work(*intermediate_points, limits)?;
+        if let Some(previous) = coalesced
+            .last_mut()
+            .filter(|previous| previous.upper_bound == bucket.upper_bound)
+        {
+            previous.count += bucket.count;
+        } else {
+            coalesced.push(bucket);
+        }
+    }
+    if coalesced.is_empty() {
+        return Ok(f64::NAN);
+    }
+    if coalesced[0].count.is_nan() {
+        coalesced[0].count = 0.0;
+    }
+    let mut previous = coalesced[0].count;
+    for bucket in coalesced.iter_mut().skip(1) {
+        check_cancelled(cancelled)?;
+        if bucket.count.is_nan() || previous > bucket.count {
+            bucket.count = previous;
+        } else {
+            previous = bucket.count;
+        }
+    }
+    let total = coalesced.last().expect("nonempty buckets").count;
+    if total == 0.0 {
+        return Ok(f64::NAN);
+    }
+    if quantile < 0.0 {
+        return Ok(f64::NEG_INFINITY);
+    }
+    if quantile > 1.0 {
+        return Ok(f64::INFINITY);
+    }
+    let requested = total * quantile;
+    let mut previous_count = 0.0;
+    let mut previous_bound = 0.0;
+    for bucket in &coalesced {
+        check_cancelled(cancelled)?;
+        if bucket.count <= 0.0 {
+            previous_bound = bucket.upper_bound;
+            continue;
+        }
+        if bucket.count < requested {
+            previous_count = bucket.count;
+            previous_bound = bucket.upper_bound;
+            continue;
+        }
+        if bucket.upper_bound.is_infinite() {
+            break;
+        }
+        if bucket.count == previous_count {
+            return Ok(previous_bound);
+        }
+        return Ok(previous_bound
+            + (bucket.upper_bound - previous_bound) * (requested - previous_count)
+                / (bucket.count - previous_count));
+    }
+    Ok(coalesced
+        .iter()
+        .rev()
+        .find(|bucket| !bucket.upper_bound.is_infinite())
+        .map_or(f64::NAN, |bucket| bucket.upper_bound))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_histogram_quantiles(
+    conn: &Connection,
+    features: QueryFeatures,
+    histogram: &HistogramQuantilesPlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    check_cancelled(cancelled)?;
+    let mut frame_bytes = 0_usize;
+    let mut intermediate_points = 0_u64;
+    let mut quantiles = Vec::with_capacity(histogram.quantiles.len());
+    for plan in &histogram.quantiles {
+        let result = execute_prometheus(
+            conn,
+            features,
+            plan,
+            start,
+            stop,
+            step,
+            instant,
+            query_start,
+            query_end,
+            limits,
+            annotations,
+            cancelled,
+        )?;
+        frame_bytes = frame_bytes.saturating_add(result.frame_bytes);
+        intermediate_points = intermediate_points
+            .saturating_add(result.intermediate_points)
+            .saturating_add(result.points);
+        enforce_intermediate_work(intermediate_points, limits)?;
+        let IntermediateValue::Scalar(points) = decode_prometheus_intermediate(
+            &result.body,
+            PromValueType::Scalar,
+            instant,
+            limits,
+            cancelled,
+        )?
+        else {
+            unreachable!("histogram_quantiles phi type was checked while lowering")
+        };
+        let label = metricsql_phi_label(points.first().map_or(f64::NAN, |point| point.1));
+        quantiles.push((label, points.into_iter().collect::<BTreeMap<_, _>>()));
+    }
+
+    let bucket_type = histogram.inner.value_type();
+    let buckets = execute_prometheus(
+        conn,
+        features,
+        &histogram.inner,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )?;
+    frame_bytes = frame_bytes.saturating_add(buckets.frame_bytes);
+    intermediate_points = intermediate_points
+        .saturating_add(buckets.intermediate_points)
+        .saturating_add(buckets.points);
+    enforce_intermediate_work(intermediate_points, limits)?;
+    let series = match decode_prometheus_intermediate(
+        &buckets.body,
+        bucket_type,
+        instant,
+        limits,
+        cancelled,
+    )? {
+        IntermediateValue::Scalar(points) => vec![IntermediateSeries {
+            labels: BTreeMap::new(),
+            points,
+        }],
+        IntermediateValue::Vector(series) => series,
+    };
+    let series =
+        metricsql_vmrange_buckets_to_le(series, &mut intermediate_points, limits, cancelled)?;
+    let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, Vec<MetricsHistogramBucket>>> =
+        BTreeMap::new();
+    for mut item in series {
+        check_cancelled(cancelled)?;
+        let Some(label) = item.labels.get("le") else {
+            continue;
+        };
+        let Ok(upper_bound) = label.parse::<f64>() else {
+            continue;
+        };
+        item.labels.remove("__name__");
+        item.labels.remove("le");
+        let group = groups.entry(item.labels).or_default();
+        for (timestamp, count) in item.points {
+            group
+                .entry(timestamp)
+                .or_default()
+                .push(MetricsHistogramBucket { upper_bound, count });
+        }
+    }
+
+    let mut output = Vec::with_capacity(groups.len().saturating_mul(quantiles.len()));
+    let mut result_points = 0_u64;
+    let mut retained_label_bytes = 0_usize;
+    for (label, values) in quantiles {
+        for (labels, steps) in &groups {
+            check_cancelled(cancelled)?;
+            let mut result_labels = labels.clone();
+            result_labels.remove(&histogram.destination);
+            result_labels.insert(histogram.destination.clone(), label.clone());
+            let mut points = Vec::with_capacity(steps.len());
+            for (timestamp, buckets) in steps {
+                check_cancelled(cancelled)?;
+                let quantile = values.get(timestamp).copied().ok_or_else(|| {
+                    "histogram_quantiles phi is missing an evaluation timestamp".to_string()
+                })?;
+                let value = metricsql_bucket_quantile(
+                    quantile,
+                    buckets.clone(),
+                    &mut intermediate_points,
+                    limits,
+                    cancelled,
+                )?;
+                if !value.is_nan() {
+                    admit_prometheus_point(result_points, limits)?;
+                    result_points = result_points.saturating_add(1);
+                    intermediate_points = intermediate_points.saturating_add(1);
+                    enforce_intermediate_work(intermediate_points, limits)?;
+                    points.push((*timestamp, value));
+                }
+            }
+            if !points.is_empty() {
+                charge_metricsql_labels(&mut retained_label_bytes, &result_labels, limits)?;
+                output.push(IntermediateSeries {
+                    labels: result_labels,
+                    points,
+                });
+            }
+        }
+    }
+    let output = normalize_prometheus_vector(output, cancelled).map_err(|error| {
+        if error.contains("same labelset") {
+            "duplicate output timeseries: histogram_quantiles label transformation".to_string()
+        } else {
+            error
+        }
+    })?;
+    encode_prometheus_intermediate(
+        IntermediateValue::Vector(output),
+        instant,
+        frame_bytes,
         intermediate_points,
         limits,
         cancelled,
@@ -4142,6 +4641,103 @@ mod tests {
         ] {
             assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
         }
+    }
+
+    #[test]
+    fn histogram_quantiles_grammar_is_metricsql_only_and_composable() {
+        let PromPlan::MetricsHistogramQuantiles(plan) = lower(
+            "histogram_quantiles(\"phi\", 0.25, 0.75, cpu)",
+            300_000,
+            10_000,
+        )
+        .unwrap() else {
+            panic!("MetricsQL histogram-quantiles plan expected")
+        };
+        assert_eq!(plan.destination, "phi");
+        assert_eq!(plan.quantiles.len(), 2);
+        assert!(matches!(
+            *plan.inner,
+            PromPlan::MetricsDynamicRollup(DynamicRollupPlan {
+                op: DynamicRollupOp::Default,
+                ..
+            })
+        ));
+        for query in [
+            "HISTOGRAM_QUANTILES(\"phi\", 0.5, cpu,)",
+            "sum(histogram_quantiles(\"phi\", 0.5, cpu))",
+            "histogram_quantiles(\"phi\", step(), cpu) keep_metric_names",
+            "histogram_quantiles(\"phi\", 0.5, 1)",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_ok(), "{query}");
+        }
+        for (query, diagnostic) in [
+            (
+                "histogram_quantiles(\"phi\", cpu)",
+                "unexpected number of args: 2; expecting at least 3 args",
+            ),
+            ("histogram_quantiles(1, 0.5, cpu)", "cannot obtain dstLabel"),
+            ("histogram_quantiles(\"phi\", cpu, cpu)", "cannot parse phi"),
+        ] {
+            assert!(
+                lower(query, 300_000, 10_000)
+                    .unwrap_err()
+                    .contains(diagnostic),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn histogram_quantiles_pin_victoriametrics_float_and_bucket_rules() {
+        for (value, expected) in [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (999_999.0, "999999"),
+            (1_000_000.0, "1e+06"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "+Inf"),
+        ] {
+            assert_eq!(metricsql_phi_label(value), expected);
+        }
+
+        let cancelled = AtomicBool::new(false);
+        let limits = PromQueryLimits::default();
+        let evaluate = |quantile, buckets: &[(f64, f64)]| {
+            let mut work = 0;
+            metricsql_bucket_quantile(
+                quantile,
+                buckets
+                    .iter()
+                    .map(|(upper_bound, count)| MetricsHistogramBucket {
+                        upper_bound: *upper_bound,
+                        count: *count,
+                    })
+                    .collect(),
+                &mut work,
+                limits,
+                &cancelled,
+            )
+            .unwrap()
+        };
+        assert_eq!(evaluate(0.5, &[(1.0, 10.0), (2.0, 20.0)]), 1.0);
+        assert_eq!(
+            evaluate(0.25, &[(-5.0, 2.0), (-1.0, 4.0), (f64::INFINITY, 4.0)]),
+            -2.5
+        );
+        assert_eq!(
+            evaluate(0.25, &[(1.0, f64::NAN), (2.0, 10.0), (f64::INFINITY, 20.0)]),
+            1.5
+        );
+        assert_eq!(
+            evaluate(
+                0.5,
+                &[(1.0, 3.0), (1.0, 4.0), (2.0, 10.0), (f64::INFINITY, 10.0)]
+            ),
+            5.0 / 7.0
+        );
+        assert!(evaluate(f64::NAN, &[(1.0, 1.0)]).is_nan());
     }
 
     #[test]

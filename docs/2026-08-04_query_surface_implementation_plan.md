@@ -277,7 +277,12 @@ executable `SQL-MQL-010`, real-extension limit/cancellation/reopen coverage,
 stable-route isolation, and exact-build zero-read/narrow/wide evidence.
 `MQL-11`
 is already corrected to deferred because the pinned oracle rejects `min_of`
-and `max_of`.
+and `max_of`. `MQL-12` is shipped with pinned plural-histogram argument,
+rank-label, destination, cumulative/`vmrange`, missing-`+Inf`, repair,
+interpolation, computed-NaN, collision, and error behavior; executable
+`SQL-MQL-012`; one shared public bucket read; stable-route isolation; bounded
+work/cancellation; durability; and reopen. Exact-build narrow/wide evidence is
+the remaining Session 15 closeout gate.
 
 ### Session 16: LogsQL P2 filters
 
