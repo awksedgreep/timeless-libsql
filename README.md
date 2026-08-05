@@ -646,6 +646,9 @@ It also supports literal `prefix*:filter` field-set searches over canonical
 special fields and recursively dotted retained metadata leaves, including
 empty/quoted prefixes, independent field-group operands, projected pipelines,
 strict wildcard-comparison errors, bounded traversal, and cancellation.
+Exact-build p95 is 3.122/49.085 ms for narrow/wide word-prefix search and
+3.216/47.324 ms for typed-prefix search over the 8,192-entry evidence fixture;
+all matching shapes retain byte-identical public storage reads.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

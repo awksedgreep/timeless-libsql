@@ -3635,3 +3635,61 @@ locally. The executable SQL command is the Rust harness used by CLI section
 45. No private table, extension primitive, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed. No CI workflow was modified or invoked.
+
+## Session 16 LogsQL P2 progress: prefix-selected field sets
+
+The checked-in
+[`2026-08-05_session16_lql_f32_field_prefixes.json`](evidence/2026-08-05_session16_lql_f32_field_prefixes.json)
+was captured from exact extension, metrics-server, and logs-server build
+`94e1cd4cd715b6ec2a86e580324cf50057943332`. It closes `LQL-F32` with lazy
+any-matching-field expansion over literal canonical field-name prefixes.
+Correctness separately pins empty and quoted prefixes, punctuation, canonical
+special fields, recursively dotted rich-object leaves, retained arrays/null,
+independent logical-group operands, `NOT`, current-row pipeline projection,
+strict wildcard-comparison errors, work limits, cancellation, durability, and
+reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `range_*:key`, indexed host | 128 | 34,677 | 2.964 | 3.122 | 3.224 | 1 | 1,024 | 235,778 | 128 |
+| `range_*:key`, full fixture | 8,192 | 2,249,775 | 43.999 | 49.085 | 51.898 | 4 | 8,192 | 1,914,055 | 8,192 |
+| `context.*:value_type(uint64)`, indexed host | 128 | 34,677 | 2.948 | 3.216 | 3.523 | 1 | 1,024 | 235,778 | 128 |
+| `context.*:value_type(uint64)`, full fixture | 8,192 | 2,249,775 | 42.424 | 47.324 | 48.799 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Word-prefix p95 is 1.7% above the same-run word query at narrow cardinality and
+31.0% above it over the full fixture. Typed-prefix p95 is 0.1% below/2.3%
+above the equivalent `value_type` query. Every equal-cardinality shape reads
+the same public blocks, entries, and bytes and returns the same public rows.
+The wide word-search difference is bounded canonical-name traversal and word
+evaluation over decoded row fields, not storage amplification.
+
+Executable `SQL-LOG-022` exposes literal prefix selection plus exact retained
+string/null matching through public `logs` rows and recursive JSON1. It gives
+each bounded row a query-local identity so multiple matching fields do not
+duplicate a row while otherwise identical stored rows remain distinct. The
+Rust API owns word, phrase, range, rich-value, RFC3339 `_time`, composition,
+limits, cancellation, and response semantics. Field expansion stops at the
+first match, retains only one recursive path, and observes cancellation at
+each node. An extension primitive would not remove any measured block read,
+decode, allocation, copy, or row crossing, so it is rejected by the documented
+primitive gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+12.420 ms and the explicit durability barrier took 34.737 ms. The fixture,
+wire bytes, and storage are byte-identical to LQL-F30: four raw blocks,
+1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM bytes. Logs
+RSS HWM was 92,760 KiB, 972 KiB above LQL-F30 after four additional full-
+response shapes; metrics HWM was 51,324 KiB, 2,148 KiB lower. Both are retained
+as whole-process variation rather than attributed to the predicates.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 336
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 25-test logs real-
+extension suite, 53 logs library tests, complete Rust server workspace, Clippy
+with warnings denied, formatting, the 29-test Rust query harness,
+documentation contracts, and all 88 SQL recipes (123 statements) pass
+locally. The executable SQL command is the Rust harness used by CLI section
+45. No private table, extension primitive, storage format, authoritative
+batching, compression, index, rollup, retention, transaction, migration,
+maintenance, or public batch/SQL contract changed. No CI workflow was modified
+or invoked.

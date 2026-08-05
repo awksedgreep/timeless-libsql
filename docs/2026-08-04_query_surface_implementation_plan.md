@@ -406,8 +406,10 @@ quoted prefixes, canonical special fields, recursively dotted retained object
 leaves, array/null leaf fidelity, strict wildcard-comparison errors, projected
 pipeline behavior, work limits, cancellation, durability, and reopen.
 Executable `SQL-LOG-022` proves a recursive public-row exact-string foundation
-without collapsing duplicate log entries. The implementation and oracle gates
-pass; exact-build narrow/wide evidence remains before the row is shipped.
+without collapsing duplicate log entries. Exact-build evidence at commit
+`94e1cd4cd715b6ec2a86e580324cf50057943332` records narrow/wide word and typed-
+value field-set searches with byte-identical public reads. It closes the row
+without an extension primitive or storage-contract change.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 
