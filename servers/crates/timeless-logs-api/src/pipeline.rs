@@ -38,8 +38,21 @@ pub(crate) struct PipelineExecution<'a> {
 
 pub(crate) fn execute_query_rows(
     rows: Vec<QueryRow>,
-    execution: PipelineExecution<'_>,
+    mut execution: PipelineExecution<'_>,
 ) -> Result<Vec<Value>, String> {
+    if matches!(execution.operations.first(), Some(PipelineOp::QueryStats)) {
+        ensure_active(execution.cancelled)?;
+        let rows = vec![Value::Object(query_stats(
+            execution.report,
+            execution
+                .query_started
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+        ))];
+        execution.operations = &execution.operations[1..];
+        return execute(rows, execution);
+    }
     let rows = rows
         .into_iter()
         .enumerate()
@@ -1732,5 +1745,42 @@ mod tests {
         assert_eq!(result["BytesProcessedUncompressedValues"], json!("0"));
         assert_eq!(result["QueryDurationNsecs"], json!("777"));
         assert!(result.values().all(Value::is_string));
+    }
+
+    #[test]
+    fn query_stats_first_does_not_materialize_discarded_response_rows() {
+        let cancelled = AtomicBool::new(false);
+        let rows = execute_query_rows(
+            vec![QueryRow {
+                ts: i64::MAX,
+                level: "info".to_owned(),
+                message: "not rendered".to_owned(),
+                metadata_json: "not decoded".to_owned(),
+            }],
+            PipelineExecution {
+                report: LogQueryExecutionReport {
+                    processed_entries: 1,
+                    matched_entries: 1,
+                    values_read: 3,
+                    timestamps_read: 1,
+                    ..LogQueryExecutionReport::default()
+                },
+                operations: &[PipelineOp::QueryStats],
+                implicit_result_limit: None,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits: PipelineLimits {
+                    max_result_rows: 10,
+                    max_state_items: 10,
+                },
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["RowsFound"], json!("1"));
+        assert_eq!(rows[0]["ValuesRead"], json!("3"));
     }
 }

@@ -457,6 +457,12 @@ connection. It substitutes complete typed post-filter cardinality for
 pipelines. A new, failed, or cancelled scan clears a stale report, and a report
 can be read only once.
 
+When `query_stats` is the first pipe, the API returns that one report row
+without formatting every matched log into response JSON first. The bounded
+public storage scan and its physical counters are unchanged; later pipes still
+run over the report row, and a `query_stats` placed after another transform
+retains ordered pipeline behavior.
+
 Timeless reads one encoded rich payload instead of separate VictoriaLogs
 column files. `BytesReadValues` and `BytesReadTotal` therefore contain the same
 actual payload byte count; unavailable component byte fields and
