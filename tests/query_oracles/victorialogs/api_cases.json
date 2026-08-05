@@ -478,6 +478,60 @@
       "expected_cases": ["state-string", "state-zero"]
     },
     {
+      "id": "LQL-F20-contains-any-is-field-independent",
+      "query": "state_group:=\"state\" never_present:contains_any(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F20-contains-all-is-field-independent",
+      "query": "state_group:=\"state\" never_present:contains_all(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F20-function-names-are-case-insensitive",
+      "query": "state_group:=\"state\" never_present:CoNtAiNs_AnY(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F20-contains-any-wildcard-among-values-is-noop",
+      "query": "state_group:=\"state\" never_present:contains_any(alpha, *)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F20-contains-all-wildcard-among-values-is-noop",
+      "query": "state_group:=\"state\" never_present:contains_all(*, alpha)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F20-noop-under-not-matches-nothing",
+      "query": "state_group:=\"state\" AND NOT never_present:contains_all(*)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F20-pipeline-composition",
+      "query": "state_group:=\"state\" | filter never_present:contains_any(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F20-service-alias-does-not-capture-in-noop",
+      "query": "state_group:=\"state\" service:in(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F20-level-alias-does-not-capture-contains-noop",
+      "query": "state_group:=\"state\" level:contains_all(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
       "id": "LQL-F18-empty-field",
       "query": "state_group:=\"state\" probe:\"\"",
       "status": 200,
@@ -969,6 +1023,20 @@
     {
       "id": "LQL-F17-unseparated-values-are-invalid",
       "query": "in(alpha beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F20-contains-any-unseparated-wildcard-is-invalid",
+      "query": "contains_any(* alpha)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F20-contains-all-leading-empty-value-is-invalid",
+      "query": "contains_all(,*)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

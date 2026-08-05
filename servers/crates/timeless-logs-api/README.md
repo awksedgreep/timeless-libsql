@@ -120,6 +120,14 @@ the separately deferred subquery capability instead of being mistaken for a
 static value or outer pipeline. `SQL-LOG-015` gives direct SQLite/libSQL users
 the parameterized message and retained-text equivalents.
 
+The standalone unquoted wildcard has the same field-independent no-op meaning
+inside `contains_any(...)` and `contains_all(...)`, including mixed lists and
+missing fields. Function names are case-insensitive, and logical/pipeline
+composition treats the result as a constant true predicate. Non-wildcard
+`contains_all`/`contains_any` values return an explicit unsupported-capability
+error until `LQL-F21`/`LQL-F22` ship; query-backed lists remain `LQL-F38`.
+`SQL-LOG-016` shows the direct SQL equivalent: omit the field predicate.
+
 Double- and single-quoted strings decode VictoriaLogs-compatible Go escapes,
 backtick strings are raw, and quoted field identifiers select one literal
 metadata key. Unsupported syntax is rejected rather than ignored. The exact

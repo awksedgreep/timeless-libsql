@@ -234,6 +234,21 @@ token scanners, quoted-string escapes, Unicode word categories, and partial-
 match restart behavior. This evidence does not justify a SQLite extension
 primitive because it would not eliminate the already-required field decode.
 
+Static exact membership uses `in(v1, ..., vN)`. Values are case-sensitive,
+quoted or unquoted, and matched against the same non-mutating rich textual
+projection used by exact-prefix filters. `in()` matches nothing, a trailing
+comma is accepted, and a quoted `"*"` is literal. Any standalone unquoted `*`
+inside `in`, `contains_any`, or `contains_all` is instead a field-independent
+no-op: it matches every bounded row even when the named field is absent. The
+non-wildcard `contains_all` and `contains_any` filters and query-backed lists
+remain explicitly unsupported rather than silently approximated.
+
+Direct SQLite/libSQL users can express static membership with parameterized
+`IN` and a field no-op by omitting the field predicate. Executable
+`SQL-LOG-015` and `SQL-LOG-016` document both forms, including existing hidden-
+column pruning for a declared string-only index key. These API constructs do
+not require a private table or new extension primitive.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

@@ -123,6 +123,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-013`](#sql-log-013-numeric-aggregates-median-and-rates) | `LQL-S05`, `LQL-S06`, `LQL-S08` | current foundation | numeric-only ordinary SQL aggregates, median, and explicit-window rates |
 | [`SQL-LOG-014`](#sql-log-014-exact-prefix) | `LQL-F16` | current foundation | exact case-sensitive start-of-message and retained-text-field prefixes; API owns rich-value textual projection |
 | [`SQL-LOG-015`](#sql-log-015-static-multi-exact-membership) | `LQL-F17` | current foundation | case-sensitive message and retained-text membership with one bound parameter per value; API owns rich-value projection and static-list grammar |
+| [`SQL-LOG-016`](#sql-log-016-field-no-op) | `LQL-F20` | current foundation | exact field-independent true predicate; API owns wildcard-function grammar and composition |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5048,6 +5049,39 @@ logical/pipeline, limit, cancellation, and error semantics. Subquery
 membership is the separate deferred `LQL-F38` row. The declared string-key
 form reuses the existing public posting index; the other forms use bounded
 public rows. No new extension primitive is required.
+
+### SQL-LOG-016: field no-op
+
+A LogsQL field no-op is the constant-true predicate. It does not inspect the
+named field and must also match a row where that field is missing. In ordinary
+SQL, omit the field predicate entirely; an explicit `1 = 1` makes the mapping
+visible in a generated statement:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND 1 = 1
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+Bounds use the table's configured timestamp unit (milliseconds here), are
+inclusive, and remain independently required even though the language atom is
+a no-op. `max_work_entries` bounds decoded work, while `:limit` bounds output
+after the true predicate. Missing, JSON null, empty, and non-empty values are
+all irrelevant; the SQL must not add `json_type`, `json_extract`, or a hidden
+index-column condition.
+
+The Rust LogsQL API owns the case-insensitive `in(*)`, `contains_any(*)`, and
+`contains_all(*)` function names, field scoping, the rule that any standalone
+unquoted wildcard makes the whole static list a no-op, logical/pipeline
+composition, malformed errors, and the explicit LQL-F21/LQL-F22/LQL-F38
+boundaries. A quoted `"*"` remains an ordinary value and is not this recipe.
+The extension already exposes the exact direct-user operation through ordinary
+bounded row SQL, so no new primitive is warranted.
 
 ## Adding the next recipe
 

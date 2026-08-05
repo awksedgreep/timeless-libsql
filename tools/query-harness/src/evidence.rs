@@ -1547,6 +1547,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "field_noop_narrow",
+                "logs-field-noop-narrow",
+                "host:=\"h00\" AND never_present:contains_any(*) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "field_noop_wide",
+                "logs-field-noop-wide",
+                "never_present:contains_all(*) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
                 "empty_narrow",
                 "logs-empty-narrow",
                 "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",

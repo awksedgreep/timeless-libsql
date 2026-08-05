@@ -1206,10 +1206,38 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
             r#"never:in(nope, *)"#,
             (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
         ),
+        (
+            r#"never:contains_any(*)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"never:contains_all(*)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"never:contains_any(nope, *)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"never:contains_all(*, nope)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"service:in(*)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (
+            r#"level:contains_all(*)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
         (r#"case:in()"#, Vec::new()),
         (
             r#"case:in(missing, string) AND NOT case:in(string)"#,
             vec![1_811_000_000_000_001],
+        ),
+        (
+            r#"case:in(missing, string) AND NOT never:contains_all(*)"#,
+            Vec::new(),
         ),
     ];
     for (query, expected) in &queries {
@@ -1228,7 +1256,30 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
     pipeline_cases.sort();
     assert_eq!(pipeline_cases, ["array", "false"]);
 
-    for malformed in ["in", "in(", "in(,value)", "in(value other)", "in(value*)"] {
+    let mut noop_pipeline_cases = pipeline_rows(
+        &app,
+        r#"* | filter never:contains_any(*) | fields case | limit 100"#,
+    )
+    .await
+    .into_iter()
+    .map(|row| row["case"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+    noop_pipeline_cases.sort();
+    assert_eq!(
+        noop_pipeline_cases,
+        ["array", "empty", "false", "missing", "null", "object", "string", "zero"]
+    );
+
+    for malformed in [
+        "in",
+        "in(",
+        "in(,value)",
+        "in(value other)",
+        "in(value*)",
+        "contains_any",
+        "contains_any(* value)",
+        "contains_all(,*)",
+    ] {
         let response = app
             .clone()
             .oneshot(logsql_request(malformed))
@@ -1257,6 +1308,31 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
         .unwrap()["reason"],
         "unsupported_logsql"
     );
+
+    for unsupported in [
+        "case:contains_all(missing)",
+        "case:contains_any(missing)",
+        "case:contains_any(missing | fields case)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(unsupported))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{unsupported}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "unsupported_logsql",
+            "{unsupported}"
+        );
+    }
 
     let limited = router_with_limits(
         storage.clone(),

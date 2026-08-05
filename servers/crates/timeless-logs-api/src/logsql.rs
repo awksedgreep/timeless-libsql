@@ -696,6 +696,10 @@ pub fn parse_at(
                         append_predicate(&mut spec, exact.predicate(LogField::Message));
                         continue;
                     }
+                    if let Some(predicate) = parse_field_noop_filter(&token)? {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
                     if let Some(predicate) = parse_case_insensitive_filter(&token)? {
                         append_predicate(&mut spec, predicate);
                         continue;
@@ -931,36 +935,57 @@ impl ParsedMultiExactFilter {
 }
 
 fn parse_multi_exact_filter(token: &str) -> Result<Option<ParsedMultiExactFilter>, LogsqlError> {
-    if token.eq_ignore_ascii_case("in") {
-        return Err(LogsqlError::malformed(
-            "LogsQL in filter requires parentheses",
-        ));
+    let Some(parsed) = parse_static_value_list(token, "in")? else {
+        return Ok(None);
+    };
+    Ok(Some(match parsed {
+        ParsedStaticValueList::Values(values) => ParsedMultiExactFilter::Values(values),
+        ParsedStaticValueList::Noop => ParsedMultiExactFilter::Noop,
+    }))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParsedStaticValueList {
+    Values(Vec<String>),
+    Noop,
+}
+
+fn parse_static_value_list(
+    token: &str,
+    function: &str,
+) -> Result<Option<ParsedStaticValueList>, LogsqlError> {
+    if token.eq_ignore_ascii_case(function) {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {function} filter requires parentheses"
+        )));
     }
     let Some(open) = token.find('(') else {
         return Ok(None);
     };
-    if !token[..open].eq_ignore_ascii_case("in") {
+    if !token[..open].eq_ignore_ascii_case(function) {
         return Ok(None);
     }
     let inner = token[open..]
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
-        .ok_or_else(|| LogsqlError::malformed("unterminated LogsQL in() filter"))?;
+        .ok_or_else(|| {
+            LogsqlError::malformed(format!("unterminated LogsQL {function}() filter"))
+        })?;
     if contains_top_level(inner, '|')? {
-        return Err(LogsqlError::unsupported(
-            "LogsQL in(subquery) is owned by deferred LQL-F38 and is not supported",
-        ));
+        return Err(LogsqlError::unsupported(format!(
+            "LogsQL {function}(subquery) is owned by deferred LQL-F38 and is not supported"
+        )));
     }
 
     let inner = inner.trim();
     if inner.is_empty() {
-        return Ok(Some(ParsedMultiExactFilter::Values(Vec::new())));
+        return Ok(Some(ParsedStaticValueList::Values(Vec::new())));
     }
     let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
     if inner.is_empty() {
-        return Err(LogsqlError::malformed(
-            "LogsQL in() cannot start with an empty value",
-        ));
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {function}() cannot start with an empty value"
+        )));
     }
 
     let mut values = Vec::new();
@@ -980,7 +1005,7 @@ fn parse_multi_exact_filter(token: &str) -> Result<Option<ParsedMultiExactFilter
                 })
             {
                 return Err(LogsqlError::malformed(format!(
-                    "invalid LogsQL in() value {argument:?}"
+                    "invalid LogsQL {function}() value {argument:?}"
                 )));
             }
             argument.to_owned()
@@ -988,11 +1013,26 @@ fn parse_multi_exact_filter(token: &str) -> Result<Option<ParsedMultiExactFilter
         values.push(value);
     }
     if wildcard {
-        return Ok(Some(ParsedMultiExactFilter::Noop));
+        return Ok(Some(ParsedStaticValueList::Noop));
     }
     values.sort_unstable();
     values.dedup();
-    Ok(Some(ParsedMultiExactFilter::Values(values)))
+    Ok(Some(ParsedStaticValueList::Values(values)))
+}
+
+fn parse_field_noop_filter(token: &str) -> Result<Option<LogPredicate>, LogsqlError> {
+    for (function, row) in [("contains_all", "LQL-F21"), ("contains_any", "LQL-F22")] {
+        let Some(parsed) = parse_static_value_list(token, function)? else {
+            continue;
+        };
+        return match parsed {
+            ParsedStaticValueList::Noop => Ok(Some(LogPredicate::True)),
+            ParsedStaticValueList::Values(_) => Err(LogsqlError::unsupported(format!(
+                "LogsQL {function}(values) is owned by {row} and is not supported yet"
+            ))),
+        };
+    }
+    Ok(None)
 }
 
 fn parse_exact_prefix_argument(value: &str) -> Result<Option<String>, LogsqlError> {
@@ -1572,6 +1612,9 @@ fn compile_field_filter(
     if let Some(exact) = parse_multi_exact_filter(value)? {
         return Ok(exact.predicate(field.clone()));
     }
+    if let Some(predicate) = parse_field_noop_filter(value)? {
+        return Ok(predicate);
+    }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
             field: field.clone(),
@@ -1622,6 +1665,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
     }
     if let Some(exact) = parse_multi_exact_filter(atom)? {
         return Ok(exact.predicate(field.clone()));
+    }
+    if let Some(predicate) = parse_field_noop_filter(atom)? {
+        return Ok(predicate);
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
         return Ok(predicate_for_field(predicate, field));
@@ -2055,7 +2101,16 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
             && !value.starts_with('<')
             && !value.starts_with("range(")
             && !value.starts_with("range[")
+            && !["in", "contains_all", "contains_any"]
+                .iter()
+                .any(|function| is_named_filter_call(value, function))
     })
+}
+
+fn is_named_filter_call(value: &str, function: &str) -> bool {
+    value
+        .find('(')
+        .is_some_and(|open| value[..open].eq_ignore_ascii_case(function))
 }
 
 fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), LogsqlError> {
@@ -2084,6 +2139,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         return Ok(());
     } else if let Some(exact) = parse_multi_exact_filter(value)? {
         append_predicate(spec, exact.predicate(log_field(&path)));
+        return Ok(());
+    } else if let Some(predicate) = parse_field_noop_filter(value)? {
+        append_predicate(spec, predicate);
         return Ok(());
     }
     if !typed {
@@ -3035,6 +3093,40 @@ mod tests {
         .unwrap_err();
         assert_eq!(subquery.kind, LogsqlErrorKind::Unsupported);
         assert!(subquery.message.contains("subquery"));
+    }
+
+    #[test]
+    fn session_sixteen_field_noop_grammar_is_strict_and_field_independent() {
+        for query in [
+            "never_present:contains_any(*)",
+            "never_present:contains_all(*)",
+            "never_present:CoNtAiNs_AnY(*)",
+            "never_present:contains_any(alpha, *)",
+            "never_present:contains_all(*, alpha)",
+            "service:in(*)",
+            "level:contains_all(*)",
+            "probe:in(*)",
+            "probe:contains_any(*) AND case:in(state-string)",
+            "NOT probe:contains_all(*)",
+            "* | filter never_present:contains_any(*)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        for (query, row) in [
+            ("contains_all(alpha)", "LQL-F21"),
+            ("contains_any(alpha)", "LQL-F22"),
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Unsupported, "{query}");
+            assert!(error.message.contains(row), "{query}: {error}");
+        }
+
+        for malformed in ["contains_any", "contains_any(* alpha)", "contains_all(,*)"] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
     }
 
     #[test]
