@@ -462,6 +462,103 @@
       "id": "LQL-P09-S01-count-total-field-type",
       "query": "page_group:=\"page\" | stats count() as total",
       "expected_rows": [{"total": "4"}]
+    },
+    {
+      "id": "LQL-P04-field-values-flattens-types-and-empty-states",
+      "query": "state_group:=\"state\" | field_values probe | sort by (probe) asc",
+      "expected_rows": [
+        {"hits": "3"},
+        {"probe": "0", "hits": "1"},
+        {"probe": "false", "hits": "1"},
+        {"probe": "value", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P04-field-values-zero-limit-means-unbounded",
+      "query": "state_group:=\"state\" | field_values probe limit 0 | sort by (probe) asc",
+      "expected_rows": [
+        {"hits": "3"},
+        {"probe": "0", "hits": "1"},
+        {"probe": "false", "hits": "1"},
+        {"probe": "value", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P05-field-names-includes-stream-columns",
+      "query": "state_group:=\"state\" | field_names | sort by (name) asc",
+      "expected_rows": [
+        {"name": "_msg", "hits": "6"},
+        {"name": "_stream", "hits": "6"},
+        {"name": "_stream_id", "hits": "6"},
+        {"name": "_time", "hits": "6"},
+        {"name": "case", "hits": "6"},
+        {"name": "probe", "hits": "3"},
+        {"name": "state_group", "hits": "6"}
+      ]
+    },
+    {
+      "id": "LQL-P06-Q02-projection-flattens-and-omits-empty",
+      "query": "state_group:=\"state\" | fields case, probe | sort by (case) asc",
+      "expected_rows": [
+        {"case": "state-empty"},
+        {"case": "state-false", "probe": "false"},
+        {"case": "state-missing"},
+        {"case": "state-null"},
+        {"case": "state-string", "probe": "value"},
+        {"case": "state-zero", "probe": "0"}
+      ]
+    },
+    {
+      "id": "LQL-P08-filter-observes-current-projected-fields",
+      "query": "state_group:=\"state\" | fields case, probe | filter probe:* | sort by (case) asc",
+      "expected_rows": [
+        {"case": "state-false", "probe": "false"},
+        {"case": "state-string", "probe": "value"},
+        {"case": "state-zero", "probe": "0"}
+      ]
+    },
+    {
+      "id": "LQL-S02-count-and-count-empty",
+      "query": "state_group:=\"state\" | stats count(probe) as present, count_empty(probe) as empty",
+      "expected_rows": [{"present": "3", "empty": "3"}]
+    },
+    {
+      "id": "LQL-S03-exact-and-hashed-unique-counts",
+      "query": "state_group:=\"state\" | stats count_uniq(probe) as exact, count_uniq_hash(probe) as hashed",
+      "expected_rows": [{"exact": "3", "hashed": "3"}]
+    },
+    {
+      "id": "LQL-S04-unique-and-ordered-values",
+      "query": "state_group:=\"state\" | stats uniq_values(probe) as unique, values(probe) as all_values",
+      "expected_rows": [{
+        "unique": "[\"0\",\"false\",\"value\"]",
+        "all_values": "[\"\",\"0\",\"value\",\"false\",\"\",\"\"]"
+      }]
+    },
+    {
+      "id": "LQL-S04-values-zero-limit-means-unbounded",
+      "query": "state_group:=\"state\" | stats values(probe) limit 0 as all_values",
+      "expected_rows": [{
+        "all_values": "[\"\",\"0\",\"value\",\"false\",\"\",\"\"]"
+      }]
+    },
+    {
+      "id": "LQL-S05-S06-numeric-aggregates-coerce-storage-values",
+      "query": "numeric_group:=\"numeric\" | stats sum(n) as sum, avg(n) as avg, min(n) as min, max(n) as max, median(n) as median",
+      "expected_rows": [{
+        "sum": "9007199254741008",
+        "avg": "1286742750677286.8",
+        "max": "9007199254740993",
+        "median": "2"
+      }]
+    },
+    {
+      "id": "LQL-S08-rate-and-rate-sum-use-global-window",
+      "query": "_time:30s numeric_group:=\"numeric\" | stats rate() as rate, rate_sum(n) as rate_sum",
+      "expected_rows": [{
+        "rate": "0.3",
+        "rate_sum": "300239975158033.6"
+      }]
     }
   ],
   "error_cases": [

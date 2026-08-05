@@ -20,6 +20,9 @@ use timeless_api_common::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::logsql::PipelineOp;
+use crate::pipeline::{self, PipelineLimits};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimestampUnit {
     Milliseconds,
@@ -368,6 +371,16 @@ enum ReadCommand {
         cancelled: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<Vec<QueryRow>, String>>,
     },
+    Pipeline {
+        spec: QuerySpec,
+        operations: Vec<PipelineOp>,
+        implicit_result_limit: Option<usize>,
+        rate_window_seconds: Option<f64>,
+        timestamp_unit: TimestampUnit,
+        limits: PipelineLimits,
+        cancelled: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<Vec<JsonValue>, String>>,
+    },
     Count {
         spec: QuerySpec,
         cancelled: Arc<AtomicBool>,
@@ -628,6 +641,53 @@ impl Storage {
                 cancellation.disarm();
                 record_read_return(&self.0.profile);
                 return Err("SQLite reader stopped before query completed".into());
+            }
+        };
+        cancellation.disarm();
+        result
+    }
+
+    /// Return the complete bounded base rowset for ordered API-owned query
+    /// transforms. The extension still owns every storage read and enforces
+    /// `max_work_entries`; this method only prevents an API pipeline from
+    /// mistaking a truncated rowset for a complete aggregate input.
+    pub(crate) async fn pipeline(
+        &self,
+        spec: QuerySpec,
+        operations: Vec<PipelineOp>,
+        implicit_result_limit: Option<usize>,
+        rate_window_seconds: Option<f64>,
+        limits: PipelineLimits,
+    ) -> Result<Vec<JsonValue>, String> {
+        validate_work_limit(&spec)?;
+        let (cancelled, mut cancellation) = self.begin_read();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .reader()
+            .send(ReadCommand::Pipeline {
+                spec,
+                operations,
+                implicit_result_limit,
+                rate_window_seconds,
+                timestamp_unit: self.timestamp_unit(),
+                limits,
+                cancelled,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            cancellation.disarm();
+            record_read_return(&self.0.profile);
+            return Err("SQLite reader is not running".into());
+        }
+        cancellation.handoff_to_reader();
+        let result = match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                cancellation.disarm();
+                record_read_return(&self.0.profile);
+                return Err("SQLite reader stopped before LogsQL pipeline completed".into());
             }
         };
         cancellation.disarm();
@@ -1061,6 +1121,33 @@ fn reader_main(
                 record_query(&profile, started.elapsed(), result.is_err(), rows);
                 let _ = reply.send(result);
             }
+            ReadCommand::Pipeline {
+                spec,
+                operations,
+                implicit_result_limit,
+                rate_window_seconds,
+                timestamp_unit,
+                limits,
+                cancelled,
+                reply,
+            } => {
+                let started = Instant::now();
+                let result = cancellable_read(&conn, &cancelled, || {
+                    let rows = query_pipeline_rows(&conn, &spec, cancelled.as_ref())?;
+                    pipeline::execute_query_rows(
+                        rows,
+                        &operations,
+                        implicit_result_limit,
+                        rate_window_seconds,
+                        timestamp_unit,
+                        limits,
+                        cancelled.as_ref(),
+                    )
+                });
+                let rows = result.as_ref().map_or(0, Vec::len);
+                record_query(&profile, started.elapsed(), result.is_err(), rows);
+                let _ = reply.send(result);
+            }
             ReadCommand::Count {
                 spec,
                 cancelled,
@@ -1404,7 +1491,10 @@ fn query_rows(
         "SELECT ts, level, message, metadata FROM logs{where_sql} \
          ORDER BY ts {order} LIMIT ? OFFSET ?"
     );
-    values.push(SqlValue::Integer(spec.limit.clamp(1, 100_000) as i64));
+    values.push(SqlValue::Integer(
+        i64::try_from(spec.limit.max(1))
+            .map_err(|_| "log query limit exceeds SQLite INTEGER range".to_string())?,
+    ));
     values.push(SqlValue::Integer(spec.offset as i64));
     let mut stmt = conn
         .prepare(&sql)
@@ -1446,7 +1536,7 @@ fn query_rows_with_postfilters(
     let mut rows = statement
         .query(params_from_iter(values))
         .map_err(|error| format!("query LogsQL post-filter candidates: {error}"))?;
-    let limit = spec.limit.min(100_000);
+    let limit = spec.limit;
     let mut considered = 0usize;
     let mut matched = 0usize;
     let mut output = Vec::new();
@@ -1494,6 +1584,27 @@ fn query_rows_with_postfilters(
         }
     }
     Ok(output)
+}
+
+fn query_pipeline_rows(
+    conn: &Connection,
+    spec: &QuerySpec,
+    cancelled: &AtomicBool,
+) -> Result<Vec<QueryRow>, String> {
+    let mut scan = spec.clone();
+    scan.offset = 0;
+    scan.limit = spec
+        .max_work_rows
+        .checked_add(1)
+        .ok_or_else(|| "LogsQL max_work_rows overflows internal sentinel limit".to_string())?;
+    let rows = query_rows(conn, &scan, cancelled)?;
+    if rows.len() > spec.max_work_rows {
+        return Err(format!(
+            "LogsQL pipeline exceeded max_work_rows={}",
+            spec.max_work_rows
+        ));
+    }
+    Ok(rows)
 }
 
 fn query_count(conn: &Connection, spec: &QuerySpec, cancelled: &AtomicBool) -> Result<i64, String> {

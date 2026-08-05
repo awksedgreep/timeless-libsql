@@ -170,7 +170,10 @@ deadlines, and HTTP errors remain Rust signal-API responsibilities. The
 [SQL cookbook](QUERY_SQL_EQUIVALENTS.md#logsql-foundations-and-equivalents)
 contains executable direct-user recipes, including bounded rows/count/value
 discovery and `SQL-LOG-007` through `SQL-LOG-009` for substring, exact and
-presence predicates, and boolean composition.
+presence predicates, and boolean composition. `SQL-LOG-010` through
+`SQL-LOG-013` cover typed field discovery/projection, current-row filters,
+empty and unique counts, lossless values, numeric aggregates, median, and
+explicit-window rates using only the public `logs` table and SQLite JSON1.
 Zero, negative, NULL, and non-integer equality guards fail, including a
 supplied NULL positional TVF guard. With no equality guard the hidden column
 projects NULL, so `logs.max_work_entries IS NULL` selects the compatible
@@ -196,6 +199,27 @@ arrays, and objects but excludes null and the empty string. `value_type(...)`
 reports the stored logical JSON type rather than exposing private block
 encoding choices. These decisions preserve embedded SQLite/libSQL value
 fidelity without changing batching, compression, indexes, or on-disk formats.
+
+Ordered LogsQL pipeline transforms run on the SQLite reader thread over the
+same bounded public rows, so the HTTP deadline and cancellation flag cover
+both storage and composition. `fields`/`keep` rebuild dotted nested paths and
+a following `filter`/`where` evaluates the transformed row. `field_names`
+discovers top-level response fields and counts presence, while
+`field_values` returns deterministically ordered typed values and retains
+missing as an omitted result field. Neither operation invents `_stream` or
+`_stream_id`; those remain deferred until Timeless declares a stored stream
+identity.
+
+The API's typed statistic layer supports field/empty counts, exact and hashed
+unique cardinality, typed unique values, lossless ordered values, numeric
+sum/average/extrema/median, and interval rates. `values(field)` uses an object
+with `items` and an exact `missing` count because an ordinary JSON array cannot
+distinguish missing from a stored null. Numeric strings are not numbers. An
+explicit positive `limit` bounds result or unique state according to the
+operator; `limit 0` means no operator-specific cap, but never disables
+`max_result_rows`, `max_work_rows`, `max_response_bytes`, or the deadline.
+Pipelines fail closed if the bounded public row set would be incomplete; they
+do not aggregate a silently truncated prefix.
 
 ## Public log storage statistics
 

@@ -9,13 +9,14 @@ use axum::http::{header, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
 
 use crate::logsql::{self, LogsqlError, LogsqlErrorKind, LogsqlOutput, LogsqlPlan};
-use crate::storage::{LogEntry, QueryRow, QuerySpec, TimestampUnit};
+use crate::pipeline::{self, PipelineLimits};
+use crate::storage::{LogEntry, QuerySpec, TimestampUnit};
 use crate::{LogsQueryLimits, Storage};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -265,9 +266,64 @@ async fn query_post(
                 }
             }
         }
+    } else if plan.output == LogsqlOutput::Pipeline {
+        pipeline_response(&storage, plan, limits).await
     } else {
         query_response(&storage, plan.spec, limits).await
     }
+}
+
+async fn pipeline_response(
+    storage: &Storage,
+    plan: LogsqlPlan,
+    limits: LogsQueryLimits,
+) -> Response<Body> {
+    let rate_window_seconds = rate_window_seconds(&plan.spec, storage.timestamp_unit());
+    let rows = match tokio::time::timeout(
+        limits.deadline,
+        storage.pipeline(
+            plan.spec,
+            plan.pipeline,
+            plan.implicit_result_limit,
+            rate_window_seconds,
+            PipelineLimits {
+                max_result_rows: limits.max_result_rows,
+                max_state_items: limits.max_work_rows,
+            },
+        ),
+    )
+    .await
+    {
+        Err(_) => return timeout_error(limits),
+        Ok(Err(error)) => return query_execution_error(error),
+        Ok(Ok(rows)) => rows,
+    };
+    let row_count = rows.len();
+    let mut body = BoundedBuffer::new(limits.max_response_bytes);
+    for row in rows {
+        if serde_json::to_writer(&mut body, &row).is_err() || body.write_all(b"\n").is_err() {
+            return if body.exceeded {
+                query_limit_error("max_response_bytes", limits.max_response_bytes)
+            } else {
+                server_error("encode LogsQL pipeline response".into())
+            };
+        }
+    }
+    let body = body.into_inner();
+    storage.record_query_response_bytes(body.len());
+    ndjson_response(body, row_count)
+}
+
+fn rate_window_seconds(spec: &QuerySpec, timestamp_unit: TimestampUnit) -> Option<f64> {
+    let (minimum, maximum) = (spec.ts_min?, spec.ts_max?);
+    if maximum < minimum {
+        return Some(0.0);
+    }
+    let native_width = maximum.checked_sub(minimum)?.checked_add(1)?;
+    Some(match timestamp_unit {
+        TimestampUnit::Milliseconds => native_width as f64 / 1_000.0,
+        TimestampUnit::Microseconds => native_width as f64 / 1_000_000.0,
+    })
 }
 
 async fn query_response(
@@ -282,7 +338,7 @@ async fn query_response(
             let row_count = rows.len();
             let mut body = BoundedBuffer::new(limits.max_response_bytes);
             for row in rows {
-                match response_row(row, storage.timestamp_unit()).and_then(|value| {
+                match pipeline::response_row(row, storage.timestamp_unit()).and_then(|value| {
                     serde_json::to_writer(&mut body, &value)
                         .map_err(|error| format!("encode result row: {error}"))?;
                     body.write_all(b"\n")
@@ -400,6 +456,18 @@ fn timeout_error(limits: LogsQueryLimits) -> Response<Body> {
 
 fn query_execution_error(error: String) -> Response<Body> {
     if let Some(limit) = error
+        .split("max_result_rows=")
+        .nth(1)
+        .and_then(|value| {
+            value
+                .split(|character: char| !character.is_ascii_digit())
+                .next()
+        })
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return query_limit_error("max_result_rows", limit);
+    }
+    if let Some(limit) = error
         .split("max_work_entries=")
         .nth(1)
         .and_then(|value| {
@@ -411,16 +479,17 @@ fn query_execution_error(error: String) -> Response<Body> {
     {
         return query_limit_error("max_work_rows", limit);
     }
-    if error.contains("max_work_rows=") {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({
-                "error": "query_limit",
-                "reason": "max_work_rows",
-                "message": error
-            })),
-        )
-            .into_response();
+    if let Some(limit) = error
+        .split("max_work_rows=")
+        .nth(1)
+        .and_then(|value| {
+            value
+                .split(|character: char| !character.is_ascii_digit())
+                .next()
+        })
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return query_limit_error("max_work_rows", limit);
     }
     server_error(error)
 }
@@ -428,10 +497,51 @@ fn query_execution_error(error: String) -> Response<Body> {
 type QueryLimit = (&'static str, usize);
 
 fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(), QueryLimit> {
-    if plan.output == LogsqlOutput::Rows {
-        apply_query_limits(&mut plan.spec, plan.limit_explicit, limits)?;
-    } else {
-        plan.spec.max_work_rows = limits.max_work_rows;
+    match plan.output {
+        LogsqlOutput::Rows => {
+            apply_query_limits(&mut plan.spec, plan.limit_explicit, limits)?;
+        }
+        LogsqlOutput::Count => plan.spec.max_work_rows = limits.max_work_rows,
+        LogsqlOutput::Pipeline => {
+            for operation in &plan.pipeline {
+                match operation {
+                    crate::logsql::PipelineOp::Limit(limit)
+                    | crate::logsql::PipelineOp::FieldValues {
+                        limit: Some(limit), ..
+                    } if *limit > limits.max_result_rows => {
+                        return Err(("max_result_rows", limits.max_result_rows));
+                    }
+                    crate::logsql::PipelineOp::Offset(offset) if *offset > limits.max_work_rows => {
+                        return Err(("max_work_rows", limits.max_work_rows));
+                    }
+                    crate::logsql::PipelineOp::Stats(expressions) => {
+                        for expression in expressions {
+                            let Some(limit) = expression.limit else {
+                                continue;
+                            };
+                            if matches!(
+                                expression.kind,
+                                crate::logsql::StatsKind::UniqValues
+                                    | crate::logsql::StatsKind::Values
+                            ) && limit > limits.max_result_rows
+                            {
+                                return Err(("max_result_rows", limits.max_result_rows));
+                            }
+                            if matches!(
+                                expression.kind,
+                                crate::logsql::StatsKind::CountUniq
+                                    | crate::logsql::StatsKind::CountUniqHash
+                            ) && limit > limits.max_work_rows
+                            {
+                                return Err(("max_work_rows", limits.max_work_rows));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            plan.spec.max_work_rows = limits.max_work_rows;
+        }
     }
     Ok(())
 }
@@ -691,35 +801,6 @@ fn parse_query_time(value: &str, timestamp_unit: TimestampUnit) -> Option<i64> {
                 .ok()
                 .map(|dt| micros_to_native(dt.timestamp_micros(), timestamp_unit))
         })
-}
-
-fn response_row(row: QueryRow, timestamp_unit: TimestampUnit) -> Result<Value, String> {
-    let metadata: Map<String, Value> = serde_json::from_str(&row.metadata_json)
-        .map_err(|e| format!("decode stored metadata: {e}"))?;
-    let mut object = metadata;
-    object.insert(
-        "_time".into(),
-        Value::String(format_timestamp(row.ts, timestamp_unit)?),
-    );
-    object.insert("_msg".into(), Value::String(row.message));
-    object.insert("level".into(), Value::String(row.level));
-    Ok(Value::Object(object))
-}
-
-fn format_timestamp(ts: i64, timestamp_unit: TimestampUnit) -> Result<String, String> {
-    let (datetime, format) = match timestamp_unit {
-        TimestampUnit::Milliseconds => (
-            DateTime::<Utc>::from_timestamp_millis(ts),
-            SecondsFormat::Millis,
-        ),
-        TimestampUnit::Microseconds => (
-            DateTime::<Utc>::from_timestamp_micros(ts),
-            SecondsFormat::Micros,
-        ),
-    };
-    datetime
-        .map(|dt| dt.to_rfc3339_opts(format, true))
-        .ok_or_else(|| format!("timestamp {ts} is outside the RFC3339 range"))
 }
 
 fn now(timestamp_unit: TimestampUnit) -> i64 {

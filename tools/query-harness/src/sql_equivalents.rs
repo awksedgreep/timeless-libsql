@@ -317,7 +317,14 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "any_path" => Value::Text("$.deployment.region".to_owned()),
         "duration_threshold" => Value::Integer(10),
         "excluded_level" => Value::Text("info".to_owned()),
-        "field" => Value::Text("host".to_owned()),
+        "field" => Value::Text(
+            if identifier == "SQL-LOG-013" {
+                "duration_ms"
+            } else {
+                "host"
+            }
+            .to_owned(),
+        ),
         "max_values" => Value::Integer(100),
         "region" => Value::Text("us-east".to_owned()),
         "group_key" => Value::Text("level".to_owned()),
@@ -660,16 +667,29 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         [],
         |row| row.get(0),
     )?;
-    let recipe_rows = |identifier: &str, statement_index: usize| -> Result<usize> {
+    let recipe_sql = |identifier: &str, statement_index: usize| -> Result<String> {
         let recipe = recipes
             .iter()
             .find(|recipe| recipe.identifier == identifier)
             .with_context(|| format!("{identifier} recipe"))?;
-        let sql = recipe
+        let statements = recipe
             .statements
+            .iter()
+            .map(|block| split_sql(block))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let sql = statements
             .get(statement_index)
             .with_context(|| format!("{identifier} statement {}", statement_index + 1))?;
-        let mut statement = connection.prepare(sql)?;
+        Ok(sql.clone())
+    };
+    let recipe_values = |identifier: &str, statement_index: usize| -> Result<Vec<Vec<Value>>> {
+        let sql = recipe_sql(identifier, statement_index)?;
+        let mut statement = connection
+            .prepare(&sql)
+            .with_context(|| format!("prepare {identifier} statement {}", statement_index + 1))?;
         for index in 1..=statement.parameter_count() {
             let name = statement
                 .parameter_name(index)
@@ -677,11 +697,20 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
                 .trim_start_matches(':');
             statement.raw_bind_parameter(index, parameter(identifier, name))?;
         }
-        let rows = statement
-            .raw_query()
-            .mapped(|_| Ok(()))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.len())
+        let columns = statement.column_count();
+        let mut query = statement.raw_query();
+        let mut output = Vec::new();
+        while let Some(row) = query.next()? {
+            output.push(
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<Value>>>()?,
+            );
+        }
+        Ok(output)
+    };
+    let recipe_rows = |identifier: &str, statement_index: usize| -> Result<usize> {
+        Ok(recipe_values(identifier, statement_index)?.len())
     };
     let session_twelve_recipe_rows = [
         recipe_rows("SQL-LOG-007", 0)?,
@@ -689,6 +718,17 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         recipe_rows("SQL-LOG-008", 1)?,
         recipe_rows("SQL-LOG-008", 2)?,
         recipe_rows("SQL-LOG-009", 0)?,
+    ];
+    let session_thirteen_recipe_rows = [
+        recipe_rows("SQL-LOG-010", 0)?,
+        recipe_rows("SQL-LOG-010", 1)?,
+        recipe_rows("SQL-LOG-011", 0)?,
+        recipe_rows("SQL-LOG-011", 1)?,
+        recipe_rows("SQL-LOG-012", 0)?,
+        recipe_rows("SQL-LOG-012", 1)?,
+        recipe_rows("SQL-LOG-012", 2)?,
+        recipe_rows("SQL-LOG-013", 0)?,
+        recipe_rows("SQL-LOG-013", 1)?,
     ];
     if [
         bounded,
@@ -721,6 +761,105 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     }
     if session_twelve_recipe_rows != [1, 1, 2, 2, 1] {
         bail!("Session 12 SQL-LOG recipe results changed: {session_twelve_recipe_rows:?}");
+    }
+    if session_thirteen_recipe_rows != [8, 2, 2, 1, 1, 2, 2, 1, 1] {
+        bail!("Session 13 SQL-LOG recipe results changed: {session_thirteen_recipe_rows:?}");
+    }
+    let field_names = recipe_values("SQL-LOG-010", 0)?;
+    if field_names
+        != [
+            vec![Value::Text("_msg".into()), Value::Integer(2)],
+            vec![Value::Text("_time".into()), Value::Integer(2)],
+            vec![Value::Text("deployment".into()), Value::Integer(2)],
+            vec![Value::Text("duration_ms".into()), Value::Integer(2)],
+            vec![Value::Text("host".into()), Value::Integer(2)],
+            vec![Value::Text("level".into()), Value::Integer(2)],
+            vec![Value::Text("nested".into()), Value::Integer(2)],
+            vec![Value::Text("service".into()), Value::Integer(2)],
+        ]
+    {
+        bail!("SQL-LOG-010 field discovery changed: {field_names:?}");
+    }
+    let projection = recipe_values("SQL-LOG-010", 1)?;
+    if projection
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text("error".into()),
+                Value::Text("request timeout".into()),
+                Value::Text(r#"{"host":"web-1"}"#.into()),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text("info".into()),
+                Value::Text("request ok".into()),
+                Value::Text(r#"{"host":"web-2"}"#.into()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-010 typed projection changed: {projection:?}");
+    }
+    let empty_counts = recipe_values("SQL-LOG-011", 1)?;
+    if empty_counts != [vec![Value::Integer(2), Value::Integer(0)]] {
+        bail!("SQL-LOG-011 empty counts changed: {empty_counts:?}");
+    }
+    let unique_values = recipe_values("SQL-LOG-012", 1)?;
+    if unique_values
+        != [
+            vec![
+                Value::Text("text".into()),
+                Value::Text(r#""web-1""#.into()),
+                Value::Integer(1),
+            ],
+            vec![
+                Value::Text("text".into()),
+                Value::Text(r#""web-2""#.into()),
+                Value::Integer(1),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-012 typed unique values changed: {unique_values:?}");
+    }
+    let presence = recipe_values("SQL-LOG-012", 2)?;
+    if presence
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Integer(1),
+                Value::Text("text".into()),
+                Value::Text(r#""web-1""#.into()),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Integer(1),
+                Value::Text("text".into()),
+                Value::Text(r#""web-2""#.into()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-012 presence states changed: {presence:?}");
+    }
+    let numeric = recipe_values("SQL-LOG-013", 0)?;
+    if numeric
+        != [vec![
+            Value::Real(16.0),
+            Value::Real(8.0),
+            Value::Real(4.0),
+            Value::Real(12.0),
+            Value::Real(8.0),
+        ]]
+    {
+        bail!("SQL-LOG-013 numeric aggregates changed: {numeric:?}");
+    }
+    let rates = recipe_values("SQL-LOG-013", 1)?;
+    let [row] = rates.as_slice() else {
+        bail!("SQL-LOG-013 rates changed: {rates:?}");
+    };
+    let [Value::Real(rate), Value::Real(rate_sum)] = row.as_slice() else {
+        bail!("SQL-LOG-013 rate types changed: {rates:?}");
+    };
+    if (rate - 2.0 / 1.001).abs() > f64::EPSILON || (rate_sum - 16.0 / 1.001).abs() > f64::EPSILON {
+        bail!("SQL-LOG-013 rate values changed: {rates:?}");
     }
     let work_error = connection
         .query_row(
@@ -888,13 +1027,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 64);
+        assert_eq!(recipes.len(), 68);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            82
+            86
         );
         assert_eq!(
             recipes
@@ -902,7 +1041,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            83
+            92
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -111,8 +111,9 @@ VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
 
-Two P0 Timeless compatibility choices intentionally differ from the pinned
-VictoriaLogs wire envelope and are asserted on both sides rather than hidden:
+The following Timeless compatibility choices intentionally differ from the
+pinned VictoriaLogs wire/storage model and are asserted on both sides rather
+than hidden:
 
 - VictoriaLogs returns parser and unsupported-pipe failures as HTTP 400
   `text/plain`. Timeless returns stable JSON, using HTTP 400
@@ -124,7 +125,23 @@ VictoriaLogs wire envelope and are asserted on both sides rather than hidden:
   established Timeless/DDNet contract returns the exact count as a JSON number;
   direct SQLite/libSQL users receive the same INTEGER from
   `timeless_log_count`.
+- VictoriaLogs flattens stored field values to strings for discovery,
+  projection, and statistics, collapses missing/null/empty states, coerces
+  numeric-looking strings, and may round large integers through binary64.
+  Timeless instead preserves its retained rich JSON types, exact integer
+  identity, and missing/null/empty distinctions. The matrix records the exact
+  result envelope for each affected row.
+- VictoriaLogs exposes synthetic `_stream` and `_stream_id` fields.
+  Timeless does not invent them because the retained storage model has no
+  declared stream identity; stream filters and mutations remain deferred.
+- VictoriaLogs `values` emits a flattened string. Timeless emits the lossless
+  JSON object `{\"items\":[...],\"missing\":N}`, which is the only supported
+  response shape that distinguishes an absent field from a stored null while
+  preserving array/object values.
 
-`QSF-063` records these selected compatibility behaviors. All phrase, escape,
-identifier, filtering, ordering, and cardinality semantics remain exact to the
-pinned oracle where the retained Timeless storage model applies.
+`QSF-063` and `QSF-076` through `QSF-080` record these selected compatibility
+behaviors. The fixture now contains 57 row-query cases, six error cases, and
+twelve statistics/pipeline cases (75 total). Phrase, escape, identifier,
+filtering, ordering, cardinality, pipeline-order, limit-zero, and rate-window
+semantics remain exact to the pinned oracle where the retained Timeless
+storage model applies.

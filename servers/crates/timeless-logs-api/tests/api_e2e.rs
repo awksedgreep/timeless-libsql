@@ -8,6 +8,12 @@ use timeless_logs_api::{
 };
 use tower::ServiceExt;
 
+async fn pipeline_rows(app: &axum::Router, query: &str) -> Vec<serde_json::Value> {
+    let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{query}");
+    ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn release_backup_preserves_exact_logs_and_refuses_overwrite() {
@@ -1056,6 +1062,162 @@ async fn session_twelve_empty_any_and_typed_presence_remain_distinct_after_reope
         cases(&app, any_value).await,
         ["array", "false", "object", "string", "zero"]
     );
+    let field_values = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"state_group:="state" | field_values probe"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(field_values.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(
+            &to_bytes(field_values.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        ),
+        [
+            serde_json::json!({"hits": 1}),
+            serde_json::json!({"hits": 1, "probe": null}),
+            serde_json::json!({"hits": 1, "probe": false}),
+            serde_json::json!({"hits": 1, "probe": 0}),
+            serde_json::json!({"hits": 1, "probe": ""}),
+            serde_json::json!({"hits": 1, "probe": "value"}),
+            serde_json::json!({"hits": 1, "probe": []}),
+            serde_json::json!({"hits": 1, "probe": {}}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"state_group:="state" | field_values probe limit 0"#).await,
+        [
+            serde_json::json!({"hits": 1}),
+            serde_json::json!({"hits": 1, "probe": null}),
+            serde_json::json!({"hits": 1, "probe": false}),
+            serde_json::json!({"hits": 1, "probe": 0}),
+            serde_json::json!({"hits": 1, "probe": ""}),
+            serde_json::json!({"hits": 1, "probe": "value"}),
+            serde_json::json!({"hits": 1, "probe": []}),
+            serde_json::json!({"hits": 1, "probe": {}}),
+        ]
+    );
+    let field_names = app
+        .clone()
+        .oneshot(logsql_request(r#"state_group:="state" | field_names"#))
+        .await
+        .unwrap();
+    assert_eq!(field_names.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(field_names.into_body(), usize::MAX).await.unwrap()),
+        [
+            serde_json::json!({"hits": 8, "name": "_msg"}),
+            serde_json::json!({"hits": 8, "name": "_time"}),
+            serde_json::json!({"hits": 8, "name": "case"}),
+            serde_json::json!({"hits": 8, "name": "level"}),
+            serde_json::json!({"hits": 7, "name": "nested"}),
+            serde_json::json!({"hits": 7, "name": "probe"}),
+            serde_json::json!({"hits": 8, "name": "state_group"}),
+        ]
+    );
+
+    let projected = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"state_group:="state" | sort by (_time) asc | fields case, probe, nested.leaf | limit 100"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(projected.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(projected.into_body(), usize::MAX).await.unwrap()),
+        [
+            serde_json::json!({"case": "missing"}),
+            serde_json::json!({"case": "null", "probe": null, "nested": {"leaf": null}}),
+            serde_json::json!({"case": "empty", "probe": "", "nested": {"leaf": ""}}),
+            serde_json::json!({"case": "string", "probe": "value", "nested": {"leaf": "value"}}),
+            serde_json::json!({"case": "zero", "probe": 0, "nested": {"leaf": 0}}),
+            serde_json::json!({"case": "false", "probe": false, "nested": {"leaf": false}}),
+            serde_json::json!({"case": "array", "probe": [], "nested": {"leaf": []}}),
+            serde_json::json!({"case": "object", "probe": {}, "nested": {"leaf": {}}}),
+        ]
+    );
+
+    let filtered_projection = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"state_group:="state" | fields case, probe | filter probe:* | limit 100"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(filtered_projection.status(), StatusCode::OK);
+    let mut filtered_cases = ndjson_values(
+        &to_bytes(filtered_projection.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .into_iter()
+    .map(|row| row["case"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+    filtered_cases.sort();
+    assert_eq!(
+        filtered_cases,
+        ["array", "false", "object", "string", "zero"]
+    );
+
+    let aggregate = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"state_group:="state" | stats count(probe) as present, count_empty(probe) as empty, count_uniq(probe) as exact, count_uniq_hash(probe) as hashed, uniq_values(probe) as unique, values(probe) as all_values"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(aggregate.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(aggregate.into_body(), usize::MAX).await.unwrap()),
+        [serde_json::json!({
+            "present": 5,
+            "empty": 3,
+            "exact": 5,
+            "hashed": 5,
+            "unique": [false, 0, "value", [], {}],
+            "all_values": {
+                "items": [null, "", "value", 0, false, [], {}],
+                "missing": 1
+            }
+        })]
+    );
+
+    let limited_values = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"state_group:="state" | stats values(probe) limit 3 as first_three"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(limited_values.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(
+            &to_bytes(limited_values.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        ),
+        [serde_json::json!({
+            "first_three": {"items": [null, ""], "missing": 1}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"state_group:="state" | stats uniq_values(probe) limit 0 as unique, values(probe) limit 0 as all_values"#
+        )
+        .await,
+        [serde_json::json!({
+            "unique": [false, 0, "value", [], {}],
+            "all_values": {
+                "items": [null, "", "value", 0, false, [], {}],
+                "missing": 1
+            }
+        })]
+    );
     assert_eq!(
         cases(
             &app,
@@ -1128,6 +1290,8 @@ async fn session_twelve_empty_any_and_typed_presence_remain_distinct_after_reope
     );
 
     storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
     storage.shutdown().await.unwrap();
     let reopened = Storage::start_with_timestamp_unit(
         database,
@@ -1153,6 +1317,37 @@ async fn session_twelve_empty_any_and_typed_presence_remain_distinct_after_reope
         )
         .await,
         ["null"]
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"state_group:="state" | field_values probe limit 0"#)
+            .await
+            .len(),
+        8
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"state_group:="state" | fields case, nested.leaf | filter nested.leaf:* | limit 100"#
+        )
+        .await
+        .len(),
+        5
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"state_group:="state" | stats count(probe) as present, count_empty(probe) as empty, count_uniq(probe) as exact, values(probe) limit 0 as all_values"#
+        )
+        .await,
+        [serde_json::json!({
+            "present": 5,
+            "empty": 3,
+            "exact": 5,
+            "all_values": {
+                "items": [null, "", "value", 0, false, [], {}],
+                "missing": 1
+            }
+        })]
     );
     reopened.shutdown().await.unwrap();
 }
@@ -1299,7 +1494,54 @@ async fn session_twelve_numeric_filters_keep_types_and_integer_precision_after_r
         ["huge"]
     );
 
+    let numeric_stats = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"numeric_group:="numeric" | stats sum(n) as sum, avg(n) as avg, min(n) as min, max(n) as max, median(n) as median"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(numeric_stats.status(), StatusCode::OK);
+    let numeric_stats = ndjson_values(
+        &to_bytes(numeric_stats.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(numeric_stats.len(), 1);
+    assert_eq!(numeric_stats[0]["min"], serde_json::json!(-2));
+    assert_eq!(
+        numeric_stats[0]["max"],
+        serde_json::json!(9_007_199_254_740_993u64)
+    );
+    assert_eq!(numeric_stats[0]["median"], serde_json::json!(2.25));
+    assert_eq!(
+        numeric_stats[0]["sum"].as_f64().unwrap(),
+        9_007_199_254_741_004.0
+    );
+    assert_eq!(
+        numeric_stats[0]["avg"].as_f64().unwrap(),
+        1_501_199_875_790_167.2
+    );
+
+    let rates = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"numeric_group:="numeric" _time:[1800000000000000,1800000002000000) | stats rate() as rate, rate_sum(n) as rate_sum"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rates.status(), StatusCode::OK);
+    let rates = ndjson_values(&to_bytes(rates.into_body(), usize::MAX).await.unwrap());
+    assert_eq!(rates.len(), 1);
+    assert_eq!(rates[0]["rate"], serde_json::json!(4.5));
+    assert_eq!(
+        rates[0]["rate_sum"].as_f64().unwrap(),
+        4_503_599_627_370_502.0
+    );
+
     storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
     storage.shutdown().await.unwrap();
     let reopened = Storage::start_with_timestamp_unit(
         database,
@@ -1319,6 +1561,38 @@ async fn session_twelve_numeric_filters_keep_types_and_integer_precision_after_r
         )
         .await,
         ["huge", "ten", "two", "zero"]
+    );
+    let numeric_stats = pipeline_rows(
+        &app,
+        r#"numeric_group:="numeric" | stats sum(n) as sum, avg(n) as avg, min(n) as min, max(n) as max, median(n) as median"#,
+    )
+    .await;
+    assert_eq!(numeric_stats.len(), 1);
+    assert_eq!(numeric_stats[0]["min"], serde_json::json!(-2));
+    assert_eq!(
+        numeric_stats[0]["max"],
+        serde_json::json!(9_007_199_254_740_993u64)
+    );
+    assert_eq!(numeric_stats[0]["median"], serde_json::json!(2.25));
+    assert_eq!(
+        numeric_stats[0]["sum"].as_f64().unwrap(),
+        9_007_199_254_741_004.0
+    );
+    assert_eq!(
+        numeric_stats[0]["avg"].as_f64().unwrap(),
+        1_501_199_875_790_167.2
+    );
+    let rates = pipeline_rows(
+        &app,
+        r#"numeric_group:="numeric" _time:[1800000000000000,1800000002000000) | stats rate() as rate, rate_sum(n) as rate_sum"#,
+    )
+    .await;
+    assert_eq!(
+        rates,
+        [serde_json::json!({
+            "rate": 4.5,
+            "rate_sum": 4_503_599_627_370_502.0
+        })]
     );
     reopened.shutdown().await.unwrap();
 }
@@ -1547,6 +1821,64 @@ async fn session_ten_logsql_sort_offset_limit_count_survive_optimize_and_reopen(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_thirteen_median_state_is_bounded_and_reader_remains_reusable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start_with_timestamp_unit(
+        temp.path().join("median-limit-logsql.db"),
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(
+                r#"{"_time":1,"_msg":"wide median","level":"info","a":1,"b":2,"c":3}"#.to_owned(),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    let app = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    );
+    let limited = app
+        .clone()
+        .oneshot(logsql_request("_time:[1,2) | stats median(a,b,c) as value"))
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_work_rows",
+            "limit": 1
+        })
+    );
+    assert_eq!(
+        pipeline_rows(&app, "_time:[1,2) | stats count() as total").await,
+        [serde_json::json!({"total": 1})]
+    );
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
@@ -1651,6 +1983,77 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         })
     );
 
+    let pipeline_result_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 2,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("* | field_names"))
+    .await
+    .unwrap();
+    assert_eq!(
+        pipeline_result_limited.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(pipeline_result_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_result_rows",
+            "limit": 2
+        })
+    );
+
+    let stats_result_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 2,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("* | stats values(host) limit 3 as hosts"))
+    .await
+    .unwrap();
+    assert_eq!(
+        stats_result_limited.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(stats_result_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_result_rows",
+            "limit": 2
+        })
+    );
+
+    let discovery_app = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 200,
+            max_work_rows: 20_000,
+            ..LogsQueryLimits::default()
+        },
+    );
+    let discovered = pipeline_rows(&discovery_app, "* | field_values _msg limit 128").await;
+    assert_eq!(discovered.len(), 128);
+    assert!(
+        discovered.iter().all(|row| row["hits"] == 0),
+        "crossing the explicit cardinality limit makes retained hit counts unknown"
+    );
+
     let work_limited = router_with_limits(
         storage.clone(),
         LogsQueryLimits {
@@ -1740,10 +2143,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert_eq!(stats.api_query_in_flight, 0);
     assert!(stats.api_query_errors > 0);
     let reused = default_app
+        .clone()
         .oneshot(logsql_request("level:error | limit 1"))
         .await
         .unwrap();
     assert_eq!(reused.status(), StatusCode::OK);
+
+    let cancelled_before = storage.stats().await.unwrap().api_query_cancelled;
+    let pipeline_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | fields _msg | filter *request* | stats count_uniq(_msg) as unique",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(pipeline_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_pipeline_cancel = default_app
+        .oneshot(logsql_request("level:error | stats count() as total"))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_pipeline_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

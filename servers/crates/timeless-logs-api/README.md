@@ -54,6 +54,34 @@ Safe top-level indexed conjuncts are pushed into public extension rows before
 the bounded Rust predicate evaluator. Predicates below `OR` or `NOT` are not
 unsafely pushed.
 
+The ordered pipeline also accepts `field_values`, `field_names`,
+`fields`/`keep`, `filter`/`where`, and `stats`. Projection accepts exact dotted
+paths, top-level prefixes, and `*`; a later filter observes the projected row,
+not the original one. Field discovery is deterministic and top-level:
+`field_names` counts a field whenever it is present, including JSON null and
+empty values, and does not synthesize VictoriaLogs `_stream` fields that are
+not in the Timeless storage model. `field_values` keeps JSON types distinct,
+represents a missing value by omitting the requested field, and returns a
+deterministic type-tagged order with numeric `hits`. A positive operator
+`limit` bounds retained values; `limit 0` has the upstream meaning of no
+operator-specific limit while the server's hard result/work limits still
+apply.
+
+The shipped statistics are `count`, `count_empty`, `count_uniq`,
+`count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
+`median`, `rate`, and `rate_sum`. Missing, null, and empty remain distinct;
+`count_empty` deliberately counts all three for compatibility. Exact unique
+counts use complete typed tuples, while `count_uniq_hash` uses a documented
+stable 64-bit FNV-1a key hash and claims cardinality—not VictoriaLogs hash-bit
+identity. `uniq_values` returns typed distinct non-empty values. The lossless
+`values` result is `{\"items\":[...],\"missing\":N}` so missing cannot collapse
+into JSON null. Numeric aggregates accept only stored JSON numbers; numeric
+strings are ignored, integer-only sums remain exact when representable, min
+and max preserve the chosen JSON number, and fractional/mixed sums, averages,
+medians, and rates use finite binary64. `rate` and `rate_sum` divide by the
+explicit query interval in seconds; without a finite two-sided time interval
+they return the undivided count or sum.
+
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.
 `field:("")` follows VictoriaLogs empty semantics and matches missing, JSON

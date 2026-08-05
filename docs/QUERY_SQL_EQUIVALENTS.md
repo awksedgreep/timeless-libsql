@@ -106,6 +106,10 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-007`](#sql-log-007-case-sensitive-message-substring) | `LQL-F12` | current foundation | exact case-sensitive literal substring over bounded public rows |
 | [`SQL-LOG-008`](#sql-log-008-exact-empty-and-any-value-predicates) | `LQL-F15`, `LQL-F18`, `LQL-F19` | current foundation | full-message exactness and explicit missing/null/empty/non-empty typed JSON states |
 | [`SQL-LOG-009`](#sql-log-009-boolean-composition) | `LQL-F31` | current foundation | ordinary SQL `AND`/`OR`/`NOT` precedence over SQL-expressible public-row atoms |
+| [`SQL-LOG-010`](#sql-log-010-field-names-and-typed-projection) | `LQL-P05`, `LQL-P06`, `LQL-Q02` | current foundation | bounded top-level field discovery and typed projection over public metadata JSON |
+| [`SQL-LOG-011`](#sql-log-011-current-row-filter-and-empty-counts) | `LQL-P08`, `LQL-S02` | current foundation | bounded current-row any-value filter plus exact missing/null/empty counts |
+| [`SQL-LOG-012`](#sql-log-012-typed-unique-values-and-counts) | `LQL-P04`, `LQL-S03`, `LQL-S04` | current foundation | type-tagged exact unique counts, values, hits, and ordered presence states |
+| [`SQL-LOG-013`](#sql-log-013-numeric-aggregates-median-and-rates) | `LQL-S05`, `LQL-S06`, `LQL-S08` | current foundation | numeric-only ordinary SQL aggregates, median, and explicit-window rates |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -3502,6 +3506,281 @@ equivalent for its stated atoms. It does not claim that portable SQLite can
 reproduce LogsQL's Unicode word boundaries, RE2-compatible regexps, Unicode
 case folding, or the Rust API's exact full-domain `u64`/`f64` comparison. Use
 the corresponding bounded Rust query surface for those atoms.
+
+### SQL-LOG-010: field names and typed projection
+
+Discover top-level public response fields without reading extension shadow
+tables. `bounded` must stay materialized so JSON expansion cannot move ahead of
+the public row/work limits:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), field_rows(name) AS (
+  SELECT '_time' FROM bounded
+  UNION ALL SELECT '_msg' FROM bounded
+  UNION ALL SELECT 'level' FROM bounded
+  UNION ALL
+  SELECT fields.key
+  FROM bounded JOIN json_each(bounded.metadata) AS fields
+)
+SELECT name, COUNT(*) AS hits
+FROM field_rows
+GROUP BY name
+ORDER BY name;
+
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), selected AS (
+  SELECT
+    bounded.ts,
+    bounded.level,
+    bounded.message,
+    CASE WHEN fields.fullkey IS NULL THEN json('{}')
+         ELSE json_object(
+           :field,
+           json(bounded.metadata -> fields.fullkey)
+         )
+    END AS projected_metadata
+  FROM bounded
+  LEFT JOIN json_each(bounded.metadata) AS fields
+    ON fields.key = :field
+)
+SELECT ts, level, message, projected_metadata
+FROM selected
+ORDER BY ts;
+```
+
+The release server binds epoch microseconds; this executable cookbook fixture
+uses the table default of milliseconds. `_time`, `_msg`, and `level` are real
+public columns rather than metadata keys. The second statement preserves the
+selected JSON type—including null, boolean, number, array, and object—and emits
+`{}` when the field is missing. Nested projection uses the same approach with a
+literal or safely constructed JSON path. The Rust API owns LogsQL wildcard
+field syntax, nested-object reconstruction, response limits, and cancellation.
+
+### SQL-LOG-011: current-row filter and empty counts
+
+Apply an any-value filter at the current SQL step, then calculate the exact
+complementary `count(field)` and `count_empty(field)` states:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), states AS (
+  SELECT bounded.*, fields.fullkey, fields.type,
+         bounded.metadata -> fields.fullkey AS value_json
+  FROM bounded
+  LEFT JOIN json_each(bounded.metadata) AS fields
+    ON fields.key = :field
+)
+SELECT ts, level, message, metadata
+FROM states
+WHERE fullkey IS NOT NULL
+  AND type <> 'null'
+  AND NOT (type = 'text' AND value_json = json_quote(''))
+ORDER BY ts;
+
+WITH bounded AS MATERIALIZED (
+  SELECT ts, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), states AS (
+  SELECT fields.fullkey, fields.type,
+         bounded.metadata -> fields.fullkey AS value_json
+  FROM bounded
+  LEFT JOIN json_each(bounded.metadata) AS fields
+    ON fields.key = :field
+)
+SELECT
+  SUM(fullkey IS NOT NULL
+      AND type <> 'null'
+      AND NOT (type = 'text' AND value_json = json_quote('')))
+    AS count_field,
+  SUM(fullkey IS NULL
+      OR type = 'null'
+      OR (type = 'text' AND value_json = json_quote('')))
+    AS count_empty
+FROM states;
+```
+
+These statements intentionally distinguish a missing field from stored JSON
+null and from an empty string before applying the LogsQL empty/non-empty
+classification. Zero, false, arrays, and objects are non-empty. More complex
+`filter`/`where` expressions use ordinary SQL composition where possible; the
+Rust API owns LogsQL parsing and filters after non-SQL pipeline transforms.
+
+### SQL-LOG-012: typed unique values and counts
+
+Use the full JSON representation plus its logical JSON type as the uniqueness
+key. This prevents `0`, `"0"`, and `false` from aliasing:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), states AS (
+  SELECT fields.fullkey, fields.type,
+         bounded.metadata -> fields.fullkey AS value_json
+  FROM bounded
+  LEFT JOIN json_each(bounded.metadata) AS fields
+    ON fields.key = :field
+), nonempty AS (
+  SELECT type, value_json
+  FROM states
+  WHERE fullkey IS NOT NULL
+    AND type <> 'null'
+    AND NOT (type = 'text' AND value_json = json_quote(''))
+)
+SELECT COUNT(*) AS count_uniq
+FROM (SELECT type, value_json FROM nonempty GROUP BY type, value_json);
+
+WITH bounded AS MATERIALIZED (
+  SELECT ts, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), states AS (
+  SELECT fields.fullkey, fields.type,
+         bounded.metadata -> fields.fullkey AS value_json
+  FROM bounded
+  LEFT JOIN json_each(bounded.metadata) AS fields
+    ON fields.key = :field
+)
+SELECT type, value_json, COUNT(*) AS hits
+FROM states
+WHERE fullkey IS NOT NULL
+  AND type <> 'null'
+  AND NOT (type = 'text' AND value_json = json_quote(''))
+GROUP BY type, value_json
+ORDER BY CASE type
+  WHEN 'false' THEN 1 WHEN 'true' THEN 1
+  WHEN 'integer' THEN 2 WHEN 'real' THEN 2
+  WHEN 'text' THEN 3 WHEN 'array' THEN 4 WHEN 'object' THEN 5
+  ELSE 6 END,
+  value_json;
+
+WITH bounded AS MATERIALIZED (
+  SELECT ts, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+)
+SELECT bounded.ts,
+       fields.fullkey IS NOT NULL AS present,
+       COALESCE(fields.type, 'missing') AS logical_type,
+       CASE WHEN fields.fullkey IS NULL THEN NULL
+            ELSE bounded.metadata -> fields.fullkey END AS value_json
+FROM bounded
+LEFT JOIN json_each(bounded.metadata) AS fields
+  ON fields.key = :field
+ORDER BY bounded.ts;
+```
+
+The first two statements implement exact typed `count_uniq` and
+`uniq_values` foundations. The third is the lossless `values` foundation: its
+`present` bit keeps missing distinct from JSON null. The Rust
+`count_uniq_hash` compatibility function uses a bounded stable 64-bit hash set
+and is therefore collision-approximate; ordinary SQL should prefer the exact
+grouping above.
+
+### SQL-LOG-013: numeric aggregates, median, and rates
+
+Only retained JSON numbers participate. Numeric-looking strings, null,
+missing, booleans, arrays, and objects are ignored:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), numeric AS MATERIALIZED (
+  SELECT CAST(fields.value AS REAL) AS value
+  FROM bounded JOIN json_each(bounded.metadata) AS fields
+    ON fields.key = :field
+  WHERE fields.type IN ('integer', 'real')
+), ordered AS (
+  SELECT value,
+         ROW_NUMBER() OVER (ORDER BY value) AS position,
+         COUNT(*) OVER () AS n
+  FROM numeric
+)
+SELECT
+  SUM(value) AS sum_value,
+  AVG(value) AS avg_value,
+  MIN(value) AS min_value,
+  MAX(value) AS max_value,
+  (SELECT AVG(value)
+   FROM ordered
+   WHERE position IN ((n + 1) / 2, (n + 2) / 2)) AS median_value
+FROM numeric;
+
+WITH bounded AS MATERIALIZED (
+  SELECT ts, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts
+  LIMIT :limit
+), numeric AS (
+  SELECT CAST(fields.value AS REAL) AS value
+  FROM bounded JOIN json_each(bounded.metadata) AS fields
+    ON fields.key = :field
+  WHERE fields.type IN ('integer', 'real')
+), window(seconds) AS (
+  VALUES ((:end_ms - :start_ms + 1) / 1000.0)
+)
+SELECT
+  (SELECT COUNT(*) FROM bounded) / seconds AS rate,
+  (SELECT COALESCE(SUM(value), 0.0) FROM numeric) / seconds AS rate_sum
+FROM window;
+```
+
+The `+ 1` converts inclusive native-unit storage bounds back into the semantic
+window width. Use `1000000.0` for the release server's microsecond tables.
+SQLite `REAL` arithmetic has binary64 precision; the Rust API preserves exact
+integer values for `min`/`max`, then uses documented binary64 arithmetic for
+mixed or fractional `sum`, `avg`, `median`, and rates. Empty `avg`, `min`,
+`max`, and `median` results are JSON null in the Rust API because JSON has no
+portable NaN literal.
 
 ## Adding the next recipe
 

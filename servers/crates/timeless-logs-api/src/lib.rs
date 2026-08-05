@@ -6,6 +6,7 @@
 
 mod api;
 mod logsql;
+mod pipeline;
 mod storage;
 
 use std::net::SocketAddr;

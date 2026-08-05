@@ -19,6 +19,9 @@ use crate::{
 pub enum LogsqlOutput {
     Rows,
     Count,
+    /// Ordered API-owned transforms over bounded rows from the public logs
+    /// virtual table. LogsQL syntax and state never enter the extension.
+    Pipeline,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +32,494 @@ pub struct LogsqlPlan {
     /// tighter server policy can lower only the default without rewriting a
     /// caller's request.
     pub limit_explicit: bool,
+    pub(crate) pipeline: Vec<PipelineOp>,
+    pub(crate) implicit_result_limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PipelineField {
+    Exact { path: Vec<String>, name: String },
+    Prefix { prefix: String },
+    All,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum StatsKind {
+    Count,
+    CountEmpty,
+    CountUniq,
+    CountUniqHash,
+    UniqValues,
+    Values,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Median,
+    Rate,
+    RateSum,
+}
+
+fn parse_field_values_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let rest = segment
+        .strip_prefix("field_values")
+        .expect("caller checked field_values prefix")
+        .trim();
+    let words = pipeline_words(rest)?;
+    let Some(field) = words.first() else {
+        return Err(LogsqlError::malformed(
+            "LogsQL field_values requires a field name",
+        ));
+    };
+    let field = parse_pipeline_field(field, false)?;
+    let mut filter = None;
+    let mut limit = None;
+    let mut index = 1usize;
+    while index < words.len() {
+        match words[index].as_str() {
+            "filter" if filter.is_none() => {
+                let value = words.get(index + 1).ok_or_else(|| {
+                    LogsqlError::malformed("LogsQL field_values filter requires a value")
+                })?;
+                filter = Some(quoted_value(value)?.unwrap_or_else(|| value.clone()));
+                index += 2;
+            }
+            "limit" if limit.is_none() => {
+                let value = words.get(index + 1).ok_or_else(|| {
+                    LogsqlError::malformed("LogsQL field_values limit requires a value")
+                })?;
+                limit = Some(parse_pipeline_usize("field_values limit", value)?);
+                index += 2;
+            }
+            token => {
+                return Err(LogsqlError::malformed(format!(
+                    "unexpected LogsQL field_values token {token:?}"
+                )))
+            }
+        }
+    }
+    Ok(PipelineOp::FieldValues {
+        field,
+        filter,
+        limit,
+    })
+}
+
+fn parse_field_names_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let rest = segment
+        .strip_prefix("field_names")
+        .expect("caller checked field_names prefix")
+        .trim();
+    let words = pipeline_words(rest)?;
+    let mut filter = None;
+    let mut result_name = "name".to_owned();
+    let mut index = 0usize;
+    if words.get(index).is_some_and(|word| word == "filter") {
+        let value = words
+            .get(index + 1)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL field_names filter requires a value"))?;
+        filter = Some(quoted_value(value)?.unwrap_or_else(|| value.clone()));
+        index += 2;
+    }
+    if words.get(index).is_some_and(|word| word == "as") {
+        index += 1;
+    }
+    if let Some(alias) = words.get(index) {
+        result_name = pipeline_field_name(&parse_pipeline_field(alias, false)?)?;
+        index += 1;
+    }
+    if index != words.len() {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL field_names token {:?}",
+            words[index]
+        )));
+    }
+    Ok(PipelineOp::FieldNames {
+        filter,
+        result_name,
+    })
+}
+
+fn parse_project_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let rest = segment
+        .strip_prefix("fields")
+        .or_else(|| segment.strip_prefix("keep"))
+        .expect("caller checked projection prefix")
+        .trim();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL fields/keep requires at least one field",
+        ));
+    }
+    let fields = split_top_level(rest, ',')?
+        .into_iter()
+        .map(|field| parse_pipeline_field(field.trim(), true))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PipelineOp::Project(fields))
+}
+
+fn parse_filter_pipe(
+    segment: &str,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<PipelineOp, LogsqlError> {
+    let expression = segment
+        .strip_prefix("filter")
+        .or_else(|| segment.strip_prefix("where"))
+        .expect("caller checked filter prefix")
+        .trim();
+    if expression.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL filter/where requires an expression",
+        ));
+    }
+    let tokens = lex_logical_tokens(expression)?;
+    let expression = LogicalParser::new(tokens).parse()?;
+    Ok(PipelineOp::Filter(compile_logical_expression(
+        &expression,
+        None,
+        timestamp_unit,
+        query_now,
+    )?))
+}
+
+fn parse_stats_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let rest = segment
+        .strip_prefix("stats")
+        .expect("caller checked stats prefix")
+        .trim();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL stats requires at least one function",
+        ));
+    }
+    let expressions = split_top_level(rest, ',')?
+        .into_iter()
+        .map(|expression| parse_stats_expression(expression.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut aliases = std::collections::BTreeSet::new();
+    for expression in &expressions {
+        if !aliases.insert(expression.alias.clone()) {
+            return Err(LogsqlError::malformed(format!(
+                "duplicate LogsQL stats result name {:?}",
+                expression.alias
+            )));
+        }
+    }
+    Ok(PipelineOp::Stats(expressions))
+}
+
+fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlError> {
+    let open = expression.find('(').ok_or_else(|| {
+        LogsqlError::malformed(format!(
+            "LogsQL stats function requires parentheses: {expression:?}"
+        ))
+    })?;
+    let close = matching_parenthesis(expression, open)?;
+    let function = expression[..open].trim();
+    if function.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL stats function name is empty",
+        ));
+    }
+    let args = &expression[open + 1..close];
+    let kind = match function {
+        "count" => StatsKind::Count,
+        "count_empty" => StatsKind::CountEmpty,
+        "count_uniq" => StatsKind::CountUniq,
+        "count_uniq_hash" => StatsKind::CountUniqHash,
+        "uniq_values" => StatsKind::UniqValues,
+        "values" => StatsKind::Values,
+        "sum" => StatsKind::Sum,
+        "avg" => StatsKind::Avg,
+        "min" => StatsKind::Min,
+        "max" => StatsKind::Max,
+        "median" => StatsKind::Median,
+        "rate" => StatsKind::Rate,
+        "rate_sum" => StatsKind::RateSum,
+        _ => {
+            return Err(LogsqlError::unsupported(format!(
+                "unsupported LogsQL stats function {function:?}"
+            )))
+        }
+    };
+    let mut fields = if args.trim().is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(args, ',')?
+            .into_iter()
+            .map(|field| parse_pipeline_field(field.trim(), true))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    match kind {
+        StatsKind::Rate if !fields.is_empty() => {
+            return Err(LogsqlError::malformed(
+                "LogsQL rate() does not accept fields",
+            ))
+        }
+        StatsKind::CountUniq | StatsKind::CountUniqHash if fields.is_empty() => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function} requires at least one field"
+            )))
+        }
+        StatsKind::CountUniq | StatsKind::CountUniqHash
+            if fields
+                .iter()
+                .any(|field| !matches!(field, PipelineField::Exact { .. })) =>
+        {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function} requires exact field names"
+            )))
+        }
+        StatsKind::Rate => {}
+        _ if fields.is_empty() => fields.push(PipelineField::All),
+        _ => {}
+    }
+
+    let canonical = format!("{function}({})", args.trim());
+    let words = pipeline_words(expression[close + 1..].trim())?;
+    let mut limit = None;
+    let mut alias = None;
+    let mut index = 0usize;
+    while index < words.len() {
+        match words[index].as_str() {
+            "limit" if limit.is_none() => {
+                let value = words.get(index + 1).ok_or_else(|| {
+                    LogsqlError::malformed(format!("LogsQL {function} limit requires a value"))
+                })?;
+                limit = Some(parse_pipeline_usize(function, value)?);
+                index += 2;
+            }
+            "as" if alias.is_none() => {
+                let value = words.get(index + 1).ok_or_else(|| {
+                    LogsqlError::malformed(format!("LogsQL {function} alias requires a value"))
+                })?;
+                alias = Some(pipeline_field_name(&parse_pipeline_field(value, false)?)?);
+                index += 2;
+            }
+            token => {
+                return Err(LogsqlError::malformed(format!(
+                    "unexpected LogsQL {function} token {token:?}"
+                )))
+            }
+        }
+    }
+    if limit.is_some()
+        && !matches!(
+            kind,
+            StatsKind::CountUniq
+                | StatsKind::CountUniqHash
+                | StatsKind::UniqValues
+                | StatsKind::Values
+        )
+    {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {function} does not accept limit"
+        )));
+    }
+    Ok(StatsExpression {
+        kind,
+        fields,
+        alias: alias.unwrap_or(canonical),
+        limit,
+    })
+}
+
+fn parse_pipeline_field(value: &str, allow_wildcard: bool) -> Result<PipelineField, LogsqlError> {
+    let value = strip_optional_field_parentheses(value)?;
+    if allow_wildcard && value == "*" {
+        return Ok(PipelineField::All);
+    }
+    if allow_wildcard && !matches!(value.chars().next(), Some('"' | '\'' | '`')) {
+        if let Some(prefix) = value.strip_suffix('*') {
+            if prefix.is_empty() || prefix.contains('*') {
+                return Err(LogsqlError::malformed(format!(
+                    "invalid LogsQL field prefix {value:?}"
+                )));
+            }
+            return Ok(PipelineField::Prefix {
+                prefix: prefix.to_owned(),
+            });
+        }
+    }
+    if value.contains('*') {
+        return Err(LogsqlError::malformed(format!(
+            "wildcards are not allowed in LogsQL field {value:?}"
+        )));
+    }
+    let path = parse_field_path(value)?;
+    let name = if path.len() == 1 {
+        path[0].clone()
+    } else {
+        path.join(".")
+    };
+    Ok(PipelineField::Exact { path, name })
+}
+
+fn pipeline_field_name(field: &PipelineField) -> Result<String, LogsqlError> {
+    match field {
+        PipelineField::Exact { name, .. } => Ok(name.clone()),
+        PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(
+            "LogsQL result names cannot contain wildcards",
+        )),
+    }
+}
+
+fn strip_optional_field_parentheses(value: &str) -> Result<&str, LogsqlError> {
+    let value = value.trim();
+    if let Some(inner) = value.strip_prefix('(') {
+        let inner = inner.strip_suffix(')').ok_or_else(|| {
+            LogsqlError::malformed("unterminated parenthesized LogsQL field name")
+        })?;
+        if inner.trim().is_empty() || split_top_level(inner, ',')?.len() != 1 {
+            return Err(LogsqlError::malformed(
+                "parenthesized LogsQL field name must contain exactly one field",
+            ));
+        }
+        Ok(inner.trim())
+    } else {
+        Ok(value)
+    }
+}
+
+fn matching_parenthesis(value: &str, open: usize) -> Result<usize, LogsqlError> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (relative, character) in value[open..].char_indices() {
+        let index = open + relative;
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    LogsqlError::malformed("unmatched LogsQL stats closing parenthesis")
+                })?;
+                if depth == 0 {
+                    return Ok(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(LogsqlError::malformed("unterminated LogsQL stats function"))
+}
+
+fn pipeline_words(value: &str) -> Result<Vec<String>, LogsqlError> {
+    split_top_level(value, ' ')
+}
+
+fn split_top_level(value: &str, delimiter: char) -> Result<Vec<String>, LogsqlError> {
+    let mut output = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut parentheses = 0usize;
+    let mut brackets = 0usize;
+    for character in value.chars() {
+        if let Some(quote_delimiter) = quote {
+            current.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && quote_delimiter != '`' {
+                escaped = true;
+            } else if character == quote_delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => {
+                quote = Some(character);
+                current.push(character);
+            }
+            '(' => {
+                parentheses += 1;
+                current.push(character);
+            }
+            ')' => {
+                parentheses = parentheses.checked_sub(1).ok_or_else(|| {
+                    LogsqlError::malformed("unmatched LogsQL closing parenthesis")
+                })?;
+                current.push(character);
+            }
+            '[' => {
+                brackets += 1;
+                current.push(character);
+            }
+            ']' => {
+                brackets = brackets
+                    .checked_sub(1)
+                    .ok_or_else(|| LogsqlError::malformed("unmatched LogsQL closing bracket"))?;
+                current.push(character);
+            }
+            _ if character == delimiter && parentheses == 0 && brackets == 0 => {
+                if delimiter == ' ' {
+                    if !current.trim().is_empty() {
+                        output.push(current.trim().to_owned());
+                        current.clear();
+                    }
+                } else {
+                    output.push(current.trim().to_owned());
+                    current.clear();
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if quote.is_some() || parentheses != 0 || brackets != 0 {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL pipeline expression",
+        ));
+    }
+    if !current.trim().is_empty() || delimiter != ' ' {
+        output.push(current.trim().to_owned());
+    }
+    if output.iter().any(String::is_empty) {
+        return Err(LogsqlError::malformed(
+            "empty item in LogsQL pipeline expression",
+        ));
+    }
+    Ok(output)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct StatsExpression {
+    pub kind: StatsKind,
+    pub fields: Vec<PipelineField>,
+    pub alias: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PipelineOp {
+    SortTime {
+        descending: bool,
+    },
+    Offset(usize),
+    Limit(usize),
+    FieldValues {
+        field: PipelineField,
+        filter: Option<String>,
+        limit: Option<usize>,
+    },
+    FieldNames {
+        filter: Option<String>,
+        result_name: String,
+    },
+    Project(Vec<PipelineField>),
+    Filter(LogPredicate),
+    Stats(Vec<StatsExpression>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +579,9 @@ pub fn parse_at(
     let mut output = LogsqlOutput::Rows;
     let mut limit_explicit = false;
     let mut pipeline_stage = 0u8;
+    let mut pipeline = Vec::new();
+    let mut has_session_thirteen_pipeline = false;
+    let mut has_outer_limit = false;
     let mut segments = pipeline_segments(query)?.into_iter();
     let base = segments.next().unwrap_or_default().trim();
     if base.is_empty() {
@@ -230,24 +724,38 @@ pub fn parse_at(
                 advance_pipeline(&mut pipeline_stage, 3, command)?;
                 spec.limit = 10;
                 limit_explicit = true;
+                has_outer_limit = true;
+                pipeline.push(PipelineOp::Limit(10));
             }
             [command @ ("limit" | "head"), value] => {
                 advance_pipeline(&mut pipeline_stage, 3, command)?;
                 spec.limit = parse_pipeline_usize(command, value)?;
                 limit_explicit = true;
+                has_outer_limit = true;
+                pipeline.push(PipelineOp::Limit(spec.limit));
             }
             [command @ ("offset" | "skip"), value] => {
                 advance_pipeline(&mut pipeline_stage, 2, command)?;
                 spec.offset = parse_pipeline_usize(command, value)?;
+                pipeline.push(PipelineOp::Offset(spec.offset));
             }
             _ if is_sort_pipe(segment) => {
                 advance_pipeline(&mut pipeline_stage, 1, "sort")?;
                 spec.descending = parse_time_sort(segment)?;
+                pipeline.push(PipelineOp::SortTime {
+                    descending: spec.descending,
+                });
             }
             ["stats", function @ ("count(*)" | "count()")] if output == LogsqlOutput::Rows => {
                 advance_count_pipeline(&mut pipeline_stage)?;
                 let _ = function;
                 output = LogsqlOutput::Count;
+                pipeline.push(PipelineOp::Stats(vec![StatsExpression {
+                    kind: StatsKind::Count,
+                    fields: vec![PipelineField::All],
+                    alias: "total".into(),
+                    limit: None,
+                }]));
             }
             ["stats", function @ ("count(*)" | "count()"), "as", "total"]
             | ["stats", function @ ("count(*)" | "count()"), "total"]
@@ -256,6 +764,32 @@ pub fn parse_at(
                 advance_count_pipeline(&mut pipeline_stage)?;
                 let _ = function;
                 output = LogsqlOutput::Count;
+                pipeline.push(PipelineOp::Stats(vec![StatsExpression {
+                    kind: StatsKind::Count,
+                    fields: vec![PipelineField::All],
+                    alias: "total".into(),
+                    limit: None,
+                }]));
+            }
+            _ if segment.starts_with("field_values ") => {
+                pipeline.push(parse_field_values_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if segment == "field_names" || segment.starts_with("field_names ") => {
+                pipeline.push(parse_field_names_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if segment.starts_with("fields ") || segment.starts_with("keep ") => {
+                pipeline.push(parse_project_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if segment.starts_with("filter ") || segment.starts_with("where ") => {
+                pipeline.push(parse_filter_pipe(segment, timestamp_unit, query_now)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if segment.starts_with("stats ") => {
+                pipeline.push(parse_stats_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
             _ => {
@@ -265,10 +799,32 @@ pub fn parse_at(
             }
         }
     }
+    if has_session_thirteen_pipeline {
+        output = LogsqlOutput::Pipeline;
+        // Pipeline execution scans a separately bounded public rowset. The
+        // ordered sort/offset/limit operations above are replayed by the API
+        // and must not also be applied inside the storage cursor.
+        spec.limit = 0;
+        spec.offset = 0;
+        spec.descending = false;
+    } else {
+        pipeline.clear();
+    }
+    let cardinality_owned_by_pipeline = pipeline.iter().any(|operation| {
+        matches!(
+            operation,
+            PipelineOp::FieldValues { .. } | PipelineOp::FieldNames { .. } | PipelineOp::Stats(_)
+        )
+    });
+    let implicit_result_limit =
+        (output == LogsqlOutput::Pipeline && !has_outer_limit && !cardinality_owned_by_pipeline)
+            .then_some(100);
     Ok(LogsqlPlan {
         spec,
         output,
         limit_explicit,
+        pipeline,
+        implicit_result_limit,
     })
 }
 
@@ -2161,16 +2717,60 @@ mod tests {
         .unwrap();
         assert_eq!(count.output, LogsqlOutput::Count);
 
+        let custom_count = parse_at(
+            "level:error | stats count() as other",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(custom_count.output, LogsqlOutput::Pipeline);
+
         for invalid in [
             "* | offset -1",
             "* | sort by (service) asc",
             "* | sort by (_time) sideways",
             "* | limit 2 | offset 1",
-            "* | stats count() as other",
         ] {
             assert!(
                 parse_at(invalid, TimestampUnit::Microseconds, 0).is_err(),
                 "{invalid:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn session_thirteen_plans_typed_discovery_projection_filters_and_stats() {
+        for query in [
+            r#"* | field_values probe filter val limit 10"#,
+            r#"* | field_names filter pro as field"#,
+            r#"* | fields _time, _msg, level, nested.leaf, service*"#,
+            r#"* | keep case, probe | where probe:*"#,
+            r#"* | stats count(probe) as present, count_empty(probe) as empty"#,
+            r#"* | stats count_uniq(probe) limit 10 as exact, count_uniq_hash(probe) as hashed"#,
+            r#"* | stats uniq_values(probe) limit 10 as unique, values(probe) as values"#,
+            r#"* | stats sum(n) as sum, avg(n) as avg, min(n) as min, max(n) as max, median(n) as median"#,
+            r#"_time:1h | stats rate() as rate, rate_sum(n) as rate_sum"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 1_800_000_000_000_000);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+            assert_eq!(plan.unwrap().output, LogsqlOutput::Pipeline, "{query}");
+        }
+
+        for malformed in [
+            "* | field_values",
+            "* | field_values *",
+            "* | field_names filter",
+            "* | fields",
+            "* | filter",
+            "* | stats count_uniq()",
+            "* | stats count_uniq(pro*)",
+            "* | stats rate(n)",
+            "* | stats sum(n) limit 2",
+            "* | stats sum(n) as value, avg(n) as value",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed:?} was accepted"
             );
         }
     }

@@ -14,12 +14,14 @@ The previous Timeless compatibility oracle is
 and its tests. That parser was intentionally DDNet-oriented rather than complete
 LogsQL, but its supported syntax must not disappear in the Rust path.
 
-The current Rust parser supports the complete P0 Timeless/DDNet subset:
+The current Rust parser supports the complete P0 Timeless/DDNet subset plus
+the shipped P1 filters and ordered discovery/projection/statistics pipeline:
 wildcard selection; relative, bracketed, and comparison time bounds; all eight
-severities; service and arbitrary typed/nested field equality; quoted message
-phrases and literals; deterministic time sort, limit, and offset; and
-zero-argument `stats count()` with an optional alias. The native GET query API
-has additional filters, but they do not count as LogsQL support until the
+severities; service and arbitrary typed/nested field predicates; message
+filters; logical composition; deterministic time sort, limit, and offset;
+field names/values; typed projection and current-row filters; and the listed
+count, unique, numeric, and rate statistics. The native GET query API may have
+additional parameters, but they do not count as LogsQL support until the
 LogsQL parser and executor accept them.
 
 ## Legend and foundations
@@ -103,11 +105,11 @@ extension.
 | `LQL-P01` | `limit` / `head` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 |
 | `LQL-P02` | `offset` / `skip` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 |
 | `LQL-P03` | `sort` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS`, `SQL` | `API` | P0 |
-| `LQL-P04` | `field_values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-004-distinct-field-values)) | missing | no | `VALUES` | `API` | P1 |
-| `LQL-P05` | `field_names` | missing | no | `ROWS`, `VALUES` | `API` | P1 |
-| `LQL-P06` | `fields` / `keep` | missing | no | `SQL` | `API` | P1 |
+| `LQL-P04` | `field_values` ([indexed SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-004-distinct-field-values), [typed SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-012-typed-unique-values-and-counts)) | in progress | no | `VALUES` | `API` | P1 |
+| `LQL-P05` | `field_names` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | in progress | no | `ROWS`, `VALUES` | `API` | P1 |
+| `LQL-P06` | `fields` / `keep` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | in progress | no | `SQL` | `API` | P1 |
 | `LQL-P07` | `delete` / `drop` | missing | no | `SQL` | `API` | P2 |
-| `LQL-P08` | `filter` / `where` | missing | no | `SQL` | `API` | P1 |
+| `LQL-P08` | `filter` / `where` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-011-current-row-filter-and-empty-counts)) | in progress | no | `SQL` | `API` | P1 |
 | `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | shipped | partial | `COUNT`, `SQL` | `API` | P0 |
 | `LQL-P10` | `block_stats` | missing | no | `STATS` | `EXT` | P2 |
 | `LQL-P11` | `blocks_count` | missing | no | `STATS` | `EXT` | P2 |
@@ -151,6 +153,18 @@ extension.
 | `LQL-P49` | `set_stream_fields` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
 
+Session 13's typed pipe contract is intentionally more faithful than the
+flattened VictoriaLogs store. `field_values` uses deterministic type-tag order
+for missing, null, bool, exact numbers, strings, arrays, and objects; missing
+omits the value field. A positive limit selects a bounded deterministic subset
+and reports unknown hits as zero after overflow, while `limit 0` means no
+operator-specific limit. `field_names` discovers actual top-level response
+fields in name order and counts presence including null/empty; it neither
+synthesizes `_stream` fields nor recursively flattens objects. `fields`/`keep`
+rebuilds exact dotted paths and supports top-level prefixes and `*`.
+`filter`/`where` applies the typed predicate AST to the current transformed
+row; storage-safe predicates remain in the initial selector.
+
 ## Statistics functions
 
 The first optimization target is `COUNT`, which already avoids row decode.
@@ -160,13 +174,13 @@ only measured repeated scans should create new extension vectors.
 | ID | function | Rust now | foundation | target | priority |
 |---|---|---|---|---|---|
 | `LQL-S01` | `count()` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count)) | shipped | `COUNT` | `API` | P0 |
-| `LQL-S02` | `count(field)` / `count_empty` | missing | `ROWS` | `API` | P1 |
-| `LQL-S03` | `count_uniq` / `count_uniq_hash` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-004-distinct-field-values)) | missing | `VALUES`, `SQL` | `API` | P1 |
-| `LQL-S04` | `uniq_values` / `values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-004-distinct-field-values)) | missing | `VALUES`, `SQL` | `API` | P1 |
-| `LQL-S05` | `sum` / `avg` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | missing | `ROWS`, `SQL` | `API` | P1 |
-| `LQL-S06` | `min` / `max` / `median` | missing | `ROWS`, `SQL` | `API` | P1 |
+| `LQL-S02` | `count(field)` / `count_empty` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-011-current-row-filter-and-empty-counts)) | in progress | `ROWS` | `API` | P1 |
+| `LQL-S03` | `count_uniq` / `count_uniq_hash` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-012-typed-unique-values-and-counts)) | in progress | `VALUES`, `SQL` | `API` | P1 |
+| `LQL-S04` | `uniq_values` / `values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-012-typed-unique-values-and-counts)) | in progress | `VALUES`, `SQL` | `API` | P1 |
+| `LQL-S05` | `sum` / `avg` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | in progress | `ROWS`, `SQL` | `API` | P1 |
+| `LQL-S06` | `min` / `max` / `median` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | in progress | `ROWS`, `SQL` | `API` | P1 |
 | `LQL-S07` | `quantile` / `stddev` | missing | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-S08` | `rate` / `rate_sum` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | missing | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
+| `LQL-S08` | `rate` / `rate_sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | in progress | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
 | `LQL-S09` | `sum_len` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S10` | `any` / `field_min` / `field_max` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` | missing | `ROWS`, `SQL` | `API` | P2 |
@@ -175,12 +189,25 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S15` | total `count/first/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 
+`count(field)` requires at least one present non-empty selected value;
+`count_empty` counts rows whose selected values are all missing, null, or an
+empty string. Exact unique cardinality uses complete typed tuples; the bounded
+hash variant uses stable FNV-1a cardinality and does not claim VictoriaLogs
+hash-bit identity. `uniq_values` returns deterministic typed non-empty values;
+`values` uses `{items,missing}` to remain lossless. Numeric functions ignore
+numeric strings. Integer-only sums stay exact when representable, extrema
+preserve the selected JSON number, and mixed/fractional sums, averages,
+medians, and rates use finite binary64. `rate` and `rate_sum` divide by the
+explicit final query interval in seconds; without a finite two-sided interval
+they return the undivided count or sum, matching the upstream operator
+contract.
+
 ## Query options and HTTP behavior
 
 | ID | option/behavior | Rust now | target | priority | notes |
 |---|---|---|---|---|---|
 | `LQL-Q01` | deterministic `asc`/`desc`, limit, and offset ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | `API` | P0 | Time sort uses `(ts, stable engine order)` in either direction; equal timestamps, aliases, zero limits, optimize, and reopen are pinned. |
-| `LQL-Q02` | field projection in response | missing | `API` | P1 | Preserve `_time`, `_msg`, and typed metadata rules. |
+| `LQL-Q02` | field projection in response ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | in progress | `API` | P1 | Ordered `fields`/`keep` stages choose response fields; `_time`/`_msg` are retained only when selected, dotted metadata reconstructs its nested shape, and missing paths remain absent. |
 | `LQL-Q03` | concurrency/parallel-reader options | partial | `API` | P2 | Claims/configuration may lower hard server limits. |
 | `LQL-Q04` | `time_offset` | missing | `API` | P2 | Planner-only timestamp shift. |
 | `LQL-Q05` | `global_filter` | missing | `API` | P3 | Apply before every subquery without textual substitution. |
