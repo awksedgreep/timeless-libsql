@@ -820,6 +820,15 @@ fn predicate_matches(
             ensure_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::PatternMatch { field, matcher } => {
+            let matched = match field_json(row, field) {
+                None | Some(Value::Null) => matcher.matches(""),
+                Some(Value::String(value)) => matcher.matches(value),
+                Some(value) => matcher.matches(&value.to_string()),
+            };
+            ensure_active(cancelled)?;
+            Ok(matched)
+        }
     }
 }
 

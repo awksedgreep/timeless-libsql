@@ -15,7 +15,8 @@ and its tests. That parser was intentionally DDNet-oriented rather than complete
 LogsQL, but its supported syntax must not disappear in the Rust path.
 
 The current Rust parser supports the complete P0 Timeless/DDNet subset plus
-the shipped P1 filters and ordered discovery/projection/statistics pipeline:
+the shipped P1 filters, the P2 pattern matcher, and the ordered
+discovery/projection/statistics pipeline:
 wildcard selection; relative, bracketed, and comparison time bounds; all eight
 severities; service and arbitrary typed/nested field predicates; message
 filters; logical composition; deterministic time sort, limit, and offset;
@@ -62,7 +63,7 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `LQL-F08` | quoted message phrase | shipped | yes | `ROWS` | `API` | P0 | Exact case-sensitive phrase bytes plus Unicode letter/digit/underscore word boundaries match the pinned VictoriaLogs oracle. The existing case-insensitive Timeless substring primitive remains separate. |
 | `LQL-F09` | word filter | shipped | no | `ROWS` | `API` | P1 | Case-sensitive Unicode letter/digit/underscore boundaries pass the pinned oracle; bounded decode remains the honest plan. |
 | `LQL-F10` | prefix filter | shipped | no | `ROWS` | `API` | P1 | Word and phrase prefixes share the pinned boundary semantics; no measured index contract is claimed. |
-| `LQL-F11` | pattern-match filter | missing | no | `ROWS` | `API` | P2 | Preserve upstream wildcard/capture semantics. |
+| `LQL-F11` | pattern-match filter | shipped | no | `ROWS` | `API` | P2 | Four case-insensitive function names and all seven VictoriaLogs placeholders pass 23 pinned cases, including the exact Unicode Letter/Decimal_Number boundary for `<W>`. Matching uses a textual projection of retained rich values over bounded public rows; missing and null are empty only for this predicate. No portable SQL equivalent is claimed because SQLite `LIKE`/`GLOB` cannot reproduce the placeholder and quoted-Unicode-word grammar. |
 | `LQL-F12` | substring filter ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-007-case-sensitive-message-substring)) | shipped | partial | `ROWS`, `SQL` | `API` | P1 | Case-sensitive literal UTF-8 substring matches the pinned oracle and remains distinct from the established case-insensitive engine predicate. |
 | `LQL-F13` | regexp filter | shipped | no | `ROWS` | `API` | P1 | Bounded RE2-compatible Rust regex uses a 1 MiB compiled-size limit and observes cancellation and decoded-row work before returning matches. |
 | `LQL-F14` | case-insensitive filter | shipped | no | `ROWS` | `API` | P1 | `i(word)`, `i("phrase")`, and `i(prefix*)` use pinned Unicode case behavior over bounded public rows. |

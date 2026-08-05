@@ -42,6 +42,26 @@
     {"case": "numeric-string", "_msg": "numeric string", "numeric_group": "numeric", "n": "3"},
     {"case": "numeric-ten", "_msg": "numeric ten", "numeric_group": "numeric", "n": 10},
     {"case": "numeric-huge", "_msg": "numeric huge", "numeric_group": "numeric", "n": 9007199254740993},
+    {"case": "pattern-anchor-any", "_msg": "before x 10 y after", "pattern_group": "anchor"},
+    {"case": "pattern-anchor-full", "_msg": "x 10 y", "pattern_group": "anchor"},
+    {"case": "pattern-anchor-prefix", "_msg": "x 10 y after", "pattern_group": "anchor"},
+    {"case": "pattern-anchor-suffix", "_msg": "before x 10 y", "pattern_group": "anchor"},
+    {"case": "pattern-anchor-miss", "_msg": "before x nope y after", "pattern_group": "anchor"},
+    {"case": "pattern-num-decimal", "_msg": "job-123", "pattern_group": "number"},
+    {"case": "pattern-num-hex", "_msg": "job-12abcdEF", "pattern_group": "number"},
+    {"case": "pattern-num-short-hex", "_msg": "job-be", "pattern_group": "number"},
+    {"case": "pattern-uuid", "_msg": "id=2edfed59-3e98-4073-bbb2-28d321ca71a7", "pattern_group": "placeholder"},
+    {"case": "pattern-ip4", "_msg": "ip=123.45.67.89", "pattern_group": "placeholder"},
+    {"case": "pattern-time", "_msg": "time=10:20:30,123", "pattern_group": "placeholder"},
+    {"case": "pattern-date", "_msg": "date=2025/10/20", "pattern_group": "placeholder"},
+    {"case": "pattern-datetime", "_msg": "at=2025-10-20T08:09:11.123+01:30", "pattern_group": "placeholder"},
+    {"case": "pattern-word-unicode", "_msg": "word=привет_45", "pattern_group": "placeholder", "pattern_nd": "१२", "pattern_no": "²", "pattern_nl": "Ⅳ", "pattern_mark": "é"},
+    {"case": "pattern-word-quoted", "_msg": "word=\"hello world\"", "pattern_group": "placeholder"},
+    {"case": "pattern-unknown-literal", "_msg": "value=<BOGUS>", "pattern_group": "placeholder"},
+    {"case": "pattern-empty-message", "_msg": "empty field", "pattern_group": "empty", "pattern_value": ""},
+    {"case": "pattern-nonempty-message", "_msg": "nonempty field", "pattern_group": "empty", "pattern_value": "nonempty"},
+    {"case": "pattern-progress", "_msg": "a x nope a x 12 y", "pattern_group": "progress"},
+    {"case": "pattern-field", "_msg": "metadata pattern", "pattern_group": "field", "pattern_code": "job-42", "pattern_num": 42},
     {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
     {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
     {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
@@ -91,6 +111,132 @@
         "phrase-exact", "phrase-inside", "phrase-suffix",
         "phrase-punctuation", "phrase-unicode-punctuation"
       ]
+    },
+    {
+      "id": "LQL-F11-any-anchor",
+      "query": "pattern_group:=\"anchor\" pattern_match(\"x <N> y\")",
+      "status": 200,
+      "expected_cases": ["pattern-anchor-any", "pattern-anchor-full", "pattern-anchor-prefix", "pattern-anchor-suffix"]
+    },
+    {
+      "id": "LQL-F11-full-anchor",
+      "query": "pattern_group:=\"anchor\" pattern_match_full(\"x <N> y\")",
+      "status": 200,
+      "expected_cases": ["pattern-anchor-full"]
+    },
+    {
+      "id": "LQL-F11-prefix-anchor",
+      "query": "pattern_group:=\"anchor\" pattern_match_prefix(\"x <N> y\")",
+      "status": 200,
+      "expected_cases": ["pattern-anchor-full", "pattern-anchor-prefix"]
+    },
+    {
+      "id": "LQL-F11-suffix-anchor",
+      "query": "pattern_group:=\"anchor\" pattern_match_suffix(\"x <N> y\")",
+      "status": 200,
+      "expected_cases": ["pattern-anchor-full", "pattern-anchor-suffix"]
+    },
+    {
+      "id": "LQL-F11-number-decimal-and-even-hex",
+      "query": "pattern_group:=\"number\" pattern_match_full(\"job-<N>\")",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal", "pattern-num-hex"]
+    },
+    {
+      "id": "LQL-F11-unquoted-single-token-pattern",
+      "query": "case:=\"pattern-num-decimal\" pattern_match_full(job-123)",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal"]
+    },
+    {
+      "id": "LQL-F11-function-names-are-case-insensitive",
+      "query": "case:=\"pattern-num-decimal\" PaTtErN_MaTcH_FuLl(\"job-<N>\")",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal"]
+    },
+    {
+      "id": "LQL-F11-uuid-placeholder",
+      "query": "case:=\"pattern-uuid\" pattern_match_full(\"id=<UUID>\")",
+      "status": 200,
+      "expected_cases": ["pattern-uuid"]
+    },
+    {
+      "id": "LQL-F11-ip4-placeholder",
+      "query": "case:=\"pattern-ip4\" pattern_match_full(\"ip=<IP4>\")",
+      "status": 200,
+      "expected_cases": ["pattern-ip4"]
+    },
+    {
+      "id": "LQL-F11-time-placeholder-with-comma-fraction",
+      "query": "case:=\"pattern-time\" pattern_match_full(\"time=<TIME>\")",
+      "status": 200,
+      "expected_cases": ["pattern-time"]
+    },
+    {
+      "id": "LQL-F11-date-placeholder-with-slashes",
+      "query": "case:=\"pattern-date\" pattern_match_full(\"date=<DATE>\")",
+      "status": 200,
+      "expected_cases": ["pattern-date"]
+    },
+    {
+      "id": "LQL-F11-datetime-placeholder-with-zone",
+      "query": "case:=\"pattern-datetime\" pattern_match_full(\"at=<DATETIME>\")",
+      "status": 200,
+      "expected_cases": ["pattern-datetime"]
+    },
+    {
+      "id": "LQL-F11-word-placeholder-unicode-and-quoted",
+      "query": "pattern_group:=\"placeholder\" pattern_match_full(\"word=<W>\")",
+      "status": 200,
+      "expected_cases": ["pattern-word-unicode", "pattern-word-quoted"]
+    },
+    {
+      "id": "LQL-F11-word-placeholder-uses-letter-or-decimal-digit-categories",
+      "query": "case:=\"pattern-word-unicode\" pattern_nd:pattern_match_full(\"<W>\")",
+      "status": 200,
+      "expected_cases": ["pattern-word-unicode"]
+    },
+    {
+      "id": "LQL-F11-word-placeholder-rejects-other-number-letter-number-and-mark",
+      "query": "case:=\"pattern-word-unicode\" (pattern_no:pattern_match_full(\"<W>\") OR pattern_nl:pattern_match_full(\"<W>\") OR pattern_mark:pattern_match_full(\"<W>\"))",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F11-unknown-placeholder-is-literal",
+      "query": "case:=\"pattern-unknown-literal\" pattern_match_full(\"value=<BOGUS>\")",
+      "status": 200,
+      "expected_cases": ["pattern-unknown-literal"]
+    },
+    {
+      "id": "LQL-F11-empty-any-prefix-and-suffix-match-every-string",
+      "query": "pattern_group:=\"empty\" (pattern_match(\"\") OR pattern_match_prefix(\"\") OR pattern_match_suffix(\"\"))",
+      "status": 200,
+      "expected_cases": ["pattern-empty-message", "pattern-nonempty-message"]
+    },
+    {
+      "id": "LQL-F11-empty-full-matches-only-empty-string",
+      "query": "pattern_group:=\"empty\" pattern_value:pattern_match_full(\"\")",
+      "status": 200,
+      "expected_cases": ["pattern-empty-message"]
+    },
+    {
+      "id": "LQL-F11-any-search-advances-after-partial-match",
+      "query": "case:=\"pattern-progress\" pattern_match(\"a x <N> y\")",
+      "status": 200,
+      "expected_cases": ["pattern-progress"]
+    },
+    {
+      "id": "LQL-F11-field-scoped-pattern",
+      "query": "pattern_group:=\"field\" pattern_code:pattern_match_full(\"job-<N>\")",
+      "status": 200,
+      "expected_cases": ["pattern-field"]
+    },
+    {
+      "id": "LQL-F11-upstream-stringifies-numeric-fields",
+      "query": "pattern_group:=\"field\" pattern_num:pattern_match_full(\"<N>\")",
+      "status": 200,
+      "expected_cases": ["pattern-field"]
     },
     {
       "id": "LQL-F12-case-sensitive-substring",
@@ -374,6 +520,12 @@
         "state-string", "state-zero", "state-false",
         "numeric-missing", "numeric-null", "numeric-negative", "numeric-zero",
         "numeric-two", "numeric-decimal", "numeric-string", "numeric-ten", "numeric-huge",
+        "pattern-anchor-any", "pattern-anchor-full", "pattern-anchor-prefix",
+        "pattern-anchor-suffix", "pattern-anchor-miss", "pattern-num-decimal",
+        "pattern-num-hex", "pattern-num-short-hex", "pattern-uuid", "pattern-ip4",
+        "pattern-time", "pattern-date", "pattern-datetime", "pattern-word-unicode",
+        "pattern-word-quoted", "pattern-unknown-literal", "pattern-empty-message",
+        "pattern-nonempty-message", "pattern-progress", "pattern-field",
         "page-0", "page-1", "page-2", "page-3",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
@@ -600,6 +752,20 @@
     {
       "id": "LQL-F13-invalid-regexp",
       "query": "~\"(\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F11-empty-argument-is-invalid",
+      "query": "pattern_match()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F11-multiple-arguments-are-invalid",
+      "query": "pattern_match(\"x\", \"y\")",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

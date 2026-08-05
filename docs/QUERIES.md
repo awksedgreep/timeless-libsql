@@ -190,6 +190,50 @@ candidate pruning cannot change truth values. Regex and every decoded-row
 predicate observe the request cancellation flag and `max_work_entries` before
 a matching row may be returned.
 
+### LogsQL pattern matching
+
+The Rust LogsQL API implements VictoriaLogs-compatible `pattern_match(...)`,
+`pattern_match_full(...)`, `pattern_match_prefix(...)`, and
+`pattern_match_suffix(...)`. They search anywhere, require the complete field,
+anchor at the beginning, or anchor at the end, respectively. Function names
+are ASCII case-insensitive. A pattern is one quoted argument (or one simple
+unquoted compound token):
+
+```text
+pattern_match("request_id=<UUID>")
+message:pattern_match_prefix("job <N>")
+context.attempt:pattern_match_full("<N>")
+* | filter peer:pattern_match_suffix("ip=<IP4>")
+```
+
+The seven recognized placeholders follow the pinned VictoriaLogs matcher,
+including its deliberately structural rather than validating interpretation:
+
+| placeholder | matched shape |
+|---|---|
+| `<N>` | decimal digits, or an even-length hexadecimal token of at least four characters when hexadecimal letters are present |
+| `<UUID>` | five `<N>` components separated by `-` |
+| `<IP4>` | four `<N>` components separated by `.`; octet ranges are not validated |
+| `<TIME>` | three `<N>` components separated by `:`, with optional `.` or `,` fraction |
+| `<DATE>` | three `<N>` components separated by either `-` or `/` |
+| `<DATETIME>` | `<DATE>`, `T` or space, `<TIME>`, and an optional `Z` or numeric offset |
+| `<W>` | one Unicode General_Category Letter/Decimal_Number/underscore word or one valid quoted string; other number classes and combining marks are boundaries |
+
+Unknown `<...>` text is literal. Empty any/prefix/suffix patterns match every
+text value; an empty full pattern matches only textual empty. For this textual
+operator only, missing and JSON null project as empty, strings use their exact
+UTF-8 bytes, and retained booleans, numbers, arrays, and objects use compact
+JSON text without changing the stored type. Typed equality, presence, and
+numeric filters retain their stricter missing/null/type distinctions.
+
+Pattern matching is bounded Rust API composition over the public `logs` rows.
+It honors the existing work, result, response, deadline, and cancellation
+limits and does not inspect private shadow tables. There is no claimed ordinary
+SQL equivalent: SQLite `LIKE` and `GLOB` cannot faithfully reproduce the seven
+token scanners, quoted-string escapes, Unicode word categories, and partial-
+match restart behavior. This evidence does not justify a SQLite extension
+primitive because it would not eliminate the already-required field decode.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

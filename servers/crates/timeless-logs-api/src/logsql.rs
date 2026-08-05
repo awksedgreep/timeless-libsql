@@ -12,7 +12,8 @@ use regex::RegexBuilder;
 use serde_json::Value;
 
 use crate::{
-    LogField, LogPredicate, MetadataExact, NumericOp, QuerySpec, TimestampUnit, ValueTypeKind,
+    LogField, LogPredicate, MetadataExact, NumericOp, PatternMatchMode, PatternMatcher, QuerySpec,
+    TimestampUnit, ValueTypeKind,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -666,6 +667,16 @@ pub fn parse_at(
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
+                    if let Some(matcher) = parse_pattern_match_filter(&token)? {
+                        append_predicate(
+                            &mut spec,
+                            LogPredicate::PatternMatch {
+                                field: LogField::Message,
+                                matcher,
+                            },
+                        );
+                        continue;
+                    }
                     if let Some(regex) = parse_regexp_filter(&token)? {
                         append_predicate(
                             &mut spec,
@@ -896,6 +907,52 @@ fn parse_regexp_filter(token: &str) -> Result<Option<regex::Regex>, LogsqlError>
         .build()
         .map(Some)
         .map_err(|error| LogsqlError::malformed(format!("invalid LogsQL regexp: {error}")))
+}
+
+fn parse_pattern_match_filter(token: &str) -> Result<Option<PatternMatcher>, LogsqlError> {
+    let functions = [
+        ("pattern_match", PatternMatchMode::Any),
+        ("pattern_match_full", PatternMatchMode::Full),
+        ("pattern_match_prefix", PatternMatchMode::Prefix),
+        ("pattern_match_suffix", PatternMatchMode::Suffix),
+    ];
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    let Some((name, mode)) = functions
+        .into_iter()
+        .find(|(name, _)| token[..open].eq_ignore_ascii_case(name))
+    else {
+        return Ok(None);
+    };
+    let inner = token[open..]
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| LogsqlError::malformed(format!("unterminated LogsQL {name} filter")))?;
+    let pattern = match quoted_value(inner)? {
+        Some(pattern) => pattern,
+        None if inner.is_empty() => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {name} requires one pattern"
+            )))
+        }
+        None if !is_unquoted_pattern_argument(inner) => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {name} requires exactly one pattern argument"
+            )))
+        }
+        None => inner.to_owned(),
+    };
+    Ok(Some(PatternMatcher::new(&pattern, mode)))
+}
+
+fn is_unquoted_pattern_argument(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            logsql_word_char(character) || matches!(character, '+' | '-' | '/' | ':' | '.' | '$')
+        })
+        && !(value.len() == 1
+            && matches!(value.as_bytes()[0], b'+' | b'-' | b'/' | b':' | b'.' | b'$'))
 }
 
 fn parse_substring_filter(token: &str) -> Result<Option<String>, LogsqlError> {
@@ -1315,6 +1372,12 @@ fn compile_field_filter(
             },
         });
     }
+    if let Some(matcher) = parse_pattern_match_filter(value)? {
+        return Ok(LogPredicate::PatternMatch {
+            field: field.clone(),
+            matcher,
+        });
+    }
     if value == "*" {
         return Ok(LogPredicate::AnyValue {
             field: field.clone(),
@@ -1362,6 +1425,12 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
         return Ok(predicate_for_field(predicate, field));
+    }
+    if let Some(matcher) = parse_pattern_match_filter(atom)? {
+        return Ok(LogPredicate::PatternMatch {
+            field: field.clone(),
+            matcher,
+        });
     }
     if let Some(regex) = parse_regexp_filter(atom)? {
         return Ok(LogPredicate::Regex {
@@ -1788,6 +1857,16 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
     let value = &token[operator + operator_width..];
     let path = parse_field_path(field)?;
     if !typed {
+        if let Some(matcher) = parse_pattern_match_filter(value)? {
+            append_predicate(
+                spec,
+                LogPredicate::PatternMatch {
+                    field: log_field(&path),
+                    matcher,
+                },
+            );
+            return Ok(());
+        }
         if let Some(kind) = value_type_filter(value)? {
             append_predicate(
                 spec,
@@ -2626,6 +2705,40 @@ mod tests {
         assert!(parse_at(r#"~"alp(ha|ine)""#, TimestampUnit::Microseconds, 0).is_ok());
         assert!(parse_at(r#"~"(?i)^alpha$""#, TimestampUnit::Microseconds, 0).is_ok());
         assert!(parse_at(r#"~"(""#, TimestampUnit::Microseconds, 0).is_err());
+    }
+
+    #[test]
+    fn session_sixteen_pattern_match_grammar_is_strict_and_composable() {
+        for query in [
+            r#"pattern_match("x <N> y")"#,
+            r#"pattern_match_full("<UUID>")"#,
+            r#"pattern_match_prefix("date=<DATE>")"#,
+            r#"pattern_match_suffix("word=<W>")"#,
+            r#"PaTtErN_MaTcH_FuLl("job-<N>")"#,
+            r#"pattern_match_full(job-123)"#,
+            r#"code:pattern_match_full("job-<N>")"#,
+            r#"code:(pattern_match("job-<N>") OR pattern_match_full("other"))"#,
+            r#"pattern_match("alpha") AND NOT pattern_match_suffix("beta")"#,
+            r#"* | filter code:pattern_match_full("job-<N>")"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        for malformed in [
+            "pattern_match()",
+            r#"pattern_match("x", "y")"#,
+            "pattern_match(x y)",
+            r#"pattern_match("unterminated)"#,
+            r#"pattern_match_full("x")junk"#,
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(
+                error.kind,
+                LogsqlErrorKind::Malformed,
+                "{malformed}: {error}"
+            );
+        }
     }
 
     #[test]

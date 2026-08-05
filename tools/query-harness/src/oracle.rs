@@ -1262,6 +1262,29 @@ fn victorialogs_query(case: &Map<String, Value>, base_us: i64) -> Result<String>
     Ok(query)
 }
 
+fn victorialogs_response_cases(
+    case: &Map<String, Value>,
+    status: u16,
+    expected_status: u16,
+    content_type: &str,
+    body: &str,
+) -> Result<Vec<String>> {
+    if status != expected_status || !content_type.starts_with("application/stream+json") {
+        return Ok(Vec::new());
+    }
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| -> Result<String> {
+            let row: Value = serde_json::from_str(line)
+                .with_context(|| format!("decode VictoriaLogs row for {}", case_id(case)))?;
+            row.get("case")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .context("VictoriaLogs oracle row is missing case")
+        })
+        .collect()
+}
+
 fn victorialogs_cases(client: &Client, base: &str, fixture: &Value, base_us: i64) -> Result<usize> {
     let mut failures = 0;
     for case in object_cases(fixture, "query_cases")? {
@@ -1271,18 +1294,8 @@ fn victorialogs_cases(client: &Client, base: &str, fixture: &Value, base_us: i64
             .get("status")
             .and_then(Value::as_u64)
             .context("case status")? as u16;
-        let mut actual_cases = body
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| -> Result<String> {
-                let row: Value = serde_json::from_str(line)
-                    .with_context(|| format!("decode VictoriaLogs row for {}", case_id(case)))?;
-                row.get("case")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .context("VictoriaLogs oracle row is missing case")
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut actual_cases =
+            victorialogs_response_cases(case, status, expected_status, &content_type, &body)?;
         let mut expected_cases = case
             .get("expected_cases")
             .and_then(Value::as_array)
@@ -1646,6 +1659,49 @@ mod tests {
             let case = row.get("case").and_then(Value::as_str).unwrap();
             assert!(stream_cases.insert(case.to_owned()), "duplicate {case}");
         }
+    }
+
+    #[test]
+    fn victorialogs_documented_case_count_matches_the_checked_fixture() {
+        let root = repository_root();
+        let fixture: Value =
+            load_json(&root.join("tests/query_oracles/victorialogs/api_cases.json")).unwrap();
+        let count = ["query_cases", "stats_cases", "error_cases"]
+            .into_iter()
+            .map(|name| fixture.get(name).and_then(Value::as_array).unwrap().len())
+            .sum::<usize>();
+        let documentation =
+            fs::read_to_string(root.join("docs/QUERY_ORACLES.md")).expect("read oracle docs");
+        assert!(
+            documentation.contains(&format!("fixture now contains {count} cases")),
+            "docs/QUERY_ORACLES.md must name the exact {count}-case VictoriaLogs fixture"
+        );
+    }
+
+    #[test]
+    fn victorialogs_error_response_reports_a_case_failure_instead_of_aborting_the_corpus() {
+        let case = json!({"id": "LQL-TEST", "status": 200});
+        let case = case.as_object().unwrap();
+        assert!(victorialogs_response_cases(
+            case,
+            400,
+            200,
+            "text/plain; charset=utf-8",
+            "cannot parse query",
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            victorialogs_response_cases(
+                case,
+                200,
+                200,
+                "application/stream+json",
+                "{\"case\":\"row\"}\n",
+            )
+            .unwrap(),
+            ["row"]
+        );
     }
 
     #[test]

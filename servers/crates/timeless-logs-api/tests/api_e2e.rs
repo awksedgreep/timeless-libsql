@@ -623,6 +623,221 @@ async fn session_ten_typed_metadata_equality_distinguishes_nested_missing_null_e
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_pattern_match_filters_match_victorialogs_and_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("pattern-match-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(vec![
+            LogEntry {
+                ts: 1_800_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "prefix user_id=123, ip=45.67.89.12, time=2025-10-20T23:32:12Z suffix"
+                    .into(),
+                metadata_json: r#"{"service":"pattern","code":"job-42"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_800_000_000_000_002,
+                level: 1,
+                severity: "info".into(),
+                message: "alpha".into(),
+                metadata_json: r#"{"service":"pattern","code":"other"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_800_000_000_000_003,
+                level: 1,
+                severity: "info".into(),
+                message: "a x nope a x 12 y".into(),
+                metadata_json: r#"{"service":"pattern","n":42,"flag":true,"empty":"","nullish":null,"list":[1,"x"],"nested":{"value":true},"uuid":"2edfed59-3e98-4073-bbb2-28d321ca71a7","date":"2025/10/20","time":"10:20:30,123","word":"\"hello world\"","nd":"१२","no":"²","nl":"Ⅳ","mark":"é"}"#.into(),
+            },
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    let queries = [
+        (
+            r#"pattern_match("user_id=<N>, ip=<IP4>, time=<DATETIME>")"#,
+            vec![1_800_000_000_000_001],
+        ),
+        (
+            r#"pattern_match_prefix("prefix <W>")"#,
+            vec![1_800_000_000_000_001],
+        ),
+        (
+            r#"pattern_match_suffix("suffix")"#,
+            vec![1_800_000_000_000_001],
+        ),
+        (r#"pattern_match_full("<W>")"#, vec![1_800_000_000_000_002]),
+        (
+            r#"code:pattern_match_full("job-<N>")"#,
+            vec![1_800_000_000_000_001],
+        ),
+        (
+            r#"code:PaTtErN_MaTcH_FuLl("job-<N>")"#,
+            vec![1_800_000_000_000_001],
+        ),
+        (r#"pattern_match("a x <N> y")"#, vec![1_800_000_000_000_003]),
+        (
+            r#"n:pattern_match_full("<N>")"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"flag:pattern_match_full("true")"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"list:pattern_match_full(`[1,"x"]`)"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"nested:pattern_match_full(`{"value":true}`)"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"empty:pattern_match_full("")"#,
+            vec![
+                1_800_000_000_000_001,
+                1_800_000_000_000_002,
+                1_800_000_000_000_003,
+            ],
+        ),
+        (
+            r#"nullish:pattern_match_full("")"#,
+            vec![
+                1_800_000_000_000_001,
+                1_800_000_000_000_002,
+                1_800_000_000_000_003,
+            ],
+        ),
+        (
+            r#"uuid:pattern_match_full("<UUID>")"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"date:pattern_match_full("<DATE>")"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"time:pattern_match_full("<TIME>")"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"word:pattern_match_full("<W>")"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (
+            r#"nd:pattern_match_full("<W>")"#,
+            vec![1_800_000_000_000_003],
+        ),
+        (r#"no:pattern_match_full("<W>")"#, vec![]),
+        (r#"nl:pattern_match_full("<W>")"#, vec![]),
+        (r#"mark:pattern_match_full("<W>")"#, vec![]),
+    ];
+    for (query, expected) in &queries {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 10;
+        assert_eq!(
+            storage
+                .query(plan.spec)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.ts)
+                .collect::<Vec<_>>(),
+            *expected,
+            "{query}"
+        );
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(&app, r#"* | filter n:pattern_match_full("<N>") | limit 10"#,)
+            .await
+            .len(),
+        1
+    );
+    let malformed = app
+        .clone()
+        .oneshot(logsql_request("pattern_match()"))
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(malformed.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "malformed_logsql"
+    );
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(r#"pattern_match("a x <N> y") | limit 10"#))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"pattern_match_full("alpha") | limit 10"#)
+            .await
+            .len(),
+        1
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 10;
+        assert_eq!(
+            reopened
+                .query(plan.spec)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.ts)
+                .collect::<Vec<_>>(),
+            expected,
+            "{query}"
+        );
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

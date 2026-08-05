@@ -111,6 +111,16 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
+The fixture now contains 98 cases. Its 23 `LQL-F11` cases pin the four pattern
+anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
+time, date, datetime, and Unicode/quoted
+word placeholders; exact Unicode Letter/Decimal_Number inclusion and
+Letter_Number/Other_Number/Mark exclusion; unknown-placeholder literals; empty
+patterns; restart after a failed partial candidate; field scope; upstream
+numeric stringification; one simple unquoted compound token; and exact
+one-argument errors. The matcher
+behavior is also source-audited at VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

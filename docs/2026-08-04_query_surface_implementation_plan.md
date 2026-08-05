@@ -294,6 +294,13 @@ Rows: `LQL-F11`, `LQL-F16`, `LQL-F17`, `LQL-F20`–`LQL-F23`,
 Exit: all applicable P2 filters pass VictoriaLogs with explicit byte/Unicode,
 timezone, nested-array, field expansion, escape, and error-location behavior.
 
+Progress: `LQL-F11` is shipped with all four case-insensitive pattern anchors,
+all seven VictoriaLogs placeholders, strict one-argument grammar, rich-value textual
+projection, missing/null/empty behavior, field and pipeline composition,
+bounded work/cancellation, 23 pinned oracle cases, real-extension durability
+and reopen coverage, and no extension primitive or misleading SQL claim. The
+remaining rows continue in their listed order.
+
 ### Session 17: LogsQL P2 pipelines and query behavior
 
 Rows: `LQL-P07`, `LQL-P10`–`LQL-P16`, `LQL-P18`–`LQL-P24`,

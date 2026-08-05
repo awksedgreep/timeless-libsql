@@ -24,8 +24,8 @@ pub use logsql::{
     LogsqlPlan,
 };
 pub use storage::{
-    LogEntry, LogField, LogPredicate, MetadataExact, NumericOp, QuerySpec, Storage, StorageStats,
-    TimestampUnit, ValueTypeKind,
+    LogEntry, LogField, LogPredicate, MetadataExact, NumericOp, PatternMatchMode, PatternMatcher,
+    QuerySpec, Storage, StorageStats, TimestampUnit, ValueTypeKind,
 };
 pub use timeless_api_common::BackupReport;
 

@@ -2880,7 +2880,7 @@ HWM was 64,468 KiB, 140 KiB above it. Both are whole-process variations and
 neither direction is attributed to these query shapes.
 
 All 528 pinned Prometheus 3.13.2 cases, all 151 pinned VictoriaMetrics 1.148.0
-cases, and all 120 pinned VictoriaLogs 1.52.0 cases pass. The complete 88-test
+cases, and all 75 pinned VictoriaLogs 1.52.0 cases pass. The complete 88-test
 metrics real-extension suite, 57 metrics library tests, both complete Rust
 workspaces, clippy with warnings denied, formatting, the 25-test Rust query
 harness, documentation contracts, and all 77 SQL recipes (108 statements)
@@ -2937,7 +2937,7 @@ was 64,968 KiB, 500 KiB above it. Both are whole-process variations and
 neither direction is attributed to the three added query shapes.
 
 All 528 pinned Prometheus 3.13.2 cases, all 164 pinned VictoriaMetrics 1.148.0
-cases, and all 120 pinned VictoriaLogs 1.52.0 cases pass. The complete 89-test
+cases, and all 75 pinned VictoriaLogs 1.52.0 cases pass. The complete 89-test
 metrics real-extension suite, 58 metrics library tests, both complete Rust
 workspaces, Clippy with warnings denied, formatting, the 25-test Rust query
 harness, documentation contracts, and all 78 SQL recipes (109 statements)
@@ -2996,7 +2996,7 @@ HWM was 63,792 KiB, 1,176 KiB below it. Both are whole-process variations and
 neither direction is attributed to the added query shapes.
 
 All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
-cases, and all 120 pinned VictoriaLogs 1.52.0 cases pass. The complete 90-test
+cases, and all 75 pinned VictoriaLogs 1.52.0 cases pass. The complete 90-test
 metrics real-extension suite, 60 metrics library tests, both complete Rust
 workspaces, Clippy with warnings denied, formatting, the 25-test Rust query
 harness, documentation contracts, and all 79 SQL recipes (110 statements)

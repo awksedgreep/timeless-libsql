@@ -40,16 +40,19 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
 closed native-unit edges; all eight exact severities; service and arbitrary
 typed metadata equality; message word, phrase, word-prefix, phrase-prefix,
 case-sensitive substring, bounded RE2-compatible regexp, case-insensitive,
-and full-message exact filters; time sort, limit, and offset aliases; and
-exact count with an optional output alias. `NOT` binds before `AND`, which
-binds before `OR`; parentheses and field-scoped groups override precedence.
+full-message exact, and VictoriaLogs-compatible any/full/prefix/suffix pattern
+filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`, `<DATE>`, `<DATETIME>`, and
+`<W>` placeholders and case-insensitive function names; time sort, limit, and
+offset aliases; and exact count with
+an optional output alias. `NOT` binds before `AND`, which binds before `OR`;
+parentheses and field-scoped groups override precedence.
 Safe top-level indexed conjuncts are pushed into public extension rows before
 the bounded Rust predicate evaluator. Predicates below `OR` or `NOT` are not
 unsafely pushed.

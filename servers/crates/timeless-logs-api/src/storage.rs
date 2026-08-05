@@ -4,7 +4,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -128,6 +128,395 @@ pub enum ValueTypeKind {
     Number,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PatternMatchMode {
+    Any,
+    Full,
+    Prefix,
+    Suffix,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PatternPlaceholder {
+    Number,
+    Uuid,
+    Ipv4,
+    Time,
+    Date,
+    DateTime,
+    Word,
+}
+
+/// Compiled VictoriaLogs-compatible pattern used by API-owned row predicates.
+///
+/// This matcher operates only after a bounded public-table read. It is not an
+/// extension contract and does not expose LogsQL syntax to SQLite.
+#[derive(Clone, Debug)]
+pub struct PatternMatcher {
+    mode: PatternMatchMode,
+    separators: Vec<Vec<u8>>,
+    placeholders: Vec<PatternPlaceholder>,
+}
+
+impl PatternMatcher {
+    pub fn new(pattern: &str, mode: PatternMatchMode) -> Self {
+        let mut separators = Vec::new();
+        let mut placeholders = Vec::new();
+        let mut separator = Vec::new();
+        let bytes = pattern.as_bytes();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let Some(relative_start) = bytes[offset..].iter().position(|byte| *byte == b'<') else {
+                separator.extend_from_slice(&bytes[offset..]);
+                break;
+            };
+            let start = offset + relative_start;
+            separator.extend_from_slice(&bytes[offset..start]);
+            let Some(relative_end) = bytes[start..].iter().position(|byte| *byte == b'>') else {
+                separator.extend_from_slice(&bytes[start..]);
+                break;
+            };
+            let end = start + relative_end + 1;
+            let placeholder = match &bytes[start..end] {
+                b"<N>" => Some(PatternPlaceholder::Number),
+                b"<UUID>" => Some(PatternPlaceholder::Uuid),
+                b"<IP4>" => Some(PatternPlaceholder::Ipv4),
+                b"<TIME>" => Some(PatternPlaceholder::Time),
+                b"<DATE>" => Some(PatternPlaceholder::Date),
+                b"<DATETIME>" => Some(PatternPlaceholder::DateTime),
+                b"<W>" => Some(PatternPlaceholder::Word),
+                _ => None,
+            };
+            if let Some(placeholder) = placeholder {
+                separators.push(std::mem::take(&mut separator));
+                placeholders.push(placeholder);
+            } else {
+                separator.extend_from_slice(&bytes[start..end]);
+            }
+            offset = end;
+        }
+        separators.push(separator);
+        Self {
+            mode,
+            separators,
+            placeholders,
+        }
+    }
+
+    pub fn matches(&self, value: &str) -> bool {
+        let bytes = value.as_bytes();
+        match self.mode {
+            PatternMatchMode::Any => self.index_start_end(bytes, 0).is_some(),
+            PatternMatchMode::Full => self.index_end(bytes, 0) == Some(bytes.len()),
+            PatternMatchMode::Prefix => self.index_end(bytes, 0).is_some(),
+            PatternMatchMode::Suffix => {
+                if self.is_empty() {
+                    return true;
+                }
+                if !bytes.ends_with(self.separators.last().expect("one separator")) {
+                    return false;
+                }
+                let mut offset = 0usize;
+                while offset <= bytes.len() {
+                    let Some((start, end)) = self.index_start_end(bytes, offset) else {
+                        return false;
+                    };
+                    if end == bytes.len() {
+                        return true;
+                    }
+                    offset = start.saturating_add(1);
+                }
+                false
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.separators.len() == 1 && self.separators[0].is_empty()
+    }
+
+    fn index_start_end(&self, value: &[u8], mut offset: usize) -> Option<(usize, usize)> {
+        while offset <= value.len() {
+            let start = self.index_start(value, offset)?;
+            if let Some(end) = self.index_end(value, start) {
+                return Some((start, end));
+            }
+            offset = start.saturating_add(1);
+        }
+        None
+    }
+
+    fn index_start(&self, value: &[u8], offset: usize) -> Option<usize> {
+        let first = &self.separators[0];
+        if !first.is_empty() {
+            return find_bytes(value, first, offset);
+        }
+        let Some(first_placeholder) = self.placeholders.first() else {
+            return Some(0);
+        };
+        match first_placeholder {
+            PatternPlaceholder::Word => index_word_start(value, offset),
+            _ => index_number_start(value, offset),
+        }
+    }
+
+    fn index_end(&self, value: &[u8], mut offset: usize) -> Option<usize> {
+        for (index, separator) in self.separators.iter().enumerate() {
+            if !value.get(offset..)?.starts_with(separator) {
+                return None;
+            }
+            offset = offset.checked_add(separator.len())?;
+            let Some(placeholder) = self.placeholders.get(index) else {
+                return Some(offset);
+            };
+            offset = placeholder.index_end(value, offset)?;
+        }
+        Some(offset)
+    }
+}
+
+impl PatternPlaceholder {
+    fn index_end(self, value: &[u8], offset: usize) -> Option<usize> {
+        match self {
+            Self::Number => index_placeholder_number_end(value, offset),
+            Self::Uuid => index_generic_placeholder_end(value, offset, 5, b'-'),
+            Self::Ipv4 => index_generic_placeholder_end(value, offset, 4, b'.'),
+            Self::Time => index_time_end(value, offset),
+            Self::Date => index_date_end(value, offset),
+            Self::DateTime => index_datetime_end(value, offset),
+            Self::Word => index_word_end(value, offset),
+        }
+    }
+}
+
+fn find_bytes(value: &[u8], needle: &[u8], offset: usize) -> Option<usize> {
+    if offset > value.len() {
+        return None;
+    }
+    if needle.is_empty() {
+        return Some(offset);
+    }
+    value[offset..]
+        .windows(needle.len())
+        .position(|candidate| candidate == needle)
+        .map(|relative| offset + relative)
+}
+
+fn is_ascii_token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn is_hex(byte: u8) -> bool {
+    byte.is_ascii_hexdigit()
+}
+
+fn index_number_start(value: &[u8], mut offset: usize) -> Option<usize> {
+    while offset < value.len() {
+        if !is_hex(value[offset]) {
+            offset += 1;
+            continue;
+        }
+        if offset == 0
+            || !is_ascii_token(value[offset - 1])
+            || is_special_number_start(value[offset - 1])
+        {
+            return Some(offset);
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn index_number_end(value: &[u8], mut offset: usize) -> usize {
+    while offset < value.len() && is_hex(value[offset]) {
+        offset += 1;
+    }
+    offset
+}
+
+fn index_placeholder_number_end(value: &[u8], start: usize) -> Option<usize> {
+    let end = index_number_end(value, start);
+    if end < value.len() && is_ascii_token(value[end]) && !is_special_number_end(value[end]) {
+        return None;
+    }
+    let number = value.get(start..end)?;
+    if number.is_empty() {
+        return None;
+    }
+    let has_hex_letter = number
+        .iter()
+        .any(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_digit());
+    if has_hex_letter && (number.len() < 4 || number.len() % 2 == 1) {
+        return None;
+    }
+    Some(end)
+}
+
+fn is_special_number_start(byte: u8) -> bool {
+    matches!(byte, b'_' | b'T' | b'X' | b'x' | b'v' | b's' | b'h' | b'm')
+}
+
+fn is_special_number_end(byte: u8) -> bool {
+    matches!(byte, b'_' | b'T' | b'Z' | b's' | b'm' | b'h' | b'u' | b'n')
+}
+
+fn index_generic_placeholder_end(
+    value: &[u8],
+    start: usize,
+    count: usize,
+    separator: u8,
+) -> Option<usize> {
+    let mut end = index_placeholder_number_end(value, start)?;
+    for _ in 1..count {
+        if value.get(end).copied()? != separator {
+            return None;
+        }
+        end = index_placeholder_number_end(value, end + 1)?;
+    }
+    Some(end)
+}
+
+fn index_time_end(value: &[u8], start: usize) -> Option<usize> {
+    let end = index_generic_placeholder_end(value, start, 3, b':')?;
+    if matches!(value.get(end), Some(b'.' | b',')) {
+        if let Some(fraction_end) = index_placeholder_number_end(value, end + 1) {
+            return Some(fraction_end);
+        }
+    }
+    Some(end)
+}
+
+fn index_date_end(value: &[u8], start: usize) -> Option<usize> {
+    index_generic_placeholder_end(value, start, 3, b'-')
+        .or_else(|| index_generic_placeholder_end(value, start, 3, b'/'))
+}
+
+fn index_datetime_end(value: &[u8], start: usize) -> Option<usize> {
+    let date_end = index_date_end(value, start)?;
+    if !matches!(value.get(date_end), Some(b'T' | b' ')) {
+        return None;
+    }
+    let time_end = index_time_end(value, date_end + 1)?;
+    match value.get(time_end) {
+        Some(b'Z') => Some(time_end + 1),
+        Some(b'+' | b'-') => index_generic_placeholder_end(value, time_end + 1, 2, b':'),
+        _ => Some(time_end),
+    }
+}
+
+fn index_word_start(value: &[u8], mut offset: usize) -> Option<usize> {
+    while offset < value.len() && std::str::from_utf8(&value[offset..]).is_err() {
+        offset += 1;
+    }
+    let value = std::str::from_utf8(value.get(offset..)?).ok()?;
+    pattern_token_start_regex()
+        .find(value)
+        .map(|matched| offset + matched.start())
+}
+
+fn index_word_end(value: &[u8], start: usize) -> Option<usize> {
+    if start >= value.len() {
+        return None;
+    }
+    if matches!(value[start], b'\'' | b'"' | b'`') {
+        return index_quoted_word_end(value, start);
+    }
+    let value = std::str::from_utf8(value.get(start..)?).ok()?;
+    Some(
+        pattern_token_end_regex()
+            .find(value)
+            .map_or(start + value.len(), |matched| start + matched.start()),
+    )
+}
+
+fn utf8_character_at(value: &[u8], offset: usize) -> Option<char> {
+    std::str::from_utf8(value.get(offset..)?)
+        .ok()?
+        .chars()
+        .next()
+}
+
+fn pattern_token_start_regex() -> &'static regex::Regex {
+    // VictoriaLogs uses Go's unicode.IsLetter || unicode.IsDigit rather than
+    // the wider Unicode Alphabetic or Number properties. In particular,
+    // Letter_Number (Nl), Other_Number (No), and combining marks are not word
+    // runes, while every Decimal_Number (Nd) remains valid.
+    static TOKEN_START: OnceLock<regex::Regex> = OnceLock::new();
+    TOKEN_START.get_or_init(|| {
+        regex::Regex::new(r"[\p{L}\p{Nd}_]")
+            .expect("VictoriaLogs token-rune regex is a build-time constant")
+    })
+}
+
+fn pattern_token_end_regex() -> &'static regex::Regex {
+    static TOKEN_END: OnceLock<regex::Regex> = OnceLock::new();
+    TOKEN_END.get_or_init(|| {
+        regex::Regex::new(r"[^\p{L}\p{Nd}_]")
+            .expect("VictoriaLogs token-rune regex is a build-time constant")
+    })
+}
+
+fn index_quoted_word_end(value: &[u8], start: usize) -> Option<usize> {
+    let delimiter = *value.get(start)?;
+    if delimiter == b'`' {
+        return value[start + 1..]
+            .iter()
+            .position(|byte| *byte == b'`')
+            .map(|relative| start + relative + 2);
+    }
+    let mut offset = start + 1;
+    while offset < value.len() {
+        match value[offset] {
+            byte if byte == delimiter => return Some(offset + 1),
+            b'\n' | b'\r' => return None,
+            b'\\' => {
+                offset += 1;
+                let escape = *value.get(offset)?;
+                offset += 1;
+                match escape {
+                    b'a' | b'b' | b'f' | b'n' | b'r' | b't' | b'v' | b'\\' | b'\'' | b'"' => {}
+                    b'x' => validate_quoted_digits(value, &mut offset, 2, 16, false)?,
+                    b'u' => validate_quoted_digits(value, &mut offset, 4, 16, true)?,
+                    b'U' => validate_quoted_digits(value, &mut offset, 8, 16, true)?,
+                    b'0'..=b'7' => {
+                        offset -= 1;
+                        validate_quoted_digits(value, &mut offset, 3, 8, false)?;
+                    }
+                    _ => return None,
+                }
+            }
+            _ => {
+                let character = utf8_character_at(value, offset)?;
+                offset += character.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+fn validate_quoted_digits(
+    value: &[u8],
+    offset: &mut usize,
+    count: usize,
+    radix: u32,
+    unicode: bool,
+) -> Option<()> {
+    let end = offset.checked_add(count)?;
+    let digits = value.get(*offset..end)?;
+    let mut decoded = 0u32;
+    for digit in digits {
+        decoded = decoded.checked_mul(radix)? + char::from(*digit).to_digit(radix)?;
+    }
+    if unicode && char::from_u32(decoded).is_none() {
+        return None;
+    }
+    if radix == 8 && decoded > u8::MAX as u32 {
+        return None;
+    }
+    *offset = end;
+    Some(())
+}
+
 #[derive(Clone, Debug)]
 pub enum LogPredicate {
     True,
@@ -185,6 +574,10 @@ pub enum LogPredicate {
     Regex {
         field: LogField,
         regex: regex::Regex,
+    },
+    PatternMatch {
+        field: LogField,
+        matcher: PatternMatcher,
     },
 }
 
@@ -1863,6 +2256,11 @@ fn log_predicate_matches(
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::PatternMatch { field, matcher } => {
+            let matched = log_field_pattern_matches(field, message, level, metadata, matcher);
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
     }
 }
 
@@ -1883,7 +2281,8 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::AnyValue { field }
         | LogPredicate::Numeric { field, .. }
         | LogPredicate::ValueType { field, .. }
-        | LogPredicate::Regex { field, .. } => matches!(field, LogField::Metadata(_)),
+        | LogPredicate::Regex { field, .. }
+        | LogPredicate::PatternMatch { field, .. } => matches!(field, LogField::Metadata(_)),
     }
 }
 
@@ -2056,6 +2455,24 @@ fn log_field_text<'a>(
         LogField::Message => Some(message),
         LogField::Level => Some(level),
         LogField::Metadata(path) => metadata_path(metadata?, path)?.as_str(),
+    }
+}
+
+fn log_field_pattern_matches(
+    field: &LogField,
+    message: &str,
+    level: &str,
+    metadata: Option<&JsonValue>,
+    matcher: &PatternMatcher,
+) -> bool {
+    match field {
+        LogField::Message => matcher.matches(message),
+        LogField::Level => matcher.matches(level),
+        LogField::Metadata(path) => match metadata.and_then(|value| metadata_path(value, path)) {
+            None | Some(JsonValue::Null) => matcher.matches(""),
+            Some(JsonValue::String(value)) => matcher.matches(value),
+            Some(value) => matcher.matches(&value.to_string()),
+        },
     }
 }
 
@@ -2495,14 +2912,97 @@ mod tests {
 
     #[test]
     fn decoded_log_predicates_observe_query_cancellation() {
-        let predicate = LogPredicate::Regex {
-            field: LogField::Message,
-            regex: regex::Regex::new("request").unwrap(),
-        };
         let cancelled = AtomicBool::new(true);
-        assert_eq!(
-            log_predicate_matches(&predicate, 0, "request", "info", None, &cancelled).unwrap_err(),
-            "logs query cancelled"
+        for predicate in [
+            LogPredicate::Regex {
+                field: LogField::Message,
+                regex: regex::Regex::new("request").unwrap(),
+            },
+            LogPredicate::PatternMatch {
+                field: LogField::Message,
+                matcher: PatternMatcher::new("request <N>", PatternMatchMode::Any),
+            },
+        ] {
+            assert_eq!(
+                log_predicate_matches(&predicate, 0, "request 42", "info", None, &cancelled)
+                    .unwrap_err(),
+                "logs query cancelled"
+            );
+        }
+    }
+
+    #[test]
+    fn pattern_matcher_pins_victorialogs_anchors_placeholders_and_progress() {
+        let matcher = |pattern, mode| PatternMatcher::new(pattern, mode);
+        let any = matcher("x <N> y", PatternMatchMode::Any);
+        assert!(any.matches("before x 10 y after"));
+        assert!(any.matches("a x nope a x 12 y"));
+        assert!(!any.matches("before x nope y after"));
+
+        let full = matcher("x <N> y", PatternMatchMode::Full);
+        assert!(full.matches("x 10 y"));
+        assert!(!full.matches("x 10 y after"));
+        let prefix = matcher("x <N> y", PatternMatchMode::Prefix);
+        assert!(prefix.matches("x 10 y after"));
+        assert!(!prefix.matches("before x 10 y"));
+        let suffix = matcher("x <N> y", PatternMatchMode::Suffix);
+        assert!(suffix.matches("before x 10 y"));
+        assert!(!suffix.matches("x 10 y after"));
+
+        for matching in ["job-123", "job-12abcdEF"] {
+            assert!(matcher("job-<N>", PatternMatchMode::Full).matches(matching));
+        }
+        assert!(!matcher("job-<N>", PatternMatchMode::Full).matches("job-be"));
+        assert!(matcher("id=<UUID>", PatternMatchMode::Full)
+            .matches("id=2edfed59-3e98-4073-bbb2-28d321ca71a7"));
+        assert!(matcher("ip=<IP4>", PatternMatchMode::Full).matches("ip=123.45.67.89"));
+        assert!(matcher("time=<TIME>", PatternMatchMode::Full).matches("time=10:20:30,123"));
+        assert!(matcher("date=<DATE>", PatternMatchMode::Full).matches("date=2025/10/20"));
+        assert!(matcher("at=<DATETIME>", PatternMatchMode::Full)
+            .matches("at=2025-10-20T08:09:11.123+01:30"));
+        assert!(matcher("word=<W>", PatternMatchMode::Full).matches("word=привет_45"));
+        assert!(matcher("word=<W>", PatternMatchMode::Full).matches("word=\"hello world\""));
+        assert!(matcher("word=<W>", PatternMatchMode::Full).matches("word='hello\\' world'"));
+        assert!(matcher("word=<W>", PatternMatchMode::Full).matches("word=१२"));
+        assert!(!matcher("word=<W>", PatternMatchMode::Full).matches("word=²"));
+        assert!(!matcher("word=<W>", PatternMatchMode::Full).matches("word=Ⅳ"));
+        assert!(!matcher("word=<W>", PatternMatchMode::Full).matches("word=e\u{301}"));
+        assert!(matcher("value=<BOGUS>", PatternMatchMode::Full).matches("value=<BOGUS>"));
+
+        assert!(matcher("", PatternMatchMode::Any).matches("anything"));
+        assert!(matcher("", PatternMatchMode::Prefix).matches("anything"));
+        assert!(matcher("", PatternMatchMode::Suffix).matches("anything"));
+        assert!(matcher("", PatternMatchMode::Full).matches(""));
+        assert!(!matcher("", PatternMatchMode::Full).matches("anything"));
+    }
+
+    #[test]
+    fn pattern_predicate_textually_matches_retained_types_without_changing_them() {
+        let matcher = PatternMatcher::new("<N>", PatternMatchMode::Full);
+        let predicate = LogPredicate::PatternMatch {
+            field: LogField::Metadata(vec!["n".into()]),
+            matcher,
+        };
+        let metadata = serde_json::json!({"n": 42, "nested": {"value": true}});
+        let cancelled = AtomicBool::new(false);
+        assert!(log_predicate_matches(
+            &predicate,
+            0,
+            "message",
+            "info",
+            Some(&metadata),
+            &cancelled,
+        )
+        .unwrap());
+        assert_eq!(metadata["n"], 42);
+
+        let missing = LogPredicate::PatternMatch {
+            field: LogField::Metadata(vec!["missing".into()]),
+            matcher: PatternMatcher::new("", PatternMatchMode::Full),
+        };
+        assert!(
+            log_predicate_matches(&missing, 0, "message", "info", Some(&metadata), &cancelled,)
+                .unwrap()
         );
     }
 
