@@ -66,13 +66,13 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S14` | UTF-8 quoted metric names | missing | no | `CAT`, `RAW` | `API` | P2 | Add only with ingestion/name round-trip fixtures. |
 | `PQL-S15` | line comments | missing | no | none | `API` | P2 | Parser-only, but still requires complete-expression tests. |
 | `PQL-S16` | exact query grid and configurable lookback | shipped | yes | `GRID`, `RAW` | `API` | P0 | Request-scoped `lookback_delta`, the zero/default rule, exact millisecond open-left boundaries, non-aligned ends, and overflow-safe 11,000-point grids apply to every shipped expression. |
-| `PQL-S17` | Prometheus stale-marker semantics | partial | partial | `RAW` | `EXT` | P1 | See `QSF-004`; first decide whether ingest/storage preserves stale markers. The API consumes the resulting contract. |
+| `PQL-S17` | Prometheus stale-marker semantics | deferred | partial | `RAW` | `DEFER` | DEFER | Exact NaN payloads survive public binary ingest, flush, and reopen, but exposition `NaN` is an ordinary NaN, Victoria JSON cannot carry a NaN payload, and the Rust server has no bit-preserving remote-write ingress. Shipping requires an explicit marker-capable ingress plus selector/range/window paths that exclude only `0x7ff0000000000002` while preserving ordinary NaNs; see `QSF-004` and `QSF-065`. |
 | `PQL-S18` | instant vector, range vector, scalar, and string types | shipped | yes | none | `API` | P0 | Exact instant/empty result typing is pinned across all four Prometheus values; range evaluation accepts scalar/vector roots and returns a matrix while string/range-vector roots fail. Prometheus envelopes have no honest SQL equivalent. |
 | `PQL-S19` | deterministic Prometheus error/result envelopes | shipped | yes | none | `API` | P0 | Required range parameters, parameter/type diagnostics, strict unsupported behavior, and GET/POST data/error envelopes are pinned for every shipped node. Each future grammar row must extend this contract; optional warning/info annotations are tracked separately by `PQL-S23`, and documented stricter resource/input choices remain intentional. |
 | `PQL-S20` | 11,000 points/series, sample, row, response, and deadline limits | shipped | yes | `RAW`, `WINDOW` | `API` | P0 | Configurable hard owner limits cover pre-decode raw/window work, final points, bounded serialization, and deadlines; auth may only tighten them. |
 | `PQL-S21` | cancellation and SQLite reader reuse | shipped | n/a | all | `API` | P0 | Every new evaluator loop must check the same cancellation token. |
 | `PQL-S22` | native histogram sample type | deferred | no | none | `DEFER` | DEFER | See `QSF-003`; classic `_bucket` series remain ordinary floats. |
-| `PQL-S23` | Prometheus `warnings`/`infos` response annotations, including non-counter metric-name lint | missing | no | none | `API` | P1 | See `QSF-050`; preserve exact text, source position, deduplication, and GET/POST instant/range envelope placement without weakening result parity. |
+| `PQL-S23` | Prometheus `warnings`/`infos` response annotations, including non-counter metric-name lint | shipped | no | none | `API` | P1 | Exact quantile, sort-on-range, non-counter-name, malformed-bucket, and histogram-repair annotations preserve text, line/column source positions, type, deterministic deduplication/merge, ten-item caps, GET/POST instant/range placement, response limits, and omission from unaffected/empty results; see `QSF-050`. |
 
 ## Operators and cross-series aggregation
 
@@ -88,7 +88,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O05` | one-to-one vector matching ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O06` | `on(...)` and `ignoring(...)` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-013-on-and-ignoring-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O07` | `group_left` and `group_right` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-014-group_left-and-group_right)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O08` | trigonometric binary `atan2` | missing | no | `SQL` | `API` | P1 |
+| `PQL-O08` | trigonometric binary `atan2` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-055-atan2)); scalar/vector directions, vector matching/modifiers, range grids, IEEE quadrants, deterministic Go-compatible rounding, limits, SQL, oracle parity, and reopen are pinned | shipped | no | `SQL` | `API` | P1 |
 | `PQL-O09` | `sum` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O10` | `avg` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-015-cross-series-average-by-label)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O11` | `min` and `max` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-016-cross-series-minimum-and-maximum)) | shipped | yes | `SQL` | `API` | P0 |
@@ -130,7 +130,7 @@ correctness fallback.
 | `PQL-R18` | `predict_linear` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-035-predict_linear)); evaluation-time-centered compensated regression, scalar horizons, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R19` | `changes` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-036-changes)); transition counting across finite, NaN, infinity, and signed-zero values, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R20` | `resets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-037-resets)); strict float-counter decrease counting across finite, NaN, infinity, and signed-zero values, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
-| `PQL-R21` | `double_exponential_smoothing` | missing | no | `RAW` | `API` | P1 |
+| `PQL-R21` | experimental `double_exponential_smoothing`; pinned Prometheus 3.13.2 rejects it in the default stable tier, and Timeless does the same explicitly through GET, POST, and reopen; implementation requires a separately enabled experimental compatibility tier and oracle gate | experimental | no | `RAW` | `API` | EXP |
 | `PQL-R22` | experimental `mad_over_time` | missing | no | `RAW` | `API` | EXP |
 | `PQL-R23` | experimental `ts_of_min/max/first/last_over_time` | missing | no | `RAW` | `API` | EXP |
 

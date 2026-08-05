@@ -223,7 +223,13 @@ by `flags:u8=0`, `reserved:u16=0`, `n_points:u32 LE`, then columnar
 `series_id:i64[n]`, `timestamp:i64[n]`, and `value_bits:u64[n]` arrays, all
 little-endian. The entire id set is validated before any point is buffered.
 Named batch `0x01` remains the portable path when the caller has no durable
-id cache.
+id cache. Both binary formats preserve all 64 value bits through buffering,
+flush, and reopen, including distinct NaN payloads. Text exposition `NaN` is
+an ordinary float NaN, not an implicit Prometheus stale marker; JSON ingest
+cannot represent a NaN payload. Consequently the Rust PromQL server does not
+yet claim stale-marker semantics. That feature requires a bit-preserving
+server ingress and marker-aware selector/window execution that excludes only
+`0x7ff0000000000002`, never every NaN.
 
 The same durable ID is a read handle. SQLite pushes an equality constraint
 through the base metrics table and every per-series metrics query TVF:

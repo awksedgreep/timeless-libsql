@@ -143,6 +143,44 @@ fn write_flush_query_recover() {
 }
 
 #[test]
+fn distinct_nan_payloads_survive_buffer_flush_and_reopen() {
+    let dir = temp_dir("nan_payload_roundtrip");
+    let labels = HashMap::new();
+    let ordinary_nan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let prometheus_stale_nan = f64::from_bits(0x7ff0_0000_0000_0002);
+
+    {
+        let engine = new_engine(&dir);
+        let sid = engine.resolve_cached("nan_payloads", &labels).unwrap();
+        engine.write_point(sid, 10, ordinary_nan);
+        engine.write_point(sid, 20, prometheus_stale_nan);
+
+        let buffered = engine.query_range_by_id(sid, 0, 30).unwrap();
+        assert_eq!(buffered[0].1.to_bits(), ordinary_nan.to_bits());
+        assert_eq!(buffered[1].1.to_bits(), prometheus_stale_nan.to_bits());
+        assert_ne!(buffered[0].1.to_bits(), buffered[1].1.to_bits());
+
+        engine.flush_all().unwrap();
+        let persisted = engine.query_range_by_id(sid, 0, 30).unwrap();
+        assert_eq!(persisted[0].1.to_bits(), ordinary_nan.to_bits());
+        assert_eq!(persisted[1].1.to_bits(), prometheus_stale_nan.to_bits());
+        engine.shutdown().unwrap();
+    }
+
+    {
+        let engine = new_engine(&dir);
+        let sid = engine.resolve_cached("nan_payloads", &labels).unwrap();
+        let reopened = engine.query_range_by_id(sid, 0, 30).unwrap();
+        assert_eq!(reopened[0].1.to_bits(), ordinary_nan.to_bits());
+        assert_eq!(reopened[1].1.to_bits(), prometheus_stale_nan.to_bits());
+        assert_ne!(reopened[0].1.to_bits(), reopened[1].1.to_bits());
+        engine.shutdown().unwrap();
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn aggregate_summary_covers_chunks_boundaries_buffer_and_reopen() {
     let dir = temp_dir("aggregate_summary");
     let labels: HashMap<String, String> = [("host".to_string(), "a".to_string())]

@@ -3554,6 +3554,12 @@ async fn session_five_promql_quantile_interpolates_per_step_and_reopens() {
         .await;
         assert_eq!(response.0, StatusCode::OK, "{}: {}", parameter, response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+        assert_eq!(
+            response.1["warnings"],
+            serde_json::json!([format!(
+                "PromQL warning: quantile value should be between 0 and 1, got {parameter} (1:10)"
+            )])
+        );
     }
     for (parameter, expected) in [("0", "0"), ("1", "-0")] {
         let response = prom_query(
@@ -5626,6 +5632,12 @@ async fn session_six_promql_quantile_over_time_interpolates_ieee_and_reopens() {
             result.1["data"]["result"][0]["value"][1], expected,
             "{query}"
         );
+        assert_eq!(
+            result.1["warnings"],
+            serde_json::json!([format!(
+                "PromQL warning: quantile value should be between 0 and 1, got {parameter} (1:20)"
+            )])
+        );
     }
     let empty = prom_query(
         &app,
@@ -6036,6 +6048,22 @@ async fn session_seven_promql_rate_extrapolates_resets_bounds_and_reopens() {
         steady.1["data"]["result"],
         serde_json::json!([{"metric": {"case": "steady"}, "value": [base + 60, "10"]}])
     );
+    assert_eq!(
+        steady.1["infos"],
+        serde_json::json!([
+            "PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"range_rate\" (1:6)"
+        ])
+    );
+    let posted_steady = post_form(
+        &app,
+        "/prometheus/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "rate(range_rate{case=\"steady\"}[60s])")
+            .append_pair("time", &(base + 60).to_string())
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted_steady, steady);
 
     for (case, window, at, expected) in [
         ("reset", 60, 60, "1.75"),
@@ -6085,6 +6113,12 @@ async fn session_seven_promql_rate_extrapolates_resets_bounds_and_reopens() {
             "value": [base + 60, "6.666666666666667"]
         }])
     );
+    assert_eq!(
+        subquery.1["infos"],
+        serde_json::json!([
+            "PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"range_rate\" (1:1)"
+        ])
+    );
     let nan = prom_query(&app, "rate(range_rate{case=\"nan\"}[60s])", base + 60).await;
     assert_eq!(nan.0, StatusCode::OK, "{}", nan.1);
     assert_eq!(nan.1["data"]["result"][0]["value"][1], "NaN");
@@ -6101,6 +6135,7 @@ async fn session_seven_promql_rate_extrapolates_resets_bounds_and_reopens() {
     let singleton = prom_query(&app, "rate(range_rate{case=\"singleton\"}[60s])", base + 60).await;
     assert_eq!(singleton.0, StatusCode::OK, "{}", singleton.1);
     assert_eq!(singleton.1["data"]["result"], serde_json::json!([]));
+    assert!(singleton.1.get("infos").is_none(), "{}", singleton.1);
     let range = prom_query_range(
         &app,
         "rate(range_rate{case=\"steady\"}[40s])",
@@ -6117,6 +6152,7 @@ async fn session_seven_promql_rate_extrapolates_resets_bounds_and_reopens() {
             "values": [[base + 50, "10"], [base + 60, "10"]]
         }])
     );
+    assert_eq!(range.1["infos"], steady.1["infos"]);
     let invalid = prom_query(&app, "rate(range_rate)", base + 60).await;
     assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
     assert_eq!(invalid.1["errorType"], "bad_data");
@@ -9858,6 +9894,24 @@ async fn session_eight_promql_sort_orders_ieee_instants_not_range_matrices_and_r
             {"metric": {"__name__": "sort_range", "host": "b"}, "values": [[base, "2"], [base + 10, "0"]]}
         ])
     );
+    assert_eq!(
+        range.1["warnings"],
+        serde_json::json!([
+            "PromQL warning: sort is ineffective for range queries since results are always ordered by labels (1:1)"
+        ])
+    );
+    let posted_range = post_form(
+        &app,
+        "/prometheus/api/v1/query_range",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", "sort_desc(sort_range)")
+            .append_pair("start", &base.to_string())
+            .append_pair("end", &(base + 10).to_string())
+            .append_pair("step", "10")
+            .finish(),
+    )
+    .await;
+    assert_eq!(posted_range, range);
 
     for query in ["sort(1)", "sort_desc(sort_metric[1m])"] {
         let invalid = prom_query(&app, query, base).await;
@@ -10631,6 +10685,18 @@ async fn session_nine_promql_classic_histogram_quantile_matches_oracle_and_reope
         (base + 30) * 1_000,
         (base + 30) * 1_000,
     ));
+    for index in 0..12 {
+        fixture.push_str(&format!(
+            "contract_hist_special_bucket{{case=\"many_malformed\",le=\"bad{index:02}\"}} {index} {}\n",
+            (base + 30) * 1_000
+        ));
+    }
+    for source in ["a", "b"] {
+        fixture.push_str(&format!(
+            "contract_hist_special_bucket{{case=\"duplicate_malformed\",le=\"duplicate\",source=\"{source}\"}} 1 {}\n",
+            (base + 30) * 1_000
+        ));
+    }
     assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
     assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
 
@@ -10686,6 +10752,24 @@ async fn session_nine_promql_classic_histogram_quantile_matches_oracle_and_reope
         let response = prom_query(&app, &query, base + 30).await;
         assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+        match case {
+            "decrease" => assert_eq!(
+                response.1["infos"],
+                serde_json::json!([
+                    "PromQL info: input to histogram_quantile needed to be fixed for monotonicity (see https://prometheus.io/docs/prometheus/latest/querying/functions/#histogram_quantile), from buckets 2 to 2, with a max diff of 1, over 1 samples from 2023-11-25T08:13:50Z to 2023-11-25T08:13:50Z (1:25)"
+                ])
+            ),
+            "malformed" => assert_eq!(
+                response.1["warnings"],
+                serde_json::json!([
+                    "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bogus\" (1:25)"
+                ])
+            ),
+            _ => {
+                assert!(response.1.get("warnings").is_none(), "{query}: {}", response.1);
+                assert!(response.1.get("infos").is_none(), "{query}: {}", response.1);
+            }
+        }
     }
     let absent = prom_query(
         &app,
@@ -10695,6 +10779,45 @@ async fn session_nine_promql_classic_histogram_quantile_matches_oracle_and_reope
     .await;
     assert_eq!(absent.0, StatusCode::OK, "{}", absent.1);
     assert_eq!(absent.1["data"]["result"], serde_json::json!([]));
+    assert_eq!(
+        absent.1["warnings"],
+        serde_json::json!([
+            "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"\" (1:25)"
+        ])
+    );
+
+    let deduplicated = prom_query(
+        &app,
+        "histogram_quantile(0.5, contract_hist_special_bucket{case=\"duplicate_malformed\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(deduplicated.0, StatusCode::OK, "{}", deduplicated.1);
+    assert_eq!(deduplicated.1["data"]["result"], serde_json::json!([]));
+    assert_eq!(
+        deduplicated.1["warnings"],
+        serde_json::json!([
+            "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"duplicate\" (1:25)"
+        ])
+    );
+
+    let capped = prom_query(
+        &app,
+        "histogram_quantile(0.5, contract_hist_special_bucket{case=\"many_malformed\"})",
+        base + 30,
+    )
+    .await;
+    assert_eq!(capped.0, StatusCode::OK, "{}", capped.1);
+    assert_eq!(capped.1["data"]["result"], serde_json::json!([]));
+    let mut expected_capped: Vec<String> = (0..10)
+        .map(|index| {
+            format!(
+                "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad{index:02}\" (1:25)"
+            )
+        })
+        .collect();
+    expected_capped.push("2 more warning annotations omitted".into());
+    assert_eq!(capped.1["warnings"], serde_json::json!(expected_capped));
 
     let range = prom_query_range(
         &app,
@@ -10734,7 +10857,34 @@ async fn session_nine_promql_classic_histogram_quantile_matches_oracle_and_reope
         let response = prom_query(&app, &query, base + 30).await;
         assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
         assert_eq!(response.1["data"]["result"][0]["value"][1], expected);
+        assert_eq!(
+            response.1["warnings"],
+            serde_json::json!([format!(
+                "PromQL warning: quantile value should be between 0 and 1, got {quantile} (1:20)"
+            )])
+        );
     }
+    let posted_invalid = post_form(
+        &app,
+        "/prometheus/api/v1/query",
+        &form_urlencoded::Serializer::new(String::new())
+            .append_pair(
+                "query",
+                "histogram_quantile(-1, contract_hist_bucket{host=\"a\"})",
+            )
+            .append_pair("time", &(base + 30).to_string())
+            .finish(),
+    )
+    .await;
+    assert_eq!(
+        posted_invalid,
+        prom_query(
+            &app,
+            "histogram_quantile(-1, contract_hist_bucket{host=\"a\"})",
+            base + 30,
+        )
+        .await
+    );
     for query in [
         "histogram_quantile(vector(0.5), contract_hist_bucket)",
         "histogram_quantile(0.5, 1)",
@@ -10784,6 +10934,24 @@ async fn session_nine_promql_classic_histogram_quantile_matches_oracle_and_reope
         .1,
         grouped.1
     );
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "histogram_quantile(0.5, contract_hist_special_bucket{case=\"duplicate_malformed\"})",
+            base + 30,
+        )
+        .await,
+        deduplicated
+    );
+    assert_eq!(
+        prom_query(
+            &reopened_app,
+            "histogram_quantile(0.5, contract_hist_special_bucket{case=\"many_malformed\"})",
+            base + 30,
+        )
+        .await,
+        capped
+    );
     drop(reopened_app);
     reopened.shutdown().await.unwrap();
 }
@@ -10825,6 +10993,185 @@ async fn post_body(app: &axum::Router, path: &str, body: &[u8]) -> (StatusCode, 
         .await
         .unwrap();
     (status, body.to_vec())
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eleven_promql_double_exponential_smoothing_is_explicitly_experimental() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_eleven_double_exponential_smoothing_experimental.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let query = "double_exponential_smoothing(vector(1)[1m:], 0.5, 0.1)";
+    let expected = serde_json::json!({
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": double_exponential_smoothing is experimental and is not enabled in the stable PromQL compatibility tier"
+    });
+
+    let get = prom_query(&app, query, 2).await;
+    assert_eq!(get.0, StatusCode::BAD_REQUEST, "{}", get.1);
+    assert_eq!(get.1, expected);
+    let post = post_form(
+        &app,
+        "/api/v1/query",
+        "query=double_exponential_smoothing%28vector%281%29%5B1m%3A%5D%2C0.5%2C0.1%29&time=2",
+    )
+    .await;
+    assert_eq!(post.0, StatusCode::BAD_REQUEST, "{}", post.1);
+    assert_eq!(post.1, expected);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(prom_query(&reopened_app, query, 2).await.1, expected);
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_eleven_atan2.db");
+    let base = 1_701_000_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "atan_lhs{{host=\"a\",zone=\"east\"}} 8 {}\n",
+            "atan_rhs{{host=\"a\",zone=\"east\"}} 2 {}\n",
+            "atan_matching_lhs{{host=\"a\",shared=\"x\",zone=\"east\"}} 8 {}\n",
+            "atan_matching_rhs{{host=\"a\",shared=\"x\",zone=\"west\"}} 2 {}\n",
+            "atan_temporal 6 {}\n",
+            "atan_temporal 7 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        (base + 10) * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    for (query, expected) in [
+        ("8 atan2 2", "1.3258176636680323"),
+        ("NaN atan2 2", "NaN"),
+        ("0 atan2 -1", "3.141592653589793"),
+        ("-0 atan2 -1", "-3.141592653589793"),
+    ] {
+        let response = prom_query(&app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], "scalar");
+        assert_eq!(response.1["data"]["result"][1], expected);
+    }
+
+    let matched = prom_query(&app, "atan_lhs atan2 atan_rhs", base).await;
+    assert_eq!(matched.0, StatusCode::OK, "{}", matched.1);
+    assert_eq!(
+        matched.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a", "zone": "east"},
+            "value": [base, "1.3258176636680323"]
+        }])
+    );
+    let ignoring = prom_query(
+        &app,
+        "atan_matching_lhs atan2 ignoring(zone) atan_matching_rhs",
+        base,
+    )
+    .await;
+    assert_eq!(ignoring.0, StatusCode::OK, "{}", ignoring.1);
+    assert_eq!(
+        ignoring.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {"host": "a", "shared": "x"},
+            "value": [base, "1.3258176636680323"]
+        }])
+    );
+    let scalar_left = prom_query(&app, "-0 atan2 atan_rhs", base).await;
+    assert_eq!(scalar_left.0, StatusCode::OK, "{}", scalar_left.1);
+    assert_eq!(scalar_left.1["data"]["result"][0]["value"][1], "-0");
+    assert!(scalar_left.1["data"]["result"][0]["metric"]
+        .get("__name__")
+        .is_none());
+
+    let range = prom_query_range(&app, "atan_temporal atan2 2", base, base + 10, 10).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(
+        range.1["data"]["result"],
+        serde_json::json!([{
+            "metric": {},
+            "values": [
+                [base, "1.2490457723982544"],
+                [base + 10, "1.2924966677897851"]
+            ]
+        }])
+    );
+
+    let invalid = prom_query(&app, "atan_temporal[1m] atan2 2", base).await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST, "{}", invalid.1);
+    assert_eq!(invalid.1["errorType"], "bad_data");
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    let rejected = prom_query(&limited, "atan_lhs atan2 atan_rhs", base).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        rejected.1
+    );
+    assert_eq!(
+        rejected.1,
+        serde_json::json!({
+            "status": "error",
+            "errorType": "execution",
+            "error": "query exceeded the maximum intermediate-work limit of 1 points"
+        })
+    );
+
+    drop((limited, app));
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        prom_query(&reopened_app, "atan_lhs atan2 atan_rhs", base)
+            .await
+            .1,
+        matched.1
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
 }
 
 async fn get_body(app: &axum::Router, path: &str) -> (StatusCode, Vec<u8>) {

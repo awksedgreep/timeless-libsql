@@ -270,6 +270,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "SQL-PROM-052" => "calendar_metric",
         "SQL-PROM-053" => "calendar_leap_metric",
         "SQL-PROM-054" => "sql_histogram_bucket",
+        "SQL-PROM-055" => "cpu",
         _ => "cpu",
     };
     match name {
@@ -563,6 +564,34 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         bail!("SQL-PROM-054 histogram result changed: {histogram:?}");
     }
 
+    let atan_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-PROM-055")
+        .context("SQL-PROM-055 recipe")?;
+    if atan_recipe.statements.len() != 2 {
+        bail!("SQL-PROM-055 must retain scalar/vector and vector/vector statements");
+    }
+    for (statement_index, expected_rows) in [(0, 4_usize), (1, 4_usize)] {
+        let mut statement = connection.prepare(&atan_recipe.statements[statement_index])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .unwrap()
+                .trim_start_matches(':');
+            statement.raw_bind_parameter(index, parameter("SQL-PROM-055", name))?;
+        }
+        let values = statement
+            .raw_query()
+            .mapped(|row| row.get::<_, f64>(2))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if values.len() != expected_rows || values.iter().any(|value| !value.is_finite()) {
+            bail!(
+                "SQL-PROM-055 statement {} changed: {values:?}",
+                statement_index + 1
+            );
+        }
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -821,13 +850,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 60);
+        assert_eq!(recipes.len(), 61);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            75
+            77
         );
         assert_eq!(
             recipes
@@ -835,7 +864,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            76
+            78
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

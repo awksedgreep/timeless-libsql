@@ -39,6 +39,9 @@ selectors on instant queries, and
 `deriv(selector[window])`, `predict_linear(selector[window], horizon)`, and
 ordered float-transition `changes(selector[window])` and strict float-counter
 decrease `resets(selector[window])`.
+Pinned Prometheus 3.13.2 marks `double_exponential_smoothing` experimental and
+disables it by default; the stable Timeless tier rejects it explicitly until
+a separately enabled experimental compatibility tier and oracle gate exist.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`
@@ -101,12 +104,12 @@ families with exact Prometheus bound coalescing, monotonicity correction,
 `1e-12` small-delta suppression, boundary interpolation, invalid-quantile
 values, and label/name policy. It composes with aggregation and counter
 functions, is bounded by the cumulative work limit, and does not claim native
-histogram support. Missing or malformed `le` series are excluded; exact
-optional warning/info response annotations remain tracked separately by
-`PQL-S23`. Direct SQLite/libSQL users have the executable ordinary-SQL
+histogram support. Missing or malformed `le` series are excluded. Exact
+warning/info annotations cover malformed bounds, invalid quantiles, and
+material monotonicity repair. Direct SQLite/libSQL users have the executable ordinary-SQL
 foundation in
 [`SQL-PROM-054`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-prom-054-histogram_quantile-over-classic-buckets).
-Unary minus and arithmetic `+ - * / % ^`
+Unary minus and arithmetic `+ - * / % ^` plus trigonometric binary `atan2`
 compose over shipped scalar and
 instant-vector expressions, removes the vector metric name, and preserves
 Prometheus scalar/vector/range result types. Vector/vector arithmetic uses
@@ -118,6 +121,9 @@ and names, while `bool` emits `0`/`1` and removes names. Set `and`, `or`, and
 sample's value, labels, and metric name. Vector/vector operators accept
 `on(...)` and `ignoring(...)`, including empty lists and missing-label
 matching, with Prometheus output-label and duplicate-cardinality rules.
+`atan2` uses deterministic Go-compatible last-bit rounding; its direct SQLite
+foundation is
+[`SQL-PROM-055`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-prom-055-atan2).
 Many-to-one `group_left` and one-to-many `group_right` preserve operation
 direction, copy labels from the unique side, and reject both duplicate unique
 sides and non-unique result labelsets.
@@ -147,7 +153,7 @@ The authoritative support contract is the
 Rust API rows at this revision are listed below for CI; prose in this README
 must not imply a broader language surface.
 
-<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 -->
+<!-- query-contract-shipped: PQL-S01 PQL-S02 PQL-S03 PQL-S04 PQL-S05 PQL-S06 PQL-S07 PQL-S08 PQL-S09 PQL-S11 PQL-S12 PQL-S13 PQL-S16 PQL-S18 PQL-S19 PQL-S20 PQL-S21 PQL-S23 PQL-O01 PQL-O02 PQL-O03 PQL-O04 PQL-O05 PQL-O06 PQL-O07 PQL-O08 PQL-O09 PQL-O10 PQL-O11 PQL-O12 PQL-O13 PQL-O14 PQL-O15 PQL-O16 PQL-R01 PQL-R02 PQL-R03 PQL-R04 PQL-R05 PQL-R06 PQL-R08 PQL-R09 PQL-R10 PQL-R11 PQL-R12 PQL-R13 PQL-R14 PQL-R15 PQL-R16 PQL-R17 PQL-R18 PQL-R19 PQL-R20 PQL-F01 PQL-F02 PQL-F03 PQL-F04 PQL-F05 PQL-F06 PQL-F07 PQL-F08 PQL-F09 PQL-F10 PQL-F11 PQL-F12 PQL-F13 PQL-F15 PQL-F16 PQL-F17 PQL-F18 PQL-H01 -->
 
 Both routes preserve the existing asynchronous empty `204` admission contract.
 Valid lines in a partially malformed body are persisted and rejected lines are
@@ -296,10 +302,13 @@ points rather than Prometheus 3.13.2's 11,000 intervals (11,001 points).
 Parser-specific diagnostic wording can differ after the common
 parameter/type prefix because the server uses the pinned Rust AST parser;
 status, error type, parameter ownership, and unsupported behavior are stable.
-Successful responses currently omit Prometheus's optional top-level
-`warnings`/`infos` annotations, including the counter-name lint emitted for a
-non-`_total` metric. Numeric results and data envelopes remain exact; matrix
-row `PQL-S23` tracks annotation parity explicitly rather than hiding the gap.
+Successful responses include Prometheus's optional top-level `warnings` and
+`infos` only when applicable. Exact text and source position are pinned for
+invalid quantiles, ineffective range sorting, non-counter metric-name lint,
+malformed classic-histogram bounds, and material monotonicity repair.
+Messages are deterministically deduplicated, capped at ten per severity plus
+an omission summary, and charged to the response byte limit. Empty or
+unaffected results omit the fields.
 
 PromQL remains bounded even with authentication disabled. Defaults are 11,000
 grid points per series, 100,000 final result points, 100,000 storage work

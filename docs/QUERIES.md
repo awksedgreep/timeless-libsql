@@ -33,6 +33,11 @@ Conventions used throughout:
   defaults, no staleness inference. Exact-percentile kernels are the
   flip side: raw samples are kept, so `p95` is exact, not an
   `le`-bucket estimate.
+- Binary metric batches and packed raw frames retain all IEEE value bits,
+  including distinct NaN payloads. Ordinary SQLite `REAL` projection maps a
+  NaN to `NULL`, and the kernels do not infer that every NaN is a Prometheus
+  stale marker. See `PQL-S17` in the feature matrix for the explicit deferred
+  ingress/query prerequisites.
 
 ## The dashboard patterns, one per TVF
 
@@ -350,6 +355,23 @@ join—are executable in
 [`SQL-PROM-004`](QUERY_SQL_EQUIVALENTS.md#sql-prom-004-vector-arithmetic-with-label-matching).
 The Rust layer remains responsible for AST precedence, cardinality errors,
 result types, labels, limits, cancellation, and Prometheus envelopes.
+
+PromQL `atan2` uses the same matching and result rules, with the left operand
+as `Y` and the right operand as `X`:
+
+```promql
+vertical_displacement atan2 horizontal_displacement
+queue_depth atan2 2
+```
+
+It supports scalar/scalar and either scalar/vector direction, default and
+explicit vector matching, and range grids. Vector results remove the metric
+name. The Rust evaluator uses deterministic Go-compatible arithmetic because
+SQLite/C and Go can disagree by one last-place bit for otherwise identical
+inputs. Direct SQLite/libSQL users can use ordinary `atan2(Y,X)` through the
+bounded scalar/vector and label-join recipes in
+[`SQL-PROM-055`](QUERY_SQL_EQUIVALENTS.md#sql-prom-055-atan2); the recipe
+documents that last-bit boundary honestly.
 
 ## PromQL comparison filters and `bool`
 
@@ -938,6 +960,11 @@ public row surface's explicit SQL-NULL representation of stored NaN.
 Strict float-counter decrease `resets` is
 [`SQL-PROM-037`](QUERY_SQL_EQUIVALENTS.md#sql-prom-037-resets); it does not
 relabel the extension's mechanical reset-adjusted increase/rate kernels.
+Pinned Prometheus 3.13.2 classifies `double_exponential_smoothing` as an
+experimental function and disables it by default. The stable Timeless tier
+therefore rejects it explicitly. It is not a missing stable range reduction;
+enabling it later requires a separately configured experimental API tier and
+its own enabled-oracle contract.
 Bounded instant-vector `abs` is
 [`SQL-PROM-038`](QUERY_SQL_EQUIVALENTS.md#sql-prom-038-abs); ordinary SQLite
 is exact for finite values, infinities, and signed zero, while the Rust API
@@ -1142,6 +1169,25 @@ in
 [`SQL-PROM-054`](QUERY_SQL_EQUIVALENTS.md#sql-prom-054-histogram_quantile-over-classic-buckets),
 including the documented distinction between its ordinary-SQL foundation and
 the API's complete Prometheus float/tolerance behavior.
+
+## Prometheus warning and info annotations
+
+Successful PromQL responses add top-level `warnings` and/or `infos` only when
+Prometheus would emit them. The shipped float-series cases are invalid
+quantile ranks, `sort`/`sort_desc` on a range query, `rate`/`increase` applied
+to a metric name without a conventional counter suffix, missing or malformed
+classic-histogram `le` labels, and material histogram monotonicity repair.
+Text and one-indexed line/column positions match the pinned query source,
+including nested calls and subqueries. GET and form-encoded POST requests,
+instant and range envelopes, and shutdown/reopen use the same contract.
+
+Annotations are deterministically deduplicated by their Prometheus message.
+Histogram repair observations merge their timestamp, bucket, maximum-delta,
+and sample-count span. Each severity emits at most ten messages plus one
+omission summary, and annotation bytes count against the same response-size
+limit as `data`. An unaffected query or a counter-like function that produces
+no sample omits both fields rather than returning empty arrays. These are API
+language diagnostics; no annotation syntax or state is added to SQLite.
 
 Prefer the native kernel only when its explicitly mechanical semantics are the
 desired contract; it decompresses once in the engine and ships grid points

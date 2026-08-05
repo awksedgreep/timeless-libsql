@@ -180,13 +180,18 @@ explicitly; typed/nested metadata and missing/null/empty remain distinct.
 
 ### Session 11: stable PromQL P1 completion
 
-Rows: `PQL-S17`, `PQL-S23`, `PQL-O08`, and `PQL-R21`.
+Rows: `PQL-S17`, `PQL-S23`, `PQL-O08`, and classification audit for
+`PQL-R21`.
 
 Exit: every applicable P1 PromQL row has passed Prometheus. Stale markers
 ship only if ingestion/storage has an explicit preserved contract; otherwise
 `PQL-S17` is deferred with that prerequisite rather than approximated.
 Prometheus warning/info annotations must preserve exact text, source position,
 deduplication, and response-envelope placement.
+The pinned Prometheus 3.13.2 metadata supersedes the original plan's P1
+classification for `double_exponential_smoothing`: it is experimental and
+disabled by default, so Session 11 pins stable-tier rejection and leaves
+implementation to a separately enabled experimental tier.
 
 ### Session 12: LogsQL P1 filters and logic
 

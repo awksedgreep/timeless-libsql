@@ -391,6 +391,39 @@ fn sorted_strings(value: Option<&Value>) -> Result<Vec<String>> {
     Ok(values)
 }
 
+fn warning_contract_matches(case: &Map<String, Value>, actual: Option<&Value>) -> Result<bool> {
+    let Some(contract) = case
+        .get("expected_warning_contract")
+        .map(|value| {
+            value
+                .as_object()
+                .context("expected_warning_contract must be an object")
+        })
+        .transpose()?
+    else {
+        return Ok(sorted_strings(actual)? == sorted_strings(case.get("expected_warnings"))?);
+    };
+    if case.contains_key("expected_warnings") {
+        bail!("expected_warnings and expected_warning_contract are mutually exclusive");
+    }
+    let expected_count = contract
+        .get("count")
+        .and_then(Value::as_u64)
+        .context("expected_warning_contract.count must be an unsigned integer")?
+        as usize;
+    let required = sorted_strings(contract.get("required"))?;
+    let allowed = sorted_strings(contract.get("allowed"))?;
+    let actual = sorted_strings(actual)?;
+    let unique_count = actual
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    Ok(actual.len() == expected_count
+        && unique_count == actual.len()
+        && required.iter().all(|warning| actual.contains(warning))
+        && actual.iter().all(|warning| allowed.contains(warning)))
+}
+
 fn results_equal(expected: &[Value], actual: &Value, ordered: bool) -> bool {
     let Some(actual) = actual.as_array() else {
         return false;
@@ -869,37 +902,25 @@ fn operator_cases(client: &Client, base: &str, fixture: &Value, sample_ms: i64) 
                 case.get("result_order").and_then(Value::as_str) == Some("ordered"),
             )
         };
-        let expected_warnings = case
-            .get("expected_warnings")
-            .map(|value| sorted_strings(Some(value)))
-            .transpose()?;
-        let expected_infos = case
-            .get("expected_infos")
-            .map(|value| {
-                let evaluation = Utc
-                    .timestamp_millis_opt(evaluation_ms)
-                    .single()
-                    .unwrap()
-                    .format("%Y-%m-%dT%H:%M:%SZ")
-                    .to_string();
-                let mut values = sorted_strings(Some(value))?;
-                for value in &mut values {
-                    *value = value.replace("{evaluation_rfc3339}", &evaluation);
-                }
-                values.sort();
-                Ok::<_, anyhow::Error>(values)
-            })
-            .transpose()?;
+        let evaluation = Utc
+            .timestamp_millis_opt(evaluation_ms)
+            .single()
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut expected_infos = sorted_strings(case.get("expected_infos"))?;
+        for value in &mut expected_infos {
+            *value = value.replace("{evaluation_rfc3339}", &evaluation);
+        }
+        expected_infos.sort();
+        let actual_infos = sorted_strings(body.get("infos"))?;
+        let warnings_match = warning_contract_matches(case, body.get("warnings"))?;
         let valid = status == 200
             && body.get("status") == Some(&json!("success"))
             && body.pointer("/data/resultType") == Some(&json!(result_type))
             && result_matches
-            && expected_warnings.as_ref().is_none_or(|expected| {
-                sorted_strings(body.get("warnings")).is_ok_and(|actual| actual == *expected)
-            })
-            && expected_infos.as_ref().is_none_or(|expected| {
-                sorted_strings(body.get("infos")).is_ok_and(|actual| actual == *expected)
-            });
+            && warnings_match
+            && actual_infos == expected_infos;
         failures += print_verdict(case, valid, || format!("expected {result:?}; got {body}"));
     }
     Ok(failures)
@@ -1380,6 +1401,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn warning_contract_pins_cap_without_assuming_go_map_iteration_order() {
+        let case = json!({
+            "expected_warning_contract": {
+                "count": 3,
+                "required": ["1 more warning annotations omitted"],
+                "allowed": ["a", "b", "c", "1 more warning annotations omitted"]
+            }
+        });
+        let case = case.as_object().unwrap();
+        assert!(warning_contract_matches(
+            case,
+            Some(&json!(["c", "a", "1 more warning annotations omitted"]))
+        )
+        .unwrap());
+        assert!(!warning_contract_matches(
+            case,
+            Some(&json!(["a", "a", "1 more warning annotations omitted"]))
+        )
+        .unwrap());
+        assert!(!warning_contract_matches(
+            case,
+            Some(&json!([
+                "a",
+                "unknown",
+                "1 more warning annotations omitted"
+            ]))
+        )
+        .unwrap());
     }
 
     #[test]

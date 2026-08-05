@@ -208,6 +208,59 @@
       "expected_values": [49]
     },
     {
+      "id": "PQL-O08-scalar-finite",
+      "query": "8 atan2 2",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": 1.3258176636680323
+    },
+    {
+      "id": "PQL-O08-scalar-ieee",
+      "query": "NaN atan2 2",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": "NaN"
+    },
+    {
+      "id": "PQL-O08-signed-zero-positive-pi",
+      "query": "0 atan2 -1",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": 3.141592653589793
+    },
+    {
+      "id": "PQL-O08-signed-zero-negative-pi",
+      "query": "-0 atan2 -1",
+      "evaluation_offset_ms": 30000,
+      "expected_scalar": -3.141592653589793
+    },
+    {
+      "id": "PQL-O08-vector-vector-default-matching",
+      "query": "oracle_arithmetic_lhs atan2 oracle_arithmetic_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle", "zone": "east"},
+      "expected_values": [1.3258176636680323]
+    },
+    {
+      "id": "PQL-O08-ignoring-matching",
+      "query": "oracle_matching_lhs atan2 ignoring(zone) oracle_matching_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle", "shared": "x"},
+      "expected_values": [1.3258176636680323]
+    },
+    {
+      "id": "PQL-O08-vector-scalar-range",
+      "query": "oracle_temporal atan2 2",
+      "evaluation_offset_ms": 0,
+      "drop_metric_name": true,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_values": [1.2490457723982544, 1.2924966677897851]
+    },
+    {
+      "id": "PQL-O08-scalar-vector-direction",
+      "query": "-0 atan2 oracle_arithmetic_rhs",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a", "job": "oracle", "zone": "east"},
+      "expected_values": ["-0"]
+    },
+    {
       "id": "PQL-O05-default-one-to-one-excludes-name",
       "query": "oracle_temporal + oracle_temporal",
       "evaluation_offset_ms": 30000,
@@ -583,21 +636,30 @@
       "query": "quantile(NaN, oracle_aggregation)",
       "evaluation_offset_ms": 30000,
       "expected_metric": {},
-      "expected_values": ["NaN"]
+      "expected_values": ["NaN"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got NaN (1:10)"
+      ]
     },
     {
       "id": "PQL-O15-quantile-low-parameter",
       "query": "quantile(-1, oracle_aggregation)",
       "evaluation_offset_ms": 30000,
       "expected_metric": {},
-      "expected_values": ["-Inf"]
+      "expected_values": ["-Inf"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got -1 (1:10)"
+      ]
     },
     {
       "id": "PQL-O15-quantile-high-parameter",
       "query": "quantile(2, oracle_aggregation)",
       "evaluation_offset_ms": 30000,
       "expected_metric": {},
-      "expected_values": ["+Inf"]
+      "expected_values": ["+Inf"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got 2 (1:10)"
+      ]
     },
     {
       "id": "PQL-O16-count-values-by",
@@ -951,21 +1013,30 @@
       "query": "quantile_over_time(NaN, oracle_temporal[20s])",
       "evaluation_offset_ms": 30000,
       "expected_metric": {"job": "oracle"},
-      "expected_values": ["NaN"]
+      "expected_values": ["NaN"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got NaN (1:20)"
+      ]
     },
     {
       "id": "PQL-R09-quantile-over-time-low-parameter",
       "query": "quantile_over_time(-1, oracle_temporal[20s])",
       "evaluation_offset_ms": 30000,
       "expected_metric": {"job": "oracle"},
-      "expected_values": ["-Inf"]
+      "expected_values": ["-Inf"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got -1 (1:20)"
+      ]
     },
     {
       "id": "PQL-R09-quantile-over-time-high-parameter",
       "query": "quantile_over_time(2, oracle_temporal[20s])",
       "evaluation_offset_ms": 30000,
       "expected_metric": {"job": "oracle"},
-      "expected_values": ["+Inf"]
+      "expected_values": ["+Inf"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got 2 (1:20)"
+      ]
     },
     {
       "id": "PQL-R09-quantile-over-time-empty",
@@ -1077,7 +1148,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [10],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-reset-extrapolated",
@@ -1085,7 +1157,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "reset", "job": "oracle"},
       "expected_values": [1.75],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-sparse-half-interval",
@@ -1093,7 +1166,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "sparse", "job": "oracle"},
       "expected_values": [3.3333333333333335],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-zero-point",
@@ -1101,7 +1175,8 @@
       "evaluation_offset_ms": 40000,
       "expected_metric": {"case": "zero", "job": "oracle"},
       "expected_values": [3.775],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-open-left-boundary",
@@ -1109,7 +1184,8 @@
       "evaluation_offset_ms": 50000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [10],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-offset-keeps-output-time",
@@ -1117,7 +1193,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [10],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-over-subquery",
@@ -1125,7 +1202,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [6.666666666666667],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:1)"]
     },
     {
       "id": "PQL-R12-rate-nan",
@@ -1133,7 +1211,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "nan", "job": "oracle"},
       "expected_values": ["NaN"],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-positive-infinity",
@@ -1141,7 +1220,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "pos_inf", "job": "oracle"},
       "expected_values": ["+Inf"],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-negative-infinity",
@@ -1149,7 +1229,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "neg_inf", "job": "oracle"},
       "expected_values": ["-Inf"],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:6)"]
     },
     {
       "id": "PQL-R12-rate-singleton-omitted",
@@ -1241,7 +1322,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [600],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-reset-extrapolated",
@@ -1249,7 +1331,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "reset", "job": "oracle"},
       "expected_values": [105],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-sparse-half-interval",
@@ -1257,7 +1340,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "sparse", "job": "oracle"},
       "expected_values": [200],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-zero-point",
@@ -1265,7 +1349,8 @@
       "evaluation_offset_ms": 40000,
       "expected_metric": {"case": "zero", "job": "oracle"},
       "expected_values": [151],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-open-left-boundary",
@@ -1273,7 +1358,8 @@
       "evaluation_offset_ms": 50000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [400],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-offset-keeps-output-time",
@@ -1281,7 +1367,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [400],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-over-subquery",
@@ -1289,7 +1376,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "steady", "job": "oracle"},
       "expected_values": [266.66666666666663],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:1)"]
     },
     {
       "id": "PQL-R14-increase-nan",
@@ -1297,7 +1385,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "nan", "job": "oracle"},
       "expected_values": ["NaN"],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-positive-infinity",
@@ -1305,7 +1394,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "pos_inf", "job": "oracle"},
       "expected_values": ["+Inf"],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-negative-infinity",
@@ -1313,7 +1403,8 @@
       "evaluation_offset_ms": 60000,
       "expected_metric": {"case": "neg_inf", "job": "oracle"},
       "expected_values": ["-Inf"],
-      "drop_metric_name": true
+      "drop_metric_name": true,
+      "expected_infos": ["PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: \"oracle_counter\" (1:10)"]
     },
     {
       "id": "PQL-R14-increase-singleton-omitted",
@@ -2708,6 +2799,9 @@
       "expected_results": [
         {"metric": {"__name__": "oracle_sort_range", "host": "a", "job": "oracle"}, "values": [1, 10]},
         {"metric": {"__name__": "oracle_sort_range", "host": "b", "job": "oracle"}, "values": [2, 0]}
+      ],
+      "expected_warnings": [
+        "PromQL warning: sort is ineffective for range queries since results are always ordered by labels (1:1)"
       ]
     },
     {
@@ -3198,14 +3292,20 @@
       "query": "histogram_quantile(2, oracle_histogram_bucket{host=\"a\"})",
       "evaluation_offset_ms": 30000,
       "expected_metric": {"host": "a", "job": "oracle"},
-      "expected_values": ["+Inf"]
+      "expected_values": ["+Inf"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got 2 (1:20)"
+      ]
     },
     {
       "id": "PQL-H01-nan-quantile",
       "query": "histogram_quantile(NaN, oracle_histogram_bucket{host=\"a\"})",
       "evaluation_offset_ms": 30000,
       "expected_metric": {"host": "a", "job": "oracle"},
-      "expected_values": ["NaN"]
+      "expected_values": ["NaN"],
+      "expected_warnings": [
+        "PromQL warning: quantile value should be between 0 and 1, got NaN (1:20)"
+      ]
     },
     {
       "id": "PQL-H01-missing-infinite-bucket",
@@ -3298,6 +3398,40 @@
         "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bogus\" (1:25)",
         "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"\" (1:25)"
       ]
+    },
+    {
+      "id": "PQL-S23-warning-deduplication",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"duplicate_malformed\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true,
+      "expected_warnings": [
+        "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"duplicate\" (1:25)"
+      ]
+    },
+    {
+      "id": "PQL-S23-warning-cap-and-omission-summary",
+      "query": "histogram_quantile(0.5, oracle_histogram_special_bucket{case=\"many_malformed\"})",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true,
+      "expected_warning_contract": {
+        "count": 11,
+        "required": ["2 more warning annotations omitted"],
+        "allowed": [
+          "2 more warning annotations omitted",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad00\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad01\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad02\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad03\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad04\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad05\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad06\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad07\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad08\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad09\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad10\" (1:25)",
+          "PromQL warning: bucket label \"le\" is missing or has a malformed value of \"bad11\" (1:25)"
+        ]
+      }
     },
     {
       "id": "PQL-H01-composes-with-rate-and-aggregation",
@@ -3544,6 +3678,17 @@
         "status": "error",
         "errorType": "bad_data",
         "error": "invalid parameter \"query\": 1:1: parse error: function \"first_over_time\" is not enabled"
+      }
+    },
+    {
+      "id": "PQL-R21-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "double_exponential_smoothing(vector(1)[1m:], 0.5, 0.1)", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"double_exponential_smoothing\" is not enabled"
       }
     },
     {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -371,6 +371,7 @@ pub(crate) enum ReadRequest {
         selectors: Vec<Selector>,
     },
     Prometheus {
+        query: String,
         plan: PromPlan,
         start: i64,
         stop: i64,
@@ -548,6 +549,7 @@ pub(crate) struct PromAbsentPlan {
 pub(crate) struct PromSortPlan {
     inner: Box<PromPlan>,
     descending: bool,
+    source: Option<PromSourceCall>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -571,6 +573,7 @@ pub(crate) struct PromTimestampPlan {
 pub(crate) struct PromHistogramQuantilePlan {
     quantile: Box<PromPlan>,
     inner: Box<PromPlan>,
+    source: Option<PromSourceCall>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -784,6 +787,7 @@ pub(crate) struct PromRangePlan {
     op: PromRangeOp,
     input: PromRangeInput,
     parameter: Option<Box<PromPlan>>,
+    source: Option<PromSourceCall>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -825,6 +829,308 @@ pub(crate) struct PromAggregatePlan {
     param: Option<Box<PromPlan>>,
     value_label: Option<String>,
     grouping: PromAggregateGrouping,
+    source: Option<PromSourceCall>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PromSourceCall {
+    start: usize,
+    arguments: Vec<usize>,
+}
+
+impl PromSourceCall {
+    fn argument(&self, index: usize) -> usize {
+        self.arguments.get(index).copied().unwrap_or(self.start)
+    }
+}
+
+#[derive(Debug)]
+enum PromAnnotation {
+    Generic {
+        raw: String,
+        position: usize,
+    },
+    HistogramMonotonicity {
+        raw: String,
+        position: usize,
+        min_timestamp_ms: i64,
+        max_timestamp_ms: i64,
+        min_bucket: f64,
+        max_bucket: f64,
+        max_diff: f64,
+        samples: u64,
+    },
+}
+
+impl PromAnnotation {
+    fn render(&self, query: &str) -> String {
+        match self {
+            Self::Generic { raw, position } => {
+                format!("{raw} ({})", promql_source_position(query, *position))
+            }
+            Self::HistogramMonotonicity {
+                raw,
+                position,
+                min_timestamp_ms,
+                max_timestamp_ms,
+                min_bucket,
+                max_bucket,
+                max_diff,
+                samples,
+            } => format!(
+                "{raw}, from buckets {} to {}, with a max diff of {}, over {samples} samples from {} to {} ({})",
+                format_prometheus_annotation_float(*min_bucket),
+                format_prometheus_annotation_float(*max_bucket),
+                format_prometheus_annotation_float_precision_2(*max_diff),
+                format_prometheus_annotation_timestamp(*min_timestamp_ms),
+                format_prometheus_annotation_timestamp(*max_timestamp_ms),
+                promql_source_position(query, *position),
+            ),
+        }
+    }
+}
+
+#[derive(Default)]
+struct PromAnnotations {
+    warnings: BTreeMap<String, PromAnnotation>,
+    infos: BTreeMap<String, PromAnnotation>,
+}
+
+impl PromAnnotations {
+    fn warning(&mut self, raw: String, position: usize) {
+        self.warnings
+            .insert(raw.clone(), PromAnnotation::Generic { raw, position });
+    }
+
+    fn info(&mut self, raw: String, position: usize) {
+        self.infos
+            .insert(raw.clone(), PromAnnotation::Generic { raw, position });
+    }
+
+    fn invalid_quantile(&mut self, quantile: f64, position: usize) {
+        self.warning(
+            format!(
+                "PromQL warning: quantile value should be between 0 and 1, got {}",
+                format_prometheus_annotation_float(quantile)
+            ),
+            position,
+        );
+    }
+
+    fn bad_bucket_label(&mut self, label: &str, position: usize) {
+        self.warning(
+            format!(
+                "PromQL warning: bucket label \"le\" is missing or has a malformed value of {}",
+                prometheus_annotation_quote(label)
+            ),
+            position,
+        );
+    }
+
+    fn possible_non_counter(&mut self, metric: &str, position: usize) {
+        self.info(
+            format!(
+                "PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket: {}",
+                prometheus_annotation_quote(metric)
+            ),
+            position,
+        );
+    }
+
+    fn histogram_monotonicity(
+        &mut self,
+        position: usize,
+        timestamp_ms: i64,
+        min_bucket: f64,
+        max_bucket: f64,
+        max_diff: f64,
+    ) {
+        let raw = "PromQL info: input to histogram_quantile needed to be fixed for monotonicity (see https://prometheus.io/docs/prometheus/latest/querying/functions/#histogram_quantile)".to_string();
+        match self.infos.get_mut(&raw) {
+            Some(PromAnnotation::HistogramMonotonicity {
+                position: existing_position,
+                min_timestamp_ms,
+                max_timestamp_ms,
+                min_bucket: existing_min_bucket,
+                max_bucket: existing_max_bucket,
+                max_diff: existing_max_diff,
+                samples,
+                ..
+            }) => {
+                *existing_position = position;
+                *min_timestamp_ms = (*min_timestamp_ms).min(timestamp_ms);
+                *max_timestamp_ms = (*max_timestamp_ms).max(timestamp_ms);
+                *existing_min_bucket = existing_min_bucket.min(min_bucket);
+                *existing_max_bucket = existing_max_bucket.max(max_bucket);
+                *existing_max_diff = existing_max_diff.max(max_diff);
+                *samples = samples.saturating_add(1);
+            }
+            _ => {
+                self.infos.insert(
+                    raw.clone(),
+                    PromAnnotation::HistogramMonotonicity {
+                        raw,
+                        position,
+                        min_timestamp_ms: timestamp_ms,
+                        max_timestamp_ms: timestamp_ms,
+                        min_bucket,
+                        max_bucket,
+                        max_diff,
+                        samples: 1,
+                    },
+                );
+            }
+        }
+    }
+
+    fn append_to_success(
+        &self,
+        query: &str,
+        output: &mut ReadOutput,
+        limits: PromQueryLimits,
+    ) -> Result<(), String> {
+        if self.warnings.is_empty() && self.infos.is_empty() {
+            return Ok(());
+        }
+        if output.body.pop() != Some(b'}') {
+            return Err("Prometheus success envelope is missing its final object delimiter".into());
+        }
+        if !self.warnings.is_empty() {
+            output.body.extend_from_slice(b",\"warnings\":");
+            write_json(
+                &mut output.body,
+                &render_prometheus_annotations(&self.warnings, query, "warning"),
+            )?;
+        }
+        if !self.infos.is_empty() {
+            output.body.extend_from_slice(b",\"infos\":");
+            write_json(
+                &mut output.body,
+                &render_prometheus_annotations(&self.infos, query, "info"),
+            )?;
+        }
+        output.body.push(b'}');
+        enforce_prometheus_output(&output.body, output.points, limits)
+    }
+}
+
+fn render_prometheus_annotations(
+    annotations: &BTreeMap<String, PromAnnotation>,
+    query: &str,
+    level: &str,
+) -> Vec<String> {
+    const MAX_ANNOTATIONS: usize = 10;
+    let mut rendered: Vec<String> = annotations
+        .values()
+        .take(MAX_ANNOTATIONS)
+        .map(|annotation| annotation.render(query))
+        .collect();
+    if annotations.len() > MAX_ANNOTATIONS {
+        rendered.push(format!(
+            "{} more {level} annotations omitted",
+            annotations.len() - MAX_ANNOTATIONS
+        ));
+    }
+    rendered
+}
+
+fn promql_source_position(query: &str, position: usize) -> String {
+    if query.is_empty() {
+        return "unknown position".into();
+    }
+    if position > query.len() || !query.is_char_boundary(position) {
+        return "invalid position".into();
+    }
+    let prefix = &query[..position];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    format!("{line}:{}", position - line_start + 1)
+}
+
+fn prometheus_annotation_quote(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '\u{0007}' => output.push_str("\\a"),
+            '\u{0008}' => output.push_str("\\b"),
+            '\u{000c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{000b}' => output.push_str("\\v"),
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            character if character <= '\u{001f}' || character == '\u{007f}' => {
+                output.push_str(&format!("\\x{:02x}", character as u32));
+            }
+            character if character.is_control() => {
+                let value = character as u32;
+                if value <= u16::MAX as u32 {
+                    output.push_str(&format!("\\u{value:04x}"));
+                } else {
+                    output.push_str(&format!("\\U{value:08x}"));
+                }
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn format_prometheus_annotation_float(value: f64) -> String {
+    format_prometheus_value(value)
+}
+
+fn format_prometheus_annotation_float_precision_2(value: f64) -> String {
+    if !value.is_finite() || value == 0.0 {
+        return format_prometheus_annotation_float(value);
+    }
+    let exponent = value.abs().log10().floor() as i32;
+    if !(-4..2).contains(&exponent) {
+        let rendered = format!("{value:.1e}");
+        let (mantissa, exponent) = rendered
+            .split_once('e')
+            .expect("scientific format includes exponent");
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        let exponent: i32 = exponent.parse().expect("scientific exponent is decimal");
+        format!("{mantissa}e{exponent:+03}")
+    } else {
+        let decimals = (1 - exponent).max(0) as usize;
+        let rendered = format!("{value:.decimals$}");
+        if rendered.contains('.') {
+            rendered
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+        } else {
+            rendered
+        }
+    }
+}
+
+fn format_prometheus_annotation_timestamp(timestamp_ms: i64) -> String {
+    let seconds = timestamp_ms / 1_000;
+    let (year, month, day) = prometheus_utc_civil_date(seconds);
+    let second_of_day = seconds.rem_euclid(86_400);
+    let hour = second_of_day / 3_600;
+    let minute = second_of_day / 60 % 60;
+    let second = second_of_day % 60;
+    if year >= 0 {
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    } else {
+        format!(
+            "-{:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z",
+            -year
+        )
+    }
+}
+
+fn prometheus_counter_name(metric: &str) -> bool {
+    ["_total", "_sum", "_count", "_bucket"]
+        .iter()
+        .any(|suffix| metric.ends_with(suffix))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -835,6 +1141,7 @@ enum PromBinaryOp {
     Divide,
     Modulo,
     Power,
+    Atan2,
     Equal,
     NotEqual,
     Greater,
@@ -896,7 +1203,13 @@ impl PromBinaryOp {
     fn is_arithmetic(self) -> bool {
         matches!(
             self,
-            Self::Add | Self::Subtract | Self::Multiply | Self::Divide | Self::Modulo | Self::Power
+            Self::Add
+                | Self::Subtract
+                | Self::Multiply
+                | Self::Divide
+                | Self::Modulo
+                | Self::Power
+                | Self::Atan2
         )
     }
 
@@ -912,6 +1225,7 @@ impl PromBinaryOp {
             Self::Divide => Some(lhs / rhs),
             Self::Modulo => Some(lhs % rhs),
             Self::Power => Some(lhs.powf(rhs)),
+            Self::Atan2 => Some(prometheus_atan2(lhs, rhs)),
             comparison => {
                 let matches = match comparison {
                     Self::Equal => lhs == rhs,
@@ -932,6 +1246,97 @@ impl PromBinaryOp {
                 }
             }
         }
+    }
+}
+
+// Go's math.Atan2 and the host C libm do not always round the last bit the
+// same way. Prometheus evaluates this operator with Go's Cephes-derived
+// implementation, so keep the arithmetic local and deterministic.
+fn prometheus_atan2(y: f64, x: f64) -> f64 {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+    if y.is_nan() || x.is_nan() {
+        return f64::NAN;
+    }
+    if y == 0.0 {
+        if x >= 0.0 && !x.is_sign_negative() {
+            return 0.0_f64.copysign(y);
+        }
+        return PI.copysign(y);
+    }
+    if x == 0.0 {
+        return FRAC_PI_2.copysign(y);
+    }
+    if x.is_infinite() {
+        if x.is_sign_positive() {
+            return if y.is_infinite() {
+                FRAC_PI_4.copysign(y)
+            } else {
+                0.0_f64.copysign(y)
+            };
+        }
+        return if y.is_infinite() {
+            (3.0 * FRAC_PI_4).copysign(y)
+        } else {
+            PI.copysign(y)
+        };
+    }
+    if y.is_infinite() {
+        return FRAC_PI_2.copysign(y);
+    }
+
+    let quotient = prometheus_atan(y / x);
+    if x < 0.0 {
+        if quotient <= 0.0 {
+            quotient + PI
+        } else {
+            quotient - PI
+        }
+    } else {
+        quotient
+    }
+}
+
+fn prometheus_atan(value: f64) -> f64 {
+    fn reduced(value: f64) -> f64 {
+        const MORE_BITS: f64 = 6.123_233_995_736_766e-17;
+        const TAN_3_PI_8: f64 = 2.414_213_562_373_095;
+        if value <= 0.66 {
+            return series(value);
+        }
+        if value > TAN_3_PI_8 {
+            return std::f64::consts::FRAC_PI_2 - series(1.0 / value) + MORE_BITS;
+        }
+        std::f64::consts::FRAC_PI_4 + series((value - 1.0) / (value + 1.0)) + 0.5 * MORE_BITS
+    }
+
+    fn series(value: f64) -> f64 {
+        // These are the exact f64-rounded forms of Go's longer Cephes
+        // coefficient spellings. Keeping only significant binary64 digits
+        // avoids implying precision that is not present in either runtime.
+        const P0: f64 = -8.750_608_600_031_904e-1;
+        const P1: f64 = -1.615_753_718_733_365_2e1;
+        const P2: f64 = -7.500_855_792_314_705e1;
+        const P3: f64 = -1.228_866_684_490_136_1e2;
+        const P4: f64 = -6.485_021_904_942_025e1;
+        const Q0: f64 = 2.485_846_490_142_306_2e1;
+        const Q1: f64 = 1.650_270_098_316_988_5e2;
+        const Q2: f64 = 4.328_810_604_912_902_7e2;
+        const Q3: f64 = 4.853_903_996_359_137e2;
+        const Q4: f64 = 1.945_506_571_482_614e2;
+        let square = value * value;
+        let correction = square
+            * ((((P0 * square + P1) * square + P2) * square + P3) * square + P4)
+            / (((((square + Q0) * square + Q1) * square + Q2) * square + Q3) * square + Q4);
+        value * correction + value
+    }
+
+    if value == 0.0 {
+        value
+    } else if value > 0.0 {
+        reduced(value)
+    } else {
+        -reduced(-value)
     }
 }
 
@@ -1108,6 +1513,7 @@ pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest,
     };
     let lookback = parse_prom_request_lookback(params.get("lookback_delta"), 300_000)?;
     Ok(ReadRequest::Prometheus {
+        query: query.to_owned(),
         plan: lower_promql(query, lookback)
             .map_err(|error| format!("invalid parameter \"query\": {error}"))?,
         start: time,
@@ -1160,6 +1566,7 @@ pub(crate) fn prometheus_range_request(params: &Params) -> Result<ReadRequest, S
         _ => {}
     }
     Ok(ReadRequest::Prometheus {
+        query: query.to_owned(),
         plan,
         start,
         stop,
@@ -1202,7 +1609,276 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
             format!("parse error: {error}")
         }
     })?;
-    lower_promql_expr(parsed, lookback, 0)
+    let mut plan = lower_promql_expr(parsed, lookback, 0)?;
+    attach_promql_source_positions(&mut plan, input)?;
+    Ok(plan)
+}
+
+fn attach_promql_source_positions(plan: &mut PromPlan, input: &str) -> Result<(), String> {
+    let mut calls = scan_promql_source_calls(input);
+    attach_promql_plan_source_positions(plan, &mut calls)
+}
+
+fn attach_promql_plan_source_positions(
+    plan: &mut PromPlan,
+    calls: &mut BTreeMap<String, VecDeque<PromSourceCall>>,
+) -> Result<(), String> {
+    let take = |calls: &mut BTreeMap<String, VecDeque<PromSourceCall>>, name: &str| {
+        calls.get_mut(name).and_then(VecDeque::pop_front)
+    };
+    match plan {
+        PromPlan::Scalar(_) | PromPlan::String(_) | PromPlan::Time => {}
+        PromPlan::Unary(inner) => attach_promql_plan_source_positions(inner, calls)?,
+        PromPlan::Function(function) => {
+            attach_promql_plan_source_positions(&mut function.inner, calls)?;
+            for parameter in &mut function.parameters {
+                attach_promql_plan_source_positions(parameter, calls)?;
+            }
+        }
+        PromPlan::LabelReplace(label_replace) => {
+            attach_promql_plan_source_positions(&mut label_replace.inner, calls)?;
+        }
+        PromPlan::LabelJoin(label_join) => {
+            attach_promql_plan_source_positions(&mut label_join.inner, calls)?;
+        }
+        PromPlan::Absent(absent) => {
+            attach_promql_plan_source_positions(&mut absent.inner, calls)?;
+        }
+        PromPlan::Sort(sort) => {
+            let name = if sort.descending { "sort_desc" } else { "sort" };
+            sort.source = Some(
+                take(calls, name)
+                    .ok_or_else(|| format!("PromQL source locator could not find {name} call"))?,
+            );
+            attach_promql_plan_source_positions(&mut sort.inner, calls)?;
+        }
+        PromPlan::Conversion(conversion) => {
+            attach_promql_plan_source_positions(&mut conversion.inner, calls)?;
+        }
+        PromPlan::Timestamp(timestamp) => {
+            attach_promql_plan_source_positions(&mut timestamp.inner, calls)?;
+        }
+        PromPlan::Calendar(calendar) => {
+            attach_promql_plan_source_positions(&mut calendar.inner, calls)?;
+        }
+        PromPlan::HistogramQuantile(histogram) => {
+            histogram.source = Some(take(calls, "histogram_quantile").ok_or_else(|| {
+                "PromQL source locator could not find histogram_quantile call".to_string()
+            })?);
+            attach_promql_plan_source_positions(&mut histogram.quantile, calls)?;
+            attach_promql_plan_source_positions(&mut histogram.inner, calls)?;
+        }
+        PromPlan::Binary(binary) => {
+            attach_promql_plan_source_positions(&mut binary.lhs, calls)?;
+            attach_promql_plan_source_positions(&mut binary.rhs, calls)?;
+        }
+        PromPlan::Aggregate(aggregate) => {
+            if aggregate.op == PromAggregateOp::Quantile {
+                aggregate.source = Some(take(calls, "quantile").ok_or_else(|| {
+                    "PromQL source locator could not find quantile aggregation".to_string()
+                })?);
+            }
+            if let Some(parameter) = &mut aggregate.param {
+                attach_promql_plan_source_positions(parameter, calls)?;
+            }
+            attach_promql_plan_source_positions(&mut aggregate.inner, calls)?;
+        }
+        PromPlan::Selector { .. } | PromPlan::RangeSelector { .. } => {}
+        PromPlan::RangeReduction(range) => {
+            if matches!(
+                range.op,
+                PromRangeOp::Quantile | PromRangeOp::Rate | PromRangeOp::Increase
+            ) {
+                let name = range.op.name();
+                range.source =
+                    Some(take(calls, name).ok_or_else(|| {
+                        format!("PromQL source locator could not find {name} call")
+                    })?);
+            }
+            if let Some(parameter) = &mut range.parameter {
+                attach_promql_plan_source_positions(parameter, calls)?;
+            }
+            if let PromRangeInput::Subquery(subquery) = &mut range.input {
+                attach_promql_plan_source_positions(&mut subquery.inner, calls)?;
+            }
+        }
+        PromPlan::Subquery(subquery) => {
+            attach_promql_plan_source_positions(&mut subquery.inner, calls)?;
+        }
+    }
+    Ok(())
+}
+
+fn scan_promql_source_calls(input: &str) -> BTreeMap<String, VecDeque<PromSourceCall>> {
+    let bytes = input.as_bytes();
+    let mut calls: BTreeMap<String, VecDeque<PromSourceCall>> = BTreeMap::new();
+    let mut index = 0_usize;
+    let mut quote = None;
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if delimiter == b'"' && bytes[index] == b'\\' {
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(bytes[index], b'"' | b'`') {
+            quote = Some(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if !is_promql_identifier_start(bytes[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < bytes.len() && is_promql_identifier_continue(bytes[index]) {
+            index += 1;
+        }
+        let name = &input[start..index];
+        let mut next = skip_promql_whitespace(bytes, index);
+        if name == "quantile" {
+            if let Some((modifier, after_modifier)) = promql_identifier_at(input, next) {
+                if matches!(modifier, "by" | "without") {
+                    next = skip_promql_whitespace(bytes, after_modifier);
+                    if bytes.get(next) == Some(&b'(') {
+                        if let Some(close) = matching_promql_delimiter(bytes, next, b'(', b')') {
+                            next = skip_promql_whitespace(bytes, close + 1);
+                        }
+                    }
+                }
+            }
+        }
+        if bytes.get(next) != Some(&b'(') {
+            continue;
+        }
+        if let Some(arguments) = promql_direct_argument_offsets(bytes, next) {
+            calls
+                .entry(name.to_owned())
+                .or_default()
+                .push_back(PromSourceCall { start, arguments });
+        }
+    }
+    calls
+}
+
+fn is_promql_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':')
+}
+
+fn is_promql_identifier_continue(byte: u8) -> bool {
+    is_promql_identifier_start(byte) || byte.is_ascii_digit()
+}
+
+fn skip_promql_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        index += 1;
+    }
+    index
+}
+
+fn promql_identifier_at(input: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = input.as_bytes();
+    if !bytes
+        .get(start)
+        .copied()
+        .is_some_and(is_promql_identifier_start)
+    {
+        return None;
+    }
+    let mut end = start + 1;
+    while bytes
+        .get(end)
+        .copied()
+        .is_some_and(is_promql_identifier_continue)
+    {
+        end += 1;
+    }
+    Some((&input[start..end], end))
+}
+
+fn matching_promql_delimiter(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut quote = None;
+    let mut index = start;
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if delimiter == b'"' && bytes[index] == b'\\' {
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(bytes[index], b'"' | b'`') {
+            quote = Some(bytes[index]);
+        } else if bytes[index] == open {
+            depth += 1;
+        } else if bytes[index] == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn promql_direct_argument_offsets(bytes: &[u8], open: usize) -> Option<Vec<usize>> {
+    let close = matching_promql_delimiter(bytes, open, b'(', b')')?;
+    let first = skip_promql_whitespace(bytes, open + 1);
+    if first == close {
+        return Some(Vec::new());
+    }
+    let mut arguments = vec![first];
+    let mut parens = 1_usize;
+    let mut brackets = 0_usize;
+    let mut braces = 0_usize;
+    let mut quote = None;
+    let mut index = open + 1;
+    while index < close {
+        if let Some(delimiter) = quote {
+            if delimiter == b'"' && bytes[index] == b'\\' {
+                index = (index + 2).min(close);
+                continue;
+            }
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'"' | b'`' => quote = Some(bytes[index]),
+            b'(' => parens += 1,
+            b')' => parens -= 1,
+            b'[' => brackets += 1,
+            b']' => brackets = brackets.saturating_sub(1),
+            b'{' => braces += 1,
+            b'}' => braces = braces.saturating_sub(1),
+            b',' if parens == 1 && brackets == 0 && braces == 0 => {
+                let argument = skip_promql_whitespace(bytes, index + 1);
+                if argument < close {
+                    arguments.push(argument);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Some(arguments)
 }
 
 const MAX_PROMQL_NESTING: usize = 16;
@@ -1426,6 +2102,7 @@ fn lower_promql_expr(
             Ok(PromPlan::HistogramQuantile(PromHistogramQuantilePlan {
                 quantile: Box::new(quantile),
                 inner: Box::new(inner),
+                source: None,
             }))
         }
         promql::Expr::Call(call) if call.func.name == "label_replace" => {
@@ -1524,6 +2201,7 @@ fn lower_promql_expr(
                 op: PromRangeOp::Present,
                 input,
                 parameter: None,
+                source: None,
             });
             Ok(PromPlan::Absent(PromAbsentPlan {
                 inner: Box::new(present),
@@ -1541,6 +2219,7 @@ fn lower_promql_expr(
             Ok(PromPlan::Sort(PromSortPlan {
                 inner: Box::new(inner),
                 descending: call.func.name == "sort_desc",
+                source: None,
             }))
         }
         promql::Expr::Call(call) if matches!(call.func.name, "scalar" | "vector") => {
@@ -1634,6 +2313,10 @@ fn lower_promql_expr(
             "first_over_time is experimental and is not enabled in the stable PromQL compatibility tier"
                 .into(),
         ),
+        promql::Expr::Call(call) if call.func.name == "double_exponential_smoothing" => Err(
+            "double_exponential_smoothing is experimental and is not enabled in the stable PromQL compatibility tier"
+                .into(),
+        ),
         promql::Expr::Call(call) if call.func.name == "quantile_over_time" => {
             let [parameter, argument] = call.args.args.as_slice() else {
                 return Err("quantile_over_time requires a scalar and a range vector".into());
@@ -1660,6 +2343,7 @@ fn lower_promql_expr(
                 op: PromRangeOp::Quantile,
                 input,
                 parameter: Some(Box::new(parameter)),
+                source: None,
             }))
         }
         promql::Expr::Call(call) if call.func.name == "predict_linear" => {
@@ -1688,6 +2372,7 @@ fn lower_promql_expr(
                 op: PromRangeOp::PredictLinear,
                 input,
                 parameter: Some(Box::new(parameter)),
+                source: None,
             }))
         }
         promql::Expr::Call(call)
@@ -1753,6 +2438,7 @@ fn lower_promql_expr(
                 op,
                 input,
                 parameter: None,
+                source: None,
             }))
         }
         other => Err(format!(
@@ -1882,6 +2568,7 @@ fn lower_promql_aggregate(
         param,
         value_label,
         grouping,
+        source: None,
     }))
 }
 
@@ -1901,6 +2588,7 @@ fn lower_promql_binary(
         token::T_DIV => PromBinaryOp::Divide,
         token::T_MOD => PromBinaryOp::Modulo,
         token::T_POW => PromBinaryOp::Power,
+        token::T_ATAN2 => PromBinaryOp::Atan2,
         token::T_EQLC => PromBinaryOp::Equal,
         token::T_NEQ => PromBinaryOp::NotEqual,
         token::T_GTR => PromBinaryOp::Greater,
@@ -2557,15 +3245,32 @@ pub(crate) fn execute(
             execute_series(conn, features.table, metric.as_deref(), &selectors)
         }
         ReadRequest::Prometheus {
+            query,
             plan,
             start,
             stop,
             step,
             instant,
             limits,
-        } => execute_prometheus(
-            conn, features, &plan, start, stop, step, instant, start, stop, limits, cancelled,
-        ),
+        } => {
+            let mut annotations = PromAnnotations::default();
+            let mut output = execute_prometheus(
+                conn,
+                features,
+                &plan,
+                start,
+                stop,
+                step,
+                instant,
+                start,
+                stop,
+                limits,
+                &mut annotations,
+                cancelled,
+            )?;
+            annotations.append_to_success(&query, &mut output, limits)?;
+            Ok(output)
+        }
     }
 }
 
@@ -3349,6 +4054,7 @@ fn execute_prometheus(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     match plan {
@@ -3367,6 +4073,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Function(function) => execute_prometheus_function(
@@ -3380,6 +4087,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::LabelReplace(label_replace) => execute_prometheus_label_replace(
@@ -3393,6 +4101,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::LabelJoin(label_join) => execute_prometheus_label_join(
@@ -3406,6 +4115,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Absent(absent) => execute_prometheus_absent(
@@ -3419,6 +4129,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Sort(sort) => execute_prometheus_sort(
@@ -3432,6 +4143,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Conversion(conversion) => execute_prometheus_conversion(
@@ -3445,6 +4157,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Time => execute_prometheus_time(start, stop, step, instant, limits, cancelled),
@@ -3459,6 +4172,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Calendar(calendar) => execute_prometheus_calendar(
@@ -3472,6 +4186,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::HistogramQuantile(histogram) => execute_prometheus_histogram_quantile(
@@ -3485,6 +4200,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Binary(binary) => execute_prometheus_binary(
@@ -3498,6 +4214,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Aggregate(aggregate) => execute_prometheus_aggregate(
@@ -3511,6 +4228,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::Selector { selector, lookback } => execute_prometheus_selector(
@@ -3538,6 +4256,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
         PromPlan::RangeSelector { selector, window } => execute_prometheus_range_selector(
@@ -3561,6 +4280,7 @@ fn execute_prometheus(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         ),
     }
@@ -3578,6 +4298,7 @@ fn execute_prometheus_range_reduction_plan(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let (parameters, parameter_frame_bytes, parameter_intermediate_points) =
@@ -3593,6 +4314,7 @@ fn execute_prometheus_range_reduction_plan(
                 query_start,
                 query_end,
                 limits,
+                annotations,
                 cancelled,
             )?;
             let frame_bytes = output.frame_bytes;
@@ -3612,6 +4334,13 @@ fn execute_prometheus_range_reduction_plan(
             (None, 0, 0)
         };
     enforce_intermediate_work(parameter_intermediate_points, limits)?;
+    let annotation_position = range.source.as_ref().map_or(0, |source| {
+        if matches!(&range.input, PromRangeInput::Subquery(_)) {
+            source.start
+        } else {
+            source.argument(0)
+        }
+    });
 
     let mut output = match &range.input {
         PromRangeInput::Selector { selector, window }
@@ -3656,6 +4385,8 @@ fn execute_prometheus_range_reduction_plan(
             query_start,
             query_end,
             limits,
+            annotations,
+            annotation_position,
             cancelled,
         )?,
         PromRangeInput::Subquery(subquery) => execute_prometheus_range_subquery(
@@ -3671,9 +4402,30 @@ fn execute_prometheus_range_reduction_plan(
             query_start,
             query_end,
             limits,
+            annotations,
+            annotation_position,
             cancelled,
         )?,
     };
+    if matches!(range.op, PromRangeOp::Rate | PromRangeOp::Increase)
+        && output.points > 0
+        && matches!(&range.input, PromRangeInput::Selector { selector, .. } if matches!(&selector.metric, MetricSelection::Exact(metric) if !prometheus_counter_name(metric)))
+    {
+        let PromRangeInput::Selector { selector, .. } = &range.input else {
+            unreachable!("guarded selector")
+        };
+        let MetricSelection::Exact(metric) = &selector.metric else {
+            unreachable!("guarded exact metric")
+        };
+        annotations.possible_non_counter(metric, annotation_position);
+    }
+    if range.op == PromRangeOp::Quantile && output.points > 0 {
+        for &(_, quantile) in parameters.as_deref().unwrap_or_default() {
+            if quantile.is_nan() || !(0.0..=1.0).contains(&quantile) {
+                annotations.invalid_quantile(quantile, annotation_position);
+            }
+        }
+    }
     output.frame_bytes = output.frame_bytes.saturating_add(parameter_frame_bytes);
     output.intermediate_points = output
         .intermediate_points
@@ -3740,6 +4492,7 @@ fn execute_prometheus_aggregate(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -3754,6 +4507,7 @@ fn execute_prometheus_aggregate(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let mut intermediate_points = child.intermediate_points.saturating_add(child.points);
@@ -3781,6 +4535,7 @@ fn execute_prometheus_aggregate(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         )?;
         intermediate_points = intermediate_points
@@ -3802,6 +4557,31 @@ fn execute_prometheus_aggregate(
         None
     };
     enforce_intermediate_work(intermediate_points, limits)?;
+    if aggregate.op == PromAggregateOp::Quantile {
+        let position = aggregate
+            .source
+            .as_ref()
+            .map_or(0, |source| source.argument(0));
+        let parameters = params.as_deref().unwrap_or_default();
+        if parameters.iter().any(|(_, value)| value.is_nan()) {
+            annotations.invalid_quantile(f64::NAN, position);
+        } else {
+            let maximum = parameters
+                .iter()
+                .map(|(_, value)| *value)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let minimum = parameters
+                .iter()
+                .map(|(_, value)| *value)
+                .fold(f64::INFINITY, f64::min);
+            if maximum > 1.0 {
+                annotations.invalid_quantile(maximum, position);
+            }
+            if minimum < 0.0 {
+                annotations.invalid_quantile(minimum, position);
+            }
+        }
+    }
     let series = if aggregate.op.is_ranked() {
         apply_prometheus_ranked(
             aggregate,
@@ -4249,6 +5029,7 @@ fn execute_prometheus_unary(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -4264,6 +5045,7 @@ fn execute_prometheus_unary(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let intermediate_points = child.intermediate_points.saturating_add(child.points);
@@ -4313,6 +5095,7 @@ fn execute_prometheus_function(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -4327,6 +5110,7 @@ fn execute_prometheus_function(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let mut intermediate_points = child.intermediate_points.saturating_add(child.points);
@@ -4346,6 +5130,7 @@ fn execute_prometheus_function(
             query_start,
             query_end,
             limits,
+            annotations,
             cancelled,
         )?;
         intermediate_points = intermediate_points
@@ -4413,6 +5198,19 @@ struct PromClassicBucket {
     count: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PromHistogramRepair {
+    min_bucket: f64,
+    max_bucket: f64,
+    max_diff: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PromClassicQuantile {
+    value: f64,
+    repair: Option<PromHistogramRepair>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_prometheus_histogram_quantile(
     conn: &Connection,
@@ -4425,6 +5223,7 @@ fn execute_prometheus_histogram_quantile(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -4439,6 +5238,7 @@ fn execute_prometheus_histogram_quantile(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let buckets = execute_prometheus(
@@ -4452,6 +5252,7 @@ fn execute_prometheus_histogram_quantile(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let frame_bytes = quantile.frame_bytes.saturating_add(buckets.frame_bytes);
@@ -4481,20 +5282,33 @@ fn execute_prometheus_histogram_quantile(
     else {
         unreachable!("histogram bucket type was checked while lowering")
     };
+    let quantile_position = histogram
+        .source
+        .as_ref()
+        .map_or(0, |source| source.argument(0));
+    let bucket_position = histogram
+        .source
+        .as_ref()
+        .map_or(0, |source| source.argument(1));
+    if !series.is_empty() {
+        for &(_, quantile) in &quantiles {
+            if quantile.is_nan() || !(0.0..=1.0).contains(&quantile) {
+                annotations.invalid_quantile(quantile, quantile_position);
+            }
+        }
+    }
     let quantiles: BTreeMap<i64, f64> = quantiles.into_iter().collect();
     let mut groups: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, Vec<PromClassicBucket>>> =
         BTreeMap::new();
     for item in series {
         check_cancelled(cancelled)?;
-        let Some(upper_bound) = item
-            .labels
-            .get("le")
-            .and_then(|value| parse_prometheus_bucket_bound(value).ok())
-        else {
-            // Prometheus emits an optional warning for a missing or malformed
-            // bound. Exact warning envelopes are tracked separately by
-            // PQL-S23; malformed series do not participate in the result.
-            continue;
+        let bucket_label = item.labels.get("le").map_or("", String::as_str);
+        let upper_bound = match parse_prometheus_bucket_bound(bucket_label) {
+            Ok(upper_bound) => upper_bound,
+            Err(()) => {
+                annotations.bad_bucket_label(bucket_label, bucket_position);
+                continue;
+            }
         };
         let mut labels = item.labels;
         labels.remove("le");
@@ -4520,10 +5334,17 @@ fn execute_prometheus_histogram_quantile(
             let quantile = quantiles.get(&timestamp).copied().ok_or_else(|| {
                 "histogram_quantile scalar is missing an evaluation timestamp".to_string()
             })?;
-            points.push((
-                timestamp,
-                prometheus_classic_bucket_quantile(quantile, buckets, cancelled)?,
-            ));
+            let quantile = prometheus_classic_bucket_quantile(quantile, buckets, cancelled)?;
+            if let Some(repair) = quantile.repair {
+                annotations.histogram_monotonicity(
+                    bucket_position,
+                    timestamp,
+                    repair.min_bucket,
+                    repair.max_bucket,
+                    repair.max_diff,
+                );
+            }
+            points.push((timestamp, quantile.value));
         }
         if !points.is_empty() {
             output.push(IntermediateSeries { labels, points });
@@ -4574,15 +5395,19 @@ fn prometheus_classic_bucket_quantile(
     quantile: f64,
     mut buckets: Vec<PromClassicBucket>,
     cancelled: &AtomicBool,
-) -> Result<f64, String> {
+) -> Result<PromClassicQuantile, String> {
+    let without_repair = |value| PromClassicQuantile {
+        value,
+        repair: None,
+    };
     if quantile.is_nan() {
-        return Ok(f64::NAN);
+        return Ok(without_repair(f64::NAN));
     }
     if quantile < 0.0 {
-        return Ok(f64::NEG_INFINITY);
+        return Ok(without_repair(f64::NEG_INFINITY));
     }
     if quantile > 1.0 {
-        return Ok(f64::INFINITY);
+        return Ok(without_repair(f64::INFINITY));
     }
     buckets.sort_by(|lhs, rhs| {
         if lhs.upper_bound < rhs.upper_bound {
@@ -4597,7 +5422,7 @@ fn prometheus_classic_bucket_quantile(
         .last()
         .is_some_and(|bucket| bucket.upper_bound == f64::INFINITY)
     {
-        return Ok(f64::NAN);
+        return Ok(without_repair(f64::NAN));
     }
 
     let mut coalesced: Vec<PromClassicBucket> = Vec::with_capacity(buckets.len());
@@ -4613,32 +5438,65 @@ fn prometheus_classic_bucket_quantile(
         }
     }
     let mut previous = coalesced.first().map_or(0.0, |bucket| bucket.count);
+    let mut repair: Option<PromHistogramRepair> = None;
     for bucket in coalesced.iter_mut().skip(1) {
         check_cancelled(cancelled)?;
         if bucket.count == previous {
             continue;
         }
-        if prometheus_almost_equal(bucket.count, previous, 1e-12) || bucket.count < previous {
+        if prometheus_almost_equal(bucket.count, previous, 1e-12) {
             bucket.count = previous;
+            continue;
+        }
+        if bucket.count < previous {
+            let difference = previous - bucket.count;
+            match &mut repair {
+                Some(repair) => {
+                    repair.min_bucket = repair.min_bucket.min(bucket.upper_bound);
+                    repair.max_bucket = repair.max_bucket.max(bucket.upper_bound);
+                    repair.max_diff = repair.max_diff.max(difference);
+                }
+                None => {
+                    repair = Some(PromHistogramRepair {
+                        min_bucket: bucket.upper_bound,
+                        max_bucket: bucket.upper_bound,
+                        max_diff: difference,
+                    });
+                }
+            }
+            bucket.count = previous;
+            continue;
         }
         previous = bucket.count;
     }
     if coalesced.len() < 2 {
-        return Ok(f64::NAN);
+        return Ok(PromClassicQuantile {
+            value: f64::NAN,
+            repair,
+        });
     }
     let observations = coalesced.last().expect("nonempty buckets").count;
     if observations == 0.0 {
-        return Ok(f64::NAN);
+        return Ok(PromClassicQuantile {
+            value: f64::NAN,
+            repair,
+        });
     }
     let mut rank = quantile * observations;
     let bucket_index =
         coalesced[..coalesced.len() - 1].partition_point(|bucket| bucket.count < rank);
     if bucket_index == coalesced.len() - 1 {
-        return Ok(coalesced[bucket_index - 1].upper_bound);
+        return Ok(PromClassicQuantile {
+            value: coalesced[bucket_index - 1].upper_bound,
+            repair,
+        });
     }
     let bucket = coalesced[bucket_index];
     if bucket_index == 0 && bucket.upper_bound <= 0.0 {
-        return Ok(bucket.upper_bound);
+        return Ok(PromClassicQuantile {
+            value: bucket.upper_bound,
+            repair,
+        });
     }
     let (lower_bound, lower_count) = if bucket_index == 0 {
         (0.0, 0.0)
@@ -4648,7 +5506,10 @@ fn prometheus_classic_bucket_quantile(
     };
     rank -= lower_count;
     let bucket_count = bucket.count - lower_count;
-    Ok(lower_bound + (bucket.upper_bound - lower_bound) * (rank / bucket_count))
+    Ok(PromClassicQuantile {
+        value: lower_bound + (bucket.upper_bound - lower_bound) * (rank / bucket_count),
+        repair,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4663,6 +5524,7 @@ fn execute_prometheus_label_replace(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -4682,6 +5544,7 @@ fn execute_prometheus_label_replace(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let intermediate_points = child.intermediate_points.saturating_add(child.points);
@@ -4751,6 +5614,7 @@ fn execute_prometheus_label_join(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -4768,6 +5632,7 @@ fn execute_prometheus_label_join(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let intermediate_points = child.intermediate_points.saturating_add(child.points);
@@ -4907,6 +5772,7 @@ fn execute_prometheus_absent(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -4921,6 +5787,7 @@ fn execute_prometheus_absent(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let frame_bytes = child.frame_bytes;
@@ -4988,9 +5855,16 @@ fn execute_prometheus_sort(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
+    if !instant {
+        annotations.warning(
+            "PromQL warning: sort is ineffective for range queries since results are always ordered by labels".into(),
+            sort.source.as_ref().map_or(0, |source| source.start),
+        );
+    }
     let child = execute_prometheus(
         conn,
         features,
@@ -5002,6 +5876,7 @@ fn execute_prometheus_sort(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let frame_bytes = child.frame_bytes;
@@ -5071,6 +5946,7 @@ fn execute_prometheus_conversion(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -5086,6 +5962,7 @@ fn execute_prometheus_conversion(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let frame_bytes = child.frame_bytes;
@@ -5187,6 +6064,7 @@ fn execute_prometheus_timestamp(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     if let PromPlan::Selector { selector, lookback } = timestamp.inner.as_ref() {
@@ -5222,6 +6100,7 @@ fn execute_prometheus_timestamp(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let frame_bytes = child.frame_bytes;
@@ -5267,6 +6146,7 @@ fn execute_prometheus_calendar(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -5281,6 +6161,7 @@ fn execute_prometheus_calendar(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let frame_bytes = child.frame_bytes;
@@ -5326,6 +6207,7 @@ fn execute_prometheus_binary(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
@@ -5342,6 +6224,7 @@ fn execute_prometheus_binary(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     check_cancelled(cancelled)?;
@@ -5356,6 +6239,7 @@ fn execute_prometheus_binary(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let intermediate_points = lhs
@@ -6010,6 +6894,7 @@ fn execute_prometheus_subquery(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     if !instant {
@@ -6044,6 +6929,7 @@ fn execute_prometheus_subquery(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )
 }
@@ -6062,6 +6948,8 @@ fn execute_prometheus_range_subquery(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    annotation_position: usize,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let effective_start = subquery
@@ -6092,6 +6980,7 @@ fn execute_prometheus_range_subquery(
         query_start,
         query_end,
         limits,
+        annotations,
         cancelled,
     )?;
     let frame_bytes = inner.frame_bytes;
@@ -6112,6 +7001,7 @@ fn execute_prometheus_range_subquery(
 
     for mut series in intermediate {
         check_cancelled(cancelled)?;
+        let metric = series.labels.get("__name__").cloned();
         if !op.retains_metric_name() {
             series.labels.remove("__name__");
         }
@@ -6169,6 +7059,14 @@ fn execute_prometheus_range_subquery(
         if item_points == 0 {
             body.truncate(item_start);
         } else {
+            if matches!(op, PromRangeOp::Rate | PromRangeOp::Increase) {
+                if let Some(metric) = metric
+                    .as_deref()
+                    .filter(|metric| !metric.is_empty() && !prometheus_counter_name(metric))
+                {
+                    annotations.possible_non_counter(metric, annotation_position);
+                }
+            }
             write_prometheus_item_suffix(&mut body, instant);
             emitted += 1;
             result_points = result_points.saturating_add(item_points);
@@ -7048,6 +7946,8 @@ fn execute_prometheus_range_raw(
     query_start: i64,
     query_end: i64,
     limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    annotation_position: usize,
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     let selection_start = selector
@@ -7267,6 +8167,11 @@ fn execute_prometheus_range_raw(
             if item_points == 0 {
                 body.truncate(item_start);
             } else {
+                if matches!(op, PromRangeOp::Rate | PromRangeOp::Increase)
+                    && !prometheus_counter_name(&metric)
+                {
+                    annotations.possible_non_counter(&metric, annotation_position);
+                }
                 write_prometheus_item_suffix(&mut body, instant);
                 emitted += 1;
                 points = points.saturating_add(item_points);
@@ -7986,6 +8891,129 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prometheus_atan2_matches_go_rounding_and_ieee_quadrants() {
+        for (y, x, expected) in [
+            (6.0, 2.0, 1.2490457723982544_f64),
+            (7.0, 2.0, 1.2924966677897851_f64),
+            (8.0, 2.0, 1.3258176636680323_f64),
+        ] {
+            assert_eq!(prometheus_atan2(y, x).to_bits(), expected.to_bits());
+        }
+
+        assert_eq!(prometheus_atan2(0.0, 1.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(prometheus_atan2(-0.0, 1.0).to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(
+            prometheus_atan2(0.0, -1.0).to_bits(),
+            std::f64::consts::PI.to_bits()
+        );
+        assert_eq!(
+            prometheus_atan2(-0.0, -1.0).to_bits(),
+            (-std::f64::consts::PI).to_bits()
+        );
+        assert_eq!(
+            prometheus_atan2(f64::INFINITY, f64::NEG_INFINITY).to_bits(),
+            (3.0 * std::f64::consts::FRAC_PI_4).to_bits()
+        );
+        assert!(prometheus_atan2(f64::NAN, 1.0).is_nan());
+    }
+
+    #[test]
+    fn promql_annotation_source_locations_follow_nested_calls_and_skip_literals() {
+        let query = "histogram_quantile(\n  -1,\n  rate(foo[5m:1m])\n)";
+        let calls = scan_promql_source_calls(query);
+        let histogram = calls["histogram_quantile"].front().unwrap();
+        assert_eq!(promql_source_position(query, histogram.start), "1:1");
+        assert_eq!(promql_source_position(query, histogram.argument(0)), "2:3");
+        assert_eq!(promql_source_position(query, histogram.argument(1)), "3:3");
+        let rate = calls["rate"].front().unwrap();
+        assert_eq!(promql_source_position(query, rate.start), "3:3");
+        assert_eq!(promql_source_position(query, rate.argument(0)), "3:8");
+
+        let grouped = "quantile without (pod) (\n  NaN,\n  foo\n)";
+        let quantile = scan_promql_source_calls(grouped)["quantile"]
+            .front()
+            .unwrap()
+            .clone();
+        assert_eq!(promql_source_position(grouped, quantile.start), "1:1");
+        assert_eq!(promql_source_position(grouped, quantile.argument(0)), "2:3");
+        assert_eq!(promql_source_position(grouped, quantile.argument(1)), "3:3");
+
+        let quoted = r#"foo{label="sort(fake)",raw=`rate(fake[5m])`} + sort(real)"#;
+        let calls = scan_promql_source_calls(quoted);
+        assert_eq!(calls["sort"].len(), 1);
+        assert!(!calls.contains_key("rate"));
+        assert_eq!(
+            &quoted[calls["sort"].front().unwrap().argument(0)..],
+            "real)"
+        );
+    }
+
+    #[test]
+    fn prometheus_annotations_deduplicate_merge_cap_and_render_exactly() {
+        let query = "histogram_quantile(\n  0.5,\n  buckets\n)";
+        let bucket_position = scan_promql_source_calls(query)["histogram_quantile"]
+            .front()
+            .unwrap()
+            .argument(1);
+        let mut annotations = PromAnnotations::default();
+        annotations.warning("duplicate".into(), 0);
+        annotations.warning("duplicate".into(), bucket_position);
+        annotations.histogram_monotonicity(bucket_position, 1_700_000_000_000, 2.0, 2.0, 1.0);
+        annotations.histogram_monotonicity(bucket_position, 1_700_000_010_000, 1.0, 4.0, 10.0);
+        assert_eq!(annotations.warnings.len(), 1);
+        assert_eq!(
+            render_prometheus_annotations(&annotations.warnings, query, "warning"),
+            vec!["duplicate (3:3)"]
+        );
+        assert_eq!(
+            render_prometheus_annotations(&annotations.infos, query, "info"),
+            vec!["PromQL info: input to histogram_quantile needed to be fixed for monotonicity (see https://prometheus.io/docs/prometheus/latest/querying/functions/#histogram_quantile), from buckets 1 to 4, with a max diff of 10, over 2 samples from 2023-11-14T22:13:20Z to 2023-11-14T22:13:30Z (3:3)"]
+        );
+        assert_eq!(format_prometheus_annotation_float_precision_2(10.0), "10");
+        assert_eq!(
+            format_prometheus_annotation_float_precision_2(100.0),
+            "1e+02"
+        );
+
+        let mut capped = BTreeMap::new();
+        for index in 0..12 {
+            let raw = format!("warning {index:02}");
+            capped.insert(raw.clone(), PromAnnotation::Generic { raw, position: 0 });
+        }
+        let rendered = render_prometheus_annotations(&capped, "x", "warning");
+        assert_eq!(rendered.len(), 11);
+        assert_eq!(
+            rendered.last().unwrap(),
+            "2 more warning annotations omitted"
+        );
+
+        let body = br#"{"status":"success","data":{"resultType":"vector","result":[]}}"#.to_vec();
+        let original_len = body.len();
+        let mut output = ReadOutput {
+            body,
+            frame_bytes: 0,
+            series: 0,
+            points: 0,
+            intermediate_points: 0,
+            rows: 0,
+        };
+        let error = annotations
+            .append_to_success(
+                query,
+                &mut output,
+                PromQueryLimits {
+                    max_response_bytes: original_len,
+                    ..PromQueryLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!("query exceeded the maximum response-size limit of {original_len} bytes")
+        );
+    }
+
+    #[test]
     fn merged_params_keep_repeated_selectors_and_body_wins() {
         let params = Params::parse(
             Some("metric=a&match%5B%5D=a%7Bx%3D%221%22%7D&metric=b"),
@@ -8122,6 +9150,7 @@ mod tests {
             op: PromRangeOp::Avg,
             input: PromRangeInput::Subquery(average),
             parameter: None,
+            ..
         }) = lower_promql("avg_over_time(cpu[30s:])", 300_000).unwrap()
         else {
             panic!("subquery range function lowered to the wrong plan")
@@ -8133,6 +9162,7 @@ mod tests {
             op: PromRangeOp::Avg,
             input: PromRangeInput::Subquery(nested),
             parameter: None,
+            ..
         }) = lower_promql(
             "avg_over_time(avg_over_time(cpu[20s:10s])[20s:10s])",
             300_000,
@@ -8146,7 +9176,8 @@ mod tests {
             PromPlan::RangeReduction(PromRangePlan {
                 op: PromRangeOp::Avg,
                 input: PromRangeInput::Subquery(_),
-                parameter: None
+                parameter: None,
+                ..
             })
         ));
         assert!(aligned_subquery_grid(0, 0, 10, 0).is_err());
@@ -8568,7 +9599,8 @@ mod tests {
             &cancelled,
         )
         .unwrap();
-        assert_eq!(value, 2.5);
+        assert_eq!(value.value, 2.5);
+        assert!(value.repair.is_none());
 
         assert_eq!(parse_prometheus_bucket_bound("+Inf"), Ok(f64::INFINITY));
         assert_eq!(

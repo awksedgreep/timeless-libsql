@@ -510,5 +510,24 @@ pub(super) fn prometheus_remote_write(timestamp_ms: i64) -> Vec<u8> {
         &[(123.0, 30_000)],
         &[("case", "absent_bound")],
     );
+    for index in 0..12 {
+        let bound = format!("bad{index:02}");
+        request.series(
+            "oracle_histogram_special_bucket",
+            &[(index as f64, 30_000)],
+            &[("case", "many_malformed"), ("le", bound.as_str())],
+        );
+    }
+    for source in ["a", "b"] {
+        request.series(
+            "oracle_histogram_special_bucket",
+            &[(1.0, 30_000)],
+            &[
+                ("case", "duplicate_malformed"),
+                ("le", "duplicate"),
+                ("source", source),
+            ],
+        );
+    }
     snappy_literal(&request.encoded)
 }

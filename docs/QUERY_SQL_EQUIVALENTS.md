@@ -96,6 +96,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-052`](#sql-prom-052-minute-hour-day_of_week-and-day_of_month) | `PQL-F17` | current foundation | UTC extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
 | [`SQL-PROM-053`](#sql-prom-053-day_of_year-days_in_month-month-and-year) | `PQL-F18` | current foundation | UTC calendar extraction for SQLite-representable Unix seconds; API owns packed IEEE and full-domain behavior |
 | [`SQL-PROM-054`](#sql-prom-054-histogram_quantile-over-classic-buckets) | `PQL-H01` | current foundation | bounded classic-bucket grouping, monotonic correction, and linear interpolation; API owns strict bound parsing, tolerance, annotations, IEEE, names, limits, and envelopes |
+| [`SQL-PROM-055`](#sql-prom-055-atan2) | `PQL-O08` | current foundation | bounded SQLite `atan2(Y,X)` over scalar/vector or label-matched vectors; API owns Go-compatible last-bit rounding, types, names, matching errors, limits, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -2217,6 +2218,64 @@ primitive is justified.
 
 Direct regression: `tests/cli.sh` section 45; HTTP/oracle/reopen regression:
 `session_nine_promql_classic_histogram_quantile_matches_oracle_and_reopens`.
+
+### SQL-PROM-055: `atan2`
+
+SQLite's ordinary two-argument math function uses the same operand orientation
+as PromQL: `atan2(Y, X)`. Apply a scalar right operand to every selected
+sample with:
+
+```sql
+SELECT labels, ts, atan2(value, CAST(:scalar AS REAL)) AS value
+FROM timeless_grid(
+  'metrics', :metric, :filter_json,
+  :start, :end, :step, :lookback
+)
+ORDER BY labels, ts;
+```
+
+Two stored vectors can be matched by canonical labels and evaluation time:
+
+```sql
+WITH lhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+), rhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+)
+SELECT lhs.labels, lhs.ts, atan2(lhs.value, rhs.value) AS value
+FROM lhs
+JOIN rhs ON rhs.labels = lhs.labels AND rhs.ts = lhs.ts
+ORDER BY lhs.labels, lhs.ts;
+```
+
+`:metric`, `:lhs_metric`, and `:rhs_metric` are exact stored metric names;
+the filter parameters are public Timeless matcher objects or NULL. Metric
+timestamps and `:start`, `:end`, `:step`, and `:lookback` are integer seconds.
+Grid bounds are inclusive, sample lookback is `(T-lookback,T]`, unmatched and
+empty inputs emit no row, and rows are ordered by canonical labels then time.
+Values are SQLite REALs. The first statement demonstrates vector/scalar
+direction; exchange the arguments for scalar/vector direction.
+
+This is the bounded SQL execution foundation, not a byte-exact PromQL
+implementation. SQLite delegates `atan2` to its platform math implementation,
+which can differ from Go's Cephes-derived `math.Atan2` by one last-place bit
+(for example, `atan2(8,2)`). The Rust API uses a deterministic Go-compatible
+kernel and additionally owns scalar/scalar result types, `on`/`ignoring` and
+group matching, cardinality failures, metric-name removal, packed NaN and
+signed-zero strings, cumulative limits, cancellation, and HTTP envelopes. A
+special extension primitive would not reduce storage reads or decoded points.
+
+Executable regression: Rust SQL-equivalent harness `SQL-PROM-055` semantic
+check; HTTP/oracle/reopen regression:
+`session_eleven_promql_atan2_matches_scalar_vector_ieee_and_reopens`.
 
 ### SQL-PROM-006: range selector
 

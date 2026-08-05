@@ -813,6 +813,10 @@ fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec
         instant("calendar_part_two_wide", "metrics-calendar-day-of-year-wide", "day_of_year(query_contract_cpu)", series),
         instant("histogram_quantile_narrow", "metrics-histogram-quantile-narrow", r#"histogram_quantile(0.95, query_contract_histogram_bucket{host="h0000"})"#, 1),
         instant("histogram_quantile_wide", "metrics-histogram-quantile-wide", "histogram_quantile(0.95, query_contract_histogram_bucket)", series),
+        instant("atan2_narrow", "metrics-atan2-narrow", r#"query_contract_cpu{host="h0000"} atan2 2"#, 1),
+        range("atan2_wide", "metrics-atan2-wide", "query_contract_cpu atan2 2", at, series * 4),
+        instant("annotations_narrow", "metrics-annotations-warning-narrow", r#"quantile(-1, query_contract_cpu{host="h0000"})"#, 1),
+        range("annotations_wide", "metrics-annotations-info-wide", "rate(query_contract_cpu[5m])", at, series * 4),
         instant("arithmetic_vector_scalar_narrow", "metrics-arithmetic-vector-scalar-narrow", r#"query_contract_cpu{host="h0000"} * 2"#, 1),
         range("arithmetic_one_to_one_wide", "metrics-arithmetic-one-to-one-wide", "query_contract_cpu + query_contract_cpu", at, series * 4),
         instant("comparison_filter_narrow", "metrics-comparison-filter-narrow", r#"query_contract_cpu{host="h0000"} > 30"#, 1),
@@ -1414,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn metric_spec_keys_are_unique_and_include_histograms() {
+    fn metric_spec_keys_are_unique_and_include_session_eleven_rows() {
         let specs = metric_specs(512, 64, 1_800_000_310);
         let mut keys = std::collections::BTreeSet::new();
         for spec in &specs {
@@ -1423,9 +1427,13 @@ mod tests {
         // The work-limit query is appended only after its 100,025-point
         // fixture crosses the second durability barrier.
         assert!(keys.insert("work_limit_rejected"));
-        assert_eq!(keys.len(), 131);
+        assert_eq!(keys.len(), 135);
         assert!(keys.contains("histogram_quantile_narrow"));
         assert!(keys.contains("histogram_quantile_wide"));
+        assert!(keys.contains("atan2_narrow"));
+        assert!(keys.contains("atan2_wide"));
+        assert!(keys.contains("annotations_narrow"));
+        assert!(keys.contains("annotations_wide"));
         assert!(keys.contains("result_limit_rejected"));
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1435,7 +1443,7 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let prior: Value = serde_json::from_slice(
-            &fs::read(root.join("docs/evidence/2026-08-04_session8_pql_f18.json")).unwrap(),
+            &fs::read(root.join("docs/evidence/2026-08-04_session9_pql_h01.json")).unwrap(),
         )
         .unwrap();
         let mut expected: std::collections::BTreeSet<&str> = prior
@@ -1446,8 +1454,12 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        expected.insert("histogram_quantile_narrow");
-        expected.insert("histogram_quantile_wide");
+        expected.extend([
+            "atan2_narrow",
+            "atan2_wide",
+            "annotations_narrow",
+            "annotations_wide",
+        ]);
         assert_eq!(keys, expected);
     }
 }

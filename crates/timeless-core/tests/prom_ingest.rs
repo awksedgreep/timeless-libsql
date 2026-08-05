@@ -84,6 +84,11 @@ fn prometheus_ingest_semantics() {
     let nan_rows = engine.query_range_by_id(nan, 0, i64::MAX - 1).unwrap();
     assert_eq!(nan_rows.len(), 1);
     assert!(nan_rows[0].1.is_nan());
+    assert_ne!(
+        nan_rows[0].1.to_bits(),
+        0x7ff0_0000_0000_0002,
+        "text exposition NaN is an ordinary float NaN, not an implicit Prometheus stale marker"
+    );
     for (name, expected) in [
         ("positive_inf", f64::INFINITY),
         ("negative_inf", f64::NEG_INFINITY),
