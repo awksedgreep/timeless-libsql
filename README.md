@@ -623,8 +623,9 @@ bounded `label_set`/`label_del` transformations, plus implicit
 `default_rollup` and the established one-argument window-less rollups with
 VictoriaMetrics scrape/carry-in semantics, plus complete-grid
 `range_avg/min/max/sum` with pinned slot-index, missing-value, name, collision,
-and IEEE behavior; direct SQL users retain the same public mechanics with
-executable `SQL-MQL-001` through `SQL-MQL-006` recipes. The
+and IEEE behavior, plus cumulative `running_avg/min/max/sum` with pinned carry
+and computed-NaN behavior; direct SQL users retain the same public mechanics
+with executable `SQL-MQL-001` through `SQL-MQL-007` recipes. The
 extension exposes general SQLite/libSQL primitives and receives a new query
 vector only when measurements prove that storage-aware pushdown materially
 avoids reads, decode, copies, or row crossings. Saved queries, subscriptions,

@@ -104,6 +104,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-MQL-004`](#sql-mql-004-label_set-and-label_del) | `MQL-04` | current foundation | ordinary JSON label projection and separate metric-name projection; API owns transform grammar, scalar vectorization, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-005`](#sql-mql-005-default_rollup-and-window-less-rollups) | `MQL-05` | current foundation | automatic finite-series last-sample window and step-sized public window reductions; API owns packed stale/NaN fidelity, carry-in/reset semantics, language, limits, cancellation, and envelopes |
 | [`SQL-MQL-006`](#sql-mql-006-range-aggregates) | `MQL-06` | current foundation | slot-indexed full-grid average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, implicit windows, duplicate outputs, limits, cancellation, and envelopes |
+| [`SQL-MQL-007`](#sql-mql-007-running-aggregates) | `MQL-07` | current foundation | slot-indexed cumulative average, minimum, maximum, or sum over a bounded public input grid; API owns arbitrary expression composition, packed missing/NaN semantics, collisions, limits, cancellation, and envelopes |
 | [`SQL-LOG-001`](#sql-log-001-bounded-filter-sort-and-pagination) | `LQL-F01`, `LQL-F02`, `LQL-F06`, `LQL-F07`, `LQL-P01`, `LQL-P02`, `LQL-P03` | current foundation | exact row query for declared index keys |
 | [`SQL-LOG-002`](#sql-log-002-message-substring) | `LQL-F12` | current foundation | exact Timeless case-insensitive substring, not LogsQL word or phrase semantics |
 | [`SQL-LOG-003`](#sql-log-003-exact-count) | `LQL-P09`, `LQL-S01` | current | exact scalar count without row materialization |
@@ -3942,6 +3943,108 @@ additional storage selection or decode beyond its child expression.
 Executable regression: Rust SQL-equivalent harness `SQL-MQL-006`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_range_aggregates_match_victoriametrics_and_reopen`.
+
+### SQL-MQL-007: running aggregates
+
+`running_avg`, `running_min`, `running_max`, and `running_sum` emit the
+cumulative reduction at each timestamp instead of repeating only the final
+value. The following recursive statement applies the row-visible mechanics to
+one exact metric through the public `timeless_grid` TVF:
+
+```sql
+WITH RECURSIVE
+evaluation(slot, ts) AS (
+  SELECT 0, :start
+  UNION ALL
+  SELECT slot + 1, ts + :step
+  FROM evaluation
+  WHERE ts + :step <= :end
+), selected AS MATERIALIZED (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :metric, :filter_json,
+    :start, :end, :step, :lookback
+  )
+), identities AS (
+  SELECT DISTINCT labels FROM selected
+), input_grid AS (
+  SELECT identities.labels, evaluation.slot, evaluation.ts, selected.value
+  FROM identities
+  CROSS JOIN evaluation
+  LEFT JOIN selected
+    ON selected.labels = identities.labels
+   AND selected.ts = evaluation.ts
+), first_slots AS (
+  SELECT labels, min(slot) AS first_slot
+  FROM input_grid
+  WHERE value IS NOT NULL
+  GROUP BY labels
+), running(labels, slot, value) AS (
+  SELECT input_grid.labels, input_grid.slot, input_grid.value
+  FROM input_grid
+  JOIN first_slots
+    ON first_slots.labels = input_grid.labels
+   AND first_slots.first_slot = input_grid.slot
+  UNION ALL
+  SELECT
+    input_grid.labels,
+    input_grid.slot,
+    CASE
+      WHEN input_grid.value IS NULL THEN running.value
+      WHEN :aggregate = 'avg' THEN
+        running.value + (input_grid.value - running.value)
+          / (input_grid.slot - first_slots.first_slot + 1.0)
+      WHEN :aggregate = 'min' THEN
+        CASE WHEN running.value < input_grid.value
+          THEN running.value ELSE input_grid.value END
+      WHEN :aggregate = 'max' THEN
+        CASE WHEN running.value > input_grid.value
+          THEN running.value ELSE input_grid.value END
+      WHEN :aggregate = 'sum' THEN running.value + input_grid.value
+    END
+  FROM running
+  JOIN input_grid
+    ON input_grid.labels = running.labels
+   AND input_grid.slot = running.slot + 1
+  JOIN first_slots USING (labels)
+)
+SELECT NULL AS name, running.labels, input_grid.ts, running.value
+FROM running
+JOIN input_grid
+  ON input_grid.labels = running.labels
+ AND input_grid.slot = running.slot
+WHERE :aggregate IN ('avg', 'min', 'max', 'sum')
+  AND running.value IS NOT NULL
+ORDER BY running.labels, input_grid.ts;
+```
+
+Bind the same parameters and units as `SQL-MQL-006`: inclusive `:start` and
+`:end`, positive `:step`, selector `:lookback`, exact `:metric`, canonical
+label-equality `:filter_json` or NULL, and one of `avg`, `min`, `max`, or `sum`
+for `:aggregate`. Output names are SQL NULL because every running function
+removes the metric name even under `keep_metric_names`; labels are canonical
+JSON TEXT, timestamps INTEGER, and values REAL ordered by label identity and
+timestamp.
+
+Leading SQL NULL slots emit no row. After the first value, a missing slot
+carries the prior running value and still advances the average's slot-index
+denominator. Average uses VictoriaMetrics's incremental update, sum uses
+ordinary binary64 addition, and equal extrema choose the later operand. A
+computed SQL NULL/NaN row is omitted. SQLite row projection cannot retain an
+original packed NaN payload, while the Rust API treats stored ordinary/stale
+NaNs through the documented packed contract before applying these same
+running rules. The API also owns arbitrary scalar/vector expressions,
+implicit per-series windows, post-name-drop duplicate detection, limits,
+cancellation, float rendering, and HTTP envelopes.
+
+The statement materializes one bounded public input grid and performs no
+second storage query or private-table access. Its mechanics differ from
+`SQL-MQL-006` only at output: each non-NULL recursive state is emitted instead
+of selecting the final state and filling the complete grid.
+
+Executable regression: Rust SQL-equivalent harness `SQL-MQL-007`; pinned
+VictoriaMetrics and real-extension HTTP/reopen regression:
+`session_fifteen_metricsql_running_aggregates_match_victoriametrics_and_reopen`.
 
 ## LogsQL foundations and equivalents
 

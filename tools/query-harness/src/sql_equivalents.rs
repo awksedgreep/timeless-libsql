@@ -1174,6 +1174,103 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         bail!("SQL-MQL-006 slot-indexed average changed: {precision:?}");
     }
 
+    let running_recipe = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-MQL-007")
+        .context("SQL-MQL-007 recipe")?;
+    if running_recipe.statements.len() != 1 {
+        bail!("SQL-MQL-007 must retain one parameterized running statement");
+    }
+    for (aggregate, expected_values) in [
+        ("avg", [10.0_f64, 20.0_f64, 20.0_f64, 20.0_f64]),
+        ("min", [10.0_f64, 10.0_f64, 20.0_f64, 20.0_f64]),
+        ("max", [10.0_f64, 30.0_f64, 20.0_f64, 20.0_f64]),
+        ("sum", [10.0_f64, 40.0_f64, 20.0_f64, 40.0_f64]),
+    ] {
+        let mut statement = connection.prepare(&running_recipe.statements[0])?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-MQL-007 parameter must be named")?
+                .trim_start_matches(':');
+            let value = if name == "aggregate" {
+                Value::Text(aggregate.to_owned())
+            } else {
+                parameter("SQL-MQL-007", name)
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let rows = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected = [
+            (
+                None,
+                r#"{"host":"web-1","service":"api"}"#.to_owned(),
+                100_i64,
+                expected_values[0],
+            ),
+            (
+                None,
+                r#"{"host":"web-1","service":"api"}"#.to_owned(),
+                110_i64,
+                expected_values[1],
+            ),
+            (
+                None,
+                r#"{"host":"web-2","service":"api"}"#.to_owned(),
+                100_i64,
+                expected_values[2],
+            ),
+            (
+                None,
+                r#"{"host":"web-2","service":"api"}"#.to_owned(),
+                110_i64,
+                expected_values[3],
+            ),
+        ];
+        if rows != expected {
+            bail!("SQL-MQL-007 {aggregate} changed: {rows:?}");
+        }
+    }
+
+    let mut running_precision = connection.prepare(&running_recipe.statements[0])?;
+    for index in 1..=running_precision.parameter_count() {
+        let name = running_precision
+            .parameter_name(index)
+            .context("SQL-MQL-007 precision parameter must be named")?
+            .trim_start_matches(':');
+        let value = match name {
+            "aggregate" => Value::Text("avg".to_owned()),
+            "metric" => Value::Text("avg_precision".to_owned()),
+            "start" => Value::Integer(10),
+            "end" => Value::Integer(30),
+            "step" => Value::Integer(10),
+            "lookback" => Value::Integer(30),
+            _ => parameter("SQL-MQL-007", name),
+        };
+        running_precision.raw_bind_parameter(index, value)?;
+    }
+    let running_precision = running_precision
+        .raw_query()
+        .mapped(|row| row.get::<_, f64>(3))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if running_precision.len() != 3
+        || running_precision[0].to_bits() != 1e16_f64.to_bits()
+        || running_precision[1].to_bits() != 5e15_f64.to_bits()
+        || running_precision[2].to_bits() != 0.0_f64.to_bits()
+    {
+        bail!("SQL-MQL-007 slot-indexed average changed: {running_precision:?}");
+    }
+
     let bounded: i64 = connection.query_row(
         "SELECT COUNT(*) FROM logs
          WHERE ts>=1000 AND ts<=2000 AND level='error' AND service='api'
@@ -1597,13 +1694,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 75);
+        assert_eq!(recipes.len(), 76);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            99
+            100
         );
         assert_eq!(
             recipes
@@ -1611,7 +1708,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            105
+            106
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

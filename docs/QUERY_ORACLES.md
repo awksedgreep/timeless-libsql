@@ -148,8 +148,12 @@ and three errors. It pins whole-grid reduction and repeated output,
 slot-indexed incremental average, ordinary sum, later-operand extrema ties,
 leading/interior missing grids, NaN/infinity/overflow behavior, scalar and
 expression composition, case/trailing-comma grammar, unconditional name
-removal, arity, and duplicate outputs. The fixture now contains 116 MetricsQL
-cases in total.
+removal, arity, and duplicate outputs. The `MQL-07` corpus adds 21 successful
+running-aggregate cases and three errors. It pins cumulative average/minimum/
+maximum/sum, slot-indexed arithmetic, missing and stale carry, computed-NaN
+omission, overflow, infinity, signed zero, scalar/expression composition,
+case/trailing-comma grammar, unconditional name removal, arity, and duplicate
+outputs. The fixture now contains 140 MetricsQL cases in total.
 Timeless compares exact result labels, timestamp grids, and float values while
 retaining its documented HTTP 400 `bad_data` envelope in place of
 VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
@@ -172,6 +176,16 @@ later operand for equal minima and maxima. Timeless retains exact stored
 binary64 bits and therefore returns negative zero when the later operand is
 negative zero. The API regression pins that stronger fidelity explicitly;
 all non-representation semantics remain oracle-equal.
+
+The `MQL-07` fixture proves that a stale/missing slot after the first value
+emits the prior running state while still advancing `running_avg`'s slot
+position. If a real arithmetic step computes NaN—for example positive
+infinity followed by a finite value—the timestamp is omitted and the NaN
+state is not replaced by the prior infinity. Timeless treats an ordinary
+stored NaN as the same missing input for this transform while retaining its
+stronger bit-exact storage contract outside the language operation. Running
+extrema preserve the same Timeless signed-zero representation divergence as
+the complete-grid functions.
 
 Session 14 also pins Prometheus 3 quoted UTF-8 metric and label names, comments
 and source positions, and classic-bucket `histogram_fraction` grouping and

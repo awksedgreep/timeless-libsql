@@ -56,9 +56,16 @@ pub(super) enum RangeAggregateOp {
     Sum,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RangeAggregateOutput {
+    Complete,
+    Running,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RangeAggregatePlan {
     pub(super) op: RangeAggregateOp,
+    pub(super) output: RangeAggregateOutput,
     pub(super) inner: Box<PromPlan>,
 }
 
@@ -304,7 +311,27 @@ fn lower_union_or_alias(
     }
     if let Some(op) = range_aggregate_op(&normalized) {
         let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
-        return lower_range_aggregate(&normalized, op, arguments, context, depth).map(Some);
+        return lower_range_aggregate(
+            &normalized,
+            op,
+            RangeAggregateOutput::Complete,
+            arguments,
+            context,
+            depth,
+        )
+        .map(Some);
+    }
+    if let Some(op) = running_aggregate_op(&normalized) {
+        let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
+        return lower_range_aggregate(
+            &normalized,
+            op,
+            RangeAggregateOutput::Running,
+            arguments,
+            context,
+            depth,
+        )
+        .map(Some);
     }
     if let Some((dynamic, op)) = windowless_rollup_op(&normalized) {
         let arguments = metric_sql_arguments(&input[open + 1..close], &normalized)?;
@@ -385,9 +412,20 @@ fn range_aggregate_op(name: &str) -> Option<RangeAggregateOp> {
     })
 }
 
+fn running_aggregate_op(name: &str) -> Option<RangeAggregateOp> {
+    Some(match name {
+        "running_avg" => RangeAggregateOp::Avg,
+        "running_min" => RangeAggregateOp::Min,
+        "running_max" => RangeAggregateOp::Max,
+        "running_sum" => RangeAggregateOp::Sum,
+        _ => return None,
+    })
+}
+
 fn lower_range_aggregate(
     function: &str,
     op: RangeAggregateOp,
+    output: RangeAggregateOutput,
     arguments: Vec<&str>,
     context: &mut LowerContext<'_>,
     depth: usize,
@@ -409,6 +447,7 @@ fn lower_range_aggregate(
     }
     Ok(PromPlan::MetricsRangeAggregate(RangeAggregatePlan {
         op,
+        output,
         inner: Box::new(inner),
     }))
 }
@@ -1164,6 +1203,7 @@ fn contains_custom_word(input: &str) -> bool {
                     || word.eq_ignore_ascii_case("label_del")
                     || word.eq_ignore_ascii_case("default_rollup")
                     || range_aggregate_op(&word.to_ascii_lowercase()).is_some()
+                    || running_aggregate_op(&word.to_ascii_lowercase()).is_some()
                     || windowless_rollup_op(&word.to_ascii_lowercase()).is_some()
                 {
                     return true;
@@ -2108,9 +2148,10 @@ pub(super) fn execute_range_aggregate(
         check_cancelled(cancelled)?;
         item.points.sort_unstable_by_key(|sample| sample.0);
         let mut input = item.points.into_iter().peekable();
-        let mut previous = None;
-        let mut last_non_nan = None;
+        let mut previous: Option<f64> = None;
+        let mut last_non_nan: Option<f64> = None;
         let mut slots_since_first = 0_u64;
+        let mut running_points = Vec::with_capacity(timestamps.len());
         for timestamp in &timestamps {
             check_cancelled(cancelled)?;
             intermediate_points = intermediate_points.saturating_add(1);
@@ -2129,8 +2170,15 @@ pub(super) fn execute_range_aggregate(
                 input.next();
             }
             let Some(value) = value.filter(|value| !value.is_nan()) else {
-                if previous.is_some() {
+                if let Some(previous) = previous {
                     slots_since_first = slots_since_first.saturating_add(1);
+                    if plan.output == RangeAggregateOutput::Running && !previous.is_nan() {
+                        admit_prometheus_point(result_points, limits)?;
+                        result_points = result_points.saturating_add(1);
+                        intermediate_points = intermediate_points.saturating_add(1);
+                        enforce_intermediate_work(intermediate_points, limits)?;
+                        running_points.push((*timestamp, previous));
+                    }
                 }
                 continue;
             };
@@ -2144,25 +2192,47 @@ pub(super) fn execute_range_aggregate(
             previous = Some(next);
             if !next.is_nan() {
                 last_non_nan = Some(next);
+                if plan.output == RangeAggregateOutput::Running {
+                    admit_prometheus_point(result_points, limits)?;
+                    result_points = result_points.saturating_add(1);
+                    intermediate_points = intermediate_points.saturating_add(1);
+                    enforce_intermediate_work(intermediate_points, limits)?;
+                    running_points.push((*timestamp, next));
+                }
             }
         }
-        let Some(value) = last_non_nan else {
-            continue;
+        let points = match plan.output {
+            RangeAggregateOutput::Complete => {
+                let Some(value) = last_non_nan else {
+                    continue;
+                };
+                let mut points = Vec::with_capacity(timestamps.len());
+                for timestamp in &timestamps {
+                    check_cancelled(cancelled)?;
+                    admit_prometheus_point(result_points, limits)?;
+                    result_points = result_points.saturating_add(1);
+                    intermediate_points = intermediate_points.saturating_add(1);
+                    enforce_intermediate_work(intermediate_points, limits)?;
+                    points.push((*timestamp, value));
+                }
+                points
+            }
+            RangeAggregateOutput::Running => {
+                if running_points.is_empty() {
+                    continue;
+                }
+                running_points
+            }
         };
         item.labels.remove("__name__");
         if !labels_seen.insert(item.labels.clone()) {
-            return Err("duplicate output timeseries: range aggregate".into());
+            let kind = match plan.output {
+                RangeAggregateOutput::Complete => "range",
+                RangeAggregateOutput::Running => "running",
+            };
+            return Err(format!("duplicate output timeseries: {kind} aggregate"));
         }
         charge_metricsql_labels(&mut retained_label_bytes, &item.labels, limits)?;
-        let mut points = Vec::with_capacity(timestamps.len());
-        for timestamp in &timestamps {
-            check_cancelled(cancelled)?;
-            admit_prometheus_point(result_points, limits)?;
-            result_points = result_points.saturating_add(1);
-            intermediate_points = intermediate_points.saturating_add(1);
-            enforce_intermediate_work(intermediate_points, limits)?;
-            points.push((*timestamp, value));
-        }
         output.push(IntermediateSeries {
             labels: item.labels,
             points,
@@ -3103,6 +3173,31 @@ mod tests {
             "range_avg(cpu, 1)",
             "range_sum()",
             "range_sum(cpu, 1)",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
+        }
+    }
+
+    #[test]
+    fn running_aggregates_match_metricsql_grammar() {
+        for query in [
+            "running_avg(cpu)",
+            "running_min(cpu)",
+            "running_max(cpu)",
+            "running_sum(cpu)",
+            "running_avg(1)",
+            "running_sum(cpu * 2)",
+            "RUNNING_MAX(cpu,)",
+            "running_avg(cpu) keep_metric_names",
+            "sum(running_sum(cpu))",
+        ] {
+            assert!(lower(query, 300_000, 10_000).is_ok(), "{query}");
+        }
+        for query in [
+            "running_avg()",
+            "running_avg(cpu, 1)",
+            "running_sum()",
+            "running_sum(cpu, 1)",
         ] {
             assert!(lower(query, 300_000, 10_000).is_err(), "{query}");
         }

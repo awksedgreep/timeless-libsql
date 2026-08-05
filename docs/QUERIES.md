@@ -1543,6 +1543,48 @@ MetricsQL parsing, arbitrary expression composition, implicit lookback,
 collision policy, limits, cancellation, and HTTP result shaping remain Rust
 API responsibilities; no extension syntax or storage format changed.
 
+### Cumulative MetricsQL running aggregates
+
+The explicit MetricsQL routes also support cumulative transforms over the
+current request grid:
+
+```text
+running_avg(cpu_usage)
+running_min(cpu_usage)
+running_max(cpu_usage)
+running_sum(cpu_usage)
+running_sum(cpu_usage * 2)
+```
+
+Unlike `range_*`, these functions emit the running state at each evaluation
+timestamp. For input `11, 13, 15`, `running_avg` returns `11, 12, 13` and
+`running_sum` returns `11, 24, 39`. An instant request is a one-slot grid.
+Scalars become nameless vectors, shipped scalar/vector expressions compose as
+the argument, names are case-insensitive, and one trailing comma is accepted.
+
+Leading missing/NaN slots emit nothing. After the first value, a missing or
+stale slot emits the previous state; it still advances `running_avg`'s slot
+index, so `1, missing, 2` becomes `1, 1, 1.3333333333333333`. If actual
+arithmetic computes NaN, that timestamp is omitted instead of carrying the
+prior value. Average uses VictoriaMetrics's incremental update, sum uses
+ordinary binary64 addition, and minimum/maximum choose the later equal
+operand.
+
+Every running function removes `__name__`, including when followed by
+`keep_metric_names`. Post-removal duplicate identities fail with HTTP 422
+`execution`; invalid arity fails with HTTP 400 `bad_data`. Stable PromQL routes
+reject all four function names. Timeless retains stored signed-zero bits, so
+equal extrema expose the later operand's zero sign even though the
+VictoriaMetrics Remote Write fixture normalizes both zero orders.
+
+One bounded child evaluation supplies the complete grid; cumulative folding
+adds no storage read. Direct SQLite/libSQL users can execute the recursive
+public-grid equivalent in
+[`SQL-MQL-007`](QUERY_SQL_EQUIVALENTS.md#sql-mql-007-running-aggregates).
+MetricsQL parsing, arbitrary expression composition, packed missing/NaN
+behavior, collisions, limits, cancellation, and HTTP envelopes remain Rust
+API responsibilities; no extension syntax or storage format changed.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

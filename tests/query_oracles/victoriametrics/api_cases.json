@@ -953,6 +953,207 @@
         {"metric": {"case": "zero", "job": "oracle"}, "values": [0, 0]},
         {"metric": {"case": "zero_reverse", "job": "oracle"}, "values": [0, 0]}
       ]
+    },
+    {
+      "id": "MQL-07-running-avg-emits-the-cumulative-average",
+      "query": "running_avg(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [11, 12, 13]
+    },
+    {
+      "id": "MQL-07-running-min-emits-the-cumulative-minimum",
+      "query": "running_min(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [11, 11, 11]
+    },
+    {
+      "id": "MQL-07-running-max-emits-the-cumulative-maximum",
+      "query": "running_max(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [11, 13, 15]
+    },
+    {
+      "id": "MQL-07-running-sum-emits-the-cumulative-sum",
+      "query": "running_sum(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [11, 24, 39]
+    },
+    {
+      "id": "MQL-07-running-aggregate-is-identity-on-an-instant-grid",
+      "query": "running_sum(oracle_step)",
+      "evaluation_offset_ms": 4000,
+      "step": "2s",
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [15]
+    },
+    {
+      "id": "MQL-07-keep-metric-names-does-not-restore-the-source-name",
+      "query": "running_avg(oracle_step) keep_metric_names",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [11, 12, 13]
+    },
+    {
+      "id": "MQL-07-running-aggregate-vectorizes-a-scalar",
+      "query": "running_avg(1)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {},
+      "expected_values": [1, 1, 1]
+    },
+    {
+      "id": "MQL-07-running-aggregate-composes-over-an-expression",
+      "query": "running_sum(oracle_step * 2)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [22, 48, 78]
+    },
+    {
+      "id": "MQL-07-running-aggregate-is-case-insensitive-and-allows-a-trailing-comma",
+      "query": "RUNNING_MAX(oracle_step,)",
+      "evaluation_offset_ms": 4000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 4000, "step": "2s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [11, 13, 15]
+    },
+    {
+      "id": "MQL-07-running-avg-uses-slot-indexed-incremental-arithmetic",
+      "query": "running_avg(oracle_range_avg_precision)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [10000000000000000, 5000000000000000, 0]
+    },
+    {
+      "id": "MQL-07-running-sum-uses-ordinary-float-addition",
+      "query": "running_sum(oracle_range_avg_precision)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [10000000000000000, 10000000000000000, 0]
+    },
+    {
+      "id": "MQL-07-running-sum-carries-across-sparse-grid-points",
+      "query": "running_sum(oracle_mql_sparse)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 10000, "end_offset_ms": 30000, "step": "10s"},
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"host": "a", "job": "oracle"}, "values": [10, 20, 50]},
+        {"metric": {"host": "b", "job": "oracle"}, "offsets_ms": [20000, 30000], "values": [20, 40]}
+      ]
+    },
+    {
+      "id": "MQL-07-running-avg-avoids-equal-maximum-overflow",
+      "query": "running_avg(oracle_range_avg_overflow)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [
+        "179769313486231500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "179769313486231500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ]
+    },
+    {
+      "id": "MQL-07-running-sum-overflows-ordinary-addition",
+      "query": "running_sum(oracle_range_avg_overflow)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [
+        "179769313486231500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "+Inf"
+      ]
+    },
+    {
+      "id": "MQL-07-running-avg-carries-through-stale-slots-and-counts-their-position",
+      "query": "running_avg(oracle_mql_stale)",
+      "evaluation_offset_ms": 20000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 20000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"job": "oracle"},
+          "values": [1, 1, 1.3333333333333333]
+        }
+      ]
+    },
+    {
+      "id": "MQL-07-running-sum-carries-through-stale-slots-and-continues-the-fold",
+      "query": "running_sum(oracle_mql_stale)",
+      "evaluation_offset_ms": 20000,
+      "range": {"start_offset_ms": 0, "end_offset_ms": 20000, "step": "10s"},
+      "expected_results": [
+        {
+          "metric": {"job": "oracle"},
+          "values": [1, 1, 3]
+        }
+      ]
+    },
+    {
+      "id": "MQL-07-running-avg-pins-missing-and-infinite-values",
+      "query": "running_avg(oracle_range_avg_ieee)",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "nan", "job": "oracle"}, "offsets_ms": [30000], "values": [1]},
+        {"metric": {"case": "positive", "job": "oracle"}, "offsets_ms": [20000], "values": ["+Inf"]},
+        {"metric": {"case": "mixed", "job": "oracle"}, "offsets_ms": [20000], "values": ["+Inf"]}
+      ]
+    },
+    {
+      "id": "MQL-07-running-min-pins-missing-nan-and-infinite-values",
+      "query": "running_min(oracle_range_extrema{case=~\"mixed|infinite\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "mixed", "job": "oracle"}, "offsets_ms": [30000], "values": [2]},
+        {"metric": {"case": "infinite", "job": "oracle"}, "values": ["-Inf", "-Inf"]}
+      ]
+    },
+    {
+      "id": "MQL-07-running-max-pins-missing-nan-and-infinite-values",
+      "query": "running_max(oracle_range_extrema{case=~\"mixed|infinite\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "mixed", "job": "oracle"}, "offsets_ms": [30000], "values": [2]},
+        {"metric": {"case": "infinite", "job": "oracle"}, "values": ["-Inf", "+Inf"]}
+      ]
+    },
+    {
+      "id": "MQL-07-running-extrema-pin-upstream-signed-zero-normalization",
+      "query": "running_min(oracle_range_extrema{case=~\"zero.*\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "zero", "job": "oracle"}, "values": [0, 0]},
+        {"metric": {"case": "zero_reverse", "job": "oracle"}, "values": [0, 0]}
+      ]
+    },
+    {
+      "id": "MQL-07-running-max-pins-upstream-signed-zero-normalization",
+      "query": "running_max(oracle_range_extrema{case=~\"zero.*\"})",
+      "evaluation_offset_ms": 30000,
+      "range": {"start_offset_ms": 20000, "end_offset_ms": 30000, "step": "10s"},
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"case": "zero", "job": "oracle"}, "values": [0, 0]},
+        {"metric": {"case": "zero_reverse", "job": "oracle"}, "values": [0, 0]}
+      ]
     }
   ],
   "operator_error_cases": [
@@ -1127,6 +1328,30 @@
     {
       "id": "MQL-06-range-aggregate-rejects-post-name-drop-collisions",
       "query": "range_sum({__name__=~\"oracle_keep_a|oracle_keep_b\"})",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "duplicate output timeseries"
+    },
+    {
+      "id": "MQL-07-running-aggregate-requires-one-argument",
+      "query": "running_avg()",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected number of args; got 0; want 1"
+    },
+    {
+      "id": "MQL-07-running-aggregate-rejects-extra-arguments",
+      "query": "running_sum(oracle_step, 1)",
+      "evaluation_offset_ms": 30000,
+      "status": 422,
+      "error_type": "422",
+      "error_contains": "unexpected number of args; got 2; want 1"
+    },
+    {
+      "id": "MQL-07-running-aggregate-rejects-post-name-drop-collisions",
+      "query": "running_sum({__name__=~\"oracle_keep_a|oracle_keep_b\"})",
       "evaluation_offset_ms": 30000,
       "status": 422,
       "error_type": "422",

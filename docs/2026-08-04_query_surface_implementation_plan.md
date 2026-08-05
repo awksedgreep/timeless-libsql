@@ -261,9 +261,14 @@ timestamp policy, executable `SQL-MQL-005`, stable-route isolation, and one
 public packed-raw evaluation plan. `MQL-06` is shipped with complete-grid
 `range_avg/min/max/sum`, pinned slot-index/missing/IEEE/name/collision
 behavior, executable `SQL-MQL-006`, one bounded child evaluation,
-generated-result/work limits, cancellation, and stable-route isolation. The
-remaining rows continue in their listed order; `MQL-11` is already corrected
-to deferred because the pinned oracle rejects `min_of` and `max_of`.
+generated-result/work limits, cancellation, and stable-route isolation.
+`MQL-07` is implemented pending exact-build evidence, with cumulative
+`running_avg/min/max/sum`, pinned
+missing/stale carry, slot-index, IEEE/name/collision behavior, executable
+`SQL-MQL-007`, one bounded child evaluation, limits, cancellation, and stable
+route isolation. The remaining rows continue in their listed order; `MQL-11`
+is already corrected to deferred because the pinned oracle rejects `min_of`
+and `max_of`.
 
 ### Session 16: LogsQL P2 filters
 

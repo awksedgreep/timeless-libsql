@@ -199,6 +199,17 @@ path normalizes them. Scalar/expression composition, limits, cancellation,
 stable-route isolation, GET/POST, and shutdown/reopen are pinned through the
 real extension with one child storage evaluation.
 
+`running_avg`, `running_min`, `running_max`, and `running_sum` use the same
+complete request grid but emit the cumulative state at every step. After the
+first value, missing or stale steps emit the prior state while still advancing
+the average's slot index. A newly computed NaN is omitted rather than replaced
+with the previous finite/infinite value. Average uses incremental arithmetic,
+sum uses ordinary binary64 addition, equal extrema select the later operand,
+and every function removes the metric name even under `keep_metric_names`.
+Leading gaps, overflow, infinity, signed zero, collisions, limits,
+cancellation, GET/POST, and reopen are pinned against VictoriaMetrics through
+one public child evaluation.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding
@@ -213,6 +224,8 @@ and
 [`SQL-MQL-005`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-005-default_rollup-and-window-less-rollups)
 and
 [`SQL-MQL-006`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-006-range-aggregates)
+and
+[`SQL-MQL-007`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-mql-007-running-aggregates)
 recipes. Invalid MetricsQL uses Timeless's stable HTTP 400 `bad_data` JSON
 envelope; the pinned VictoriaMetrics oracle uses HTTP 422 with error type
 `422`. Limits and cancellation continue to use Timeless's existing execution
