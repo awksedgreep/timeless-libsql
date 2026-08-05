@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, SecondsFormat, TimeZone, Timelike, Utc};
+use chrono::{Datelike, NaiveTime, SecondsFormat, TimeZone, Timelike, Utc};
 use clap::Args;
 use regex::Regex;
 use reqwest::blocking::{Client, Response};
@@ -1462,10 +1462,25 @@ fn victorialogs_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Re
             .map(|value| value.as_i64().context("time_offset_us must be an integer"))
             .transpose()?
             .unwrap_or(position as i64);
-        row.insert(
-            "oracle_time".to_owned(),
-            json!(base_us.saturating_add(offset_us)),
-        );
+        let oracle_time = row
+            .remove("utc_time_of_day")
+            .map(|value| -> Result<i64> {
+                let value = value
+                    .as_str()
+                    .context("utc_time_of_day must be an HH:MM:SS.ffffff string")?;
+                let time = NaiveTime::parse_from_str(value, "%H:%M:%S%.f")
+                    .with_context(|| format!("invalid utc_time_of_day {value:?}"))?;
+                let base = Utc
+                    .timestamp_micros(base_us)
+                    .single()
+                    .context("VictoriaLogs base timestamp is outside UTC range")?;
+                Ok(Utc
+                    .from_utc_datetime(&base.date_naive().and_time(time))
+                    .timestamp_micros())
+            })
+            .transpose()?
+            .unwrap_or_else(|| base_us.saturating_add(offset_us));
+        row.insert("oracle_time".to_owned(), json!(oracle_time));
         ndjson.push_str(&serde_json::to_string(&row)?);
         ndjson.push('\n');
     }

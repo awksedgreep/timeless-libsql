@@ -38,6 +38,40 @@ impl TimestampUnit {
     }
 }
 
+const NANOSECONDS_PER_DAY: i128 = 86_400_000_000_000;
+
+pub(crate) fn day_range_matches(
+    timestamp: i64,
+    timestamp_unit: TimestampUnit,
+    start_ns: i64,
+    end_ns: i64,
+    start_inclusive: bool,
+    end_inclusive: bool,
+    offset_ns: i64,
+) -> bool {
+    if start_ns > end_ns {
+        return false;
+    }
+    let (units_per_day, nanoseconds_per_unit) = match timestamp_unit {
+        TimestampUnit::Milliseconds => (86_400_000_i64, 1_000_000_i128),
+        TimestampUnit::Microseconds => (86_400_000_000_i64, 1_000_i128),
+    };
+    let day_offset = (i128::from(timestamp % units_per_day) * nanoseconds_per_unit
+        + i128::from(offset_ns))
+        % NANOSECONDS_PER_DAY;
+    let start_ns = i128::from(start_ns);
+    let end_ns = i128::from(end_ns);
+    (if start_inclusive {
+        day_offset >= start_ns
+    } else {
+        day_offset > start_ns
+    }) && (if end_inclusive {
+        day_offset <= end_ns
+    } else {
+        day_offset < end_ns
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct LogEntry {
     pub ts: i64,
@@ -675,6 +709,16 @@ pub enum LogPredicate {
     Timestamp {
         minimum: Option<i64>,
         maximum: Option<i64>,
+    },
+    /// VictoriaLogs `_time:day_range` semantics over the UTC time of day.
+    /// The optional query offset is explicit request state; the process local
+    /// timezone is never consulted.
+    DayRange {
+        start_ns: i64,
+        end_ns: i64,
+        start_inclusive: bool,
+        end_inclusive: bool,
+        offset_ns: i64,
     },
     Regex {
         field: LogField,
@@ -2677,6 +2721,21 @@ fn log_predicate_matches_resolved(
         LogPredicate::Timestamp { minimum, maximum } => Ok(minimum
             .is_none_or(|minimum| timestamp >= minimum)
             && maximum.is_none_or(|maximum| timestamp <= maximum)),
+        LogPredicate::DayRange {
+            start_ns,
+            end_ns,
+            start_inclusive,
+            end_inclusive,
+            offset_ns,
+        } => Ok(day_range_matches(
+            timestamp,
+            timestamp_unit,
+            *start_ns,
+            *end_ns,
+            *start_inclusive,
+            *end_inclusive,
+            *offset_ns,
+        )),
         LogPredicate::Regex { field, regex } => {
             let matched = log_field_text(resolved_field!(field), message, level, metadata)
                 .is_some_and(|text| regex.is_match(text));
@@ -2726,7 +2785,8 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::Or(_)
         | LogPredicate::Not(_)
         | LogPredicate::FieldCompare { .. }
-        | LogPredicate::Timestamp { .. } => return None,
+        | LogPredicate::Timestamp { .. }
+        | LogPredicate::DayRange { .. } => return None,
     };
     match field {
         LogField::FieldPrefix(prefix) => Some(prefix),
@@ -2804,7 +2864,9 @@ fn metadata_prefix_predicate_matches(
 
 fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
     match predicate {
-        LogPredicate::True | LogPredicate::Timestamp { .. } => false,
+        LogPredicate::True | LogPredicate::Timestamp { .. } | LogPredicate::DayRange { .. } => {
+            false
+        }
         LogPredicate::And(predicates) | LogPredicate::Or(predicates) => {
             predicates.iter().any(predicate_references_metadata)
         }
@@ -3604,6 +3666,13 @@ mod tests {
                 right: LogField::Level,
                 operator: FieldCompareOp::LessOrEqual,
             },
+            LogPredicate::DayRange {
+                start_ns: 0,
+                end_ns: 86_400_000_000_000 - 1,
+                start_inclusive: true,
+                end_inclusive: true,
+                offset_ns: 0,
+            },
             LogPredicate::Regex {
                 field: LogField::Message,
                 regex: regex::Regex::new("request").unwrap(),
@@ -3627,6 +3696,57 @@ mod tests {
                 "logs query cancelled"
             );
         }
+    }
+
+    #[test]
+    fn day_range_uses_native_precision_and_explicit_offsets() {
+        let hour = 3_600_000_000_000_i64;
+        let at_ten_us = 1_800_007_200_000_000_i64;
+        assert!(day_range_matches(
+            at_ten_us,
+            TimestampUnit::Microseconds,
+            10 * hour,
+            12 * hour,
+            true,
+            true,
+            0,
+        ));
+        assert!(!day_range_matches(
+            at_ten_us,
+            TimestampUnit::Microseconds,
+            10 * hour,
+            12 * hour,
+            false,
+            true,
+            0,
+        ));
+        assert!(day_range_matches(
+            at_ten_us,
+            TimestampUnit::Microseconds,
+            12 * hour,
+            14 * hour,
+            true,
+            true,
+            2 * hour,
+        ));
+        assert!(day_range_matches(
+            at_ten_us / 1_000,
+            TimestampUnit::Milliseconds,
+            8 * hour,
+            10 * hour,
+            true,
+            true,
+            -2 * hour,
+        ));
+        assert!(!day_range_matches(
+            at_ten_us,
+            TimestampUnit::Microseconds,
+            12 * hour,
+            10 * hour,
+            true,
+            true,
+            0,
+        ));
     }
 
     #[test]

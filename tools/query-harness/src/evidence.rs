@@ -1817,6 +1817,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "day_range_narrow",
+                "logs-day-range-narrow",
+                "host:=\"h00\" AND _time:day_range[08:00, 09:00) offset 0h | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "day_range_wide",
+                "logs-day-range-wide",
+                "_time:day_range[08:00, 09:00) offset 0h | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
                 "empty_narrow",
                 "logs-empty-narrow",
                 "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",

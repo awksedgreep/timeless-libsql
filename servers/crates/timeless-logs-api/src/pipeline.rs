@@ -15,7 +15,7 @@ use crate::logsql::{
     logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, PipelineField, PipelineOp,
     StatsExpression, StatsKind,
 };
-use crate::storage::QueryRow;
+use crate::storage::{day_range_matches, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
 
 #[derive(Clone, Copy)]
@@ -965,6 +965,33 @@ fn predicate_matches_resolved(
                     && maximum.is_none_or(|maximum| timestamp <= maximum)
             }))
         }
+        LogPredicate::DayRange {
+            start_ns,
+            end_ns,
+            start_inclusive,
+            end_inclusive,
+            offset_ns,
+        } => {
+            let timestamp = row
+                .get("_time")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| match timestamp_unit {
+                    TimestampUnit::Milliseconds => value.timestamp_millis(),
+                    TimestampUnit::Microseconds => value.timestamp_micros(),
+                });
+            Ok(timestamp.is_some_and(|timestamp| {
+                day_range_matches(
+                    timestamp,
+                    timestamp_unit,
+                    *start_ns,
+                    *end_ns,
+                    *start_inclusive,
+                    *end_inclusive,
+                    *offset_ns,
+                )
+            }))
+        }
         LogPredicate::Regex { field, regex } => {
             let matched =
                 field_text(row, resolved_field!(field)).is_some_and(|text| regex.is_match(text));
@@ -1009,7 +1036,8 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::Or(_)
         | LogPredicate::Not(_)
         | LogPredicate::FieldCompare { .. }
-        | LogPredicate::Timestamp { .. } => return None,
+        | LogPredicate::Timestamp { .. }
+        | LogPredicate::DayRange { .. } => return None,
     };
     match field {
         LogField::FieldPrefix(prefix) => Some(prefix),
@@ -1443,6 +1471,13 @@ mod tests {
                 left: LogField::Message,
                 right: LogField::Level,
                 operator: crate::FieldCompareOp::LessOrEqual,
+            },
+            LogPredicate::DayRange {
+                start_ns: 0,
+                end_ns: 86_400_000_000_000 - 1,
+                start_inclusive: true,
+                end_inclusive: true,
+                offset_ns: 0,
             },
         ] {
             assert_eq!(

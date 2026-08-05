@@ -649,6 +649,10 @@ strict wildcard-comparison errors, bounded traversal, and cancellation.
 Exact-build p95 is 3.122/49.085 ms for narrow/wide word-prefix search and
 3.216/47.324 ms for typed-prefix search over the 8,192-entry evidence fixture;
 all matching shapes retain byte-identical public storage reads.
+Day-range filtering adds exact `HH:MM`/`HHMM` bracket semantics and signed
+compound offsets over UTC; an omitted offset is deterministic UTC rather than
+ambient process-local time. Direct users can run the native-unit public-row
+equivalent in `SQL-LOG-023`.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

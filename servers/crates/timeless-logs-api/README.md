@@ -247,6 +247,23 @@ block and 1,024 entries; every wide shape reads four blocks and all 8,192
 entries. The visible wide word-search cost is bounded per-row field traversal,
 not storage amplification, and does not justify an extension primitive.
 
+Day ranges use `_time:day_range[start, end] offset duration`. Bounds accept
+`HH:MM` and `HHMM`; brackets include or exclude the exact timestamp; offsets
+accept signed compound VictoriaLogs durations. `24:00` clamps to the last
+nanosecond, minute `60` normalizes forward, inverted ranges are valid and
+empty, and only `[00:00,00:00)` is the special full-day equal range. Ranges do
+not wrap overnight. When `offset` is omitted, Timeless uses UTC explicitly
+instead of reading mutable process-local timezone state.
+
+The storage-row evaluator performs one native timestamp remainder and fixed-
+offset comparison per decoded row, with no date allocation. Pipeline filters
+parse and inspect the current projected RFC3339 `_time`; removal by an earlier
+`fields` pipe makes the predicate false. `SQL-LOG-023` exposes the exact millisecond/microsecond public-
+row foundation and bracket normalization. The Rust API retains clock/duration
+grammar, logical and pipeline composition, errors, limits, cancellation, and
+envelopes. Exact-build performance evidence remains pending before `LQL-F33`
+is shipped.
+
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept
 `="prefix"*`, field-scoped forms, and `exact(prefix*)`. They are

@@ -410,6 +410,16 @@ without collapsing duplicate log entries. Exact-build evidence at commit
 `94e1cd4cd715b6ec2a86e580324cf50057943332` records narrow/wide word and typed-
 value field-set searches with byte-identical public reads. It closes the row
 without an extension primitive or storage-contract change.
+`LQL-F33` now has fifteen successful and eight error pinned day-range cases,
+failing-then-passing parser and real-extension regressions, exact open/closed
+boundaries, compact and colon clock grammar, signed compound offsets,
+`24:00` and minute-60 normalization, the midnight half-open full-day special
+case, valid empty inverted ranges, current-row pipelines, work limits,
+cancellation, durability, and reopen. Timeless deliberately makes an omitted
+offset mean UTC instead of inheriting mutable process-local timezone state.
+Executable `SQL-LOG-023` proves the native-unit public-row foundation. The
+implementation and oracle gates pass; exact-build narrow/wide evidence remains
+before the row is shipped.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

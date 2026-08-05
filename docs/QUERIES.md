@@ -399,6 +399,30 @@ exactness. LogsQL parsing, word/phrase/range/rich-value semantics, RFC3339
 `_time` projection, composition, limits, cancellation, and envelopes remain
 in the Rust API. No extension primitive or storage-format change is involved.
 
+`_time:day_range[start, end] offset duration` filters by a repeated UTC time-
+of-day interval. Bounds accept `HH:MM` or `HHMM`; `[`/`]` include the exact
+bound and `(`/`)` exclude it. The bounds are instants rather than minute
+buckets, so a closed `12:00` includes exactly that timestamp and not the next
+native tick. `24:00` clamps to the final nanosecond of the day, minute `60`
+normalizes into the following hour, and an inverted range is valid but empty.
+The VictoriaLogs special case `[00:00,00:00)` selects the full day; other equal
+half-open ranges are empty. Overnight wrapping is not implicit.
+
+The optional offset is a signed VictoriaLogs compound duration and is added to
+UTC before comparison. Timeless deliberately uses UTC when it is omitted. It
+does not read the server process's local timezone, so the same request cannot
+change with deployment location or daylight-saving state. Use an explicit
+fixed offset when local wall time is intended. A pipeline filter reads the
+current projected `_time`, so a preceding `fields` pipe can remove it.
+
+`SQL-LOG-023` gives direct SQLite/libSQL users the executable native timestamp
+modulo and explicit-offset operation over bounded public rows, including open-
+midnight normalization and millisecond/microsecond unit parameters. Clock and
+duration grammar, logical/pipeline composition, errors, limits, cancellation,
+and HTTP envelopes remain in the Rust API. The repeated daily predicate cannot
+independently prune an arbitrary absolute time range, and ordinary SQL already
+receives the timestamp, so no extension primitive or storage change is added.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

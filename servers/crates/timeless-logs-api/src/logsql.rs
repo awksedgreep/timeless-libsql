@@ -670,7 +670,11 @@ pub fn parse_at(
                 }
                 LogsqlTerm::Token(token) if token.starts_with("_time:") => {
                     let window = required_logsql_value(&token, "_time:")?;
-                    apply_time_filter(&mut spec, &window, timestamp_unit, query_now)?;
+                    if let Some(predicate) = parse_day_range_filter(&window)? {
+                        append_predicate(&mut spec, predicate);
+                    } else {
+                        apply_time_filter(&mut spec, &window, timestamp_unit, query_now)?;
+                    }
                 }
                 LogsqlTerm::Message(message) if spec.message_phrase.is_none() => {
                     spec.message_phrase = Some(message);
@@ -2316,7 +2320,7 @@ fn lex_logical_tokens(input: &str) -> Result<Vec<LogicalToken>, LogsqlError> {
                     index += 1;
                     break;
                 }
-                index = if prefix == "_time:" || prefix.ends_with(":range") || prefix == "range" {
+                index = if is_time_range_prefix(prefix) {
                     scan_time_range(input, index)?
                 } else {
                     scan_balanced_parentheses(input, index)?
@@ -2325,7 +2329,7 @@ fn lex_logical_tokens(input: &str) -> Result<Vec<LogicalToken>, LogsqlError> {
             }
             if character == '[' {
                 let prefix = &input[start..index];
-                if prefix == "_time:" || prefix.ends_with(":range") || prefix == "range" {
+                if is_time_range_prefix(prefix) {
                     index = scan_time_range(input, index)?;
                     continue;
                 }
@@ -2350,7 +2354,62 @@ fn lex_logical_tokens(input: &str) -> Result<Vec<LogicalToken>, LogsqlError> {
         }
         push_logical_atom(&mut tokens, &input[start..index])?;
     }
-    Ok(tokens)
+    combine_day_range_offset_tokens(tokens)
+}
+
+fn is_time_range_prefix(prefix: &str) -> bool {
+    prefix == "_time:"
+        || prefix.eq_ignore_ascii_case("range")
+        || prefix.strip_prefix("_time:").is_some_and(|function| {
+            function.eq_ignore_ascii_case("day_range")
+                || function.eq_ignore_ascii_case("week_range")
+        })
+        || prefix
+            .get(prefix.len().saturating_sub(6)..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(":range"))
+}
+
+fn is_day_range_atom(atom: &str) -> bool {
+    atom.strip_prefix("_time:").is_some_and(|value| {
+        value
+            .get(.."day_range".len())
+            .is_some_and(|name| name.eq_ignore_ascii_case("day_range"))
+    })
+}
+
+fn combine_day_range_offset_tokens(
+    tokens: Vec<LogicalToken>,
+) -> Result<Vec<LogicalToken>, LogsqlError> {
+    let mut combined = Vec::with_capacity(tokens.len());
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let LogicalToken::Atom(atom) = &tokens[index] else {
+            combined.push(tokens[index].clone());
+            index += 1;
+            continue;
+        };
+        if is_day_range_atom(atom)
+            && matches!(tokens.get(index + 1), Some(LogicalToken::Atom(offset)) if offset.eq_ignore_ascii_case("offset"))
+        {
+            let (duration, consumed) = match (tokens.get(index + 2), tokens.get(index + 3)) {
+                (Some(LogicalToken::Atom(duration)), _) => (duration.clone(), 3),
+                (Some(LogicalToken::Not), Some(LogicalToken::Atom(duration))) => {
+                    (format!("-{duration}"), 4)
+                }
+                _ => {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL day_range offset requires one duration",
+                    ))
+                }
+            };
+            combined.push(LogicalToken::Atom(format!("{atom} offset {duration}")));
+            index += consumed;
+            continue;
+        }
+        combined.push(tokens[index].clone());
+        index += 1;
+    }
+    Ok(combined)
 }
 
 fn scan_balanced_parentheses(input: &str, start: usize) -> Result<usize, LogsqlError> {
@@ -2590,6 +2649,9 @@ fn compile_logical_atom(
     if atom.starts_with("_time:") {
         let mut spec = QuerySpec::default();
         let value = required_logsql_value(atom, "_time:")?;
+        if let Some(predicate) = parse_day_range_filter(&value)? {
+            return Ok(predicate);
+        }
         apply_time_filter(&mut spec, &value, timestamp_unit, query_now)?;
         return Ok(LogPredicate::Timestamp {
             minimum: spec.ts_min,
@@ -3115,8 +3177,11 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
         if current.starts_with("_time:[") || current.starts_with("_time:(") {
             time_range = true;
         }
-        if matches!(character, '(' | '[')
-            && (current.ends_with(":range(") || current.ends_with(":range["))
+        if !time_range
+            && matches!(character, '(' | '[')
+            && current
+                .get(..current.len() - 1)
+                .is_some_and(is_time_range_prefix)
         {
             numeric_range = true;
         }
@@ -3158,6 +3223,7 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
         raw_terms.push(current);
     }
 
+    let raw_terms = combine_day_range_offset_terms(raw_terms)?;
     let mut terms = Vec::with_capacity(raw_terms.len());
     for raw in raw_terms {
         if let Some((message, consumed)) = parse_quoted_prefix(&raw)? {
@@ -3169,6 +3235,29 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
         terms.push(LogsqlTerm::Token(raw));
     }
     Ok(terms)
+}
+
+fn combine_day_range_offset_terms(raw_terms: Vec<String>) -> Result<Vec<String>, LogsqlError> {
+    let mut combined = Vec::with_capacity(raw_terms.len());
+    let mut index = 0usize;
+    while index < raw_terms.len() {
+        let term = &raw_terms[index];
+        if is_day_range_atom(term)
+            && raw_terms
+                .get(index + 1)
+                .is_some_and(|value| value.eq_ignore_ascii_case("offset"))
+        {
+            let duration = raw_terms.get(index + 2).ok_or_else(|| {
+                LogsqlError::malformed("LogsQL day_range offset requires one duration")
+            })?;
+            combined.push(format!("{term} offset {duration}"));
+            index += 3;
+            continue;
+        }
+        combined.push(term.clone());
+        index += 1;
+    }
+    Ok(combined)
 }
 
 fn required_logsql_value(token: &str, prefix: &str) -> Result<String, LogsqlError> {
@@ -3712,6 +3801,123 @@ fn parse_duration_ms(value: &str) -> Option<i64> {
         _ => return None,
     };
     count.checked_mul(multiplier)
+}
+
+fn parse_day_range_filter(value: &str) -> Result<Option<LogPredicate>, LogsqlError> {
+    const FUNCTION: &str = "day_range";
+    const NANOSECONDS_PER_MINUTE: i64 = 60_000_000_000;
+    const NANOSECONDS_PER_HOUR: i64 = 60 * NANOSECONDS_PER_MINUTE;
+    const NANOSECONDS_PER_DAY: i64 = 24 * NANOSECONDS_PER_HOUR;
+
+    let Some(name) = value.get(..FUNCTION.len()) else {
+        return Ok(None);
+    };
+    if !name.eq_ignore_ascii_case(FUNCTION) {
+        return Ok(None);
+    }
+    let remainder = &value[FUNCTION.len()..];
+    let Some(open) = remainder.chars().next() else {
+        return Err(LogsqlError::malformed(
+            "LogsQL day_range requires '[' or '(' and two bounds",
+        ));
+    };
+    if !matches!(open, '[' | '(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL day_range must start with '[' or '('",
+        ));
+    }
+    let Some((close_relative, close)) = remainder[open.len_utf8()..]
+        .char_indices()
+        .find(|(_, character)| matches!(character, ']' | ')'))
+    else {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL day_range filter",
+        ));
+    };
+    let close_index = open.len_utf8() + close_relative;
+    let inner = &remainder[open.len_utf8()..close_index];
+    let (start, end) = inner
+        .split_once(',')
+        .ok_or_else(|| LogsqlError::malformed("LogsQL day_range requires exactly two bounds"))?;
+    if end.contains(',') {
+        return Err(LogsqlError::malformed(
+            "LogsQL day_range accepts exactly two bounds",
+        ));
+    }
+    let start_ns = parse_day_clock_ns(start.trim()).ok_or_else(|| {
+        LogsqlError::malformed(format!("invalid LogsQL day_range start {start:?}"))
+    })?;
+    let mut end_ns = parse_day_clock_ns(end.trim())
+        .ok_or_else(|| LogsqlError::malformed(format!("invalid LogsQL day_range end {end:?}")))?;
+    let start_inclusive = open == '[';
+    let mut end_inclusive = close == ']';
+    if !end_inclusive && end_ns == 0 {
+        // VictoriaLogs subtracts one nanosecond from an open end, wrapping
+        // midnight to the final nanosecond of the day.
+        end_ns = NANOSECONDS_PER_DAY - 1;
+        end_inclusive = true;
+    }
+
+    let suffix = remainder[close_index + close.len_utf8()..].trim();
+    let offset_ns = if suffix.is_empty() {
+        // Deterministic compatibility choice: an omitted offset means UTC,
+        // not the process's mutable local timezone.
+        0
+    } else {
+        let mut words = suffix.split_whitespace();
+        let keyword = words.next().unwrap_or_default();
+        let duration = words.next().ok_or_else(|| {
+            LogsqlError::malformed("LogsQL day_range offset requires one duration")
+        })?;
+        if !keyword.eq_ignore_ascii_case("offset") || words.next().is_some() {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected text after LogsQL day_range: {suffix:?}"
+            )));
+        }
+        parse_victorialogs_human_duration(duration).ok_or_else(|| {
+            LogsqlError::malformed(format!("invalid LogsQL day_range offset {duration:?}"))
+        })?
+    };
+    Ok(Some(LogPredicate::DayRange {
+        start_ns,
+        end_ns,
+        start_inclusive,
+        end_inclusive,
+        offset_ns,
+    }))
+}
+
+fn parse_day_clock_ns(value: &str) -> Option<i64> {
+    const NANOSECONDS_PER_MINUTE: i64 = 60_000_000_000;
+    const NANOSECONDS_PER_HOUR: i64 = 60 * NANOSECONDS_PER_MINUTE;
+    const NANOSECONDS_PER_DAY: i64 = 24 * NANOSECONDS_PER_HOUR;
+
+    let (hours, minutes) = match value.as_bytes() {
+        [hour_tens, hour_ones, b':', minute_tens, minute_ones] => {
+            ((hour_tens, hour_ones), (minute_tens, minute_ones))
+        }
+        [hour_tens, hour_ones, minute_tens, minute_ones] => {
+            ((hour_tens, hour_ones), (minute_tens, minute_ones))
+        }
+        _ => return None,
+    };
+    let decimal_pair = |(tens, ones): (&u8, &u8)| {
+        tens.is_ascii_digit()
+            .then_some(i64::from(*tens - b'0') * 10)
+            .and_then(|value| {
+                ones.is_ascii_digit()
+                    .then_some(value + i64::from(*ones - b'0'))
+            })
+    };
+    let hours = decimal_pair(hours)?;
+    let minutes = decimal_pair(minutes)?;
+    if hours > 24 || minutes > 60 {
+        return None;
+    }
+    Some(
+        (hours * NANOSECONDS_PER_HOUR + minutes * NANOSECONDS_PER_MINUTE)
+            .min(NANOSECONDS_PER_DAY - 1),
+    )
 }
 
 fn apply_time_filter(
@@ -4753,6 +4959,42 @@ mod tests {
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_sixteen_day_range_grammar_is_complete_and_strict() {
+        for query in [
+            "_time:day_range[10:00, 12:00] offset 0h",
+            "_time:day_range(10:00, 12:00) offset 2h",
+            "_time:DAY_RANGE[1000, 1200] offset -2h",
+            "_time:day_range[10:60, 12:00] offset 1h30m",
+            "_time:day_range[00:00, 24:00]",
+            "_time:day_range[10:00, 12:00] offset 0h AND level:=error",
+            "* | filter _time:day_range[10:00, 12:00] offset 0h",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error:?}"));
+            assert!(
+                format!("{plan:?}").contains("DayRange"),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for malformed in [
+            "_time:day_range",
+            "_time:day_range[foo, 12:00]",
+            "_time:day_range[10:00, bar]",
+            "_time:day_range[25:00, 26:00]",
+            "_time:day_range[10:61, 12:00]",
+            "_time:day_range[10:00, 12:00",
+            "_time:day_range[10:00, 12:00] offset",
+            "_time:day_range[10:00, 12:00] offset nope",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed}"
+            );
         }
     }
 

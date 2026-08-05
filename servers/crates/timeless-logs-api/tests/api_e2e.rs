@@ -3244,6 +3244,210 @@ async fn session_sixteen_field_prefixes_expand_existing_rich_fields_and_reopen()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_day_ranges_use_explicit_utc_offsets_and_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("day-range-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                (1_800_007_199_999_999, "day-before"),
+                (1_800_007_200_000_000, "day-start"),
+                (1_800_010_800_123_456, "day-middle"),
+                (1_800_014_400_000_000, "day-end"),
+                (1_800_014_400_000_001, "day-after"),
+            ]
+            .into_iter()
+            .map(|(ts, case)| LogEntry {
+                ts,
+                level: 1,
+                severity: "info".into(),
+                message: "clock fixture".into(),
+                metadata_json: format!(r#"{{"case":"{case}","day_group":"day"}}"#),
+            })
+            .collect(),
+        )
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn cases(storage: &Storage, query: &str) -> Vec<String> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap()["case"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    let all = vec![
+        "day-before",
+        "day-start",
+        "day-middle",
+        "day-end",
+        "day-after",
+    ];
+    let queries = [
+        (
+            "_time:day_range[10:00, 12:00] offset 0h",
+            vec!["day-start", "day-middle", "day-end"],
+        ),
+        (
+            "_time:day_range[10:00, 12:00]",
+            vec!["day-start", "day-middle", "day-end"],
+        ),
+        (
+            "_time:day_range(10:00, 12:00) offset 0h",
+            vec!["day-middle"],
+        ),
+        (
+            "_time:day_range[10:00, 12:00) offset 0h",
+            vec!["day-start", "day-middle"],
+        ),
+        (
+            "_time:day_range(10:00, 12:00] offset 0h",
+            vec!["day-middle", "day-end"],
+        ),
+        (
+            "_time:DAY_RANGE[1000, 1200] offset 0h",
+            vec!["day-start", "day-middle", "day-end"],
+        ),
+        (
+            "_time:day_range[12:00, 14:00] offset 2h",
+            vec!["day-start", "day-middle", "day-end"],
+        ),
+        (
+            "_time:day_range[08:00, 10:00] offset -2h",
+            vec!["day-start", "day-middle", "day-end"],
+        ),
+        (
+            "_time:day_range[11:30, 13:30] offset 1h30m",
+            vec!["day-start", "day-middle", "day-end"],
+        ),
+        (
+            "_time:day_range[10:60, 12:00] offset 0h",
+            vec!["day-middle", "day-end"],
+        ),
+        ("_time:day_range[00:00, 24:00] offset 0h", all.clone()),
+        ("_time:day_range[00:00, 00:00) offset 0h", all),
+        ("_time:day_range[10:00, 10:00] offset 0h", vec!["day-start"]),
+        ("_time:day_range[12:00, 10:00] offset 0h", Vec::new()),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(cases(&storage, query).await, *expected, "{query}");
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "_time:day_range[10:00, 12:00] offset 0h | filter day_group:=\"day\" | fields case",
+        )
+        .await
+        .into_iter()
+        .map(|row| row["case"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>(),
+        ["day-start", "day-middle", "day-end"]
+    );
+    assert!(
+        pipeline_rows(
+            &app,
+            "* | fields _msg | filter _time:day_range[10:00, 12:00] offset 0h",
+        )
+        .await
+        .is_empty(),
+        "pipeline day_range must observe the current projected row"
+    );
+
+    for malformed in [
+        "_time:day_range",
+        "_time:day_range[foo, 12:00]",
+        "_time:day_range[10:00, bar]",
+        "_time:day_range[25:00, 26:00]",
+        "_time:day_range[10:61, 12:00]",
+        "_time:day_range[10:00, 12:00",
+        "_time:day_range[10:00, 12:00] offset",
+        "_time:day_range[10:00, 12:00] offset nope",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "_time:day_range[10:00, 12:00] offset 0h | limit 100",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        cases(&storage, "_time:day_range[10:00, 12:00]").await,
+        ["day-start", "day-middle", "day-end"],
+        "the reader must remain reusable after a bounded-work rejection"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(cases(&reopened, query).await, expected, "reopened: {query}");
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

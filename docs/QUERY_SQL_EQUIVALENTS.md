@@ -130,6 +130,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-020`](#sql-log-020-unicode-codepoint-length-range-over-retained-text) | `LQL-F28` | current foundation | inclusive Unicode-codepoint length over retained text plus missing/null-as-empty; API owns rich-value projection, bound grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-021`](#sql-log-021-same-row-textual-field-comparison) | `LQL-F30` | current foundation | exact textual equality and explicit bytewise fallback ordering over two public-row fields; API owns VictoriaLogs math-value detection, `_time` rendering, grammar, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-022`](#sql-log-022-prefix-selected-field-set) | `LQL-F32` | current foundation | row-local exact-string matching over canonical special fields and recursively flattened metadata leaf names selected by a literal prefix; API owns LogsQL filter semantics, rich projection, grammar, limits, cancellation, and envelopes |
+| [`SQL-LOG-023`](#sql-log-023-utc-day-range-with-explicit-offset) | `LQL-F33` | current foundation | exact UTC time-of-day bracket filtering with an explicit fixed offset over native public timestamps; API owns LogsQL clock/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5515,6 +5516,83 @@ is bounded by each already-decoded metadata value. The result limit is applied
 after field matching. Ordinary SQL already receives the required public rows;
 an extension primitive would not avoid a storage read, decode, allocation,
 copy, or row crossing.
+
+### SQL-LOG-023: UTC day range with explicit offset
+
+Bind `:day_start_ns` and `:day_end_ns` to parsed time-of-day offsets in
+nanoseconds, `:start_inclusive` and `:end_inclusive` to zero or one from the
+written brackets, and `:offset_ns` to the fixed offset applied to UTC before
+comparison. For a normal millisecond `timeless_logs` table, bind
+`:timestamp_scale_ns = 1000000` and `:units_per_day = 86400000`; a microsecond
+table uses `1000` and `86400000000`. This example applies the filter to an
+inclusive native timestamp window:
+
+```sql
+WITH
+arguments AS (
+  SELECT
+    :day_start_ns AS day_start_ns,
+    CASE
+      WHEN :end_inclusive = 0 AND :day_end_ns = 0
+      THEN 86399999999999
+      ELSE :day_end_ns
+    END AS day_end_ns,
+    :start_inclusive AS start_inclusive,
+    CASE
+      WHEN :end_inclusive = 0 AND :day_end_ns = 0 THEN 1
+      ELSE :end_inclusive
+    END AS end_inclusive
+), bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), evaluated AS (
+  SELECT
+    bounded.*,
+    (
+      (ts % :units_per_day) * :timestamp_scale_ns
+      + (:offset_ns % 86400000000000)
+    ) % 86400000000000 AS day_offset_ns
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM evaluated
+CROSS JOIN arguments
+WHERE day_start_ns <= day_end_ns
+  AND CASE start_inclusive
+        WHEN 0 THEN day_offset_ns > day_start_ns
+        ELSE day_offset_ns >= day_start_ns
+      END
+  AND CASE end_inclusive
+        WHEN 0 THEN day_offset_ns < day_end_ns
+        ELSE day_offset_ns <= day_end_ns
+      END
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+The bounds are points within a day, not minute buckets: a closed `12:00` end
+includes exactly 12:00 and excludes 12:00 plus one native tick. An open
+midnight end follows VictoriaLogs' special normalization to the final
+nanosecond of the day, so `[00:00,00:00)` selects the full day. Any other
+inverted range is valid and empty; ranges do not wrap overnight. `24:00` is
+clamped to the final nanosecond of the day. SQLite `%` retains the dividend's
+sign, matching the source behavior for pre-epoch timestamps and negative
+shifts. The offset is reduced before addition so ordinary fixed timezone
+offsets cannot overflow the per-day calculation.
+
+The Rust API accepts `HH:MM` and `HHMM` bounds, parses VictoriaLogs signed
+compound duration offsets, and deliberately treats an omitted offset as UTC.
+It does not read the process-local timezone, whose ambient value would make
+the same query change across hosts or daylight-saving transitions. LogsQL
+parsing, logical and current-row pipeline composition, work/result/response
+limits, cancellation, and HTTP envelopes remain API behavior. The repeated
+daily predicate cannot narrow an arbitrary absolute timestamp window by
+itself. Ordinary SQL already receives the necessary public timestamp, so an
+extension primitive would not avoid block reads, decode, allocation, copy, or
+row crossing.
 
 ## Adding the next recipe
 

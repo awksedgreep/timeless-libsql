@@ -401,6 +401,13 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "string_max" => Value::Text("ut".to_owned()),
         "length_min" => Value::Integer(7),
         "length_max" => Value::Integer(7),
+        "day_start_ns" => Value::Integer(0),
+        "day_end_ns" => Value::Integer(60_000_000_000),
+        "start_inclusive" => Value::Integer(1),
+        "end_inclusive" => Value::Integer(0),
+        "offset_ns" => Value::Integer(0),
+        "timestamp_scale_ns" => Value::Integer(1_000_000),
+        "units_per_day" => Value::Integer(86_400_000),
         "empty_path" => Value::Text("$.nested.none".to_owned()),
         "any_path" => Value::Text("$.deployment.region".to_owned()),
         "duration_threshold" => Value::Integer(10),
@@ -1616,6 +1623,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let len_range_rows = recipe_values("SQL-LOG-020", 0)?;
     let field_compare_rows = recipe_values("SQL-LOG-021", 0)?;
     let field_prefix_rows = recipe_values("SQL-LOG-022", 0)?;
+    let day_range_rows = recipe_values("SQL-LOG-023", 0)?;
     if [
         bounded,
         substring,
@@ -1719,6 +1727,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if field_prefix_timestamps != [Some(Value::Integer(1000))] {
         bail!("SQL-LOG-022 field-prefix selection changed: {field_prefix_rows:?}");
+    }
+    let day_range_timestamps = day_range_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if day_range_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
+        bail!("SQL-LOG-023 UTC day-range selection changed: {day_range_rows:?}");
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2296,6 +2311,89 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             bail!("SQL-LOG-022 prefix {prefix:?} exact value {exact:?} changed: {actual:?}");
         }
     }
+
+    for (ts, case) in [
+        (35_999_999_i64, "day-before"),
+        (36_000_000_i64, "day-start"),
+        (39_600_123_i64, "day-middle"),
+        (43_200_000_i64, "day-end"),
+        (43_200_001_i64, "day-after"),
+    ] {
+        connection.execute(
+            "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+            params![
+                ts,
+                "info",
+                "clock fixture",
+                format!(r#"{{"case":"{case}"}}"#)
+            ],
+        )?;
+    }
+    connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
+    let day_range_sql = recipe_sql("SQL-LOG-023", 0)?;
+    let day_range_timestamps = |day_start_ns: i64,
+                                day_end_ns: i64,
+                                start_inclusive: i64,
+                                end_inclusive: i64,
+                                offset_ns: i64|
+     -> Result<Vec<i64>> {
+        let mut statement = connection.prepare(&day_range_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-023 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "day_start_ns" => Value::Integer(day_start_ns),
+                "day_end_ns" => Value::Integer(day_end_ns),
+                "start_inclusive" => Value::Integer(start_inclusive),
+                "end_inclusive" => Value::Integer(end_inclusive),
+                "offset_ns" => Value::Integer(offset_ns),
+                "start_ms" => Value::Integer(35_999_999),
+                "end_ms" => Value::Integer(43_200_001),
+                _ => parameter("SQL-LOG-023", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        Ok(statement
+            .raw_query()
+            .mapped(|row| row.get::<_, i64>(0))
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    };
+    let hour = 3_600_000_000_000_i64;
+    for (start, end, start_inclusive, end_inclusive, offset, expected) in [
+        (
+            10 * hour,
+            12 * hour,
+            1,
+            1,
+            0,
+            vec![43_200_000, 39_600_123, 36_000_000],
+        ),
+        (10 * hour, 12 * hour, 0, 0, 0, vec![39_600_123]),
+        (
+            12 * hour,
+            14 * hour,
+            1,
+            1,
+            2 * hour,
+            vec![43_200_000, 39_600_123, 36_000_000],
+        ),
+        (
+            0,
+            0,
+            1,
+            0,
+            0,
+            vec![43_200_001, 43_200_000, 39_600_123, 36_000_000, 35_999_999],
+        ),
+        (12 * hour, 10 * hour, 1, 1, 0, vec![]),
+    ] {
+        let actual = day_range_timestamps(start, end, start_inclusive, end_inclusive, offset)?;
+        if actual != expected {
+            bail!("SQL-LOG-023 day range {start}..{end} offset {offset} changed: {actual:?}");
+        }
+    }
     Ok(())
 }
 
@@ -2337,13 +2435,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 88);
+        assert_eq!(recipes.len(), 89);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            117
+            118
         );
         assert_eq!(
             recipes
@@ -2351,7 +2449,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            123
+            124
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }
