@@ -2893,3 +2893,60 @@ recovery, GET/POST, durability, shutdown, and reopen. No extension primitive,
 private table access, storage format, batching, compression, index, rollup,
 retention, transaction, migration, maintenance, or public batch/SQL contract
 changed. No CI workflow was invoked.
+
+## Session 15 MetricsQL P2 progress: query-context values
+
+The checked-in
+[`2026-08-05_session15_mql_10_query_context.json`](evidence/2026-08-05_session15_mql_10_query_context.json)
+was captured from exact extension, metrics-server, and logs-server build
+`3c290202cef902326660a5e540a08d6b1ec4206d`. It closes `MQL-10` with a
+storage-free request-context expression plus narrow and wide selector
+composition. Correctness separately pins range and instant start/end values,
+subsecond step, pre-epoch time, case, arity, unsupported functions, and direct
+selector modifier isolation.
+
+| shape | result points | response bytes | p50 ms | p95 ms | p99 ms | candidate chunks/query | decoded points/query | extension payload bytes/query | extension frame bytes/query | extension points returned/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| pure `time() - start() + step() - step()`, four steps | 4 | 158 | 0.480 | 0.649 | 0.701 | 0 | 0 | 0 | 0 | 0 |
+| context composition, exact host / four steps | 4 | 189 | 0.255 | 0.756 | 0.896 | 1 | 32 | 131 | 540 | 32 |
+| context composition, 512 series / four steps | 2,048 | 67,620 | 5.124 | 5.352 | 5.422 | 512 | 16,384 | 53,831 | 268,304 | 16,384 |
+
+The pure context shape performs no extension query because all three values
+are request metadata. Both selector compositions perform exactly one existing
+public packed-raw query. Their candidate chunks, decoded points, persisted
+payload bytes, frame bytes, and returned extension points are identical to
+the same-run implicit MetricsQL rollup at the corresponding width. Context
+lowering therefore adds no storage read, decode, frame, or row crossing.
+
+The wide context composition measured 5.352 ms p95 versus 3.880 ms for the
+same-run implicit MetricsQL rollup, a 37.9% evaluator/response difference with
+identical storage work. The context expression charges 2,060 intermediate
+points per request for scalar subtraction and vector addition. Binary
+operation name removal makes its response 67,620 bytes, exactly 16,384 bytes
+smaller than the named rollup's 84,004 bytes. This is an honest bounded Rust
+composition cost; moving request metadata into the extension would not reduce
+the storage work and would give direct SQLite users no capability beyond
+binding the values in `SQL-MQL-010`.
+
+All 36,928 points completed durably with zero failed or queued work. Admission
+took 8.103 ms and the explicit durability barrier took 93.332 ms. Metrics
+storage remained 224,688 payload bytes, 409,600 index bytes, and 1,542,312
+physical database/WAL/SHM bytes. Logs remained 1,088,919 logical and 1,190,496
+physical bytes. Metrics RSS HWM was 50,936 KiB, 740 KiB above MQL-09; logs HWM
+was 64,968 KiB, 500 KiB above it. Both are whole-process variations and
+neither direction is attributed to the three added query shapes.
+
+All 528 pinned Prometheus 3.13.2 cases, all 164 pinned VictoriaMetrics 1.148.0
+cases, and all 120 pinned VictoriaLogs 1.52.0 cases pass. The complete 89-test
+metrics real-extension suite, 58 metrics library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 25-test Rust query
+harness, documentation contracts, and all 78 SQL recipes (109 statements)
+pass locally. Regressions cover range and instant context values,
+subsecond/pre-epoch inputs, case-insensitive zero-argument grammar,
+scalar/vector composition, direct `@ start()` modifier preservation, exact
+unsupported functions and arity, stable PromQL isolation, pure zero-read and
+selector one-read accounting, result/deadline limits, cancellation recovery,
+GET/POST, durability, shutdown, and reopen. No extension primitive, private
+table access, storage format, batching, compression, index, rollup, retention,
+transaction, migration, maintenance, or public batch/SQL contract changed. No
+CI workflow was invoked.
