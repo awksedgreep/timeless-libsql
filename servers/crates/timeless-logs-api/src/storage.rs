@@ -20,7 +20,7 @@ use timeless_api_common::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::logsql::{parse_ipv4_address, PipelineOp};
+use crate::logsql::{parse_ipv4_address, parse_ipv6_address, PipelineOp};
 use crate::pipeline::{self, PipelineLimits};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -591,6 +591,15 @@ pub enum LogPredicate {
         field: LogField,
         minimum: u32,
         maximum: u32,
+    },
+    /// VictoriaLogs `ipv6_range(...)` over an exact retained string. IPv4
+    /// input is normalized to its IPv4-mapped 16-byte address. Bounds are
+    /// inclusive unsigned network order; invalid and non-string values do
+    /// not match.
+    Ipv6Range {
+        field: LogField,
+        minimum: [u8; 16],
+        maximum: [u8; 16],
     },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
@@ -2338,6 +2347,18 @@ fn log_predicate_matches(
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::Ipv6Range {
+            field,
+            minimum,
+            maximum,
+        } => {
+            let matched = minimum <= maximum
+                && log_field_text(field, message, level, metadata)
+                    .and_then(parse_ipv6_address)
+                    .is_some_and(|address| address >= *minimum && address <= *maximum);
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
             field,
             message,
@@ -2401,6 +2422,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::TextualContainsAny { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }
+        | LogPredicate::Ipv6Range { field, .. }
         | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
@@ -3088,6 +3110,11 @@ mod tests {
                 field: LogField::Message,
                 minimum: 0,
                 maximum: u32::MAX,
+            },
+            LogPredicate::Ipv6Range {
+                field: LogField::Message,
+                minimum: [0; 16],
+                maximum: [u8::MAX; 16],
             },
             LogPredicate::Regex {
                 field: LogField::Message,

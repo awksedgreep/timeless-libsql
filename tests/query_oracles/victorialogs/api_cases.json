@@ -84,6 +84,21 @@
     {"case": "ipv4-service", "_msg": "ip service", "ip_group": "ipv4", "service": "10.0.0.4"},
     {"case": "ipv4-message", "_msg": "10.0.0.42", "ip_group": "ipv4"},
     {"case": "ipv4-message-embedded", "_msg": "before 10.0.0.42", "ip_group": "ipv4"},
+    {"case": "ipv6-missing", "_msg": "v6 missing", "ip_group": "ipv6"},
+    {"case": "ipv6-null", "_msg": "v6 null", "ip_group": "ipv6", "ip": null},
+    {"case": "ipv6-numeric", "_msg": "v6 numeric", "ip_group": "ipv6", "ip": 6},
+    {"case": "ipv6-network", "_msg": "v6 network", "ip_group": "ipv6", "ip": "2001:db8::"},
+    {"case": "ipv6-low", "_msg": "v6 low", "ip_group": "ipv6", "ip": "2001:db8::1"},
+    {"case": "ipv6-uppercase", "_msg": "v6 uppercase", "ip_group": "ipv6", "ip": "2001:DB8::2"},
+    {"case": "ipv6-upper", "_msg": "v6 upper", "ip_group": "ipv6", "ip": "2001:db8::ffff"},
+    {"case": "ipv6-outside", "_msg": "v6 outside", "ip_group": "ipv6", "ip": "2001:db8:0:1::"},
+    {"case": "ipv6-invalid", "_msg": "v6 invalid", "ip_group": "ipv6", "ip": "2001:db8:::1"},
+    {"case": "ipv6-embedded", "_msg": "v6 embedded", "ip_group": "ipv6", "ip": "address=2001:db8::1"},
+    {"case": "ipv6-service", "_msg": "v6 service", "ip_group": "ipv6", "service": "2001:db8::4"},
+    {"case": "ipv6-message", "_msg": "2001:db8::42", "ip_group": "ipv6"},
+    {"case": "ipv6-message-embedded", "_msg": "[2001:db8::42]:443", "ip_group": "ipv6"},
+    {"case": "ipv6-mapped-low", "_msg": "v6 mapped low", "ip_group": "ipv6", "ip": "1.2.3.4"},
+    {"case": "ipv6-mapped-outside", "_msg": "v6 mapped outside", "ip_group": "ipv6", "ip": "9.0.0.0"},
     {"case": "page-0", "_msg": "page zero", "page_group": "page", "time_offset_us": 1000000},
     {"case": "page-1", "_msg": "page one", "page_group": "page", "time_offset_us": 2000000},
     {"case": "page-2", "_msg": "page two", "page_group": "page", "time_offset_us": 3000000},
@@ -1095,6 +1110,10 @@
         "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast", "ipv4-outside",
         "ipv4-invalid", "ipv4-embedded", "ipv4-service", "ipv4-message",
         "ipv4-message-embedded",
+        "ipv6-missing", "ipv6-null", "ipv6-numeric", "ipv6-network",
+        "ipv6-low", "ipv6-uppercase", "ipv6-upper", "ipv6-outside",
+        "ipv6-invalid", "ipv6-embedded", "ipv6-service", "ipv6-message",
+        "ipv6-message-embedded", "ipv6-mapped-low", "ipv6-mapped-outside",
         "page-0", "page-1", "page-2", "page-3",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
@@ -1242,6 +1261,78 @@
       "query": "ip_group:=\"ipv4\" | filter ip:ipv4_range(10.0.0.0/24)",
       "status": 200,
       "expected_cases": ["ipv4-network", "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast"]
+    },
+    {
+      "id": "LQL-F26-ipv6-cidr-is-inclusive",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(2001:db8::/112)",
+      "status": 200,
+      "expected_cases": ["ipv6-network", "ipv6-low", "ipv6-uppercase", "ipv6-upper"]
+    },
+    {
+      "id": "LQL-F26-ipv6-cidr-normalizes-host-bits-and-trailing-comma",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(2001:db8::34/112,)",
+      "status": 200,
+      "expected_cases": ["ipv6-network", "ipv6-low", "ipv6-uppercase", "ipv6-upper"]
+    },
+    {
+      "id": "LQL-F26-ipv6-two-bounds-are-inclusive",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(2001:db8::1, 2001:db8:0:1::)",
+      "status": 200,
+      "expected_cases": ["ipv6-low", "ipv6-uppercase", "ipv6-upper", "ipv6-outside"]
+    },
+    {
+      "id": "LQL-F26-ipv6-single-address-and-case-normalization",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(2001:DB8::1)",
+      "status": 200,
+      "expected_cases": ["ipv6-low"]
+    },
+    {
+      "id": "LQL-F26-ipv6-zero-prefix-and-exact-string-parsing",
+      "query": "ip_group:=\"ipv6\" ip:IpV6_RaNgE(::/0)",
+      "status": 200,
+      "expected_cases": ["ipv6-network", "ipv6-low", "ipv6-uppercase", "ipv6-upper", "ipv6-outside", "ipv6-mapped-low", "ipv6-mapped-outside"]
+    },
+    {
+      "id": "LQL-F26-ipv6-inverted-range-matches-nothing",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(2001:db8:0:1::, 2001:db8::)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F26-ipv4-input-is-mapped-into-ipv6-space",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(1.2.3.4, 8.0.0.0)",
+      "status": 200,
+      "expected_cases": ["ipv6-mapped-low"]
+    },
+    {
+      "id": "LQL-F26-ipv4-cidr-prefix-is-128-bit",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(1.2.3.99/120)",
+      "status": 200,
+      "expected_cases": ["ipv6-mapped-low"]
+    },
+    {
+      "id": "LQL-F26-ipv6-message-requires-whole-string",
+      "query": "ip_group:=\"ipv6\" ipv6_range(2001:db8::42)",
+      "status": 200,
+      "expected_cases": ["ipv6-message"]
+    },
+    {
+      "id": "LQL-F26-ipv6-arbitrary-field-and-quoted-argument",
+      "query": "ip_group:=\"ipv6\" service:ipv6_range(\"2001:db8::4\")",
+      "status": 200,
+      "expected_cases": ["ipv6-service"]
+    },
+    {
+      "id": "LQL-F26-ipv6-logical-composition",
+      "query": "ip_group:=\"ipv6\" ip:ipv6_range(2001:db8::/112) AND NOT ip:ipv6_range(2001:db8::8000/113)",
+      "status": 200,
+      "expected_cases": ["ipv6-network", "ipv6-low", "ipv6-uppercase"]
+    },
+    {
+      "id": "LQL-F26-ipv6-pipeline-composition",
+      "query": "ip_group:=\"ipv6\" | filter ip:ipv6_range(2001:db8::/112)",
+      "status": 200,
+      "expected_cases": ["ipv6-network", "ipv6-low", "ipv6-uppercase", "ipv6-upper"]
     }
   ],
   "stats_cases": [
@@ -1557,6 +1648,55 @@
     {
       "id": "LQL-F25-unseparated-bounds-are-invalid",
       "query": "ipv4_range(10.0.0.1 10.0.0.2)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F26-empty-range-is-invalid",
+      "query": "ipv6_range()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F26-invalid-address-is-invalid",
+      "query": "ipv6_range(2001:db8:::1)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F26-invalid-prefix-is-invalid",
+      "query": "ipv6_range(2001:db8::1/129)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F26-invalid-upper-bound-is-invalid",
+      "query": "ipv6_range(2001:db8::1, 2001:db8::gg)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F26-three-bounds-are-invalid",
+      "query": "ipv6_range(::1, ::2, ::3)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F26-attached-wildcard-is-invalid",
+      "query": "ipv6_range(::1*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F26-unseparated-bounds-are-invalid",
+      "query": "ipv6_range(::1 ::2)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

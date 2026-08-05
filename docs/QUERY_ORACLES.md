@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 221 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 240 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -204,6 +204,18 @@ pipeline composition, missing/null/numeric/invalid/embedded non-matches, and
 strict argument/address/prefix errors. The behavior is source-audited against
 `filter_ipv4_range.go`, `parser.go`, and `values_encoder.go` at VictoriaLogs
 commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+
+The twelve successful and seven error `LQL-F26` cases pin inclusive unsigned
+16-byte ordering for one address, one CIDR, or two explicit address bounds.
+They cover compressed and uppercase spelling, `/0` and `/128`-space behavior,
+network/broadcast edges, host-bit normalization, trailing commas, inverted
+ranges, exact whole-string parsing, arbitrary/message fields, logical and
+pipeline composition, missing/null/numeric/invalid/embedded non-matches, and
+strict errors. VictoriaLogs maps IPv4 input into IPv4-mapped IPv6 space and
+applies CIDR prefixes across all 128 bits, so `1.2.3.99/120` selects the mapped
+`1.2.3.0/24` range. The behavior is source-audited against
+`filter_ipv6_range.go`, `parser.go`, and their tests at VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

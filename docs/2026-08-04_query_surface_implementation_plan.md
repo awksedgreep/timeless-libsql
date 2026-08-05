@@ -358,7 +358,13 @@ cancellation, durability, and reopen. Executable `SQL-LOG-018` proves the
 bounded public JSON1 form. Exact-build evidence at commit
 `9081a326cbe9a23be8b877f2cae36b11251becf5` records narrow/wide CIDR and
 explicit-bound matching with byte-identical same-run public reads and closes
-the row without an extension primitive.
+the row without an extension primitive. `LQL-F26` now has twelve successful
+and seven error pinned `ipv6_range` cases, source-audited 16-byte and
+IPv4-mapped semantics, failing-then-passing parser and real-extension
+regressions, exact retained-string parsing, strict grammar, logical/pipeline
+composition, work limits, cancellation, durability, and reopen. Portable
+SQLite has no built-in IPv6 parser, so no SQL or extension surface is claimed;
+exact-build measurement remains the final row exit criterion.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

@@ -1300,6 +1300,7 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                     "context": {"retry": index % 3 == 0, "attempt": index % 5},
                     "tags": ["query", true],
                     "client_ip": format!("10.0.{}.{}", (index / 256) % 256, index % 256),
+                    "client_ipv6": format!("2001:db8::{index:x}"),
                 }),
             )?;
         }
@@ -1675,6 +1676,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "ipv6_range_narrow",
+                "logs-ipv6-range-cidr-narrow",
+                "host:=\"h00\" AND client_ipv6:ipv6_range(2001:db8::/115) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "ipv6_range_wide",
+                "logs-ipv6-range-cidr-wide",
+                "client_ipv6:ipv6_range(2001:db8::/115) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "ipv6_range_bounds_narrow",
+                "logs-ipv6-range-bounds-narrow",
+                "host:=\"h00\" AND client_ipv6:ipv6_range(2001:db8::, 2001:db8::1fff) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "ipv6_range_bounds_wide",
+                "logs-ipv6-range-bounds-wide",
+                "client_ipv6:ipv6_range(2001:db8::, 2001:db8::1fff) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
                 "empty_narrow",
                 "logs-empty-narrow",
                 "host:=\"h00\" AND optional:(\"\") | sort by (_time) asc | limit 10000",
@@ -1762,14 +1791,14 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "field_names_narrow",
                 "logs-field-names-narrow",
                 "host:=\"h00\" | field_names",
-                9,
+                10,
                 None,
             ),
             (
                 "field_names_wide",
                 "logs-field-names-wide",
                 "* | field_names",
-                9,
+                10,
                 None,
             ),
             (

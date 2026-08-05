@@ -1880,6 +1880,279 @@ async fn session_sixteen_ipv4_range_matches_retained_strings_and_reopens() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_ipv6_range_matches_retained_strings_and_reopens() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("ipv6-range-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(vec![
+            LogEntry {
+                ts: 1_813_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "missing".into(),
+                metadata_json: r#"{"case":"missing"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_002,
+                level: 1,
+                severity: "info".into(),
+                message: "null".into(),
+                metadata_json: r#"{"case":"null","ip":null}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_003,
+                level: 1,
+                severity: "info".into(),
+                message: "numeric".into(),
+                metadata_json: r#"{"case":"numeric","ip":6}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_004,
+                level: 1,
+                severity: "info".into(),
+                message: "network".into(),
+                metadata_json: r#"{"case":"network","ip":"2001:db8::"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_005,
+                level: 1,
+                severity: "info".into(),
+                message: "low".into(),
+                metadata_json: r#"{"case":"low","ip":"2001:db8::1"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_006,
+                level: 1,
+                severity: "info".into(),
+                message: "uppercase".into(),
+                metadata_json: r#"{"case":"uppercase","ip":"2001:DB8::2"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_007,
+                level: 1,
+                severity: "info".into(),
+                message: "upper".into(),
+                metadata_json: r#"{"case":"upper","ip":"2001:db8::ffff"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_008,
+                level: 1,
+                severity: "info".into(),
+                message: "outside".into(),
+                metadata_json: r#"{"case":"outside","ip":"2001:db8:0:1::"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_009,
+                level: 1,
+                severity: "info".into(),
+                message: "invalid".into(),
+                metadata_json: r#"{"case":"invalid","ip":"2001:db8:::1"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_010,
+                level: 1,
+                severity: "info".into(),
+                message: "embedded".into(),
+                metadata_json: r#"{"case":"embedded","ip":"before 2001:db8::1"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_011,
+                level: 1,
+                severity: "info".into(),
+                message: "nested".into(),
+                metadata_json: r#"{"case":"nested","nested":{"ip":"2001:db8::3"}}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_012,
+                level: 1,
+                severity: "info".into(),
+                message: "service".into(),
+                metadata_json: r#"{"case":"service","service":"2001:db8::4"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_013,
+                level: 1,
+                severity: "info".into(),
+                message: "2001:db8::42".into(),
+                metadata_json: r#"{"case":"message"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_014,
+                level: 1,
+                severity: "info".into(),
+                message: "[2001:db8::42]:443".into(),
+                metadata_json: r#"{"case":"message-embedded"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_015,
+                level: 1,
+                severity: "info".into(),
+                message: "mapped low".into(),
+                metadata_json: r#"{"case":"mapped-low","ip":"1.2.3.4"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_813_000_000_000_016,
+                level: 1,
+                severity: "info".into(),
+                message: "mapped outside".into(),
+                metadata_json: r#"{"case":"mapped-outside","ip":"9.0.0.0"}"#.into(),
+            },
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn cases(storage: &Storage, query: &str) -> Vec<String> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap()["case"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    let queries = [
+        (
+            "ip:ipv6_range(2001:db8::/112)",
+            vec!["network", "low", "uppercase", "upper"],
+        ),
+        (
+            "ip:ipv6_range(2001:db8::34/112,)",
+            vec!["network", "low", "uppercase", "upper"],
+        ),
+        (
+            "ip:ipv6_range(2001:db8::1, 2001:db8:0:1::)",
+            vec!["low", "uppercase", "upper", "outside"],
+        ),
+        ("ip:ipv6_range(2001:DB8::1)", vec!["low"]),
+        (
+            "ip:IpV6_RaNgE(::/0)",
+            vec![
+                "network",
+                "low",
+                "uppercase",
+                "upper",
+                "outside",
+                "mapped-low",
+                "mapped-outside",
+            ],
+        ),
+        ("ip:ipv6_range(2001:db8:0:1::, 2001:db8::)", Vec::new()),
+        ("nested.ip:ipv6_range(2001:db8::3)", vec!["nested"]),
+        ("service:ipv6_range(2001:db8::4)", vec!["service"]),
+        ("ipv6_range(2001:db8::42)", vec!["message"]),
+        ("ip:ipv6_range(1.2.3.4, 8.0.0.0)", vec!["mapped-low"]),
+        ("ip:ipv6_range(1.2.3.99/120)", vec!["mapped-low"]),
+        (
+            "ip:ipv6_range(2001:db8::/112) AND NOT ip:ipv6_range(2001:db8::8000/113)",
+            vec!["network", "low", "uppercase"],
+        ),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(cases(&storage, query).await, *expected, "{query}");
+    }
+
+    let app = router(storage.clone());
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "* | filter ip:ipv6_range(2001:db8::/112) | fields case | limit 100",
+        )
+        .await
+        .into_iter()
+        .map(|row| row["case"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>(),
+        ["network", "low", "uppercase", "upper"]
+    );
+
+    for malformed in [
+        "ipv6_range(",
+        "ipv6_range()",
+        "ipv6_range(2001:db8:::1)",
+        "ipv6_range(2001:db8::1/129)",
+        "ipv6_range(2001:db8::1, 2001:db8::gg)",
+        "ipv6_range(::1, ::2, ::3)",
+        "ipv6_range(::1 ::2)",
+        "ipv6_range(::1*)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("ip:ipv6_range(2001:db8::/112) | limit 100"))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        cases(&storage, "ip:ipv6_range(2001:db8::/112)").await.len(),
+        4,
+        "the reader must remain reusable after a bounded-work rejection"
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(cases(&reopened, query).await, expected, "reopened: {query}");
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

@@ -120,6 +120,18 @@ reads one block and 1,024 entries; every wide shape reads four blocks and all
 8,192 entries. This is bounded API evaluation over byte-identical public
 reads, not a missing storage primitive.
 
+IPv6 range filters likewise accept one exact address, a CIDR from `/0` through
+`/128`, or two inclusive bounds. Address spelling is normalized before
+comparison, so compressed and uppercase forms compare by the same unsigned
+16-byte network order. IPv4 input is mapped into IPv6 space exactly as in
+VictoriaLogs; consequently its CIDR prefix is still 128-bit (`/120` is the
+mapped equivalent of an IPv4 `/24`). Missing, null, numeric, invalid, and
+embedded-address values do not match. LogsQL grammar, normalization,
+composition, limits, cancellation, and errors remain bounded Rust API work.
+Portable SQLite has no built-in IPv6 parser, so the cookbook does not claim a
+misleading SQL equivalent and no extension scalar is added merely to shorten
+language-owned evaluation.
+
 Exact filters accept quoted or unquoted `=value` and the equivalent
 case-insensitive `exact(value)` function name. Exact-prefix filters accept
 `="prefix"*`, field-scoped forms, and `exact(prefix*)`. They are
