@@ -161,6 +161,77 @@ fn parse_project_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Project(fields))
 }
 
+fn is_delete_pipe(segment: &str) -> bool {
+    segment
+        .split_whitespace()
+        .next()
+        .is_some_and(is_delete_alias)
+}
+
+fn is_delete_alias(command: &str) -> bool {
+    ["delete", "del", "drop", "rm"]
+        .iter()
+        .any(|alias| command.eq_ignore_ascii_case(alias))
+}
+
+fn parse_delete_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let command_end = segment.find(char::is_whitespace).unwrap_or(segment.len());
+    let command = &segment[..command_end];
+    if !is_delete_alias(command) {
+        return Err(LogsqlError::malformed(format!(
+            "unsupported LogsQL delete alias {command:?}"
+        )));
+    }
+    let fields = segment[command_end..].trim();
+    if fields.is_empty() {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {command} requires at least one field"
+        )));
+    }
+    let fields = split_top_level(fields, ',')?
+        .into_iter()
+        .map(|field| parse_delete_field(field.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PipelineOp::Delete(fields))
+}
+
+fn parse_delete_field(value: &str) -> Result<PipelineField, LogsqlError> {
+    if value == "*" {
+        return Ok(PipelineField::All);
+    }
+    if matches!(value.chars().next(), Some('"' | '\'' | '`')) {
+        let (field, consumed) = parse_quoted_prefix(value)?.ok_or_else(|| {
+            LogsqlError::malformed(format!("invalid quoted LogsQL delete field {value:?}"))
+        })?;
+        let field = if field.is_empty() {
+            "_msg".to_owned()
+        } else {
+            field
+        };
+        return match &value[consumed..] {
+            "" => Ok(PipelineField::Exact {
+                path: vec![field.clone()],
+                name: field,
+            }),
+            "*" => Ok(PipelineField::Prefix { prefix: field }),
+            _ => Err(LogsqlError::malformed(format!(
+                "unexpected text after quoted LogsQL delete field {value:?}"
+            ))),
+        };
+    }
+    if let Some(prefix) = value.strip_suffix('*') {
+        if prefix.is_empty() || prefix.contains('*') || prefix.chars().any(char::is_whitespace) {
+            return Err(LogsqlError::malformed(format!(
+                "invalid LogsQL delete field prefix {value:?}"
+            )));
+        }
+        return Ok(PipelineField::Prefix {
+            prefix: prefix.to_owned(),
+        });
+    }
+    parse_pipeline_field(value, false)
+}
+
 fn parse_filter_pipe(
     segment: &str,
     timestamp_unit: TimestampUnit,
@@ -345,7 +416,7 @@ fn parse_pipeline_field(value: &str, allow_wildcard: bool) -> Result<PipelineFie
             });
         }
     }
-    if value.contains('*') {
+    if value.contains('*') && !matches!(value.chars().next(), Some('"' | '\'' | '`')) {
         return Err(LogsqlError::malformed(format!(
             "wildcards are not allowed in LogsQL field {value:?}"
         )));
@@ -556,6 +627,7 @@ pub(crate) enum PipelineOp {
         result_name: String,
     },
     Project(Vec<PipelineField>),
+    Delete(Vec<PipelineField>),
     Filter(LogPredicate),
     Stats(Vec<StatsExpression>),
 }
@@ -865,6 +937,10 @@ pub fn parse_at(
             }
             _ if segment.starts_with("fields ") || segment.starts_with("keep ") => {
                 pipeline.push(parse_project_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_delete_pipe(segment) => {
+                pipeline.push(parse_delete_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if segment.starts_with("filter ") || segment.starts_with("where ") => {
@@ -5287,6 +5363,39 @@ mod tests {
             prepare_query_layout("case:=\"word-exact\""),
             Ok(Cow::Borrowed(_))
         ));
+    }
+
+    #[test]
+    fn session_seventeen_delete_pipe_grammar_is_complete_and_strict() {
+        for query in [
+            "* | delete foo",
+            "* | del foo",
+            "* | drop foo",
+            "* | rm foo",
+            "* | DELETE foo, bar*",
+            "* | delete \"foo,bar\", \"foo|bar\", \"foo.\"*",
+            "* | delete \"\"",
+            "* | delete *",
+            "* | fields foo, bar | delete foo | filter bar:*",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | delete",
+            "* | delete foo,",
+            "* | delete , foo",
+            "* | delete foo,,bar",
+            "* | delete foo bar",
+            "* | delete foo *",
+            "* | delete *foo",
+            "* | delete foo*bar",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
     }
 
     #[test]

@@ -104,6 +104,17 @@ deterministic type-tagged order with numeric `hits`. A positive operator
 operator-specific limit while the server's hard result/work limits still
 apply.
 
+`delete`, `del`, `drop`, and `rm` remove comma-separated exact fields, quoted
+literal names, case-sensitive field prefixes, or every field from the current
+pipeline row. Unquoted dotted paths recurse through retained JSON objects;
+arrays and scalars remain atomic. Empty object parents are pruned, a row with
+no remaining fields is omitted, missing fields are no-ops, and later stages
+observe the deletion. Strict comma/wildcard grammar, decoded-row work limits,
+request cancellation, flush/shutdown/reopen durability, and rich values are
+covered by the real-extension regression. `SQL-LOG-025` is the direct
+SQLite/libSQL exact-metadata-path foundation; language and recursive pruning
+remain Rust API behavior.
+
 The shipped statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
 `median`, `rate`, and `rate_sum`. Missing, null, and empty remain distinct;

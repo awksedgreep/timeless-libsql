@@ -667,6 +667,13 @@ line/column locations. This bounded parser-only behavior never enters SQLite;
 direct users continue to compose the corresponding public-row SQL recipes.
 Exact-build p95 is 3.335/39.610 ms narrow/wide versus 3.504/41.410 ms for the
 same-run plain word forms, with byte-identical public storage reads.
+The ordered pipeline also supports case-insensitive `delete`, `del`, `drop`,
+and `rm` aliases over exact, quoted, prefix, nested rich-object, special, or all
+fields. Missing fields are no-ops, arrays/scalars remain atomic, empty parents
+are pruned, later stages see the transformed row, and a fully empty row is
+omitted. Executable `SQL-LOG-025` gives embedded SQLite/libSQL users the exact
+metadata-path `json_remove` foundation; prefix grammar, recursive pruning,
+limits, cancellation, and response semantics remain bounded Rust API work.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

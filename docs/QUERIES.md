@@ -468,6 +468,33 @@ preserves byte offsets and line boundaries, and the normalized LogsQL source
 never enters SQLite. Direct SQLite/libSQL users write ordinary parameterized SQL,
 so `LQL-F40` has no separate SQL recipe or extension primitive.
 
+`delete`, `del`, `drop`, and `rm` are case-insensitive aliases for the same
+ordered row transform. They accept a comma-separated list of exact fields,
+literal field prefixes ending in `*`, quoted field names, or the standalone
+`*` that removes every field. The empty quoted field `""` is VictoriaLogs'
+message alias and therefore removes `_msg`. A missing exact field is a no-op,
+repeated deletion is idempotent, and later pipeline stages observe only the
+remaining fields. If no fields remain, the row is omitted rather than emitted
+as `{}`.
+
+Unquoted dotted names traverse Timeless's retained rich objects. Quoted names
+remain literal top-level keys even when they contain dots, commas, pipes, or
+asterisks. Prefixes compare case-sensitive canonical dotted paths and recurse
+through objects; arrays and scalars remain atomic and are removed only by
+their complete field path. Removing the last child prunes its now-empty parent.
+This preserves nested values without inventing VictoriaLogs' flattened
+storage model. Malformed commas, separated wildcards, leading wildcards, and
+embedded unquoted wildcards fail before storage work. Traversal is bounded by
+the decoded row/work limits and observes request cancellation.
+
+`SQL-LOG-025` gives direct SQLite/libSQL users an executable `json_remove`
+projection for exact retained metadata paths. Direct SQL can omit `ts`,
+`message`, or `level` from its projection, but LogsQL aliases, quoted/prefix
+grammar, formatted `_time`, special-field deletion, recursive empty-parent
+pruning, empty-row omission, composition, limits, cancellation, and envelopes
+remain Rust API behavior. Public JSON1 already supplies the exact-path
+foundation; no extension primitive or storage-format change is warranted.
+
 The retained rich-log model intentionally differs from VictoriaLogs where
 flattening would discard information. Numeric strings are not coerced, and
 integer comparisons remain exact beyond 2^53. `field:("")` provides the

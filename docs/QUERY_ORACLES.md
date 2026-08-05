@@ -444,3 +444,11 @@ identifier,
 filtering, ordering, cardinality, pipeline-order, limit-zero, and rate-window
 semantics remain exact to the pinned oracle where the retained Timeless
 storage model applies.
+
+`LQL-P07` adds eighteen successful pipeline-output cases and eight error cases
+for exact, prefix, quoted, special, nested, array, null, empty, unknown, and
+all-field deletion; the `delete`/`del`/`drop`/`rm` aliases; ordered projection
+and filter composition; idempotence; and strict comma/wildcard grammar. A row
+with no fields after deletion is omitted rather than encoded as an empty JSON
+object. The fixture now contains 296 row-query cases, 102 error cases, and 30
+statistics/pipeline cases; the fixture now contains 428 cases in total.

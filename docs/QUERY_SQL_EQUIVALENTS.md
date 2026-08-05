@@ -132,6 +132,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-022`](#sql-log-022-prefix-selected-field-set) | `LQL-F32` | current foundation | row-local exact-string matching over canonical special fields and recursively flattened metadata leaf names selected by a literal prefix; API owns LogsQL filter semantics, rich projection, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-023`](#sql-log-023-utc-day-range-with-explicit-offset) | `LQL-F33` | current foundation | exact UTC time-of-day bracket filtering with an explicit fixed offset over native public timestamps; API owns LogsQL clock/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
 | [`SQL-LOG-024`](#sql-log-024-utc-week-range-with-explicit-offset) | `LQL-F34` | current foundation | exact Sunday-through-Saturday UTC weekday filtering with an explicit fixed offset over native public timestamps; API owns LogsQL weekday/bracket/duration grammar, deterministic default timezone, composition, limits, cancellation, and envelopes |
+| [`SQL-LOG-025`](#sql-log-025-delete-exact-retained-metadata-fields) | `LQL-P07` | current foundation | exact deletion of retained metadata paths with public JSON1; API owns aliases, prefixes, special fields, empty-parent/row pruning, composition, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5674,6 +5675,53 @@ weekly predicate cannot independently narrow an arbitrary absolute timestamp
 window. The public row already contains the necessary timestamp, so an
 extension primitive would not avoid block reads, decode, allocation, copy, or
 row crossing.
+
+### SQL-LOG-025: delete exact retained metadata fields
+
+Bind `:delete_path_1` and `:delete_path_2` as SQLite JSON paths such as
+`$.duration_ms`, `$.nested.drop`, or `$."field,with,punctuation"`. The
+timestamp bounds use the table's native unit: milliseconds for a default
+`timeless_logs` table or microseconds when it was created with
+`timestamp_unit='us'`.
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), deleted AS (
+  SELECT
+    ts,
+    level,
+    message,
+    json_remove(metadata, :delete_path_1, :delete_path_2) AS metadata
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM deleted
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+`json_remove` retains JSON types and treats a missing path as a no-op. Paths
+are case-sensitive, the statement deletes both paths before ordering, and the
+result is a read-only projection: stored metadata is unchanged. To omit the
+public `message`, `level`, or `ts` columns, leave that column out of the final
+`SELECT`; `_msg`, `level`, and `_time` are the Rust API's row names, with
+`_time` formatted from native `ts`.
+
+The Rust API additionally owns case-insensitive `delete`, `del`, `drop`, and
+`rm` grammar; quoted field names; exact deletion of `_msg`, `_time`, and
+`level`; recursive dotted rich-object paths; literal prefix deletion; ordered
+pipeline composition; pruning empty parents and fully empty rows; strict
+errors; work/result/response limits; cancellation; and HTTP envelopes.
+SQLite's `json_remove` deliberately leaves an emptied parent object in place,
+so this recipe is the honest exact-path storage foundation rather than a
+claim of complete LogsQL pipeline equivalence. Prefix deletion and recursive
+pruning happen over already bounded public rows in Rust and do not justify an
+extension primitive.
 
 ## Adding the next recipe
 

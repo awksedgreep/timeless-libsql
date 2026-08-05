@@ -3856,6 +3856,209 @@ async fn session_sixteen_comments_multiline_semicolons_and_locations_reopen() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_delete_pipe_preserves_rich_rows_limits_and_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("delete-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(vec![
+            LogEntry {
+                ts: 1_800_000_000_000_000,
+                level: 3,
+                severity: "warning".into(),
+                message: "delete message".into(),
+                metadata_json: serde_json::json!({
+                    "case": "delete-row",
+                    "delete_group": "delete",
+                    "keep": "kept",
+                    "drop_exact": "gone",
+                    "drop_prefix_a": "one",
+                    "drop_prefix_b": "two",
+                    "Drop_prefix_caps": "caps",
+                    "delete,weird": "comma",
+                    "delete|pipe": "pipe",
+                    "drop,prefix.one": "quoted-prefix",
+                    "star*literal": "literal-star",
+                    "nested": {"drop": "nested-gone", "keep": "nested-kept"},
+                    "array": ["x", 1],
+                    "null_value": null,
+                    "empty_value": ""
+                })
+                .to_string(),
+            },
+            LogEntry {
+                ts: 1_800_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "other row".into(),
+                metadata_json: r#"{"case":"delete-other","delete_group":"other"}"#.into(),
+            },
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+    let app = router(storage.clone());
+
+    let queries = [
+        (
+            "delete_group:=\"delete\" | delete drop_exact, drop_prefix_a | fields case, keep, drop_exact, drop_prefix_a, drop_prefix_b",
+            vec![serde_json::json!({"case":"delete-row","keep":"kept","drop_prefix_b":"two"})],
+        ),
+        (
+            "delete_group:=\"delete\" | drop drop_exact | fields case, drop_exact",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | del drop_exact | fields case, drop_exact",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | rm drop_exact | fields case, drop_exact",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | DELETE drop_exact | fields case, drop_exact",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete drop_prefix* | fields case, drop_prefix_a, drop_prefix_b, Drop_prefix_caps",
+            vec![serde_json::json!({"case":"delete-row","Drop_prefix_caps":"caps"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete \"delete,weird\", \"delete|pipe\", \"star*literal\" | fields case, \"delete,weird\", \"delete|pipe\", \"star*literal\"",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete \"drop,prefix.\"* | fields case, \"drop,prefix.one\", keep",
+            vec![serde_json::json!({"case":"delete-row","keep":"kept"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete absent | fields case, keep",
+            vec![serde_json::json!({"case":"delete-row","keep":"kept"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete _msg, _time, level | fields case, _msg, _time, level",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete *",
+            Vec::new(),
+        ),
+        (
+            "delete_group:=\"delete\" | fields case, keep, drop_exact | delete drop_exact",
+            vec![serde_json::json!({"case":"delete-row","keep":"kept"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete drop_exact | filter drop_exact:* | fields case",
+            Vec::new(),
+        ),
+        (
+            "delete_group:=\"delete\" | delete drop_exact, drop_exact | fields case, drop_exact",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete \"\" | fields case, _msg",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete nested.drop | fields case, nested",
+            vec![serde_json::json!({"case":"delete-row","nested":{"keep":"nested-kept"}})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete nested.d* | fields case, nested",
+            vec![serde_json::json!({"case":"delete-row","nested":{"keep":"nested-kept"}})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete nested | fields case, nested",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+        (
+            "delete_group:=\"delete\" | delete array, null_value, empty_value | fields case, array, null_value, empty_value",
+            vec![serde_json::json!({"case":"delete-row"})],
+        ),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(pipeline_rows(&app, query).await, *expected, "{query:?}");
+    }
+
+    for malformed in [
+        "* | delete",
+        "* | delete drop_exact,",
+        "* | delete , drop_exact",
+        "* | delete drop_exact,,keep",
+        "* | delete drop_exact keep",
+        "* | delete drop_prefix *",
+        "* | delete *drop_prefix",
+        "* | delete drop*prefix",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed:?}");
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], "malformed_logsql", "{malformed:?}: {body}");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "delete_group:=\"delete\" | delete drop_exact | fields case",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "delete_group:=\"delete\" | delete drop_exact | fields case"
+        )
+        .await,
+        [serde_json::json!({"case":"delete-row"})]
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    for (query, expected) in queries {
+        assert_eq!(
+            pipeline_rows(&reopened_app, query).await,
+            expected,
+            "reopened: {query:?}"
+        );
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

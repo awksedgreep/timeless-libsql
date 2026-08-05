@@ -455,6 +455,17 @@ Exit: transformations and statistics remain bounded, typed, cancellable, and
 deterministic where promised. `block_stats` or `blocks_count` becomes `EXT`
 only with direct-user utility and measured storage/decode savings.
 
+`LQL-P07` now has eighteen successful and eight error pinned VictoriaLogs
+cases, failing-then-passing parser and real-extension regressions, all four
+case-insensitive aliases, exact/quoted/prefix/all-field grammar, ordered
+composition, recursive rich-object deletion, atomic array/scalar behavior,
+empty-parent and empty-row pruning, strict errors, work limits, cancellation,
+durability, and reopen. Executable `SQL-LOG-025` proves the exact retained-
+metadata-path foundation through public JSON1. Prefix traversal and pruning
+remain bounded Rust API composition because they occur after the same public
+decode and do not justify an extension primitive. Exact-build evidence and
+the shipped-row closeout remain before advancing to `LQL-P10`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

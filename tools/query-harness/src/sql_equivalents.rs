@@ -352,6 +352,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "label_value" => Value::Text("production".to_owned()),
         "delete_label" => Value::Text("service".to_owned()),
         "delete_path" => Value::Text("$.service".to_owned()),
+        "delete_path_1" => Value::Text("$.deployment.region".to_owned()),
+        "delete_path_2" => Value::Text("$.duration_ms".to_owned()),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
         "output_labels_json" => Value::Text(r#"{"case":"late","service":"api"}"#.to_owned()),
@@ -1627,6 +1629,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let field_prefix_rows = recipe_values("SQL-LOG-022", 0)?;
     let day_range_rows = recipe_values("SQL-LOG-023", 0)?;
     let week_range_rows = recipe_values("SQL-LOG-024", 0)?;
+    let delete_rows = recipe_values("SQL-LOG-025", 0)?;
     if [
         bounded,
         substring,
@@ -1744,6 +1747,25 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if week_range_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
         bail!("SQL-LOG-024 UTC week-range selection changed: {week_range_rows:?}");
+    }
+    let delete_timestamps = delete_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if delete_timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
+        bail!("SQL-LOG-025 exact deletion ordering changed: {delete_rows:?}");
+    }
+    for row in &delete_rows {
+        let Value::Text(metadata) = &row[3] else {
+            bail!("SQL-LOG-025 metadata projection is not JSON text: {row:?}");
+        };
+        let metadata: serde_json::Value = serde_json::from_str(metadata)?;
+        if metadata.pointer("/deployment/region").is_some()
+            || metadata.pointer("/duration_ms").is_some()
+            || metadata.pointer("/service").is_none()
+        {
+            bail!("SQL-LOG-025 exact deletion or retained metadata changed: {metadata}");
+        }
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2555,13 +2577,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 90);
+        assert_eq!(recipes.len(), 91);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            119
+            120
         );
         assert_eq!(
             recipes
@@ -2569,7 +2591,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            125
+            126
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

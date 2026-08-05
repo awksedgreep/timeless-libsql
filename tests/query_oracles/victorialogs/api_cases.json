@@ -134,7 +134,8 @@
     {"case": "week-thu", "_msg": "week Thursday", "week_group": "week", "utc_weekday": "Thu", "utc_time_of_day": "12:00:00.000000"},
     {"case": "week-fri", "_msg": "week Friday", "week_group": "week", "utc_weekday": "Fri", "utc_time_of_day": "12:00:00.000000"},
     {"case": "week-sat", "_msg": "week Saturday", "week_group": "week", "utc_weekday": "Sat", "utc_time_of_day": "12:00:00.000000"},
-    {"case": "comment-hash", "_msg": "hash#inside", "comment_group": "comments", "hash#field": "hash#value"}
+    {"case": "comment-hash", "_msg": "hash#inside", "comment_group": "comments", "hash#field": "hash#value"},
+    {"case": "delete-row", "_msg": "delete message", "delete_group": "delete", "level": "warning", "keep": "kept", "drop_exact": "gone", "drop_prefix_a": "one", "drop_prefix_b": "two", "Drop_prefix_caps": "caps", "delete,weird": "comma", "delete|pipe": "pipe", "drop,prefix.one": "quoted-prefix", "star*literal": "literal-star", "nested": {"drop": "nested-gone", "keep": "nested-kept"}, "array": ["x", 1], "null_value": null, "empty_value": ""}
   ],
   "query_cases": [
     {
@@ -1153,7 +1154,7 @@
         "string-range-numeric", "string-range-boolean", "string-range-array",
         "string-range-object", "string-range-nested", "string-range-service",
         "string-range-message",
-        "page-0", "page-1", "page-2", "page-3", "comment-hash",
+        "page-0", "page-1", "page-2", "page-3", "delete-row", "comment-hash",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
         "word-unicode-boundary", "word-unicode", "word-unicode-case"
@@ -2108,6 +2109,96 @@
         "rate": "0.3",
         "rate_sum": "300239975158033.6"
       }]
+    },
+    {
+      "id": "LQL-P07-delete-exact-list",
+      "query": "delete_group:=\"delete\" | delete drop_exact, drop_prefix_a | fields case, keep, drop_exact, drop_prefix_a, drop_prefix_b",
+      "expected_rows": [{"case": "delete-row", "keep": "kept", "drop_prefix_b": "two"}]
+    },
+    {
+      "id": "LQL-P07-drop-alias",
+      "query": "delete_group:=\"delete\" | drop drop_exact | fields case, drop_exact",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-del-alias",
+      "query": "delete_group:=\"delete\" | del drop_exact | fields case, drop_exact",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-rm-alias",
+      "query": "delete_group:=\"delete\" | rm drop_exact | fields case, drop_exact",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-command-is-case-insensitive",
+      "query": "delete_group:=\"delete\" | DELETE drop_exact | fields case, drop_exact",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-prefix-is-literal-and-case-sensitive",
+      "query": "delete_group:=\"delete\" | delete drop_prefix* | fields case, drop_prefix_a, drop_prefix_b, Drop_prefix_caps",
+      "expected_rows": [{"case": "delete-row", "Drop_prefix_caps": "caps"}]
+    },
+    {
+      "id": "LQL-P07-quoted-exact-field-names",
+      "query": "delete_group:=\"delete\" | delete \"delete,weird\", \"delete|pipe\", \"star*literal\" | fields case, \"delete,weird\", \"delete|pipe\", \"star*literal\"",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-quoted-prefix",
+      "query": "delete_group:=\"delete\" | delete \"drop,prefix.\"* | fields case, \"drop,prefix.one\", keep",
+      "expected_rows": [{"case": "delete-row", "keep": "kept"}]
+    },
+    {
+      "id": "LQL-P07-unknown-field-is-noop",
+      "query": "delete_group:=\"delete\" | delete absent | fields case, keep",
+      "expected_rows": [{"case": "delete-row", "keep": "kept"}]
+    },
+    {
+      "id": "LQL-P07-special-fields",
+      "query": "delete_group:=\"delete\" | delete _msg, _time, level | fields case, _msg, _time, level",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-delete-all-fields",
+      "query": "delete_group:=\"delete\" | delete *",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P07-delete-after-projection",
+      "query": "delete_group:=\"delete\" | fields case, keep, drop_exact | delete drop_exact",
+      "expected_rows": [{"case": "delete-row", "keep": "kept"}]
+    },
+    {
+      "id": "LQL-P07-later-filter-observes-deletion",
+      "query": "delete_group:=\"delete\" | delete drop_exact | filter drop_exact:* | fields case",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P07-duplicate-field-is-idempotent",
+      "query": "delete_group:=\"delete\" | delete drop_exact, drop_exact | fields case, drop_exact",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-empty-field-alias-deletes-message",
+      "query": "delete_group:=\"delete\" | delete \"\" | fields case, _msg",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-dotted-nested-leaf",
+      "query": "delete_group:=\"delete\" | delete nested.drop | fields case, nested.drop, nested.keep",
+      "expected_rows": [{"case": "delete-row", "nested.keep": "nested-kept"}]
+    },
+    {
+      "id": "LQL-P07-retained-array-field",
+      "query": "delete_group:=\"delete\" | delete array | fields case, array",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P07-null-and-empty-fields",
+      "query": "delete_group:=\"delete\" | delete null_value, empty_value | fields case, null_value, empty_value",
+      "expected_rows": [{"case": "delete-row"}]
     }
   ],
   "error_cases": [
@@ -2765,6 +2856,62 @@
     {
       "id": "LQL-F40-comment-removes-required-pipe-argument",
       "query": "case:=\"word-exact\" | fields # missing field",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-requires-a-field",
+      "query": "* | delete",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-rejects-trailing-comma",
+      "query": "* | delete drop_exact,",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-rejects-leading-comma",
+      "query": "* | delete , drop_exact",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-rejects-empty-middle-field",
+      "query": "* | delete drop_exact,,keep",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-requires-commas",
+      "query": "* | delete drop_exact keep",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-rejects-separated-wildcard",
+      "query": "* | delete drop_prefix *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-rejects-leading-wildcard",
+      "query": "* | delete *drop_prefix",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P07-delete-rejects-embedded-wildcard",
+      "query": "* | delete drop*prefix",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -141,6 +141,7 @@ pub(crate) fn execute(
                 cancelled,
             )?,
             PipelineOp::Project(fields) => project(rows, fields, cancelled)?,
+            PipelineOp::Delete(fields) => delete_fields(rows, fields, cancelled)?,
             PipelineOp::Filter(predicate) => filter(rows, predicate, timestamp_unit, cancelled)?,
             PipelineOp::Stats(expressions) => vec![Value::Object(stats(
                 &rows,
@@ -304,6 +305,134 @@ fn project(
             Ok(Value::Object(projected))
         })
         .collect()
+}
+
+fn delete_fields(
+    rows: Vec<Value>,
+    fields: &[PipelineField],
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let mut output = Vec::with_capacity(rows.len());
+    for (index, mut row) in rows.into_iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        let object = row
+            .as_object_mut()
+            .ok_or_else(|| "LogsQL pipeline row is not a JSON object".to_string())?;
+        for field in fields {
+            ensure_active(cancelled)?;
+            match field {
+                PipelineField::All => object.clear(),
+                PipelineField::Exact { path, .. } => {
+                    delete_exact_path(object, path, cancelled)?;
+                }
+                PipelineField::Prefix { prefix } => {
+                    delete_field_prefix(object, prefix, cancelled)?;
+                }
+            }
+            if object.is_empty() {
+                break;
+            }
+        }
+        // VictoriaLogs omits a result row after every field has been deleted.
+        if !object.is_empty() {
+            output.push(row);
+        }
+    }
+    Ok(output)
+}
+
+fn delete_exact_path(
+    object: &mut Map<String, Value>,
+    path: &[String],
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    ensure_active(cancelled)?;
+    let Some((first, tail)) = path.split_first() else {
+        return Ok(false);
+    };
+    if tail.is_empty() {
+        return Ok(object.remove(first).is_some());
+    }
+    let (removed, prune_parent) = match object.get_mut(first) {
+        Some(Value::Object(child)) => {
+            let removed = delete_exact_path(child, tail, cancelled)?;
+            (removed, removed && child.is_empty())
+        }
+        // Retained arrays and scalars are atomic fields. Deletion never shifts
+        // array element indexes or mutates stored rich values.
+        Some(_) | None => (false, false),
+    };
+    if prune_parent {
+        object.remove(first);
+    }
+    Ok(removed)
+}
+
+fn delete_field_prefix(
+    object: &mut Map<String, Value>,
+    prefix: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let mut path = String::new();
+    let mut visits = 0usize;
+    let mut was_cancelled = false;
+    object.retain(|name, value| {
+        if was_cancelled {
+            return true;
+        }
+        let original_len = path.len();
+        path.push_str(name);
+        let keep = retain_nonmatching_prefix(
+            value,
+            &mut path,
+            prefix,
+            cancelled,
+            &mut visits,
+            &mut was_cancelled,
+        );
+        path.truncate(original_len);
+        keep
+    });
+    if was_cancelled {
+        return ensure_active(cancelled);
+    }
+    Ok(())
+}
+
+fn retain_nonmatching_prefix(
+    value: &mut Value,
+    path: &mut String,
+    prefix: &str,
+    cancelled: &AtomicBool,
+    visits: &mut usize,
+    was_cancelled: &mut bool,
+) -> bool {
+    *visits = visits.saturating_add(1);
+    if *visits & 0x3f == 0 && cancelled.load(AtomicOrdering::Relaxed) {
+        *was_cancelled = true;
+        return true;
+    }
+    if path.starts_with(prefix) {
+        return false;
+    }
+    let Value::Object(object) = value else {
+        return true;
+    };
+    let had_children = !object.is_empty();
+    object.retain(|name, child| {
+        if *was_cancelled {
+            return true;
+        }
+        let original_len = path.len();
+        if !path.is_empty() {
+            path.push('.');
+        }
+        path.push_str(name);
+        let keep = retain_nonmatching_prefix(child, path, prefix, cancelled, visits, was_cancelled);
+        path.truncate(original_len);
+        keep
+    });
+    !(had_children && object.is_empty())
 }
 
 fn filter(
@@ -1509,6 +1638,19 @@ mod tests {
                 "LogsQL pipeline cancelled"
             );
         }
+    }
+
+    #[test]
+    fn delete_prefix_observes_cancellation_during_recursive_walk() {
+        let mut object = Map::new();
+        for index in 0..128 {
+            object.insert(format!("drop.{index:03}"), json!(index));
+        }
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            delete_field_prefix(&mut object, "drop.", &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
     }
 
     #[test]
