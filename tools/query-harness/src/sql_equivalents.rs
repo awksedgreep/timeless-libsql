@@ -370,6 +370,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "message_prefix" => Value::Text("request".to_owned()),
         "message_value_1" => Value::Text("request timeout".to_owned()),
         "message_value_2" => Value::Text("request ok".to_owned()),
+        "indexed_value_1" => Value::Text("web-1".to_owned()),
+        "indexed_value_2" => Value::Text("web-2".to_owned()),
         "field_path" => Value::Text("$.deployment.region".to_owned()),
         "field_prefix" => Value::Text("us-".to_owned()),
         "field_value_1" => Value::Text("us-east".to_owned()),
@@ -1579,6 +1581,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let multi_exact_rows = [
         recipe_values("SQL-LOG-015", 0)?,
         recipe_values("SQL-LOG-015", 1)?,
+        recipe_values("SQL-LOG-015", 2)?,
     ];
     if [
         bounded,
@@ -1854,6 +1857,44 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             log_stats.get("index_bytes")
         );
     }
+
+    connection.execute(
+        "INSERT INTO logs(ts,level,message,metadata) VALUES(?1,?2,?3,?4)",
+        params![
+            3000_i64,
+            "notice",
+            "newest nonmatching row",
+            r#"{"deployment":{"region":"elsewhere"}}"#
+        ],
+    )?;
+    connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
+    for (identifier, statement_index) in [("SQL-LOG-014", 1), ("SQL-LOG-015", 2)] {
+        let sql = recipe_sql(identifier, statement_index)?;
+        let mut statement = connection
+            .prepare(&sql)
+            .with_context(|| format!("prepare {identifier} post-filter limit regression"))?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("documented SQL parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "end_ms" => Value::Integer(3000),
+                "limit" => Value::Integer(1),
+                _ => parameter(identifier, name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let timestamps = statement
+            .raw_query()
+            .mapped(|row| row.get::<_, i64>(0))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if timestamps != [2000] {
+            bail!(
+                "{identifier} applied the result limit before retained-field filtering: {timestamps:?}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1901,7 +1942,7 @@ mod tests {
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            108
+            109
         );
         assert_eq!(
             recipes
@@ -1909,7 +1950,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            114
+            115
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

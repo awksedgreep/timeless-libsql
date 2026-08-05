@@ -4941,8 +4941,6 @@ WITH bounded AS MATERIALIZED (
   WHERE ts >= :start_ms
     AND ts <= :end_ms
     AND max_work_entries = :max_work_entries
-  ORDER BY ts DESC
-  LIMIT :limit
 ), projected AS (
   SELECT *,
     CASE
@@ -4958,7 +4956,8 @@ SELECT ts, level, message, metadata
 FROM projected
 WHERE substr(field_text, 1, length(:field_prefix))
       = :field_prefix COLLATE BINARY
-ORDER BY ts DESC;
+ORDER BY ts DESC
+LIMIT :limit;
 ```
 
 The first statement is exact for the default message field, including an
@@ -4988,6 +4987,21 @@ ORDER BY ts DESC
 LIMIT :limit;
 ```
 
+If the selected value is a declared string-only `index_keys` column, use the
+public hidden column directly. SQLite/libSQL can plan the `IN` values as
+repeated equality scans over the existing posting index:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND host COLLATE BINARY IN (:indexed_value_1, :indexed_value_2)
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
 For a dynamic metadata path known to contain retained strings, project
 missing and JSON null to the same empty text used by LogsQL before applying
 the bound membership list:
@@ -4999,8 +5013,6 @@ WITH bounded AS MATERIALIZED (
   WHERE ts >= :start_ms
     AND ts <= :end_ms
     AND max_work_entries = :max_work_entries
-  ORDER BY ts DESC
-  LIMIT :limit
 ), projected AS (
   SELECT *,
     CASE
@@ -5015,7 +5027,8 @@ WITH bounded AS MATERIALIZED (
 SELECT ts, level, message, metadata
 FROM projected
 WHERE field_text COLLATE BINARY IN (:field_value_1, :field_value_2)
-ORDER BY ts DESC;
+ORDER BY ts DESC
+LIMIT :limit;
 ```
 
 Generate one placeholder per caller-supplied value and bind it; never splice
@@ -5032,9 +5045,9 @@ compact projection. The Rust Logs API therefore parses the static `in()`
 list, deduplicates it within the request's bounded query text, projects all
 retained rich types without mutating storage, and owns `in()`, wildcard,
 logical/pipeline, limit, cancellation, and error semantics. Subquery
-membership is the separate deferred `LQL-F38` row. Both recipes use bounded
-public rows and ordinary SQL; neither establishes a storage-saving reason for
-a new extension primitive.
+membership is the separate deferred `LQL-F38` row. The declared string-key
+form reuses the existing public posting index; the other forms use bounded
+public rows. No new extension primitive is required.
 
 ## Adding the next recipe
 

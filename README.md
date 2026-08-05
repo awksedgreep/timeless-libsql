@@ -631,13 +631,17 @@ errors, plus VictoriaMetrics plural histogram quantiles over cumulative and
 `vmrange` buckets with one shared bucket read; direct SQL users retain
 the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`,
 `SQL-MQL-009` through `SQL-MQL-010`, and `SQL-MQL-012` recipes. The LogsQL API
-includes the four VictoriaLogs pattern anchors and all seven typed placeholders
-over bounded public rows while retaining Timeless's rich JSON types; this
-API-owned grammar intentionally makes no inexact `LIKE`/`GLOB` equivalence
-claim. The extension exposes general SQLite/libSQL primitives and receives a new query
-vector only when measurements prove that storage-aware pushdown materially
-avoids reads, decode, copies, or row crossings. Saved queries, subscriptions,
-rules, dashboards, and control-plane state remain higher-order library work.
+includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
+exact-prefix matching, and static multi-exact `in(...)` membership over bounded
+public rows while retaining Timeless's rich JSON types. Patterns intentionally
+make no inexact `LIKE`/`GLOB` equivalence claim; direct SQLite/libSQL users have
+executable exact-prefix and parameterized-membership recipes in `SQL-LOG-014`
+and `SQL-LOG-015`, including the existing public posting index for declared
+string-only keys. The extension exposes general SQLite/libSQL primitives and
+receives a new query vector only when measurements prove that storage-aware
+pushdown materially avoids reads, decode, copies, or row crossings. Saved
+queries, subscriptions, rules, dashboards, and control-plane state remain
+higher-order library work.
 
 ## How it works
 

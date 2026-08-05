@@ -3109,3 +3109,51 @@ pass locally. No extension primitive, private table access, storage format,
 batching, compression, index, rollup, retention, transaction, migration,
 maintenance, or public batch/SQL contract changed. No CI workflow was
 invoked.
+
+## Session 16 LogsQL P2 progress: static multi-exact membership
+
+The checked-in
+[`2026-08-05_session16_lql_f17_multi_exact.json`](evidence/2026-08-05_session16_lql_f17_multi_exact.json)
+was captured from exact extension, metrics-server, and logs-server build
+`e782043dc662111f4f6f68b001da64fe9b3a7f00`. It closes `LQL-F17` with
+case-sensitive static membership over messages and nested typed fields.
+Correctness separately pins quoted/unquoted values, commas and pipes inside
+quotes, literal versus standalone wildcard behavior, case-insensitive
+function names, empty and duplicate lists, rich textual projection without
+storage mutation, logical/pipeline composition, explicit subquery deferral,
+malformed errors, limits, cancellation, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| two message values, indexed host | 2 | 336 | 1.897 | 2.077 | 2.195 | 1 | 1,024 | 132,676 | 128 |
+| two message values, full fixture | 2 | 337 | 13.726 | 15.273 | 19.808 | 4 | 8,192 | 1,088,919 | 8,192 |
+| two nested numeric values, indexed host | 51 | 8,699 | 1.971 | 2.235 | 2.338 | 1 | 1,024 | 132,676 | 128 |
+| two nested numeric values, full fixture | 3,277 | 569,896 | 21.488 | 22.864 | 24.095 | 4 | 8,192 | 1,088,919 | 8,192 |
+
+The two-value message form is 7.2% below the same-run exact filter at narrow
+p95 and 0.1% below it at wide p95, with byte-identical storage work. Its wide
+p95 is 36.2% below word matching because it serializes two rows instead of
+8,192, not because it prunes another block. Nested numeric membership reads
+the same candidates and payload but emits 40% of the fixture; its 10.7%
+increase over same-run one-value exact-prefix wide p95 is likewise output and
+predicate work. Generic rich membership cannot soundly use the string-only
+posting index without losing numeric, boolean, array, object, missing, or null
+matches. `SQL-LOG-015` exposes existing hidden-column `IN` pruning to direct
+users who declare a string-only index key and ordinary bounded message/text
+recipes for the general case. No new extension primitive is justified.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+10.954 ms and the explicit durability barrier took 20.493 ms. Logs storage
+remained four raw blocks, 1,088,919 logical bytes, and 1,190,496 physical
+database/WAL/SHM bytes. Logs RSS HWM was 65,780 KiB, 132 KiB below the prior
+capture; metrics HWM was 52,820 KiB, 864 KiB lower. Both are whole-process
+variations, and metrics storage remained byte-identical.
+
+All 528 pinned Prometheus 3.13.2 cases, all 184 pinned VictoriaMetrics 1.148.0
+cases, and all 131 pinned VictoriaLogs 1.52.0 cases pass. The complete 19-test
+logs real-extension suite, 42 logs library tests, both complete Rust
+workspaces, Clippy with warnings denied, formatting, the 28-test Rust query
+harness, documentation contracts, and all 81 SQL recipes (115 statements)
+pass locally. No private table, storage format, batching, compression, index,
+rollup, retention, transaction, migration, maintenance, or public batch/SQL
+contract changed. No CI workflow was invoked.

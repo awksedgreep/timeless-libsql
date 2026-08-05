@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F24 LQL-F29 LQL-F31 LQL-F39 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P08 LQL-P09 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -344,6 +344,16 @@ still crossed the same 128/8,192 public candidate rows and read the same
 bytes and whole-process HWM is 65,912KiB. `QSF-115` records that the selective
 result size—not storage pushdown—explains the lower typed-prefix latency and
 keeps the operation in the Rust API.
+
+Session 16 static multi-exact membership also retains that public plan.
+Two-value message membership measured 2.077ms/15.273ms narrow/wide p95 while
+returning two rows; nested numeric membership measured 2.235ms/22.864ms while
+returning 51/3,277 rows. Both use the same one-block/1,024-entry or four-block/
+8,192-entry reads as the other filters. Physical storage remains exactly
+1,190,496 bytes and whole-process HWM is 65,780KiB. `SQL-LOG-015` exposes
+ordinary parameterized `IN` and existing hidden-column pruning for declared
+string-only index keys; `QSF-118` records why rich typed membership remains
+bounded Rust composition rather than a new extension primitive.
 
 The measured follow-up work is organized in
 [`LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md`](../../../LOGS_MIXED_WORKLOAD_PERFORMANCE_PLAN.md).
