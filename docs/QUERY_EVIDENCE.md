@@ -3409,3 +3409,59 @@ documentation contracts, and all 84 SQL recipes (119 statements) pass
 locally. No private table, extension primitive, storage format, batching,
 compression, index, rollup, retention, transaction, migration, maintenance,
 or public batch/SQL contract changed. No CI workflow was invoked.
+
+## Session 16 LogsQL P2 progress: IPv6 range filtering
+
+The checked-in
+[`2026-08-05_session16_lql_f26_ipv6_range.json`](evidence/2026-08-05_session16_lql_f26_ipv6_range.json)
+was captured from exact extension, metrics-server, and logs-server build
+`756ec7068ca25aef82ea6b1f7d6aa6f4c45b0c97`. It closes `LQL-F26` with
+inclusive unsigned 16-byte IP matching over exact retained strings.
+Correctness separately pins compressed and uppercase spelling, one address,
+CIDR and explicit bounds, network/broadcast edges, host-bit normalization,
+`/0`, inverted ranges, IPv4-mapped addresses and 128-bit prefix semantics,
+message/arbitrary fields, aliases, logical/pipeline composition,
+missing/null/non-string/invalid/embedded non-matches, strict errors, work
+limits, cancellation, durability, and reopen.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `client_ipv6:ipv6_range(2001:db8::/115)`, indexed host | 128 | 31,733 | 2.993 | 3.290 | 4.035 | 1 | 1,024 | 212,226 | 128 |
+| `client_ipv6:ipv6_range(2001:db8::/115)`, full fixture | 8,192 | 2,061,359 | 38.217 | 39.210 | 39.368 | 4 | 8,192 | 1,725,639 | 8,192 |
+| explicit `2001:db8::` through `2001:db8::1fff`, indexed host | 128 | 31,733 | 3.016 | 3.961 | 4.220 | 1 | 1,024 | 212,226 | 128 |
+| explicit `2001:db8::` through `2001:db8::1fff`, full fixture | 8,192 | 2,061,359 | 38.043 | 40.015 | 41.268 | 4 | 8,192 | 1,725,639 | 8,192 |
+
+CIDR p95 is 5.6% above the same-run word query at narrow cardinality and 6.1%
+above it over the full fixture. Explicit-bound p95 is 27.1%/8.3% above the
+same word comparison; the narrow run retained one 4.220 ms p99/max tail.
+Every equal-cardinality shape reads the same public blocks, entries, and
+payload bytes and emits the same response bytes. The difference is bounded
+16-byte parsing and comparison after decode, not storage amplification.
+
+Portable SQLite has no built-in IPv6 parser, so no copyable statement over the
+current exact-string storage can honestly promise LogsQL equivalence. Users
+with an application-owned canonical packed-address column can compare it in
+ordinary SQL, but that is a different stored schema. The Rust API therefore
+owns address/CIDR parsing, IPv4 mapping, normalization, composition, limits,
+cancellation, and errors. A new extension scalar would not remove any measured
+storage read, decode, allocation, copy, or row crossing, so it is rejected by
+the documented primitive gate.
+
+All 8,192 entries completed durably with zero queued work. Admission took
+12.689 ms and the explicit durability barrier took 34.611 ms. Adding exact
+`client_ipv6` to every evidence row increased logical payload and wide
+response size by 249,584 bytes; logs storage is four raw blocks, 1,725,639
+logical bytes, and 1,829,096 physical database/WAL/SHM bytes. Logs RSS HWM was
+82,484 KiB, 7,284 KiB above LQL-F25 after four additional full-response shapes
+and wider rows; metrics HWM was 51,804 KiB, 348 KiB lower. Both are retained
+as whole-process variation, and metrics storage is otherwise unchanged.
+
+The unchanged 528-case Prometheus 3.13.2 and 184-case VictoriaMetrics 1.148.0
+fixtures remain covered by their existing product regressions, and all 240
+pinned VictoriaLogs 1.52.0 cases pass live. The complete 21-test logs
+real-extension suite, 49 logs library tests, both complete Rust workspaces,
+Clippy with warnings denied, formatting, the 29-test Rust query harness,
+documentation contracts, and all 84 SQL recipes (119 statements) pass
+locally. No private table, extension primitive, storage format, batching,
+compression, index, rollup, retention, transaction, migration, maintenance,
+or public batch/SQL contract changed. No CI workflow was invoked.

@@ -364,7 +364,10 @@ IPv4-mapped semantics, failing-then-passing parser and real-extension
 regressions, exact retained-string parsing, strict grammar, logical/pipeline
 composition, work limits, cancellation, durability, and reopen. Portable
 SQLite has no built-in IPv6 parser, so no SQL or extension surface is claimed;
-exact-build measurement remains the final row exit criterion.
+exact-build evidence at commit
+`756ec7068ca25aef82ea6b1f7d6aa6f4c45b0c97` records narrow/wide CIDR and
+explicit-bound matching with byte-identical same-run public reads and closes
+the row without an extension primitive.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 
