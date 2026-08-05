@@ -494,6 +494,41 @@ fn split_top_level(value: &str, delimiter: char) -> Result<Vec<String>, LogsqlEr
     Ok(output)
 }
 
+fn contains_top_level(value: &str, needle: char) -> Result<bool, LogsqlError> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut groups = 0usize;
+    for character in value.chars() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' | '[' => groups = groups.saturating_add(1),
+            ')' | ']' => {
+                groups = groups
+                    .checked_sub(1)
+                    .ok_or_else(|| LogsqlError::malformed("unmatched LogsQL closing group"))?
+            }
+            _ if character == needle && groups == 0 => return Ok(true),
+            _ => {}
+        }
+    }
+    if quote.is_some() || groups != 0 {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL function expression",
+        ));
+    }
+    Ok(false)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct StatsExpression {
     pub kind: StatsKind,
@@ -654,6 +689,10 @@ pub fn parse_at(
                         )));
                     }
                     if let Some(exact) = parse_exact_filter(&token)? {
+                        append_predicate(&mut spec, exact.predicate(LogField::Message));
+                        continue;
+                    }
+                    if let Some(exact) = parse_multi_exact_filter(&token)? {
                         append_predicate(&mut spec, exact.predicate(LogField::Message));
                         continue;
                     }
@@ -874,6 +913,86 @@ fn parse_exact_filter(token: &str) -> Result<Option<ParsedExactFilter>, LogsqlEr
         ));
     }
     parse_exact_argument(inner, "LogsQL exact() filter").map(Some)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParsedMultiExactFilter {
+    Values(Vec<String>),
+    Noop,
+}
+
+impl ParsedMultiExactFilter {
+    fn predicate(self, field: LogField) -> LogPredicate {
+        match self {
+            Self::Values(values) => LogPredicate::TextualIn { field, values },
+            Self::Noop => LogPredicate::True,
+        }
+    }
+}
+
+fn parse_multi_exact_filter(token: &str) -> Result<Option<ParsedMultiExactFilter>, LogsqlError> {
+    if token.eq_ignore_ascii_case("in") {
+        return Err(LogsqlError::malformed(
+            "LogsQL in filter requires parentheses",
+        ));
+    }
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    if !token[..open].eq_ignore_ascii_case("in") {
+        return Ok(None);
+    }
+    let inner = token[open..]
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| LogsqlError::malformed("unterminated LogsQL in() filter"))?;
+    if contains_top_level(inner, '|')? {
+        return Err(LogsqlError::unsupported(
+            "LogsQL in(subquery) is owned by deferred LQL-F38 and is not supported",
+        ));
+    }
+
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Ok(Some(ParsedMultiExactFilter::Values(Vec::new())));
+    }
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    if inner.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL in() cannot start with an empty value",
+        ));
+    }
+
+    let mut values = Vec::new();
+    let mut wildcard = false;
+    for argument in split_top_level(inner, ',')? {
+        let argument = argument.trim();
+        if argument == "*" {
+            wildcard = true;
+            continue;
+        }
+        let value = if let Some(value) = quoted_value(argument)? {
+            value
+        } else {
+            if argument.is_empty()
+                || argument.chars().any(|character| {
+                    character.is_whitespace() || matches!(character, '*' | '(' | ')')
+                })
+            {
+                return Err(LogsqlError::malformed(format!(
+                    "invalid LogsQL in() value {argument:?}"
+                )));
+            }
+            argument.to_owned()
+        };
+        values.push(value);
+    }
+    if wildcard {
+        return Ok(Some(ParsedMultiExactFilter::Noop));
+    }
+    values.sort_unstable();
+    values.dedup();
+    Ok(Some(ParsedMultiExactFilter::Values(values)))
 }
 
 fn parse_exact_prefix_argument(value: &str) -> Result<Option<String>, LogsqlError> {
@@ -1450,6 +1569,9 @@ fn compile_field_filter(
     if let Some(exact) = parse_exact_filter(value)? {
         return Ok(exact.predicate(field.clone()));
     }
+    if let Some(exact) = parse_multi_exact_filter(value)? {
+        return Ok(exact.predicate(field.clone()));
+    }
     if let Some(matcher) = parse_pattern_match_filter(value)? {
         return Ok(LogPredicate::PatternMatch {
             field: field.clone(),
@@ -1496,6 +1618,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
         });
     }
     if let Some(exact) = parse_exact_filter(atom)? {
+        return Ok(exact.predicate(field.clone()));
+    }
+    if let Some(exact) = parse_multi_exact_filter(atom)? {
         return Ok(exact.predicate(field.clone()));
     }
     if let Some(predicate) = parse_case_insensitive_filter(atom)? {
@@ -1739,6 +1864,7 @@ fn pipeline_segments(input: &str) -> Result<Vec<&str>, LogsqlError> {
     let mut start = 0usize;
     let mut quote = None;
     let mut escaped = false;
+    let mut groups = 0usize;
     for (index, character) in input.char_indices() {
         if let Some(delimiter) = quote {
             if escaped {
@@ -1752,13 +1878,24 @@ fn pipeline_segments(input: &str) -> Result<Vec<&str>, LogsqlError> {
         }
         if matches!(character, '"' | '\'' | '`') {
             quote = Some(character);
-        } else if character == '|' {
+        } else if matches!(character, '(' | '[') {
+            groups = groups.saturating_add(1);
+        } else if matches!(character, ')' | ']') {
+            groups = groups
+                .checked_sub(1)
+                .ok_or_else(|| LogsqlError::malformed("unmatched LogsQL closing group"))?;
+        } else if character == '|' && groups == 0 {
             segments.push(&input[start..index]);
             start = index + character.len_utf8();
         }
     }
     if quote.is_some() {
         return Err(LogsqlError::malformed("unterminated LogsQL quoted string"));
+    }
+    if groups != 0 {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL parenthesized expression",
+        ));
     }
     segments.push(&input[start..]);
     Ok(segments)
@@ -1943,6 +2080,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
             return Ok(());
         }
     } else if let Some(exact) = parse_exact_filter(value)? {
+        append_predicate(spec, exact.predicate(log_field(&path)));
+        return Ok(());
+    } else if let Some(exact) = parse_multi_exact_filter(value)? {
         append_predicate(spec, exact.predicate(log_field(&path)));
         return Ok(());
     }
@@ -2861,6 +3001,40 @@ mod tests {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
         }
+    }
+
+    #[test]
+    fn session_sixteen_multi_exact_grammar_is_strict_and_composable() {
+        for query in [
+            r#"in(alpha, "ssh: login fail")"#,
+            r#"in("left|right")"#,
+            r#"case:in(word-exact, "phrase-exact")"#,
+            r#"case:In(word-exact, word-case)"#,
+            r#"probe:in("", 0, false, value)"#,
+            r#"case:in()"#,
+            r#"missing:in(*)"#,
+            r#"case:in(word-exact,)"#,
+            r#"missing:in(alpha, *)"#,
+            r#"case:in(word-exact, word-case) AND NOT case:in(word-case)"#,
+            r#"* | filter case:in(word-exact, word-case)"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        for malformed in ["in", "in(", "in(,)", "in(alpha beta)", "in(alpha*)"] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+
+        let subquery = parse_at(
+            "case:in(word | fields case)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(subquery.kind, LogsqlErrorKind::Unsupported);
+        assert!(subquery.message.contains("subquery"));
     }
 
     #[test]

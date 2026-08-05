@@ -312,7 +312,12 @@ work limits, executable `SQL-LOG-014`, and real-extension durability/reopen
 coverage. Exact-build evidence at commit
 `e169a9d310890f72e07f98b002e8cefea84eaeb7` records narrow/wide message and
 typed-field costs with storage work unchanged. The remaining rows continue in
-their listed order.
+their listed order. `LQL-F17` implementation is in progress with 17 pinned
+static-list cases, exact rich textual membership, empty/duplicate/trailing-
+comma/wildcard behavior, explicit subquery deferral, logical/pipeline
+composition, work limits, cancellation, executable `SQL-LOG-015`, and real-
+extension durability/reopen coverage. Exact-build performance evidence and
+the final shipped disposition remain its exit gate.
 
 ### Session 17: LogsQL P2 pipelines and query behavior
 

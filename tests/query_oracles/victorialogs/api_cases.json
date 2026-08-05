@@ -388,6 +388,96 @@
       "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
     },
     {
+      "id": "LQL-F17-unqualified-static-values",
+      "query": "in(alpha, \"ssh: login fail\")",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "word-exact"]
+    },
+    {
+      "id": "LQL-F17-field-scoped-quoted-and-unquoted-values",
+      "query": "case:in(word-exact, \"phrase-exact\")",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "word-exact"]
+    },
+    {
+      "id": "LQL-F17-quoted-comma-is-one-value",
+      "query": "in(\"time=10:20:30,123\")",
+      "status": 200,
+      "expected_cases": ["pattern-time"]
+    },
+    {
+      "id": "LQL-F17-quoted-pipe-is-one-value",
+      "query": "in(\"left|right\")",
+      "status": 200,
+      "expected_cases": ["quote-pipe"]
+    },
+    {
+      "id": "LQL-F17-quoted-star-is-a-literal-value",
+      "query": "case:in(\"*\", word-exact)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F17-function-name-is-case-insensitive",
+      "query": "case:In(word-exact, word-case)",
+      "status": 200,
+      "expected_cases": ["word-case", "word-exact"]
+    },
+    {
+      "id": "LQL-F17-numeric-textual-projection",
+      "query": "numeric_group:=\"numeric\" n:in(-2, 2.5, \"3\", 9007199254740993)",
+      "status": 200,
+      "expected_cases": ["numeric-negative", "numeric-decimal", "numeric-string", "numeric-huge"]
+    },
+    {
+      "id": "LQL-F17-empty-and-rich-textual-projection",
+      "query": "state_group:=\"state\" probe:in(\"\", 0, false, value)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F17-duplicate-values-do-not-duplicate-results",
+      "query": "case:in(word-exact, word-exact, phrase-exact)",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "word-exact"]
+    },
+    {
+      "id": "LQL-F17-empty-list-matches-nothing",
+      "query": "case:in()",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F17-star-is-a-field-independent-no-op",
+      "query": "state_group:=\"state\" never_present:in(*)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F17-trailing-comma-is-accepted",
+      "query": "case:in(word-exact,)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F17-standalone-wildcard-among-values-is-a-no-op",
+      "query": "state_group:=\"state\" never_present:in(alpha, *)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F17-logical-composition",
+      "query": "case:in(word-exact, word-case) AND NOT case:in(word-case)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F17-pipeline-composition",
+      "query": "state_group:=\"state\" | filter case:in(state-string, state-zero)",
+      "status": 200,
+      "expected_cases": ["state-string", "state-zero"]
+    },
+    {
       "id": "LQL-F18-empty-field",
       "query": "state_group:=\"state\" probe:\"\"",
       "status": 200,
@@ -865,6 +955,20 @@
     {
       "id": "LQL-F15-unquoted-leading-operator-is-invalid",
       "query": "==foo",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F17-leading-empty-value-is-invalid",
+      "query": "in(,alpha)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F17-unseparated-values-are-invalid",
+      "query": "in(alpha beta)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

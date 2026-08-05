@@ -47,9 +47,11 @@ windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
 closed native-unit edges; all eight exact severities; service and arbitrary
 typed metadata equality; message word, phrase, word-prefix, phrase-prefix,
 case-sensitive substring, bounded RE2-compatible regexp, case-insensitive,
-full-message exact, start-anchored exact-prefix, and VictoriaLogs-compatible any/full/prefix/suffix pattern
-filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`, `<DATE>`, `<DATETIME>`, and
-`<W>` placeholders and case-insensitive function names; time sort, limit, and
+full-message exact, start-anchored exact-prefix, and static
+`in(v1, ..., vN)` exact membership; VictoriaLogs-compatible
+any/full/prefix/suffix pattern filters with `<N>`, `<UUID>`, `<IP4>`, `<TIME>`,
+`<DATE>`, `<DATETIME>`, and `<W>` placeholders and case-insensitive function
+names; time sort, limit, and
 offset aliases; and exact count with
 an optional output alias. `NOT` binds before `AND`, which binds before `OR`;
 parentheses and field-scoped groups override precedence.
@@ -107,6 +109,16 @@ prefix matches every value. The stored metadata type and bytes are unchanged.
 The direct SQL cookbook gives exact message/text-field forms; full rich-value
 projection, LogsQL composition, limits, cancellation, and error envelopes
 remain API behavior.
+
+Static multi-exact filters accept quoted and unquoted values in `in(...)`,
+sort and deduplicate the request-owned list, and apply case-sensitive full-
+value membership to the same rich textual projection. `in()` matches nothing;
+a trailing comma is accepted; quoted `"*"` is literal; and any standalone
+unquoted `*` argument makes the filter a field-independent no-op, matching the
+pinned VictoriaLogs behavior. A top-level pipe inside `in(...)` is rejected as
+the separately deferred subquery capability instead of being mistaken for a
+static value or outer pipeline. `SQL-LOG-015` gives direct SQLite/libSQL users
+the parameterized message and retained-text equivalents.
 
 Double- and single-quoted strings decode VictoriaLogs-compatible Go escapes,
 backtick strings are raw, and quoted field identifiers select one literal

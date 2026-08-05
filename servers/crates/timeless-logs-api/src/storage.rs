@@ -555,6 +555,14 @@ pub enum LogPredicate {
         field: LogField,
         value: String,
     },
+    /// VictoriaLogs `in(v1, ..., vN)` semantics over the public textual
+    /// projection of a retained field. Values are sorted and deduplicated by
+    /// the parser, so membership remains deterministic and logarithmic in the
+    /// request-bounded value count.
+    TextualIn {
+        field: LogField,
+        values: Vec<String>,
+    },
     /// Case-sensitive, start-anchored VictoriaLogs `="prefix"*` semantics.
     ExactPrefix {
         field: LogField,
@@ -2245,6 +2253,17 @@ fn log_predicate_matches(
             metadata,
             |text| text == value,
         )),
+        LogPredicate::TextualIn { field, values } => Ok(log_field_projected_matches(
+            field,
+            message,
+            level,
+            metadata,
+            |text| {
+                values
+                    .binary_search_by(|candidate| candidate.as_str().cmp(text))
+                    .is_ok()
+            },
+        )),
         LogPredicate::ExactPrefix { field, value } => Ok(log_field_projected_matches(
             field,
             message,
@@ -2303,6 +2322,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::Substring { field, .. }
         | LogPredicate::Exact { field, .. }
         | LogPredicate::TextualExact { field, .. }
+        | LogPredicate::TextualIn { field, .. }
         | LogPredicate::ExactPrefix { field, .. }
         | LogPredicate::TypedExact { field, .. }
         | LogPredicate::Empty { field }
@@ -2954,6 +2974,10 @@ mod tests {
     fn decoded_log_predicates_observe_query_cancellation() {
         let cancelled = AtomicBool::new(true);
         for predicate in [
+            LogPredicate::TextualIn {
+                field: LogField::Message,
+                values: vec!["other".into(), "request 42".into()],
+            },
             LogPredicate::Regex {
                 field: LogField::Message,
                 regex: regex::Regex::new("request").unwrap(),

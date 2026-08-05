@@ -788,6 +788,13 @@ fn predicate_matches(
         LogPredicate::TextualExact { field, value } => {
             Ok(projected_field_matches(row, field, |text| text == value))
         }
+        LogPredicate::TextualIn { field, values } => {
+            Ok(projected_field_matches(row, field, |text| {
+                values
+                    .binary_search_by(|candidate| candidate.as_str().cmp(text))
+                    .is_ok()
+            }))
+        }
         LogPredicate::ExactPrefix { field, value } => {
             Ok(projected_field_matches(row, field, |text| {
                 text.starts_with(value)

@@ -122,6 +122,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-012`](#sql-log-012-typed-unique-values-and-counts) | `LQL-P04`, `LQL-S03`, `LQL-S04` | current foundation | type-tagged exact unique counts, values, hits, and ordered presence states |
 | [`SQL-LOG-013`](#sql-log-013-numeric-aggregates-median-and-rates) | `LQL-S05`, `LQL-S06`, `LQL-S08` | current foundation | numeric-only ordinary SQL aggregates, median, and explicit-window rates |
 | [`SQL-LOG-014`](#sql-log-014-exact-prefix) | `LQL-F16` | current foundation | exact case-sensitive start-of-message and retained-text-field prefixes; API owns rich-value textual projection |
+| [`SQL-LOG-015`](#sql-log-015-static-multi-exact-membership) | `LQL-F17` | current foundation | case-sensitive message and retained-text membership with one bound parameter per value; API owns rich-value projection and static-list grammar |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -4970,6 +4971,70 @@ for this predicate, preserves their stored types, applies the same rule to
 `exact(value*)`, and owns LogsQL parsing, logical/pipeline composition,
 cancellation, limits, and error envelopes. Both statements decode bounded
 public rows; neither justifies an extension primitive.
+
+### SQL-LOG-015: static multi-exact membership
+
+For a known static value count, bind every candidate separately and use
+ordinary binary `IN` membership over the public message column:
+
+```sql
+SELECT ts, level, message, metadata
+FROM logs
+WHERE ts >= :start_ms
+  AND ts <= :end_ms
+  AND max_work_entries = :max_work_entries
+  AND message COLLATE BINARY IN (:message_value_1, :message_value_2)
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+For a dynamic metadata path known to contain retained strings, project
+missing and JSON null to the same empty text used by LogsQL before applying
+the bound membership list:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+  ORDER BY ts DESC
+  LIMIT :limit
+), projected AS (
+  SELECT *,
+    CASE
+      WHEN json_type(metadata, :field_path) IS NULL THEN ''
+      WHEN json_type(metadata, :field_path) = 'null' THEN ''
+      WHEN json_type(metadata, :field_path) = 'text'
+        THEN json_extract(metadata, :field_path)
+      ELSE NULL
+    END AS field_text
+  FROM bounded
+)
+SELECT ts, level, message, metadata
+FROM projected
+WHERE field_text COLLATE BINARY IN (:field_value_1, :field_value_2)
+ORDER BY ts DESC;
+```
+
+Generate one placeholder per caller-supplied value and bind it; never splice
+values into SQL text. An empty static list is the constant-false predicate
+`0`, while the upstream standalone-wildcard form is a no-op and therefore
+omits the membership predicate. Bounds use the table's configured timestamp
+unit (milliseconds here), remain inclusive, and `max_work_entries` bounds the
+public decode before API composition. Ordering is explicitly newest first.
+
+These statements are exact for the message and retained strings, including
+case and arbitrary UTF-8 bytes. SQLite/libSQL formatting of floating-point,
+array, and object values is not a portable substitute for `serde_json`'s
+compact projection. The Rust Logs API therefore parses the static `in()`
+list, deduplicates it within the request's bounded query text, projects all
+retained rich types without mutating storage, and owns `in()`, wildcard,
+logical/pipeline, limit, cancellation, and error semantics. Subquery
+membership is the separate deferred `LQL-F38` row. Both recipes use bounded
+public rows and ordinary SQL; neither establishes a storage-saving reason for
+a new extension primitive.
 
 ## Adding the next recipe
 

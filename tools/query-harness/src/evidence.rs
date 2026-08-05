@@ -1348,6 +1348,14 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         let host_typed_exact_prefix_matches = (0..entries)
             .filter(|index| index % 64 == 0 && index % 5 == 1)
             .count();
+        let multi_exact_message_matches = usize::from(entries > 0) + usize::from(entries > 1);
+        let host_multi_exact_message_matches = usize::from(entries > 0) + usize::from(entries > 64);
+        let typed_multi_exact_matches = (0..entries)
+            .filter(|index| matches!(index % 5, 1 | 3))
+            .count();
+        let host_typed_multi_exact_matches = (0..entries)
+            .filter(|index| index % 64 == 0 && matches!(index % 5, 1 | 3))
+            .count();
         for (key, name, expression, expected, expected_total) in [
             (
                 "narrow",
@@ -1508,6 +1516,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "logs-exact-prefix-typed-field-wide",
                 "context.attempt:=\"1\"* | sort by (_time) asc | limit 10000",
                 typed_exact_prefix_matches,
+                None,
+            ),
+            (
+                "multi_exact_narrow",
+                "logs-multi-exact-narrow",
+                "host:=\"h00\" AND in(\"query contract event 0\", \"query contract event 64\") | sort by (_time) asc | limit 10000",
+                host_multi_exact_message_matches,
+                None,
+            ),
+            (
+                "multi_exact_wide",
+                "logs-multi-exact-wide",
+                "in(\"query contract event 0\", \"query contract event 1\") | sort by (_time) asc | limit 10000",
+                multi_exact_message_matches,
+                None,
+            ),
+            (
+                "multi_exact_typed_field_narrow",
+                "logs-multi-exact-typed-field-narrow",
+                "host:=\"h00\" AND context.attempt:in(1, 3) | sort by (_time) asc | limit 10000",
+                host_typed_multi_exact_matches,
+                None,
+            ),
+            (
+                "multi_exact_typed_field_wide",
+                "logs-multi-exact-typed-field-wide",
+                "context.attempt:in(1, 3) | sort by (_time) asc | limit 10000",
+                typed_multi_exact_matches,
                 None,
             ),
             (

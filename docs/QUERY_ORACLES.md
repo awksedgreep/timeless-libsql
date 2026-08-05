@@ -111,7 +111,7 @@ quoted field identifiers, and malformed query envelopes without treating
 VictoriaLogs' unspecified default row order as a contract. Time placeholders
 are resolved by the Rust harness after the container starts, so the checked
 fixture remains deterministic without relying on expired absolute timestamps.
-The fixture now contains 114 cases. Its 23 `LQL-F11` cases pin the four pattern
+The fixture now contains 131 cases. Its 23 `LQL-F11` cases pin the four pattern
 anchors and case-insensitive function names; decimal/even-hex, UUID, IPv4,
 time, date, datetime, and Unicode/quoted
 word placeholders; exact Unicode Letter/Decimal_Number inclusion and
@@ -132,6 +132,18 @@ the earlier grammar gap by pinning `exact(value)` and unquoted `=value` exact
 forms. The behavior is source-audited against `filter_exact_prefix.go`,
 `filter_exact.go`, and `parser.go` at the same immutable VictoriaLogs commit;
 a companion error case rejects ambiguous unquoted `==value` syntax.
+
+The fifteen successful and two error `LQL-F17` cases pin static multi-exact
+membership over messages and fields; quoted and unquoted arguments; quoted
+commas, pipes, and literal stars; case-insensitive function names; numeric, boolean,
+missing, null, and empty textual projection; duplicate elimination; empty
+lists; logical and pipeline composition; and exact malformed-list errors. The
+live oracle also records two non-obvious grammar rules: a trailing comma is
+accepted, and any standalone unquoted `*` argument turns the whole filter into
+a field-independent no-op even when other values are present. Subquery
+membership remains a separate `LQL-F38` capability rather than being inferred
+from the static list. The behavior is source-audited against `filter_in.go`,
+`in_values.go`, and `parser.go` at the immutable VictoriaLogs commit above.
 
 The VictoriaMetrics API fixture Remote Writes deterministic one-second and
 slow-cadence series, then evaluates MetricsQL-only cases with explicit

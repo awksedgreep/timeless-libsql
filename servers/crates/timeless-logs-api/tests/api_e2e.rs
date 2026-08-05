@@ -1081,6 +1081,229 @@ async fn session_sixteen_exact_prefix_matches_rich_fields_and_reopens() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("multi-exact-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(vec![
+            LogEntry {
+                ts: 1_811_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "missing".into(),
+                metadata_json: r#"{"case":"missing"}"#.into(),
+            },
+            LogEntry {
+                ts: 1_811_000_000_000_002,
+                level: 1,
+                severity: "info".into(),
+                message: "null".into(),
+                metadata_json: r#"{"case":"null","probe":null,"nested":{"leaf":null}}"#.into(),
+            },
+            LogEntry {
+                ts: 1_811_000_000_000_003,
+                level: 1,
+                severity: "info".into(),
+                message: "empty".into(),
+                metadata_json: r#"{"case":"empty","probe":"","nested":{"leaf":""}}"#.into(),
+            },
+            LogEntry {
+                ts: 1_811_000_000_000_004,
+                level: 1,
+                severity: "info".into(),
+                message: "string".into(),
+                metadata_json: r#"{"case":"string","probe":"value","nested":{"leaf":"value"}}"#
+                    .into(),
+            },
+            LogEntry {
+                ts: 1_811_000_000_000_005,
+                level: 1,
+                severity: "info".into(),
+                message: "zero".into(),
+                metadata_json: r#"{"case":"zero","probe":0,"nested":{"leaf":0}}"#.into(),
+            },
+            LogEntry {
+                ts: 1_811_000_000_000_006,
+                level: 1,
+                severity: "info".into(),
+                message: "false".into(),
+                metadata_json: r#"{"case":"false","probe":false,"nested":{"leaf":false}}"#.into(),
+            },
+            LogEntry {
+                ts: 1_811_000_000_000_007,
+                level: 1,
+                severity: "info".into(),
+                message: "array".into(),
+                metadata_json: r#"{"case":"array","probe":[1,"x"],"nested":{"leaf":[1,"x"]}}"#
+                    .into(),
+            },
+            LogEntry {
+                ts: 1_811_000_000_000_008,
+                level: 1,
+                severity: "info".into(),
+                message: "object".into(),
+                metadata_json:
+                    r#"{"case":"object","probe":{"ok":true},"nested":{"leaf":{"ok":true}}}"#.into(),
+            },
+        ])
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    async fn timestamps(storage: &Storage, query: &str) -> Vec<i64> {
+        let mut plan = parse_logsql_at(query, TimestampUnit::Microseconds, 0).unwrap();
+        plan.spec.descending = false;
+        plan.spec.limit = 100;
+        storage
+            .query(plan.spec)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.ts)
+            .collect()
+    }
+
+    let queries = [
+        (
+            r#"in(missing, string)"#,
+            vec![1_811_000_000_000_001, 1_811_000_000_000_004],
+        ),
+        (
+            r#"case:in(missing, string, missing,)"#,
+            vec![1_811_000_000_000_001, 1_811_000_000_000_004],
+        ),
+        (
+            r#"probe:in("", 0, false, value)"#,
+            vec![
+                1_811_000_000_000_001,
+                1_811_000_000_000_002,
+                1_811_000_000_000_003,
+                1_811_000_000_000_004,
+                1_811_000_000_000_005,
+                1_811_000_000_000_006,
+            ],
+        ),
+        (
+            r#"probe:in(`[1,"x"]`, `{"ok":true}`)"#,
+            vec![1_811_000_000_000_007, 1_811_000_000_000_008],
+        ),
+        (
+            r#"nested.leaf:in("", 0, false, value, `[1,"x"]`, `{"ok":true}`)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (r#"case:in("*", string)"#, vec![1_811_000_000_000_004]),
+        (
+            r#"never:in(nope, *)"#,
+            (1_811_000_000_000_001..=1_811_000_000_000_008).collect(),
+        ),
+        (r#"case:in()"#, Vec::new()),
+        (
+            r#"case:in(missing, string) AND NOT case:in(string)"#,
+            vec![1_811_000_000_000_001],
+        ),
+    ];
+    for (query, expected) in &queries {
+        assert_eq!(timestamps(&storage, query).await, *expected, "{query}");
+    }
+
+    let app = router(storage.clone());
+    let mut pipeline_cases = pipeline_rows(
+        &app,
+        r#"* | filter probe:in(false, `[1,"x"]`) | fields case | limit 100"#,
+    )
+    .await
+    .into_iter()
+    .map(|row| row["case"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+    pipeline_cases.sort();
+    assert_eq!(pipeline_cases, ["array", "false"]);
+
+    for malformed in ["in", "in(", "in(,value)", "in(value other)", "in(value*)"] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql",
+            "{malformed}"
+        );
+    }
+    let subquery = app
+        .clone()
+        .oneshot(logsql_request("case:in(value | fields case)"))
+        .await
+        .unwrap();
+    assert_eq!(subquery.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(subquery.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "unsupported_logsql"
+    );
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("case:in(missing, string) | limit 100"))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+    assert_eq!(
+        timestamps(&storage, "case:in(missing, string)").await.len(),
+        2
+    );
+
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    for (query, expected) in queries {
+        assert_eq!(
+            timestamps(&reopened, query).await,
+            expected,
+            "reopened: {query}"
+        );
+    }
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
