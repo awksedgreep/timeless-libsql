@@ -920,10 +920,12 @@ The test harness is the most serious part of this repo:
   moments mid-ingest, then integrity + watermark + no-dangle assertions.
 - **Compression honesty** (`timeless-core` tests): 1M points verified
   bit-exact after recovery, sizes measured from disk, not bookkeeping.
-- **CLI integration suite** (`tests/cli.sh`): ~25 sections through the real
-  sqlite3 CLI — lifecycles, `EXPLAIN QUERY PLAN` pushdown proofs, reopen
-  recovery, rollback (including auto-flush inside `BEGIN`), malformed-input
-  rejection, Prometheus ingest, two-connections-one-process sharing.
+- **CLI integration suite** (`tests/cli.sh`): 45 sections through the real
+  sqlite3 CLI and Rust persistent-host harness — lifecycles,
+  `EXPLAIN QUERY PLAN` pushdown proofs, reopen recovery, rollback (including
+  auto-flush inside `BEGIN`), malformed-input rejection, Prometheus ingest,
+  rich log/trace fidelity, and multi-connection/multi-process sharing. The
+  release gate does not require or execute Python.
 
 ```sh
 cargo test -p timeless-codec -p timeless-core   # unit + property tests

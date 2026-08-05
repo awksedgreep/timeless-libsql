@@ -50,18 +50,21 @@ What lives where:
 ### The CLI suite (the real integration harness)
 
 ```sh
-./tests/cli.sh          # 43+ sections, a few minutes; needs sqlite3 + python3
+./tests/cli.sh          # 45 sections, a few minutes; needs sqlite3 + Rust/Cargo
 ```
 
 The extension is a cdylib, so end-to-end behavior is tested through the
-sqlite3 CLI: vtab lifecycles for all three signals, pushdown proofs (with
-`EXPLAIN QUERY PLAN` assertions), reopen recovery, prune/optimize/compact,
-append-only enforcement, transaction rollback (including auto-flush inside
-BEGIN), Tier 2 batch blobs, malformed-input rejection, Prometheus ingest,
-rich trace row/batch fidelity at the exact 8,192-span threshold,
-two-connections-one-process sharing (section 21), and it invokes the oracle
-and crash suites as sections. Every section prints `PASS:`; the script exits
-nonzero on the first failure.
+sqlite3 CLI plus persistent Rust SQLite hosts: vtab lifecycles for all three
+signals, pushdown proofs (with `EXPLAIN QUERY PLAN` assertions), reopen
+recovery, prune/optimize/compact, append-only enforcement, transaction
+rollback (including auto-flush inside `BEGIN`), Tier 2 batch blobs,
+malformed-input rejection, Prometheus ingest, rich trace row/batch fidelity
+at the exact 8,192-span threshold, multi-connection and multi-process sharing,
+and the oracle and crash suites. The standalone `tools/query-harness` crate
+builds binary fixtures, drives cases that require more than one live SQLite
+connection or process, and decodes packed public frames. The release gate
+neither imports nor executes Python. Every section prints `PASS:`; the script
+exits nonzero on the first failure.
 
 ### The oracle (randomized property testing)
 

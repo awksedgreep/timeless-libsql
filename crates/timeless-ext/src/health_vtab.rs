@@ -809,10 +809,11 @@ impl CreateVTab<'_> for HealthTab {
 }
 
 impl UpdateVTab<'_> for HealthTab {
-    /// argv layout matches MetricsTab: [6] is the hidden command column.
+    /// argv layout matches MetricsTab: [7] is the hidden command column
+    /// (`series_id` was added at [6]).
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
-        if let Some(ValueRef::Text(_)) = args.iter().nth(6) {
-            let cmd: String = args.get(6)?;
+        if let Some(ValueRef::Text(_)) = args.iter().nth(7) {
+            let cmd: String = args.get(7)?;
             let _bind = DbGuard::bind(self.inner.db);
             self.inner.acquire_write_gate()?;
             return match cmd.as_str() {

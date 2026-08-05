@@ -52,51 +52,15 @@ FAILURES=0
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 
-# ── Generate the ingest script ONCE (pure function of the constants;
-# python3 because 3000 rounds × ~33 statements = ~100k lines, which a
-# bash echo loop generates too slowly). Values/timestamps are
+# ── Generate the ingest script ONCE with the Rust release-gate harness.
+# Values/timestamps are
 # deterministic per (round, i) so any surviving prefix is predictable;
 # only WHERE the kill lands is racy — by design.
 INGEST="$TMP/ingest.sql"
-python3 - "$EXT" "$ROUNDS" "$M_PER_ROUND" "$L_PER_ROUND" "$T_PER_ROUND" > "$INGEST" <<'PY'
-import sys
-ext, rounds, m_n, l_n, t_n = sys.argv[1], *map(int, sys.argv[2:6])
-w = sys.stdout.write
-w(f".load {ext}\n")
-w("CREATE VIRTUAL TABLE metrics USING timeless_metrics(rollups='60s@0');\n")
-w("CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');\n")
-w("CREATE VIRTUAL TABLE traces USING timeless_traces;\n")
-for r in range(1, rounds + 1):
-    w("BEGIN;\n")
-    for i in range(m_n):
-        w(f"INSERT INTO metrics(name, ts, value, labels) VALUES ('m{i % 3}', {1700000000 + r * 100 + i}, {r}.{i}, '{{\"host\":\"h{i % 2}\"}}');\n")
-    for i in range(l_n):
-        lvl = "error" if i % 4 == 3 else "info"
-        w(f"INSERT INTO logs(ts, level, message, service) VALUES ({1700000000000 + r * 1000 + i}, '{lvl}', 'round {r} entry {i}', 'svc{i % 2}');\n")
-    for i in range(t_n):
-        st = "error" if i % 5 == 0 else "ok"
-        ts = 1700000000000000000 + r * 1000000 + i
-        desc = "crash-path" if st == "error" else ""
-        w(f'''INSERT INTO traces(trace_id, span_id, name, service, status, start_ts, attributes, status_description, events, resource, instrumentation_scope)
-VALUES (x'{r * 31 + i % 7:032x}', x'{r * 1000 + i:016x}', 'op{i % 3}', 'must-not-win', '{st}', {ts},
-'{{"bool":true,"count":{i},"service.name":"s{i % 2}"}}', '{desc}',
-'[{{"attributes":{{"attempt":{i},"fatal":false}},"name":"checkpoint","timestamp":{ts + 1}}}]',
-'{{"deployment.environment":"crash","service.name":"resource-must-not-win"}}',
-'{{"attributes":{{"debug":false}},"name":"crash-lib","version":"1.0"}}');
-''')
-    w("INSERT INTO metrics(metrics) VALUES ('flush');\n")
-    w("INSERT INTO logs(logs) VALUES ('flush');\n")
-    w("INSERT INTO traces(traces) VALUES ('flush');\n")
-    # Sprinkle maintenance into the crash window too: compaction must
-    # be exactly as crash-safe as flush (same host-transaction ride).
-    if r % 25 == 0:
-        w("INSERT INTO logs(logs) VALUES ('optimize');\n")
-        w("INSERT INTO traces(traces) VALUES ('optimize');\n")
-        w("INSERT INTO metrics(metrics) VALUES ('compact');\n")
-        w("INSERT INTO metrics(metrics) VALUES ('rollup');\n")
-    w("COMMIT;\n")
-    w(f"SELECT 'WM {r}';\n")
-PY
+cargo run --quiet --manifest-path "$(dirname "$0")/../tools/query-harness/Cargo.toml" --locked -- \
+  gate crash-sql --extension "$EXT" --rounds "$ROUNDS" \
+  --metrics-per-round "$M_PER_ROUND" --logs-per-round "$L_PER_ROUND" \
+  --traces-per-round "$T_PER_ROUND" > "$INGEST"
 
 for ((iter = 1; iter <= ITERATIONS; iter++)); do
   DB="$TMP/crash_$iter.db"

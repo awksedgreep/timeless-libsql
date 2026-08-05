@@ -4115,14 +4115,48 @@ All 490 pinned VictoriaLogs v1.52.0 cases pass live. The final 33-test logs
 real-extension suite, 71 logs library tests, complete extension and Rust
 server workspaces, 29-test Rust query harness, documentation contracts,
 Clippy with warnings denied, formatting, and all 95 SQL recipes (131
-statements) pass locally. The legacy 45-section `tests/cli.sh` suite was not
-rerun because multiple retained sections still invoke Python and the active
-Rust-only instruction forbids that execution. Its last green result is the
-LQL-P14 closeout; LQL-P15 changes only the Rust logs API, while the extension
-and storage source are unchanged, and `SQL-LOG-029` ran through the Rust
-harness. The remaining legacy CLI drivers must move to Rust before this gate
-rejoins per-row closeout. The extension's
-authoritative 8,192-entry batching, storage formats, compression, indexes,
-retention, optimize, transactions, migrations, and public batch/SQL contracts
-are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
-workflow, tag, release, or downstream repository was used or modified.
+statements) pass locally. The extension's authoritative 8,192-entry batching,
+storage formats, compression, indexes, retention, optimize, transactions,
+migrations, and public batch/SQL contracts are unchanged. No private shadow
+table, Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or
+downstream repository was used or modified.
+
+## Rust-only extension release-gate restoration
+
+Before beginning `LQL-P16`, every executable Python driver retained by the
+extension release gate was replaced with a subcommand of the existing
+standalone Rust `tools/query-harness` crate. The shell suites remain the
+canonical orchestration and assertion boundary, while Rust now owns binary
+fixture construction, persistent multi-connection and multi-process SQLite
+hosts, packed-frame decoding, rich log/trace fidelity fixtures, randomized
+crash SQL generation, and the standalone dbhealth lifecycle host.
+
+The complete 45-section `tests/cli.sh` gate passes without invoking Python.
+That run includes three 50,000-operation randomized plain-table oracle seeds,
+five `kill -9` durability iterations, all 95 documented SQL recipes (131
+statements), transaction/reopen/corruption checks, exact rich trace and log
+fidelity, and every persistent-process extension contract. The focused Rust
+correctness gate also passes `R1`, all six `R2` multi-process cases for three
+rounds, all four `R3` attached-schema cases, all five `R4` shared-engine
+cases, `R8`, and rich logs. The query-harness crate passes 29 tests, Clippy
+with warnings denied, and formatting.
+
+The first complete run correctly stopped on three harness-adapter defects:
+the `EXPLAIN QUERY PLAN` reader selected column zero instead of the detail in
+column three, and the log/trace stats readers did not accept valid SQL NULL
+values. Correcting the adapters made all 45 sections pass without changing
+extension behavior. The standalone dbhealth gate then found a separate
+product regression under both the Rust host and stock `sqlite3`: automatic
+sampling collected no rows after metrics gained the hidden `series_id`
+column. The health wrapper still read the command from argument six, so it
+delegated `sample:auto` to the ordinary metrics command handler. Reading the
+command from argument seven restores create/reopen scheduling, manual mode,
+drop cleanup, legacy blob-meta migration, and sqld scheduler suppression.
+`QSF-159` records the boundary and retained regression. A speculative strong
+scheduler ownership change was reverted; weak lifecycle ownership remains.
+
+The release gate now has no executable Python dependency. The public
+`examples/query_frames.py` client example and historical
+`tools/bench/session6_log_compaction.py` benchmark remain separate artifacts;
+neither is imported or executed by these suites. No CI workflow, tag,
+release, publication, or downstream repository was used or modified.

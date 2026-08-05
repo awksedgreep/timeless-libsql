@@ -569,6 +569,19 @@ shipment. `QSF-157` records the semantic boundary. Exact-build commit
 equal-cardinality time-sort controls. `QSF-158` accepts the +1.6%/-5.5% p95
 variation, records the byte-identical storage and HWM verdict, and closes the
 row.
+
+Before the next row, the complete extension release gate was restored to a
+Rust-only execution path. The existing `tools/query-harness` crate now owns
+the binary fixtures, persistent SQLite hosts, packed decoders, rich-fidelity
+drivers, crash workload generator, and dbhealth lifecycle driver previously
+implemented as executable Python. All 45 `tests/cli.sh` sections pass,
+including three 50,000-operation oracle seeds, five `kill -9` iterations, and
+95 SQL recipes/131 statements; the focused `R1`/`R2`/`R3`/`R4`/`R8`/rich-log
+correctness gate passes as well. This restoration found and fixed `QSF-159`:
+the dbhealth wrapper's command argument moved from six to seven when metrics
+added hidden `series_id`, preventing scheduled collection. The retained Rust
+lifecycle regression proves create, reopen, manual mode, drop, legacy meta,
+and sqld behavior. No CI or release automation is part of this local gate.
 Session 17 continues with `LQL-P16`.
 
 ### Session 18: applicable LogsQL P3

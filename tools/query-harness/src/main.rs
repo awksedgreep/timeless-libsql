@@ -1,5 +1,6 @@
 mod contracts;
 mod evidence;
+mod gate;
 mod oracle;
 mod sql_equivalents;
 
@@ -28,6 +29,8 @@ enum Command {
     Oracle(oracle::OracleArgs),
     /// Capture public-API query performance and resource evidence.
     Evidence(evidence::EvidenceArgs),
+    /// Run Rust-native extension fixtures and release-gate regressions.
+    Gate(gate::GateArgs),
     /// Execute documented public SQL-equivalence recipes.
     Sql(sql_equivalents::SqlArgs),
 }
@@ -47,6 +50,7 @@ fn main() -> Result<()> {
         Command::Contracts => contracts::run(&root),
         Command::Oracle(args) => oracle::run(&root, args),
         Command::Evidence(args) => evidence::run(&root, args),
+        Command::Gate(args) => gate::run(&root, args),
         Command::Sql(args) => sql_equivalents::run(&root, args),
     }
 }

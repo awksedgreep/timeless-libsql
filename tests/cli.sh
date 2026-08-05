@@ -41,8 +41,8 @@
 #   20. kill -9 crash test (tests/crash.sh: 5 random-timing kills of a
 #       live ingest; integrity_check, index-join invariants, and the
 #       flushed-= -durable watermark contract on reopen)
-#   21. R4 shared engine: TWO connections in ONE process (python3
-#       sqlite3) — flushed + buffered data visible across connections
+#   21. R4 shared engine: TWO connections in ONE Rust host process —
+#       flushed + buffered data visible across connections
 #       without reopen, writer-gate busy timeout, retry after commit,
 #       drop/recreate sanity
 #   22. Q2 reduction-kernel TVFs (timeless_grid / timeless_window /
@@ -409,25 +409,16 @@ ok"
 # ---------------------------------------------------------------------------
 echo "== section 7: Tier 2 batch blob ingest (format v0) =="
 # The hidden command column is overloaded by TYPE: TEXT = command, BLOB =
-# batch-blob-v0 ingest. Build a tiny 3-point blob with python3 (struct
-# packs little-endian with '<'), feed it through readfile(), and verify:
+# batch-blob-v0 ingest. Build a tiny 3-point blob with the Rust gate harness,
+# feed it through readfile(), and verify:
 #  - last_insert_rowid() reports the point count (3),
 #  - points are queryable IMMEDIATELY (same buffers as Tier 1 — ingest
 #    does NOT flush; durability contract is identical across tiers),
 #  - after an explicit 'flush' the same rows come back from chunks.
 # Series table: cpu with labels, mem with labels_len=0 (= no labels, '{}').
 BLOB="$TMP/batch_v0.blob"
-python3 - "$BLOB" <<'PY'
-import struct, sys
-names = [(b'cpu', b'{"host":"a"}'), (b'mem', b'')]
-hdr = struct.pack('<BBHII', 1, 0, 0, len(names), 3)   # ver, flags, rsvd, n_series, n_points
-series = b''.join(struct.pack('<I', len(n)) + n +
-                  struct.pack('<I', len(l)) + l for n, l in names)
-idx  = struct.pack('<3I', 0, 0, 1)                    # cpu, cpu, mem
-ts   = struct.pack('<3q', 100, 200, 150)
-vals = struct.pack('<3d', 1.5, 2.5, 3.25)
-open(sys.argv[1], 'wb').write(hdr + series + idx + ts + vals)
-PY
+cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate fixture metrics-v0 "$BLOB"
 T2DB="$TMP/tier2_test.db"
 got=$(sqlite3 "$T2DB" <<SQL
 .load $EXT
@@ -459,11 +450,8 @@ BADDB="$TMP/tier2_bad.db"
 sqlite3 "$BADDB" ".load $EXT" "CREATE VIRTUAL TABLE metrics USING timeless_metrics;"
 
 # 8a: truncated blob (drop the last 4 bytes of the value column)
-python3 - "$BLOB" "$TMP/batch_trunc.blob" <<'PY'
-import sys
-b = open(sys.argv[1], 'rb').read()
-open(sys.argv[2], 'wb').write(b[:-4])
-PY
+cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate fixture metrics-v0-truncated "$TMP/batch_trunc.blob"
 if err=$(sqlite3 "$BADDB" ".load $EXT" \
     "INSERT INTO metrics(metrics) VALUES (readfile('$TMP/batch_trunc.blob'));" 2>&1); then
   fail "truncated blob should be rejected (got success: $err)"
@@ -474,13 +462,8 @@ else
 fi
 
 # 8b: out-of-range series index (1-entry series table, point says index 5)
-python3 - "$TMP/batch_oob.blob" <<'PY'
-import struct, sys
-hdr = struct.pack('<BBHII', 1, 0, 0, 1, 1)
-series = struct.pack('<I', 3) + b'cpu' + struct.pack('<I', 0)
-body = struct.pack('<I', 5) + struct.pack('<q', 1) + struct.pack('<d', 1.0)
-open(sys.argv[1], 'wb').write(hdr + series + body)
-PY
+cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate fixture metrics-v0-out-of-range "$TMP/batch_oob.blob"
 if err=$(sqlite3 "$BADDB" ".load $EXT" \
     "INSERT INTO metrics(metrics) VALUES (readfile('$TMP/batch_oob.blob'));" 2>&1); then
   fail "out-of-range series index should be rejected (got success: $err)"
@@ -1110,10 +1093,8 @@ echo "== section 21: R4 shared engine — two connections, one process =="
 # connection, and serialize writers with the 5s-bounded gate.
 #
 # The sqlite3 CLI is one connection per process, so this section drives
-# TWO connections in ONE process through python3's sqlite3 module (which
-# links the same system libsqlite3 and supports enable_load_extension —
-# verified: if your python was built without it, this section fails
-# loudly at load_extension, not silently).
+# TWO connections in ONE process through the Rust gate harness linked to the
+# same system libsqlite3 used by the sqlite3 CLI.
 #
 # Checks:
 #  (a) A inserts + flushes; B sees the rows WITHOUT reopening — under
@@ -1136,96 +1117,12 @@ echo "== section 21: R4 shared engine — two connections, one process =="
 #  (e) A DROPs and recreates the table; both connections stay sane
 #      (registry entry removed at xDestroy, fresh engine after).
 DB21="$TMP/multiconn.db"
-py_out=$(python3 - "$EXT" "$DB21" <<'PYEOF'
-import sqlite3, sys, time
-
-ext, db = sys.argv[1], sys.argv[2]
-
-def connect():
-    c = sqlite3.connect(db, timeout=30)
-    c.isolation_level = None  # autocommit; explicit BEGIN issued by hand
-    c.enable_load_extension(True)
-    c.load_extension(ext)
-    return c
-
-A = connect()
-B = connect()
-
-A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
-# Force B's xConnect NOW, before any data exists: a stale second engine
-# would snapshot emptiness here and never see A's work.
-assert B.execute("SELECT count(*) FROM m").fetchone()[0] == 0
-
-# (a) flushed data crosses connections without a reopen
-A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 100, 1.5)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-print("a", B.execute("SELECT name, ts, value FROM m").fetchall())
-print("a_agg", B.execute(
-    "SELECT value FROM timeless_aggregate('m','cpu',NULL,0,500,'sum')"
-).fetchone()[0])
-
-# (b) BUFFERED (unflushed) data is visible too: one shared buffer.
-# This is the accepted telemetry semantics, asserted on purpose so a
-# future change to it is a deliberate decision, not an accident.
-A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 200, 2.5)")
-print("b", B.execute("SELECT count(*) FROM m WHERE name = 'cpu'").fetchone()[0])
-print("b_agg", B.execute(
-    "SELECT value FROM timeless_aggregate('m','cpu',NULL,0,500,'sum')"
-).fetchone()[0])
-
-# (c) A's open write txn locks B's writes out, BOUNDED. On stock
-# SQLite the failure is SQLite's own "database is locked" (file write
-# lock precedes xBegin — see the section comment); our gate message
-# ("locked by another connection") is accepted too, for hosts where
-# the vtab gate is reached first. Either way: bounded, never a hang.
-B.execute("PRAGMA busy_timeout = 2000")
-A.execute("BEGIN")
-A.execute("INSERT INTO m(name, ts, value) VALUES ('cpu', 300, 3.5)")
-t0 = time.time()
-try:
-    B.execute("INSERT INTO m(name, ts, value) VALUES ('mem', 300, 9.0)")
-    print("c UNEXPECTED-SUCCESS")
-except sqlite3.OperationalError as e:
-    dt = time.time() - t0
-    if "locked" in str(e) and 1.5 <= dt <= 20.0:
-        print("c busy-after-bounded-wait")
-    else:
-        print("c UNEXPECTED", repr(str(e)), round(dt, 1))
-B.execute("PRAGMA busy_timeout = 30000")
-
-# (d) commit releases the gate; B's retry succeeds
-A.execute("COMMIT")
-B.execute("INSERT INTO m(name, ts, value) VALUES ('mem', 300, 9.0)")
-# 4 = ts100 (flushed) + ts200/ts300 (A, buffered) + mem300 (B, buffered):
-# A reading B's buffered point is the same shared-buffer semantics.
-print("d", A.execute("SELECT count(*) FROM m").fetchone()[0])
-
-# (e) DROP on A (xDestroy: shadow tables dropped, registry entry
-# removed), recreate, then BOTH connections use the fresh engine.
-A.execute("DROP TABLE m")
-A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
-B.execute("INSERT INTO m(name, ts, value) VALUES ('disk', 400, 7.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-print("e", A.execute("SELECT name, ts, value FROM m").fetchall(),
-      B.execute("SELECT count(*) FROM m").fetchone()[0])
-
-A.close(); B.close()
-PYEOF
-) || { fail "section 21 python driver crashed"; py_out=""; }
-check_eq "(a) B sees A's flushed rows without reopen" \
-  "$(grep '^a ' <<<"$py_out")" "a [('cpu', 100, 1.5)]"
-check_eq "(a aggregate) B reduces A's flushed rows without reopen" \
-  "$(grep '^a_agg ' <<<"$py_out")" "a_agg 1.5"
-check_eq "(b) B sees A's BUFFERED point (shared-buffer semantics)" \
-  "$(grep '^b ' <<<"$py_out")" "b 2"
-check_eq "(b aggregate) B reduces A's buffered point" \
-  "$(grep '^b_agg ' <<<"$py_out")" "b_agg 4.0"
-check_eq "(c) second writer fails BOUNDED with a lock error (gate unit-tested in shared.rs)" \
-  "$(grep '^c ' <<<"$py_out")" "c busy-after-bounded-wait"
-check_eq "(d) B's retry succeeds after A commits" \
-  "$(grep '^d ' <<<"$py_out")" "d 4"
-check_eq "(e) drop + recreate: both connections sane on the new engine" \
-  "$(grep '^e ' <<<"$py_out")" "e [('disk', 400, 7.0)] 1"
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli shared-engine --extension "$EXT" --database "$DB21"; then
+  pass "two live Rust SQLite connections share publication, locking, and recreate state"
+else
+  fail "two live Rust SQLite connections share publication, locking, and recreate state"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 22: Q2 reduction-kernel TVFs (timeless_grid / timeless_window) =="
@@ -1603,48 +1500,12 @@ check_eq "reopen: rollup index recovered from shadow rows" "$got" "16"
 # The packed public API returns the complete stored bucket contract once per
 # series. Decode it independently and compare every exposed aggregate with the
 # long-lived row TVF; this also pins the version and exact payload length.
-packed=$(python3 - "$EXT" "$F3DB" <<'PY'
-import sqlite3, struct, sys
-
-ext, db = sys.argv[1:]
-conn = sqlite3.connect(db)
-conn.enable_load_extension(True)
-conn.load_extension(ext)
-conn.enable_load_extension(False)
-sid, labels, blob = conn.execute(
-    "SELECT series_id, labels, buckets FROM timeless_rollup_batches("
-    "'m', 'cpu', NULL, 60, 0, 99999)"
-).fetchone()
-assert blob[:4] == b"TRB1"
-n, = struct.unpack_from("<I", blob, 4)
-assert len(blob) == 8 + n * 64
-columns = [blob[8 + i*n*8:8 + (i+1)*n*8] for i in range(8)]
-timestamps = list(struct.unpack(f"<{n}q", columns[0]))
-counts = list(struct.unpack(f"<{n}Q", columns[1]))
-avg, sums, mins, maxs = [list(struct.unpack(f"<{n}d", col)) for col in columns[2:6]]
-last_ts = list(struct.unpack(f"<{n}q", columns[6]))
-last = list(struct.unpack(f"<{n}d", columns[7]))
-packed_values = {
-    "avg": avg, "sum": sums, "min": mins, "max": maxs, "last": last
-}
-for agg, values in packed_values.items():
-    rows = conn.execute(
-        "SELECT ts, value FROM timeless_rollup('m','cpu',NULL,60,0,99999,?) ORDER BY ts",
-        (agg,),
-    ).fetchall()
-    assert [row[0] for row in rows] == timestamps
-    assert [struct.pack("<d", row[1]) for row in rows] == [struct.pack("<d", v) for v in values]
-count_rows = conn.execute(
-    "SELECT ts, value FROM timeless_rollup('m','cpu',NULL,60,0,99999,'count') ORDER BY ts"
-).fetchall()
-assert [row[0] for row in count_rows] == timestamps
-assert [int(row[1]) for row in count_rows] == counts
-assert all(bucket <= sample < bucket + 60 for bucket, sample in zip(timestamps, last_ts))
-print(f"packed|{sid}|{labels}|{n}|ok")
-PY
-)
-check_eq "packed rollup blob == all six row aggregates" "$packed" \
-  'packed|1|{"host":"a"}|16|ok'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli packed-rollup --extension "$EXT" --database "$F3DB"; then
+  pass "packed rollup blob == all six row aggregates"
+else
+  fail "packed rollup blob == all six row aggregates"
+fi
 # Error paths.
 err=$(sqlite3 "$F3DB" ".load $EXT" \
   "SELECT * FROM timeless_rollup('m', 'cpu', NULL, 60, 0, 1, 'median');" 2>&1 || true)
@@ -1708,30 +1569,8 @@ check_eq "undeclared group key names the valid set" \
 echo "== section 27: F5 batch blob ingest (logs + traces v0) =="
 F5DB="$TMP/f5_batch.db"
 LBLOB="$TMP/f5_logs.blob"; TBLOB="$TMP/f5_traces.blob"
-python3 - "$LBLOB" "$TBLOB" <<'PY'
-import struct, sys
-lp, tp = sys.argv[1], sys.argv[2]
-# logs v0: 3 entries
-blob = struct.pack('<BBHI', 1, 0, 0, 3)
-blob += b''.join(struct.pack('<q', t) for t in [1000, 1050, 2000])
-blob += bytes([1, 3, 1])
-for m in [b'hello', b'boom', b'world']:
-    blob += struct.pack('<I', len(m)) + m
-for m in [b'{"service":"api"}', b'', b'{"service":"web"}']:
-    blob += struct.pack('<I', len(m)) + m
-open(lp, 'wb').write(blob)
-# traces v0: 2 spans (one root, one child; ok + error)
-b = struct.pack('<BBHI', 1, 0, 0, 2)
-b += bytes([1]*16) + bytes([2]*16)
-b += bytes([3]*8) + bytes([4]*8)
-b += bytes(8) + bytes([5]*8)
-for n in [b'op1', b'op2']: b += struct.pack('<I', len(n)) + n
-for s in [b'api', b'web']: b += struct.pack('<I', len(s)) + s
-b += bytes([1, 2]) + bytes([1, 2])
-b += struct.pack('<qq', 5000, 6000) + struct.pack('<qq', 100, 200)
-for a in [b'{"k":"v"}', b'']: b += struct.pack('<I', len(a)) + a
-open(tp, 'wb').write(b)
-PY
+cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate fixture logs-traces-v0 "$LBLOB" "$TBLOB"
 got=$(sqlite3 "$F5DB" <<SQL
 .load $EXT
 CREATE VIRTUAL TABLE l USING timeless_logs(index_keys='service');
@@ -1765,15 +1604,11 @@ check_eq "traces blob rows decode exactly (packed ids, root parent NULL)" \
 t|02020202020202020202020202020202|op2|web|client|error|6000|200|0'
 check_eq "rolled-back batch leaves nothing" "$(grep '^postrb|' <<<"$got")" "postrb|3"
 # Malformed rejection: truncate at every section boundary + bad bytes.
-python3 - "$LBLOB" "$TMP" <<'PY'
-import sys
-blob = open(sys.argv[1], 'rb').read()
-tmp = sys.argv[2]
-for i, cut in enumerate([3, 7, 20, 33, 40, len(blob) - 1]):
-    open(f"{tmp}/f5_cut{i}.blob", 'wb').write(blob[:cut])
-bad = bytearray(blob); bad[8 + 24] = 9  # level byte -> 9
-open(f"{tmp}/f5_badlevel.blob", 'wb').write(bytes(bad))
-PY
+cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate fixture logs-v0-malformed \
+  "$TMP/f5_cut0.blob" "$TMP/f5_cut1.blob" "$TMP/f5_cut2.blob" \
+  "$TMP/f5_cut3.blob" "$TMP/f5_cut4.blob" "$TMP/f5_cut5.blob" \
+  "$TMP/f5_badlevel.blob"
 rejected=0
 for f in "$TMP"/f5_cut*.blob "$TMP/f5_badlevel.blob"; do
   if sqlite3 "$F5DB" ".load $EXT" "INSERT INTO l(l) VALUES (readfile('$f'));" 2>/dev/null; then
@@ -1787,10 +1622,11 @@ count=$(sqlite3 "$F5DB" ".load $EXT" "SELECT COUNT(*) FROM l;")
 check_eq "rejections were atomic (count unchanged)" "$count" "3"
 
 echo "== section 27b: rich traces v1 fidelity and lifecycle =="
-if python3 "$ROOT/tests/traces_rich.py" "$EXT" "$TMP/traces_rich.db" > "$TMP/traces_rich.log" 2>&1; then
-  pass "$(cat "$TMP/traces_rich.log")"
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli rich-traces --extension "$EXT" --database "$TMP/traces_rich.db"; then
+  pass "rich traces v1 fidelity and lifecycle"
 else
-  fail "rich traces regression: $(tail -3 "$TMP/traces_rich.log")"
+  fail "rich traces v1 fidelity and lifecycle"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2311,14 +2147,8 @@ $'group_left|{"host":"a","pod":"p1","team":"core"}|60|10.0\ngroup_left|{"host":"
 echo "== section 34: embedding waist + resolved-series batch =="
 E34DB="$TMP/embed34.db"
 E34BLOB="$TMP/resolved_v1.blob"
-python3 - "$E34BLOB" <<'PY'
-import struct, sys
-out = bytearray(struct.pack('<BBHI', 2, 0, 0, 3))
-out += struct.pack('<qqq', 1, 2, 1)
-out += struct.pack('<qqq', 10, 10, 20)
-out += struct.pack('<ddd', 1.5, 2.5, 3.5)
-open(sys.argv[1], 'wb').write(out)
-PY
+cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate fixture resolved-metrics-v1 "$E34BLOB"
 got=$(sqlite3 "$E34DB" <<SQL
 .load $EXT
 CREATE VIRTUAL TABLE em USING timeless_metrics;
@@ -2415,19 +2245,8 @@ done
 echo "== section 35: native scalar aggregate TVF =="
 E35DB="$TMP/aggregate35.db"
 E35NAN="$TMP/aggregate35_nan.blob"
-python3 - "$E35NAN" <<'PY'
-import math, struct, sys
-series = [(b'nan_metric', b'{"host":"mixed"}'),
-          (b'nan_metric', b'{"host":"all-nan"}')]
-header = struct.pack('<BBHII', 1, 0, 0, len(series), 5)
-table = b''.join(struct.pack('<I', len(name)) + name +
-                 struct.pack('<I', len(labels)) + labels
-                 for name, labels in series)
-indexes = struct.pack('<5I', 0, 0, 0, 1, 1)
-timestamps = struct.pack('<5q', 0, 1, 2, 0, 1)
-values = struct.pack('<5d', math.nan, 2.0, 4.0, math.nan, math.nan)
-open(sys.argv[1], 'wb').write(header + table + indexes + timestamps + values)
-PY
+cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate fixture metrics-nan-v0 "$E35NAN"
 got=$(sqlite3 "$E35DB" <<SQL
 .load $EXT
 CREATE VIRTUAL TABLE ag USING timeless_metrics;
@@ -2681,32 +2500,12 @@ SQL
 check_eq "latest follows automatic retention" "$got" $'retention|100|2.0\npruned|0'
 
 E36PUB="$TMP/latest36_publication.db"
-got=$(EXT_PATH="$EXT" DB_PATH="$E36PUB" python3 - <<'PY'
-import os, sqlite3
-
-db = os.environ["DB_PATH"]
-ext = os.environ["EXT_PATH"]
-c1 = sqlite3.connect(db, timeout=10)
-c2 = sqlite3.connect(db, timeout=10)
-for conn in (c1, c2):
-    conn.enable_load_extension(True)
-    conn.load_extension(ext)
-c1.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
-c1.commit()
-c1.execute("INSERT INTO m(name,labels,ts,value) VALUES ('cpu','{\"host\":\"a\"}',10,1.0)")
-# Publish the transaction but deliberately do not flush: B must see the shared,
-# pre-durable buffer without ever seeing transaction-private shadow rows.
-c1.commit()
-row = c2.execute(
-    "SELECT labels,ts,value FROM timeless_latest('m','cpu',NULL,0,100)"
-).fetchone()
-print("publication|%s|%d|%.1f" % row)
-c1.close()
-c2.close()
-PY
-)
-check_eq "latest publishes committed buffered writes across live connections" "$got" \
-  'publication|{"host":"a"}|10|1.0'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli latest-publication --extension "$EXT" --database "$E36PUB"; then
+  pass "latest publishes committed buffered writes across live connections"
+else
+  fail "latest publishes committed buffered writes across live connections"
+fi
 
 err=$(sqlite3 "$E36DB" ".load $EXT" \
   "SELECT * FROM timeless_latest('latest','cpu',NULL,0);" 2>&1 || true)
@@ -2716,173 +2515,22 @@ check_eq "missing latest argument reports the call shape" \
 # ---------------------------------------------------------------------------
 echo "== section 37: authoritative catalog publication and invalidation =="
 E37DB="$TMP/catalog37.db"
-got=$(EXT_PATH="$EXT" DB_PATH="$E37DB" python3 - <<'PY'
-import os, sqlite3, subprocess
-
-db = os.environ["DB_PATH"]
-ext = os.environ["EXT_PATH"]
-
-def connect():
-    conn = sqlite3.connect(db, timeout=10)
-    conn.isolation_level = None
-    conn.enable_load_extension(True)
-    conn.load_extension(ext)
-    return conn
-
-def rows(conn, name=None):
-    if name is None:
-        return conn.execute(
-            "SELECT name,ts,value FROM m ORDER BY name,ts,value"
-        ).fetchall()
-    return conn.execute(
-        "SELECT name,ts,value FROM m WHERE name=? ORDER BY ts,value", (name,)
-    ).fetchall()
-
-A = connect()
-B = connect()
-A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
-# Establish B's committed empty generation before A publishes anything.
-assert B.execute("SELECT count(*) FROM timeless_series('m')").fetchone()[0] == 0
-
-A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',10,1.0)")
-A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',20,2.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-print("commit", rows(B, "cpu"))
-
-# Capture occurs in xSync, but rollback must never publish that token. This
-# transaction also mutates both series buffers and the durable chunk catalog.
-A.execute("BEGIN")
-A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',30,99.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-A.execute("INSERT INTO m(m) VALUES ('prune:25')")
-A.execute("ROLLBACK")
-print("rollback", rows(B, "cpu"))
-
-# Compaction rewrites rowids while preserving the shared engine's exact view.
-A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',30,3.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-A.execute("INSERT INTO m(m) VALUES ('compact')")
-print("compact", rows(B, "cpu"), B.execute("SELECT count(*) FROM m_chunks").fetchone()[0])
-
-# Prune deletes an independent old-series chunk and publishes the new token.
-A.execute("INSERT INTO m(name,ts,value) VALUES ('old',1,8.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-A.execute("INSERT INTO m(m) VALUES ('prune:5')")
-print("prune", rows(B))
-
-# A different process has a different engine registry. Its committed token
-# must invalidate this process's published fast path and force a safe reload.
-sql = ".load %s\nINSERT INTO m(name,ts,value) VALUES ('mem',40,4.0);\nINSERT INTO m(m) VALUES ('flush');\n" % ext
-subprocess.run(["sqlite3", db], input=sql, text=True, check=True,
-               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-print("external", rows(B))
-
-A.close()
-B.close()
-C = connect()
-print("reopen", rows(C), C.execute("SELECT count(*) FROM m_chunks").fetchone()[0])
-C.close()
-PY
-) || { fail "section 37 python driver crashed"; got=""; }
-check_eq "catalog commit publishes to an already-open reader" \
-  "$(grep '^commit ' <<<"$got")" \
-  "commit [('cpu', 10, 1.0), ('cpu', 20, 2.0)]"
-check_eq "catalog rollback discards the prepared generation" \
-  "$(grep '^rollback ' <<<"$got")" \
-  "rollback [('cpu', 10, 1.0), ('cpu', 20, 2.0)]"
-check_eq "catalog compaction publication preserves rows and swaps chunks" \
-  "$(grep '^compact ' <<<"$got")" \
-  "compact [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0)] 1"
-check_eq "catalog prune publication removes only the old chunk" \
-  "$(grep '^prune ' <<<"$got")" \
-  "prune [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0)]"
-check_eq "external-process generation invalidates the local fast path" \
-  "$(grep '^external ' <<<"$got")" \
-  "external [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0), ('mem', 40, 4.0)]"
-check_eq "catalog publication state survives reopen" \
-  "$(grep '^reopen ' <<<"$got")" \
-  "reopen [('cpu', 10, 1.0), ('cpu', 20, 2.0), ('cpu', 30, 3.0), ('mem', 40, 4.0)] 2"
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli catalog-publication --extension "$EXT" --database "$E37DB"; then
+  pass "catalog commit, rollback, compact, prune, external invalidation, and reopen"
+else
+  fail "catalog commit, rollback, compact, prune, external invalidation, and reopen"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 38: matcher and discovery pushdown =="
 E38DB="$TMP/matcher38.db"
-got=$(EXT_PATH="$EXT" DB_PATH="$E38DB" python3 - <<'PY'
-import os, sqlite3
-
-db = os.environ["DB_PATH"]
-ext = os.environ["EXT_PATH"]
-
-def connect():
-    conn = sqlite3.connect(db, timeout=10)
-    conn.isolation_level = None
-    conn.enable_load_extension(True)
-    conn.load_extension(ext)
-    return conn
-
-def values(rows):
-    return "|".join(row[0] for row in rows)
-
-A = connect()
-B = connect()
-A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
-A.executemany("INSERT INTO m(name,labels,ts,value) VALUES ('cpu',?,?,?)", [
-    ('{"code":"a","env":"prod","host":"web-1"}', 10, 1.0),
-    ('{"code":"é","env":"dev","host":"web-2"}', 10, 2.0),
-    ('{"host":"db-1"}', 10, 3.0),
-    ('{"env":"","host":"empty"}', 10, 4.0),
-])
-
-# The second live connection sees buffered catalog rows through matcher-aware
-# discovery before any flush.
-print("buffered|" + values(B.execute(
-    "SELECT labels FROM timeless_series('m','cpu','{\"host\":{\"re\":\"web-.*\"}}') ORDER BY labels"
-)))
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-
-print("combined|" + values(B.execute(
-    "SELECT labels FROM timeless_series('m','cpu','{\"host\":{\"re\":\"web-.*\"},\"env\":{\"neq\":\"dev\"}}') ORDER BY labels"
-)))
-print("absent|" + values(B.execute(
-    "SELECT labels FROM timeless_series('m','cpu','{\"env\":{\"re\":\"\"}}') ORDER BY labels"
-)))
-print("label_values|" + values(B.execute(
-    "SELECT value FROM timeless_label_values('m','cpu','host','{\"env\":{\"neq\":\"dev\"}}')"
-)))
-print("raw|%d" % B.execute(
-    "SELECT count(*) FROM timeless_raw_batches('m','cpu','{\"host\":{\"re\":\"web-.*\"},\"env\":{\"neq\":\"dev\"}}',0,20)"
-).fetchone()[0])
-
-A.execute("BEGIN")
-A.execute("INSERT INTO m(name,labels,ts,value) VALUES ('cpu','{\"host\":\"tmp\"}',20,9.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-A.execute("ROLLBACK")
-print("rollback|%d" % B.execute(
-    "SELECT count(*) FROM timeless_series('m','cpu','{\"host\":\"tmp\"}')"
-).fetchone()[0])
-
-A.close()
-B.close()
-C = connect()
-print("reopen|%d" % C.execute(
-    "SELECT count(*) FROM timeless_series('m','cpu','{\"host\":{\"re\":\"web-.*\"}}')"
-).fetchone()[0])
-C.close()
-PY
-) || { fail "section 38 python driver crashed"; got=""; }
-check_eq "filtered discovery sees buffered rows across live connections" \
-  "$(grep '^buffered|' <<<"$got")" \
-  'buffered|{"code":"a","env":"prod","host":"web-1"}|{"code":"é","env":"dev","host":"web-2"}'
-check_eq "regex and negative matchers combine before catalog rows cross SQL" \
-  "$(grep '^combined|' <<<"$got")" \
-  'combined|{"code":"a","env":"prod","host":"web-1"}'
-check_eq "absent labels match the empty-string discovery contract" \
-  "$(grep '^absent|' <<<"$got")" \
-  $'absent|{"env":"","host":"empty"}|{"host":"db-1"}'
-check_eq "filtered label values omit absent keys and stay sorted" \
-  "$(grep '^label_values|' <<<"$got")" 'label_values|db-1|empty|web-1'
-check_eq "selective matchers reach raw chunks and rollback/reopen stay exact" \
-  "$(grep -E '^(raw|rollback|reopen)\|' <<<"$got")" \
-  $'raw|1\nrollback|0\nreopen|2'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli matcher-discovery --extension "$EXT" --database "$E38DB"; then
+  pass "matcher-aware discovery covers buffered, combined, absent, rollback, and reopen"
+else
+  fail "matcher-aware discovery covers buffered, combined, absent, rollback, and reopen"
+fi
 
 err=$(sqlite3 "$E38DB" ".load $EXT" \
   "SELECT * FROM timeless_series('m','cpu','{\"host\":{\"re\":\"[\"}}');" 2>&1 || true)
@@ -2892,63 +2540,12 @@ check_eq "direct discovery rejects an invalid regex with label context" \
 # ---------------------------------------------------------------------------
 echo "== section 39: reader gate hides transaction-private chunk rows =="
 E39DB="$TMP/read_gate39.db"
-got=$(EXT_PATH="$EXT" DB_PATH="$E39DB" python3 - <<'PY'
-import os, sqlite3
-
-db = os.environ["DB_PATH"]
-ext = os.environ["EXT_PATH"]
-
-def connect():
-    conn = sqlite3.connect(db, timeout=10)
-    conn.isolation_level = None
-    conn.enable_load_extension(True)
-    conn.load_extension(ext)
-    return conn
-
-def rows(conn):
-    return conn.execute(
-        "SELECT ts,value FROM timeless_raw('m','cpu',NULL,0,100) ORDER BY ts,value"
-    ).fetchall()
-
-A = connect()
-B = connect()
-A.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
-A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',10,1.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-assert rows(B) == [(10, 1.0)]
-
-# The shared engine now indexes row 20, but only A's transaction can see its
-# shadow-table row. Before the read gate, B followed that location and failed
-# with `chunk row ... Query returned no rows`.
-A.execute("BEGIN")
-A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',20,2.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-try:
-    rows(B)
-    print("during|UNEXPECTED-SUCCESS")
-except sqlite3.OperationalError as error:
-    print("during|" + str(error))
-A.execute("ROLLBACK")
-print("rollback|" + repr(rows(B)))
-
-A.execute("BEGIN")
-A.execute("INSERT INTO m(name,ts,value) VALUES ('cpu',30,3.0)")
-A.execute("INSERT INTO m(m) VALUES ('flush')")
-A.execute("COMMIT")
-print("commit|" + repr(rows(B)))
-
-A.close()
-B.close()
-PY
-) || { fail "section 39 python driver crashed"; got=""; }
-check_eq "reader reports a retryable transaction conflict, never a dangling row" \
-  "$(grep -c '^during|.*active write transaction.*retry.*SQLITE_BUSY' <<<"$got")" "1"
-check_eq "rollback restores the reader's committed chunk view" \
-  "$(grep '^rollback|' <<<"$got")" \
-  'rollback|[(10, 1.0)]'
-check_eq "commit publishes the replacement view before the reader retries" \
-  "$(grep '^commit|' <<<"$got")" \
-  'commit|[(10, 1.0), (30, 3.0)]'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli reader-gate --extension "$EXT" --database "$E39DB"; then
+  pass "reader gate reports conflict and publishes rollback/commit exactly"
+else
+  fail "reader gate reports conflict and publishes rollback/commit exactly"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 40: durable series-id read constraints =="
@@ -2967,301 +2564,23 @@ INSERT INTO m(m) VALUES ('flush');
 INSERT INTO m(m) VALUES ('rollup');
 SQL
 
-got=$(EXT_PATH="$EXT" DB_PATH="$E40DB" python3 - <<'PY'
-import os, sqlite3
-
-db = os.environ["DB_PATH"]
-ext = os.environ["EXT_PATH"]
-conn = sqlite3.connect(db)
-conn.enable_load_extension(True)
-conn.load_extension(ext)
-conn.enable_load_extension(False)
-
-sid = conn.execute(
-    "SELECT series_id FROM timeless_series('m','cpu','{\"host\":\"a\"}')"
-).fetchone()[0]
-assert sid == 1
-
-checks = [
-    (
-        "series",
-        "SELECT name,labels,min_ts,max_ts,points FROM timeless_series('m') "
-        "WHERE series_id=?",
-        "SELECT name,labels,min_ts,max_ts,points FROM timeless_series("
-        "'m','cpu','{\"host\":\"a\"}')",
-    ),
-    (
-        "base",
-        "SELECT ts,value FROM m WHERE series_id=? ORDER BY ts,value",
-        "SELECT ts,value FROM m WHERE name='cpu' AND labels='{\"host\":\"a\"}' "
-        "ORDER BY ts,value",
-    ),
-    (
-        "raw",
-        "SELECT ts,value FROM timeless_raw('m','cpu',NULL,0,30) "
-        "WHERE series_id=? ORDER BY ts,value",
-        "SELECT ts,value FROM timeless_raw('m','cpu','{\"host\":\"a\"}',0,30) "
-        "ORDER BY ts,value",
-    ),
-    (
-        "raw_batches",
-        "SELECT points FROM timeless_raw_batches('m','cpu',NULL,0,30) "
-        "WHERE series_id=?",
-        "SELECT points FROM timeless_raw_batches('m','cpu','{\"host\":\"a\"}',0,30)",
-    ),
-    (
-        "aggregate",
-        "SELECT value FROM timeless_aggregate('m','cpu',NULL,0,30,'avg') "
-        "WHERE series_id=?",
-        "SELECT value FROM timeless_aggregate('m','cpu','{\"host\":\"a\"}',0,30,'avg')",
-    ),
-    (
-        "latest",
-        "SELECT ts,value FROM timeless_latest('m','cpu',NULL,0,30) WHERE series_id=?",
-        "SELECT ts,value FROM timeless_latest('m','cpu','{\"host\":\"a\"}',0,30)",
-    ),
-    (
-        "grid",
-        "SELECT ts,value FROM timeless_grid('m','cpu',NULL,0,20,10,10) "
-        "WHERE series_id=? ORDER BY ts",
-        "SELECT ts,value FROM timeless_grid('m','cpu','{\"host\":\"a\"}',0,20,10,10) "
-        "ORDER BY ts",
-    ),
-    (
-        "window",
-        "SELECT ts,value FROM timeless_window('m','cpu',NULL,0,20,10,10,'avg') "
-        "WHERE series_id=? ORDER BY ts",
-        "SELECT ts,value FROM timeless_window("
-        "'m','cpu','{\"host\":\"a\"}',0,20,10,10,'avg') ORDER BY ts",
-    ),
-    (
-        "window_batches",
-        "SELECT buckets FROM timeless_window_batches("
-        "'m','cpu',NULL,0,20,10,10,'avg') WHERE series_id=?",
-        "SELECT buckets FROM timeless_window_batches("
-        "'m','cpu','{\"host\":\"a\"}',0,20,10,10,'avg')",
-    ),
-    (
-        "rollup",
-        "SELECT ts,value FROM timeless_rollup('m','cpu',NULL,10,0,100,'avg') "
-        "WHERE series_id=? ORDER BY ts",
-        "SELECT ts,value FROM timeless_rollup("
-        "'m','cpu','{\"host\":\"a\"}',10,0,100,'avg') ORDER BY ts",
-    ),
-    (
-        "rollup_batches",
-        "SELECT buckets FROM timeless_rollup_batches('m','cpu',NULL,10,0,100) "
-        "WHERE series_id=?",
-        "SELECT buckets FROM timeless_rollup_batches("
-        "'m','cpu','{\"host\":\"a\"}',10,0,100)",
-    ),
-]
-for name, by_id, by_labels in checks:
-    selected = conn.execute(by_id, (sid,)).fetchall()
-    expected = conn.execute(by_labels).fetchall()
-    assert selected == expected, (name, selected, expected)
-    print(f"parity|{name}|{len(selected)}")
-
-# INTEGER affinity is part of the SQL contract once xBestIndex omits the
-# original predicate. Non-integral, NULL, and malformed values match nothing.
-coercions = [
-    (1, 1), (1.0, 1), ("1", 1), ("+1.0e0", 1),
-    (1.5, 0), ("1x", 0), (None, 0), (sqlite3.Binary(b"1"), 0),
-]
-for value, expected in coercions:
-    count = conn.execute(
-        "SELECT count(*) FROM timeless_aggregate("
-        "'m','cpu',NULL,0,30,'avg') WHERE series_id=?",
-        (value,),
-    ).fetchone()[0]
-    assert count == expected, (value, count, expected)
-print("affinity|ok")
-
-assert conn.execute(
-    "SELECT count(*) FROM timeless_aggregate("
-    "'m','cpu','{\"host\":\"b\"}',0,30,'avg') WHERE series_id=?",
-    (sid,),
-).fetchone()[0] == 0
-assert conn.execute(
-    "SELECT count(*) FROM timeless_aggregate("
-    "'m','mem',NULL,0,30,'avg') WHERE series_id=?",
-    (sid,),
-).fetchone()[0] == 0
-assert conn.execute(
-    "SELECT count(*) FROM timeless_aggregate("
-    "'m','cpu',NULL,0,30,'avg') WHERE series_id=999999"
-).fetchone()[0] == 0
-print("intersection|ok")
-
-joined = conn.execute(
-    "SELECT s.series_id,q.value "
-    "FROM timeless_series('m','cpu',NULL) AS s "
-    "JOIN timeless_aggregate('m','cpu',NULL,0,30,'avg') AS q "
-    "ON q.series_id=s.series_id ORDER BY s.series_id"
-).fetchall()
-assert joined == [(1, 3.0), (2, 10.0)]
-base_joined = conn.execute(
-    "SELECT a.series_id FROM m AS a JOIN m AS b "
-    "ON b.series_id=a.series_id WHERE a.ts=0 AND b.ts=10 "
-    "ORDER BY a.series_id"
-).fetchall()
-assert base_joined == [(1,), (2,)], base_joined
-plan = conn.execute(
-    "EXPLAIN QUERY PLAN SELECT s.series_id,q.value "
-    "FROM timeless_series('m','cpu',NULL) AS s "
-    "JOIN timeless_aggregate('m','cpu',NULL,0,30,'avg') AS q "
-    "ON q.series_id=s.series_id"
-).fetchall()
-assert any("107374" in row[3] for row in plan), plan
-print("join|ok")
-
-# Corrupt only series 2's raw payload. A selected series-1 scan still works;
-# an unselected scan reaches the unrelated chunk and fails to decode it.
-conn.execute("UPDATE m_chunks SET ts_data=x'00' WHERE series_id=2 AND resolution=0")
-conn.commit()
-assert conn.execute(
-    "SELECT count(*) FROM timeless_raw('m','cpu',NULL,0,30) WHERE series_id=1"
-).fetchone()[0] == 3
-try:
-    conn.execute(
-        "SELECT count(*) FROM timeless_raw('m','cpu',NULL,0,30)"
-    ).fetchone()
-    raise AssertionError("broad scan unexpectedly ignored the corrupt unrelated chunk")
-except sqlite3.DatabaseError as error:
-    message = str(error).lower()
-    assert (
-        "decode" in message or "payload" in message or
-        "insufficientdata" in message or "out of bounds" in message
-    ), error
-print("pruning|ok")
-conn.close()
-PY
-) || { fail "section 40 series-id driver crashed"; got=""; }
-
-check_eq "series-id output constraint matches every label-selected query surface" \
-  "$(grep '^parity|' <<<"$got")" \
-'parity|series|1
-parity|base|3
-parity|raw|3
-parity|raw_batches|1
-parity|aggregate|1
-parity|latest|1
-parity|grid|3
-parity|window|3
-parity|window_batches|1
-parity|rollup|1
-parity|rollup_batches|1'
-check_eq "series-id affinity, intersections, parameterized join, and chunk pruning" \
-  "$(grep -E '^(affinity|intersection|join|pruning)\|' <<<"$got")" \
-$'affinity|ok\nintersection|ok\njoin|ok\npruning|ok'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli series-id --extension "$EXT" --database "$E40DB"; then
+  pass "series-id parity, affinity, intersections, joins, and chunk pruning"
+else
+  fail "series-id parity, affinity, intersections, joins, and chunk pruning"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 41: packed aggregate/latest result frames =="
 E41DB="$TMP/frames41.db"
-got=$(PYTHONDONTWRITEBYTECODE=1 EXT_PATH="$EXT" EXAMPLES_PATH="$ROOT/examples" AGG_DB="$E35DB" \
-  LATEST_DB="$E36DB" FRAME_DB="$E41DB" python3 - <<'PY'
-import os, sqlite3, sys
-
-sys.path.insert(0, os.environ["EXAMPLES_PATH"])
-from query_frames import decode_aggregate_frame, decode_latest_frame
-
-ext = os.environ["EXT_PATH"]
-
-def connect(path):
-    conn = sqlite3.connect(path, timeout=10)
-    conn.enable_load_extension(True)
-    conn.load_extension(ext)
-    conn.enable_load_extension(False)
-    return conn
-
-agg = connect(os.environ["AGG_DB"])
-modules = agg.execute(
-    "SELECT name FROM pragma_module_list WHERE name IN "
-    "('timeless_aggregate_frame','timeless_latest_frame') ORDER BY name"
-).fetchall()
-assert modules == [("timeless_aggregate_frame",), ("timeless_latest_frame",)]
-print("frame_detection|ok")
-for kind, name in enumerate(("avg", "sum", "min", "max", "count")):
-    blob, = agg.execute(
-        "SELECT frame FROM timeless_aggregate_frame("
-        "'ag',?,NULL,-10,20,?)",
-        ("nan_metric" if name != "count" else "cpu", name),
-    ).fetchone()
-    decoded_kind, decoded = decode_aggregate_frame(blob)
-    assert decoded_kind == kind
-    metric = "nan_metric" if name != "count" else "cpu"
-    expected = agg.execute(
-        "SELECT series_id,value FROM timeless_aggregate("
-        "'ag',?,NULL,-10,20,?) ORDER BY series_id",
-        (metric, name),
-    ).fetchall()
-    assert sorted(decoded) == expected, (name, decoded, expected)
-assert agg.execute(
-    "SELECT count(*) FROM timeless_aggregate_frame("
-    "'ag','cpu','{\"host\":\"missing\"}',0,20,'avg')"
-).fetchone()[0] == 0
-print("aggregate_frames|5|ok")
-agg.close()
-
-latest = connect(os.environ["LATEST_DB"])
-blob, = latest.execute(
-    "SELECT frame FROM timeless_latest_frame('latest','cpu',NULL,0,100)"
-).fetchone()
-decoded = sorted(decode_latest_frame(blob))
-expected = latest.execute(
-    "SELECT series_id,ts,value FROM timeless_latest("
-    "'latest','cpu',NULL,0,100) ORDER BY series_id"
-).fetchall()
-assert decoded == expected, (decoded, expected)
-assert latest.execute(
-    "SELECT count(*) FROM timeless_latest_frame("
-    "'latest','cpu','{\"host\":\"missing\"}',0,100)"
-).fetchone()[0] == 0
-print("latest_frame|ok")
-latest.close()
-
-# Two live connections prove that frames retain the extension's publication
-# and transaction gate rather than opening a private storage path.
-frame_db = os.environ["FRAME_DB"]
-a = connect(frame_db)
-b = connect(frame_db)
-a.execute("CREATE VIRTUAL TABLE m USING timeless_metrics")
-a.commit()
-a.execute(
-    "INSERT INTO m(name,labels,ts,value) VALUES "
-    "('cpu','{\"host\":\"a\"}',10,1.0)"
-)
-a.commit()
-first = decode_latest_frame(b.execute(
-    "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)"
-).fetchone()[0])
-assert first == [(1, 10, 1.0)]
-a.execute("BEGIN")
-a.execute(
-    "INSERT INTO m(name,labels,ts,value) VALUES "
-    "('cpu','{\"host\":\"a\"}',20,2.0)"
-)
-try:
-    b.execute(
-        "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)"
-    ).fetchone()
-    raise AssertionError("frame read escaped an active write transaction")
-except sqlite3.OperationalError as error:
-    assert "active write transaction" in str(error)
-a.commit()
-second = decode_latest_frame(b.execute(
-    "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)"
-).fetchone()[0])
-assert second == [(1, 20, 2.0)]
-print("frame_publication|ok")
-a.close()
-b.close()
-PY
-) || { fail "section 41 frame driver crashed"; got=""; }
-
-check_eq "independent TAF1/TLF1 decoders match rows and preserve publication" \
-  "$got" \
-$'frame_detection|ok\naggregate_frames|5|ok\nlatest_frame|ok\nframe_publication|ok'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli frames --extension "$EXT" --database "$E41DB" \
+  --auxiliary "$E35DB" --auxiliary "$E36DB"; then
+  pass "independent Rust TAF1/TLF1 decoders match rows and preserve publication"
+else
+  fail "independent Rust TAF1/TLF1 decoders match rows and preserve publication"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 42: exact log contains + native scalar count =="
@@ -3333,176 +2652,22 @@ fi
 # ---------------------------------------------------------------------------
 echo "== section 43: size-tiered and bounded logs optimize =="
 LOG_OPT_DB="$TMP/log_optimize.db"
-got=$(python3 - "$EXT" "$LOG_OPT_DB" <<'PY'
-import sqlite3
-import struct
-import sys
-
-extension, database = sys.argv[1:]
-db = sqlite3.connect(database)
-db.enable_load_extension(True)
-db.load_extension(extension)
-db.enable_load_extension(False)
-
-def batch(start, count, step=1):
-    timestamps = [start + i * step for i in range(count)]
-    messages = [f"request {ts}".encode() for ts in timestamps]
-    metadata = [b'{"service":"api"}'] * count
-    out = bytearray(b'\x01\x00\x00\x00')
-    out += struct.pack('<I', count)
-    out += b''.join(struct.pack('<q', ts) for ts in timestamps)
-    out += b'\x01' * count
-    for values in (messages, metadata):
-        for value in values:
-            out += struct.pack('<I', len(value)) + value
-    return bytes(out)
-
-def stats(table):
-    return dict(db.execute(
-        "SELECT key, CAST(value AS INTEGER) FROM timeless_stats(?)", (table,)
-    ))
-
-db.execute("CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service')")
-for cycle in range(40):
-    db.execute("INSERT INTO logs(logs) VALUES (?)", (batch(cycle * 256, 256),))
-    db.execute("INSERT INTO logs(logs) VALUES ('flush')")
-    db.execute("INSERT INTO logs(logs) VALUES ('optimize')")
-    db.commit()
-
-s = stats('logs')
-assert db.execute("SELECT n FROM timeless_log_count('logs')").fetchone()[0] == 10_240
-assert s['optimize_raw_entries'] == 10_240
-assert s['optimize_merge_entries'] == 12_288
-assert s['optimize_blocks_removed'] == 73
-assert s['optimize_blocks_written'] == 42
-assert s['blocks'] == 9
-assert s['optimize_pending_raw_entries'] == 0
-assert s['optimize_merge_ready_entries'] == 0
-assert s['optimize_merge_deferred_blocks'] == 8
-assert s['optimize_merge_deferred_entries'] == 2_048
-rewritten = s['optimize_raw_entries'] + s['optimize_merge_entries']
-print(f"amplification|{rewritten / 10_240:.3f}|{s['blocks']}|"
-      f"{s['optimize_merge_deferred_blocks']}|{s['optimize_merge_deferred_entries']}")
-
-db.execute("CREATE VIRTUAL TABLE budgeted USING timeless_logs")
-for cycle in range(4):
-    # More than the one-hour merge-span cap makes four independent raw groups.
-    db.execute(
-        "INSERT INTO budgeted(budgeted) VALUES (?)",
-        (batch(cycle * 3_600_001, 256),),
-    )
-    db.execute("INSERT INTO budgeted(budgeted) VALUES ('flush')")
-db.execute("INSERT INTO budgeted(budgeted) VALUES ('optimize:512')")
-db.commit()
-first = stats('budgeted')
-assert first['raw_blocks'] == 2
-assert first['optimize_raw_entries'] == 512
-assert first['optimize_budgeted_count'] == 1
-assert first['optimize_budget_entries'] == 512
-assert first['optimize_budget_limited_count'] == 1
-db.execute("INSERT INTO budgeted(budgeted) VALUES ('optimize:512')")
-db.commit()
-second = stats('budgeted')
-assert second['raw_blocks'] == 0
-assert second['optimize_raw_entries'] == 1_024
-assert db.execute("SELECT count(*) FROM budgeted").fetchone()[0] == 1_024
-try:
-    db.execute("INSERT INTO budgeted(budgeted) VALUES ('optimize:0')")
-    raise AssertionError('zero optimize budget unexpectedly accepted')
-except sqlite3.OperationalError as error:
-    assert 'budget must be positive' in str(error)
-print(f"budget|{first['raw_blocks']}|{first['optimize_raw_entries']}|"
-      f"{first['optimize_budget_limited_count']}|{second['optimize_raw_entries']}|"
-      f"{second['raw_blocks']}")
-db.close()
-PY
-) || { fail "section 43 optimize driver crashed"; got=""; }
-
-check_eq "size-tiered optimize bounds rewrites and direct callers can budget work" \
-  "$got" \
-$'amplification|2.200|9|8|2048\nbudget|2|512|1|1024|0'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli logs-optimize --extension "$EXT" --database "$LOG_OPT_DB"; then
+  pass "size-tiered optimize bounds rewrites and direct callers can budget work"
+else
+  fail "size-tiered optimize bounds rewrites and direct callers can budget work"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 44: streaming and metadata-native traces reads =="
 TRACE_READ_DB="$TMP/trace_reads.db"
-got=$(python3 - "$EXT" "$TRACE_READ_DB" <<'PY'
-import sqlite3
-import sys
-
-extension, database = sys.argv[1:]
-db = sqlite3.connect(database)
-db.enable_load_extension(True)
-db.load_extension(extension)
-db.enable_load_extension(False)
-db.execute("CREATE VIRTUAL TABLE traces USING timeless_traces")
-for number in range(12):
-    service = 'api' if number != 0 else 'worker'
-    operation = 'GET /items' if service == 'api' else 'tick'
-    duration = 5_000 if number == 5 else number + 1
-    db.execute(
-        "INSERT INTO traces(trace_id,span_id,name,service,kind,status,start_ts,"
-        "duration_ns,attributes,events,resource,instrumentation_scope) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (number.to_bytes(16, 'big'), number.to_bytes(8, 'big'), operation,
-         service, 'server', 'ok', number, duration, '{}', '[]', '{}', '{}'),
-    )
-    if number in (3, 7, 11):
-        db.execute("INSERT INTO traces(traces) VALUES ('flush')")
-db.commit()
-
-services = ','.join(row[0] for row in db.execute(
-    "SELECT value FROM timeless_trace_services('traces') ORDER BY value"
-))
-operations = ','.join(row[0] for row in db.execute(
-    "SELECT value FROM timeless_trace_operations('traces','api') ORDER BY value"
-))
-newest = ','.join(str(row[0]) for row in db.execute(
-    "SELECT start_ts FROM traces WHERE service='api' "
-    "ORDER BY start_ts DESC,span_id DESC LIMIT 2 OFFSET 1"
-))
-duration = ','.join(str(row[0]) for row in db.execute(
-    "SELECT start_ts FROM traces WHERE service='api' AND duration_ns>=1000 "
-    "ORDER BY start_ts DESC,span_id DESC LIMIT 2"
-))
-stats = dict(db.execute(
-    "SELECT key, CAST(value AS INTEGER) FROM timeless_stats('traces')"
-))
-assert services == 'api,worker'
-assert operations == 'GET /items'
-assert newest == '10,9'
-assert duration == '5'
-assert stats['discovery_count'] == 2
-assert stats['query_bounded_count'] == 2
-assert stats['query_bounded_requested_spans'] == 5
-assert stats['query_bounded_max_spans'] == 3
-assert stats['query_stable_location_snapshots'] == 2
-assert stats['query_snapshot_payload_max_bytes'] == 0
-assert stats['query_blocks_skipped_by_bound'] >= 2
-assert db.execute(
-    "SELECT count(*) FROM traces_terms WHERE term='operations:'"
-).fetchone()[0] == 3
-plan = ' '.join(row[3] for row in db.execute(
-    "EXPLAIN QUERY PLAN SELECT start_ts FROM traces WHERE service='api' "
-    "ORDER BY start_ts DESC,span_id DESC LIMIT 2 OFFSET 1"
-))
-assert 'bounded-ts-desc-offset' in plan
-assert db.execute("SELECT count(*) FROM traces").fetchone()[0] == 12
-after = dict(db.execute(
-    "SELECT key, CAST(value AS INTEGER) FROM timeless_stats('traces')"
-))
-assert after['query_count'] == 3
-assert after['query_snapshot_payload_max_bytes'] == 0
-print(f"catalog|{services}|{operations}")
-print(f"bounded|{newest}|{duration}|{stats['query_blocks_skipped_by_bound']}")
-print(f"stream|{after['query_count']}|{after['query_stable_location_snapshots']}|"
-      f"{after['query_snapshot_payload_max_bytes']}")
-db.close()
-PY
-) || { fail "section 44 traces read driver crashed"; got=""; }
-
-check_eq "traces expose bounded streaming reads and native discovery" \
-  "$got" \
-$'catalog|api,worker|GET /items\nbounded|10,9|5|2\nstream|3|3|0'
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli trace-reads --extension "$EXT" --database "$TRACE_READ_DB"; then
+  pass "traces expose bounded streaming reads and native discovery"
+else
+  fail "traces expose bounded streaming reads and native discovery"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 45: documented query-language SQL equivalents =="
