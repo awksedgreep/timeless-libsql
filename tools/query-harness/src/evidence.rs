@@ -70,6 +70,19 @@ fn require_clean_worktree(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn preserve_failed_evidence<T>(temporary: TempDir, result: Result<T>) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let preserved = temporary.keep();
+            Err(error.context(format!(
+                "failed evidence database and server logs preserved at {}",
+                preserved.display()
+            )))
+        }
+    }
+}
+
 fn binary_identity(binary: &Path) -> Result<Value> {
     let output = Command::new(binary)
         .arg("--version")
@@ -1694,18 +1707,17 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 Ok(response)
             };
             let mut stat = || stats(context.client, &server.base, "/select/logsql/stats");
-            queries.insert(
-                key.to_owned(),
-                measure(
-                    name,
-                    &mut request,
-                    Cardinality::Ndjson,
-                    expected,
-                    &mut stat,
-                    context.iterations,
-                    context.warmup,
-                )?,
-            );
+            let measured = measure(
+                name,
+                &mut request,
+                Cardinality::Ndjson,
+                expected,
+                &mut stat,
+                context.iterations,
+                context.warmup,
+            )
+            .with_context(|| format!("measure LogsQL evidence {key} ({expression})"))?;
+            queries.insert(key.to_owned(), measured);
         }
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
@@ -1775,16 +1787,19 @@ pub(crate) fn run(root: &Path, args: EvidenceArgs) -> Result<()> {
         binary: &logs_binary,
         ..metrics_context
     };
-    let evidence = json!({
-        "schema_version": 1,
-        "captured_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
-        "git_commit": expected_commit,
-        "extension_build": extension_build,
-        "host": {"system": uname("-s"), "release": uname("-r"), "machine": uname("-m"), "processor": uname("-p")},
-        "workload": {"iterations": args.iterations, "warmup": args.warmup, "single_client": true, "loopback_http": true, "release_build": true},
-        "metrics": metrics_evidence(&metrics_context, args.metric_series, args.metric_points)?,
-        "logs": logs_evidence(&logs_context, args.log_entries)?,
-    });
+    let evidence = (|| {
+        Ok(json!({
+            "schema_version": 1,
+            "captured_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+            "git_commit": expected_commit,
+            "extension_build": extension_build,
+            "host": {"system": uname("-s"), "release": uname("-r"), "machine": uname("-m"), "processor": uname("-p")},
+            "workload": {"iterations": args.iterations, "warmup": args.warmup, "single_client": true, "loopback_http": true, "release_build": true},
+            "metrics": metrics_evidence(&metrics_context, args.metric_series, args.metric_points)?,
+            "logs": logs_evidence(&logs_context, args.log_entries)?,
+        }))
+    })();
+    let evidence = preserve_failed_evidence(temporary, evidence)?;
     let output = root.join(&args.output);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
@@ -1806,6 +1821,30 @@ mod tests {
         assert_eq!(percentile(&values, 0.50), 50);
         assert_eq!(percentile(&values, 0.95), 95);
         assert_eq!(percentile(&values, 0.99), 99);
+    }
+
+    #[test]
+    fn failed_evidence_preserves_the_database_and_server_logs() {
+        let temporary = TempDir::with_prefix("timeless-evidence-failure-test-").unwrap();
+        let path = temporary.path().to_path_buf();
+        fs::write(path.join("logs.db"), b"diagnostic database").unwrap();
+        fs::write(path.join("logs.server.log"), b"diagnostic log").unwrap();
+
+        let error =
+            preserve_failed_evidence::<()>(temporary, Err(anyhow::anyhow!("decode failed")))
+                .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("decode failed"));
+        assert!(rendered.contains(&path.display().to_string()));
+        assert_eq!(
+            fs::read(path.join("logs.db")).unwrap(),
+            b"diagnostic database"
+        );
+        assert_eq!(
+            fs::read(path.join("logs.server.log")).unwrap(),
+            b"diagnostic log"
+        );
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

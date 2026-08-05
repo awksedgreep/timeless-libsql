@@ -347,6 +347,76 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     storage.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_sixteen_exact_rich_batch_stays_decodable_across_readers_and_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("rich-batch-decode.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        32,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    assert_eq!(
+        app.oneshot(ingest_request(make_evidence_rich_lines(8_192)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.total_entries, 8_192);
+    assert_eq!(stats.buffered_entries, 0);
+    assert_eq!(stats.raw_blocks, 4);
+    assert_eq!(stats.compressed_blocks, 0);
+
+    assert_evidence_rich_rows(&storage, 16).await;
+    assert_eq!(
+        pipeline_rows(
+            &router(storage.clone()),
+            r#"pattern_match_full("query contract event <N>") | sort by (_time) asc | limit 10000"#,
+        )
+        .await
+        .len(),
+        8_192
+    );
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        2,
+        32,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_evidence_rich_rows(&reopened, 16).await;
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"context.attempt:pattern_match_full("<N>") | sort by (_time) asc | limit 10000"#,
+        )
+        .await
+        .len(),
+        8_192
+    );
+
+    reopened.schedule_optimize().await.unwrap();
+    reopened.barrier().await.unwrap();
+    let stats = reopened.stats().await.unwrap();
+    assert_eq!(stats.raw_blocks, 0);
+    assert_eq!(stats.compressed_blocks, 4);
+    assert_evidence_rich_rows(&reopened, 16).await;
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -2537,6 +2607,85 @@ fn ndjson_values(body: &[u8]) -> Vec<serde_json::Value> {
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice(line).unwrap())
         .collect()
+}
+
+async fn assert_evidence_rich_rows(storage: &Storage, passes: usize) {
+    const BASE_TS: i64 = 1_800_000_000_000_000;
+    const SEVERITIES: [&str; 8] = [
+        "debug",
+        "info",
+        "notice",
+        "warning",
+        "error",
+        "critical",
+        "alert",
+        "emergency",
+    ];
+    for pass in 0..passes {
+        let rows = storage
+            .query(timeless_logs_api::QuerySpec {
+                limit: 10_000,
+                max_work_rows: 10_000,
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_else(|error| panic!("rich batch decode pass {pass}: {error}"));
+        assert_eq!(rows.len(), 8_192, "rich batch decode pass {pass}");
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.ts, BASE_TS + index as i64, "pass {pass}, row {index}");
+            assert_eq!(
+                row.level,
+                SEVERITIES[index % SEVERITIES.len()],
+                "pass {pass}, row {index}"
+            );
+            assert_eq!(
+                row.message,
+                format!("query contract event {index}"),
+                "pass {pass}, row {index}"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&row.metadata_json).unwrap(),
+                serde_json::json!({
+                    "context": {"attempt": index % 5, "retry": index % 3 == 0},
+                    "host": format!("h{:02}", index % 64),
+                    "service": if index % 4 == 0 { "api" } else { "worker" },
+                    "status": if index % 8 == 4 { 500 } else { 200 },
+                }),
+                "pass {pass}, row {index}"
+            );
+        }
+    }
+}
+
+fn make_evidence_rich_lines(count: usize) -> String {
+    const BASE_TS: i64 = 1_800_000_000_000_000;
+    const SEVERITIES: [&str; 8] = [
+        "debug",
+        "info",
+        "notice",
+        "warning",
+        "error",
+        "critical",
+        "alert",
+        "emergency",
+    ];
+    let mut body = String::with_capacity(count * 180);
+    for index in 0..count {
+        body.push_str(
+            &serde_json::json!({
+                "_time": BASE_TS + index as i64,
+                "_msg": format!("query contract event {index}"),
+                "level": SEVERITIES[index % SEVERITIES.len()],
+                "service": if index % 4 == 0 { "api" } else { "worker" },
+                "host": format!("h{:02}", index % 64),
+                "status": if index % 8 == 4 { 500 } else { 200 },
+                "context": {"retry": index % 3 == 0, "attempt": index % 5},
+            })
+            .to_string(),
+        );
+        body.push('\n');
+    }
+    body
 }
 
 fn make_lines(start: usize, count: usize) -> String {
