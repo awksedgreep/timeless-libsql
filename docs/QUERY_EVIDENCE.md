@@ -4160,3 +4160,55 @@ The release gate now has no executable Python dependency. The public
 `tools/bench/session6_log_compaction.py` benchmark remain separate artifacts;
 neither is imported or executed by these suites. No CI workflow, tag,
 release, publication, or downstream repository was used or modified.
+
+## Session 17 LogsQL P2: bounded `uniq`
+
+The checked-in
+[`2026-08-05_session17_lql_p16_uniq.json`](evidence/2026-08-05_session17_lql_p16_uniq.json)
+was captured from exact release build
+`0203fa8b3e959dd5ab76a587d3e90a49961b07b5`. The narrow shape scans one
+indexed host and emits its five unique textual `context.attempt` groups with
+hits. The wide shape scans all 8,192 entries and emits the eight actual
+`(service, level)` groups with hits. Same-run controls scan the identical
+source rowsets and return the same five/eight cardinality through established
+time sort and projection. They control storage and result size; they are not
+semantic equivalents to uniqueness grouping.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `uniq`, indexed host | 5 | 180 | 3.054 | 3.416 | 3.496 | 1 | 1,024 | 235,778 | 128 |
+| `uniq`, full fixture | 8 | 411 | 38.318 | 41.705 | 43.542 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 5 | 130 | 3.385 | 3.594 | 3.625 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 8 | 299 | 38.435 | 39.851 | 43.415 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The `uniq` p95 is 5.0% below/4.7% above its narrow/wide same-run control. Its
+internal API timer averages 2.538/37.876 ms versus 2.841/37.806 ms, or 10.7%
+below/0.2% above. Responses are 38.5%/37.5% larger because `uniq` emits the
+requested string hits. Every equal-width pair performs exactly the same
+public storage scan, block decode, payload read, and row materialization. The
+measured bounded textual structural-key grouping is accepted in the Rust API.
+`SQL-LOG-030` already gives direct SQLite/libSQL users ordinary public
+grouping, filtering, hits, and deterministic limiting, so a new extension
+primitive would not avoid storage work.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+17.156 ms and the explicit durability barrier took 38.792 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Those values are byte-identical to LQL-P15.
+Logs HWM was 93,156 KiB, 3,728 KiB below LQL-P15; metrics HWM was 52,612 KiB,
+488 KiB below it. Each maximum spans the enlarged complete workload and is
+retained as whole-process variation rather than attributed to one `uniq`
+request. Cancellation ended with zero requests in flight; direct evaluator
+and HTTP deadline regressions pin cancellation, bounded work/group/result/
+state, rejection, and reader reuse.
+
+All 516 pinned VictoriaLogs v1.52.0 cases pass live. The final 34-test logs
+real-extension suite, 73 logs library tests, complete extension and Rust
+server workspaces, complete 45-section CLI/crash/transaction suite, 30-test
+Rust query harness, documentation contracts, Clippy with warnings denied,
+formatting, and all 96 SQL recipes (132 statements) pass locally. The
+extension's authoritative 8,192-entry batching, storage formats, compression,
+indexes, retention, optimize, transactions, migrations, and public batch/SQL
+contracts are unchanged. No private shadow table, Elixir/BEAM/NIF/process
+fallback, CI workflow, tag, release, or downstream repository was used or
+modified.

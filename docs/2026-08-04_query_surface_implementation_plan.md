@@ -601,7 +601,12 @@ primitive or storage-contract change. The first full oracle run exposed an
 over-broad harness comparator edit that accidentally made ordinary row-query
 order significant; the complete corpus rejected it, and a focused Rust test
 now pins separate row-query and statistics ordering contracts. `QSF-160`
-records the semantic boundary. Session 17 continues with `LQL-P18`.
+records the semantic boundary. Exact-build commit
+`0203fa8b3e959dd5ab76a587d3e90a49961b07b5` measures `uniq` at
+3.416/41.705 ms narrow/wide p95 versus 3.594/39.851 ms for same-scan,
+equal-cardinality controls. `QSF-161` accepts the -5.0%/+4.7% p95 variation,
+records byte-identical storage and the HWM verdict, and closes the row.
+Session 17 continues with `LQL-P18`.
 
 ### Session 18: applicable LogsQL P3
 

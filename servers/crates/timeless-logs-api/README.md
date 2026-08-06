@@ -586,6 +586,14 @@ responses are 255/531 bytes versus 130/299 because they additionally contain
 string hits and rank. The bounded grouping cost is accepted in the Rust API;
 ordinary public SQL already supplies the direct-user grouping foundation.
 
+Exact-build `uniq` evidence measures 3.416/41.705 ms narrow/wide p95 while
+returning five/eight textual groups with hits, versus 3.594/39.851 ms for
+same-scan, equal-cardinality time-sort controls. The -5.0%/+4.7% p95 and
+-10.7%/+0.2% internal API variation follows byte-identical public storage
+work. `uniq` responses are 180/411 bytes versus 130/299 because they contain
+the requested string hits. The bounded structural grouping cost is accepted
+in the Rust API; `SQL-LOG-030` already supplies the direct-user operation.
+
 Malformed LogsQL returns JSON HTTP 400 with `invalid_query` and
 `malformed_logsql`; recognized but unsupported syntax returns JSON HTTP 422
 with `unsupported_capability` and `unsupported_logsql`. Limits return JSON
