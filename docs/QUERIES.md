@@ -1474,6 +1474,16 @@ projection, ordering, exact state bounds, cancellation, and HTTP envelopes
 remain Rust API composition. The required public scan already crosses every
 selected row; no extension primitive or private storage access is involved.
 
+Exact-build quantile evidence measures 3.279/3.636/3.834 ms narrow and
+37.390/38.585/40.331 ms wide p50/p95/p99, 3.5% below/1.2% above same-run
+median p95. Population deviation measures 3.330/3.517/3.676 and
+36.149/37.372/37.815 ms, 2.9%/0.1% below same-run average p95. Every
+equal-width pair reads the same one/four blocks, decodes the same
+1,024/8,192 entries, transfers the same extension payload bytes, and
+materializes the same 128/8,192 public rows. `QSF-193` therefore retains the
+bounded API implementation and the complete measured tails without adding a
+storage primitive.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

@@ -865,6 +865,23 @@ variation, records unchanged four-block storage and the HWM verdict, and
 closes `LQL-P41`. Session 17 continues with `LQL-S07`; none of its remaining
 declared P2 rows may be skipped before Session 18 begins.
 
+`LQL-S07` now has strict case-insensitive `quantile`/`stddev` grammar;
+required bounded phi; exact, prefix, and all-current-field selection;
+VictoriaLogs mixed textual natural ordering and upper-step ranks; native-
+number-only population Welford deviation; explicit retained empty/null/type
+policy; deterministic work/state limits instead of random sampling;
+cancellation; optimize/reopen durability; and reader recovery. Five exact
+statistics cases and five errors pass the complete 907-case pinned
+VictoriaLogs oracle with documented retained-model differences. Executable
+`SQL-LOG-044` gives direct users the finite-native-number foundation.
+Exact-build commit `f8d5b81bc16e2dadaf7e764273eb82cbfc0de272` measures
+3.636/38.585 ms quantile p95 versus 3.766/38.121 ms for median controls and
+3.517/37.372 ms stddev p95 versus 3.622/37.426 ms for average controls.
+`QSF-193` accepts the -3.5%/+1.2% and -2.9%/-0.1% bounded variation, records
+unchanged four-block storage and the HWM verdict, and closes `LQL-S07`.
+Session 17 continues with `LQL-S09`; its remaining declared P2 rows must not
+be skipped before Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

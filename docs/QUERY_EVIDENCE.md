@@ -4121,6 +4121,74 @@ migrations, and public batch/SQL contracts are unchanged. No private shadow
 table, Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or
 downstream repository was used or modified.
 
+## Session 17 LogsQL P2: `quantile` and `stddev`
+
+The checked-in
+[`2026-08-06_session17_lql_s07_quantile_stddev.json`](evidence/2026-08-06_session17_lql_s07_quantile_stddev.json)
+was captured from exact release extension and server build
+`f8d5b81bc16e2dadaf7e764273eb82cbfc0de272` and has SHA-256
+`1d59631a21848ada5d2cbcdc3a71c774ecb49ca3ae475b69e9ab88a3da6e1f35`.
+The narrow shapes select one indexed host (128 public rows); the wide shapes
+select all 8,192 retained entries. Median is the same-output sorted-state
+control for textual quantile. Average is the one-pass numeric-state control
+for population deviation.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| textual `quantile(0.5)`, indexed host | 1 | 14 | 3.279 | 3.636 | 3.834 | 1 | 1,024 | 235,778 | 128 |
+| textual `quantile(0.5)`, full fixture | 1 | 14 | 37.390 | 38.585 | 40.331 | 4 | 8,192 | 1,914,055 | 8,192 |
+| numeric median control, indexed host | 1 | 14 | 3.430 | 3.766 | 4.126 | 1 | 1,024 | 235,778 | 128 |
+| numeric median control, full fixture | 1 | 14 | 36.078 | 38.121 | 45.283 | 4 | 8,192 | 1,914,055 | 8,192 |
+| population `stddev`, indexed host | 1 | 26 | 3.330 | 3.517 | 3.676 | 1 | 1,024 | 235,778 | 128 |
+| population `stddev`, full fixture | 1 | 29 | 36.149 | 37.372 | 37.815 | 4 | 8,192 | 1,914,055 | 8,192 |
+| numeric average control, indexed host | 1 | 20 | 3.367 | 3.622 | 3.727 | 1 | 1,024 | 235,778 | 128 |
+| numeric average control, full fixture | 1 | 26 | 36.303 | 37.426 | 38.269 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Quantile p95 is 3.5% below/1.2% above its narrow/wide control. Its internal
+API timer averages 2.547/36.357 ms versus 2.677/34.564 ms, or 4.8% below/5.2%
+above. Population deviation p95 is 2.9%/0.1% below its control, and its
+internal API timer averages 2.543/35.014 ms versus 2.685/35.303 ms, or
+5.3%/0.8% below. Every equal-width pair performs byte-identical public block
+selection, entry decode, payload reads, and row materialization. The stddev
+response is slightly larger because its result has more decimal digits; this
+does not change storage work.
+
+Text projection, VictoriaLogs natural comparison, exact sorting, Welford
+state, strict errors, limits, cancellation, and envelopes remain bounded Rust
+API work after the required public scan. `SQL-LOG-044` gives direct
+SQLite/libSQL users an executable finite-native-number foundation. Core
+SQLite does not have the complete mixed textual comparator, and moving either
+operation into an extension opcode would not avoid a block read, decode, or
+row crossing, so no new extension primitive is justified.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.936 ms and the explicit durability barrier took 35.361 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 98,268 KiB, 3,608 KiB (3.81%)
+above LQL-P41; metrics HWM was 52,872 KiB, 456 KiB (0.86%) below it. Each
+maximum spans eight additional repeated query shapes and is retained as
+whole-process variation, not attributed to persistent statistic state.
+Cancellation ended with zero requests in flight; direct evaluator and HTTP
+deadline regressions pin work/state/result/response bounds, rejection,
+cancellation, and reader reuse.
+
+All 907 pinned VictoriaLogs v1.52.0 cases pass live. The final 51-test logs
+real-extension suite, 105 logs library tests, 90-test metrics real-extension
+suite, complete 45-section CLI/crash/transaction suite, standalone dbhealth
+lifecycle gate, 31-test Rust query harness, documentation contracts, Clippy
+with warnings denied, formatting, and all 110 SQL recipes (146 statements)
+pass locally. The declared root gate is `cargo test --workspace`;
+`cargo test --workspace --all-targets` deliberately overrides
+`dbhealth-ext`'s `test = false` and cannot link the two separate loadable
+extensions' identically named SQLite entrypoints. The crate manifest documents
+that boundary, and its authoritative `tests/dbhealth.sh` built and exercised
+the standalone artifact successfully. The extension's authoritative
+8,192-entry batching, storage
+formats, compression, indexes, retention, optimize, transactions, migrations,
+and public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, workflow invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Rust-only extension release-gate restoration
 
 Before beginning `LQL-P16`, every executable Python driver retained by the

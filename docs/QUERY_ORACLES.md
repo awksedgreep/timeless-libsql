@@ -793,4 +793,5 @@ rich JSON types, ignores numeric strings in numeric statistics, returns JSON
 null for an empty deviation, preserves an explicit empty quantile string, and
 fails a deterministic exact quantile when its configured state limit is
 exceeded. The fixture now contains 298 row-query cases, 290 error cases, and
-319 statistics/pipeline cases; the fixture now contains 907 cases in total.
+319 statistics/pipeline cases; the fixture now contains 907 cases in total,
+all passing against the immutable image.
