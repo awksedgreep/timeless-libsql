@@ -1807,6 +1807,16 @@ selectors, current-row writes, errors, limits, cancellation, and envelopes
 remain Rust API composition. No extension primitive, private table, or
 storage-format change is involved.
 
+Exact-build logfmt-unpacking evidence measures 3.355/3.619/4.494 ms narrow
+and 41.166/42.437/43.357 ms wide p50/p95/p99 while returning 64 rows and
+2,112 bytes. Identical-output pack-plus-copy controls measure
+3.328/3.573/4.213 and 38.087/41.659/44.310 ms. The +1.3%/+1.9% p95 and
++1.2%/+5.9% internal API mean follow the same one/four candidate blocks,
+1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. `QSF-220` accepts the bounded quoted/unquoted parse,
+selection, and nested destination work above the unchanged public storage
+boundary.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level

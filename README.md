@@ -914,6 +914,12 @@ SQLite/libSQL users can run executable `SQL-LOG-053` for fixed keys in
 well-formed unquoted logfmt. Full quoting, escapes, dynamic selection, and
 current-row mutation do not justify a language opcode or private-table path
 after the same required public scan.
+Exact-build p50/p95/p99 is 3.355/3.619/4.494 ms narrow and
+41.166/42.437/43.357 ms wide, versus 3.328/3.573/4.213 and
+38.087/41.659/44.310 ms for identical-output pack-plus-copy controls.
+`QSF-220` accepts the +1.3%/+1.9% p95 and +1.2%/+5.9%
+request-attributed API mean after byte-identical public storage work; storage
+remains four raw blocks with no new extension primitive.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

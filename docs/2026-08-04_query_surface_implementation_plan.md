@@ -1099,8 +1099,16 @@ nested metadata and keeps every decoded value textual. The parser and
 evaluator are bounded and cancellable; durable storage and the public
 extension remain unchanged. Executable `SQL-LOG-053` gives direct
 SQLite/libSQL users the fixed-key, well-formed-unquoted recursive-SQL
-foundation. Exact-build performance, HWM, storage, and final local gate
-evidence remain the row's closing work.
+foundation. Exact-build commit `66167687b3b4bd464e67f086554914fd468bb4c5`
+measures 3.355/3.619/4.494 ms narrow and 41.166/42.437/43.357 ms wide
+p50/p95/p99 versus 3.328/3.573/4.213 and 38.087/41.659/44.310 ms for
+identical-output controls. `QSF-220` accepts the +1.3%/+1.9% p95 after
+byte-identical public storage work. Storage remains four raw blocks; all
+8,192 entries complete durably; queues and in-flight cancellation are zero;
+and the complete root/server, 64-test logs real-extension, 90-test metrics
+real-extension, 1,134-case oracle, 45-section CLI, six-section focused
+correctness, dbhealth, SQL, documentation-contract, formatting, and lint gates
+close the row.
 
 ### Session 19: experimental and data-model dispositions
 

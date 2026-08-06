@@ -3419,9 +3419,9 @@ fn parse_unpack_pipe(
         source = match parse_delete_field(token)? {
             field @ PipelineField::Exact { .. } => field,
             PipelineField::Prefix { .. } | PipelineField::All => {
-                return Err(LogsqlError::malformed(
-                    format!("LogsQL {operation} source must be an exact field"),
-                ));
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL {operation} source must be an exact field"
+                )));
             }
         };
         cursor += 1;

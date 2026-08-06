@@ -3233,11 +3233,7 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "pack_logfmt_control_narrow",
             "pack_logfmt_narrow",
         )?;
-        require_same_public_query_work(
-            &queries,
-            "pack_logfmt_control_wide",
-            "pack_logfmt_wide",
-        )?;
+        require_same_public_query_work(&queries, "pack_logfmt_control_wide", "pack_logfmt_wide")?;
         require_same_public_query_work(
             &queries,
             "unpack_logfmt_control_narrow",

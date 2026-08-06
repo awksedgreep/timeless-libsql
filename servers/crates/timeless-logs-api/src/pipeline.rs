@@ -844,9 +844,7 @@ fn apply_unpack_logfmt_field(
         limits.max_state_bytes,
         "unpack_logfmt",
     )?;
-    if spec.keep_original_fields
-        && field_value(row, &destination_path).is_some_and(is_nonempty)
-    {
+    if spec.keep_original_fields && field_value(row, &destination_path).is_some_and(is_nonempty) {
         return Ok(());
     }
 
@@ -1000,18 +998,8 @@ fn add_logfmt_field(
         .checked_add(size_of::<(String, String)>())
         .ok_or_else(|| "LogsQL unpack_logfmt state size overflow".to_string())?;
     ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "unpack_logfmt")?;
-    charge_transfer_string(
-        name,
-        state_bytes,
-        limits.max_state_bytes,
-        "unpack_logfmt",
-    )?;
-    charge_transfer_string(
-        value,
-        state_bytes,
-        limits.max_state_bytes,
-        "unpack_logfmt",
-    )?;
+    charge_transfer_string(name, state_bytes, limits.max_state_bytes, "unpack_logfmt")?;
+    charge_transfer_string(value, state_bytes, limits.max_state_bytes, "unpack_logfmt")?;
     fields.push((name.to_owned(), value.to_owned()));
     Ok(())
 }
@@ -1117,12 +1105,7 @@ fn try_unquote_logfmt_prefix(
     Ok(None)
 }
 
-fn decode_logfmt_digits(
-    bytes: &[u8],
-    cursor: &mut usize,
-    count: usize,
-    radix: u32,
-) -> Option<u32> {
+fn decode_logfmt_digits(bytes: &[u8], cursor: &mut usize, count: usize, radix: u32) -> Option<u32> {
     let end = cursor.checked_add(count)?;
     let digits = bytes.get(*cursor..end)?;
     let mut value = 0_u32;
@@ -11406,7 +11389,10 @@ mod tests {
             &cancelled,
         )
         .unwrap_err();
-        assert!(state_error.contains("LogsQL unpack_logfmt"), "{state_error}");
+        assert!(
+            state_error.contains("LogsQL unpack_logfmt"),
+            "{state_error}"
+        );
         assert!(
             state_error.contains("max_response_bytes=1"),
             "{state_error}"

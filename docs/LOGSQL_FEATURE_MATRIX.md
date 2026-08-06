@@ -140,7 +140,7 @@ extension.
 | `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
@@ -794,6 +794,16 @@ well-formed unquoted logfmt. Complete quoting/escaping, dynamic selection,
 current-row mutation, rich nesting, limits, cancellation, and HTTP envelopes
 remain Rust API composition over the same public rows. No extension primitive,
 private table, durable mutation, or storage-contract change is required.
+
+Exact-build `QSF-220` measures `unpack_logfmt` at 3.355/3.619/4.494 ms
+narrow and 41.166/42.437/43.357 ms wide p50/p95/p99. Identical-output
+pack-plus-copy controls measure 3.328/3.573/4.213 and
+38.087/41.659/44.310 ms. The +1.3%/+1.9% p95 and +1.2%/+5.9%
+request-attributed API mean occur after identical public work: one/four
+candidate blocks, 1,024/8,192 decoded entries, 128/8,192 returned public
+rows, and 235,778/1,914,055 payload bytes per query. The row-local parse,
+escape decode, selection, and nesting cost is bounded and does not justify
+storage pushdown.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare
