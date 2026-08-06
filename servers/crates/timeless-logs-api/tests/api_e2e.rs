@@ -2961,6 +2961,319 @@ async fn session_seventeen_format_is_complete_bounded_rich_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_math_is_sequential_typed_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("math-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [LogEntry {
+                ts: 1_800_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "math rich".into(),
+                metadata_json: serde_json::json!({
+                    "case":"math-rich",
+                    "a":"2",
+                    "b":"3",
+                    "negative":-2,
+                    "bad":"nope",
+                    "empty":"",
+                    "duration":"10m5s",
+                    "bytes":"1.5KiB",
+                    "timestamp":"2024-05-30T01:02:03Z",
+                    "ipv4":"123.45.67.89",
+                    "math abs":"7",
+                    "math left field":"2",
+                    "result":"original",
+                    "nested":{"value":"4"},
+                    "source_array":[1,2],
+                    "source_null":null
+                })
+                .to_string(),
+            }]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | eval a + 1 first, first * b as second, second + nested.value as total | fields case, first, second, total, source_array, source_null"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "first":"3",
+            "second":"9",
+            "total":"13",
+            "source_array":[1,2],
+            "source_null":null
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | math a + b * 4 as precedence, (a + b) * 4 wrapped, 2 ^ 3 ^ 2 power, abs(-b) absolute, ceil(2.1) ceiling, floor(2.9) floored, round(2.5) rounded, exp(1) exponential, ln(exp(1)) logarithm, max(a, bad, b) maximum, min(b, bad, a) minimum | fields case, precedence, wrapped, power, absolute, ceiling, floored, rounded, exponential, logarithm, maximum, minimum"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "precedence":"14",
+            "wrapped":"20",
+            "power":"64",
+            "absolute":"3",
+            "ceiling":"3",
+            "floored":"2",
+            "rounded":"3",
+            "exponential":"2.718281828459045",
+            "logarithm":"1",
+            "maximum":"3",
+            "minimum":"2"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | math round(3.14159, 0.01) rounded, round(-3.14159, 0.01) negative_rounded, -5 % 2 signed_remainder, 5.5 % 2 fractional_remainder, a ^ b pow, 7 & 3 band, 4 or 1 bor, 6 xor 3 bxor, bad default 5 fallback | fields case, rounded, negative_rounded, signed_remainder, fractional_remainder, pow, band, bor, bxor, fallback"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "rounded":"3.14",
+            "negative_rounded":"-3.14",
+            "signed_remainder":"-1",
+            "fractional_remainder":"1.5",
+            "pow":"8",
+            "band":"3",
+            "bor":"5",
+            "bxor":"5",
+            "fallback":"5"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | math duration + 10e9 duration_result, bytes + 512B bytes_result, timestamp + 10e9 time_result, ipv4 + 1000 ip_result, empty default 1 empty_result, source_null default 2 null_result, missing default 3 missing_result, source_array default 4 array_result, "math abs" + "math left field" + nested.value quoted_total | fields case, duration_result, bytes_result, time_result, ip_result, empty_result, null_result, missing_result, array_result, quoted_total"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "duration_result":"615000000000",
+            "bytes_result":"2048",
+            "time_result":"1717030933000000000",
+            "ip_result":"2066564929",
+            "empty_result":"1",
+            "null_result":"2",
+            "missing_result":"3",
+            "array_result":"4",
+            "quoted_total":"13"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | math '2024-05-30T01:02:03Z' + 10e9 quoted_time, '123.45.67.89' + 1000 quoted_ip, -1.5K scaled, -45ms negative_duration, max(a, b,) maximum, round(3.14,) rounded | fields case, quoted_time, quoted_ip, scaled, negative_duration, maximum, rounded"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "quoted_time":"1717030933000000000",
+            "quoted_ip":"2066564929",
+            "scaled":"-1500",
+            "negative_duration":"-45000000",
+            "maximum":"3",
+            "rounded":"3"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | math a / b default 10 | fields case, "a / b default 10""#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "a / b default 10":"0.6666666666666666"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | math 1e20 huge, 0.000000001 tiny, 1 / 0 positive_inf, -1 / 0 negative_inf, 0 / 0 not_a_number, (1 / 0) default 7 inf_default, a + as result, a* as adjacent_result, negative & 3 negative_and, (1 / 0) & 1 inf_and, 18446744073709551616 & 1 overflow_and, -1 or 1 negative_or | fields case, huge, tiny, positive_inf, negative_inf, not_a_number, inf_default, result, adjacent_result, negative_and, inf_and, overflow_and, negative_or"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "huge":"100000000000000000000",
+            "tiny":"0.000000001",
+            "positive_inf":"+Inf",
+            "negative_inf":"-Inf",
+            "not_a_number":"NaN",
+            "inf_default":"+Inf",
+            "result":"NaN",
+            "adjacent_result":"NaN",
+            "negative_and":"2",
+            "inf_and":"0",
+            "overflow_and":"0",
+            "negative_or":"18446744073709552000"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | math duration + 10e9 duration_result | format '<duration:duration_result>' as rendered | fields case, rendered"#,
+        )
+        .await,
+        [serde_json::json!({"case":"math-rich","rendered":"10m15s"})]
+    );
+
+    let volatile = pipeline_rows(
+        &app,
+        r#"case:="math-rich" | math now() clock, floor(rand()) bucket | fields case, clock, bucket"#,
+    )
+    .await;
+    let clock = volatile[0]["clock"]
+        .as_str()
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    assert!(clock > 1_000_000_000_000_000_000.0, "{volatile:?}");
+    assert_eq!(volatile[0]["bucket"], "0");
+
+    for malformed in [
+        "* | math",
+        "* | eval",
+        "* | math * as result",
+        "* | math (a + b as result",
+        "* | math source as result*",
+        "* | math source as",
+        "* | math a as x,, b as y",
+        "* | math a as x,",
+        "* | math abs(a, b) as x",
+        "* | math abs() as x",
+        "* | math min(a) as x",
+        "* | math max() as x",
+        "* | math max(a) as x",
+        "* | math round() as x",
+        "* | math round(a, b, c) as x",
+        "* | math rand(1) as x",
+        "* | math now(1) as x",
+        "* | math 1e-9 as x",
+        "* | math abs value as x",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="math-rich" | math a + b as nested"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict");
+    assert!(conflict["message"]
+        .as_str()
+        .unwrap()
+        .contains("LogsQL math destination conflict"));
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                r#"case:="math-rich" | math a + b as selected | fields selected"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="math-rich" | fields case, a, b, negative, bad, nested, source_array, source_null, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"math-rich",
+            "a":"2",
+            "b":"3",
+            "negative":-2,
+            "bad":"nope",
+            "nested":{"value":"4"},
+            "source_array":[1,2],
+            "source_null":null,
+            "result":"original"
+        })],
+        "math must not mutate durable rich source values"
+    );
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="math-rich" | EVAL ROUND(ABS(-2.5)) AS result_value | fields case, result_value"#,
+        )
+        .await,
+        [serde_json::json!({"case":"math-rich","result_value":"3"})]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -8359,12 +8672,45 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_format);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_format_cancel = default_app
+        .clone()
         .oneshot(logsql_request(
             "level:error | format '<_msg>' as selected | fields selected | limit 1",
         ))
         .await
         .unwrap();
     assert_eq!(reused_after_format_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_math = storage.stats().await.unwrap().api_query_cancelled;
+    let math_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | math ln(exp(1)) + round(3.14159, 0.01) + _time as selected | fields selected | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(math_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_math && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_math);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_math_cancel = default_app
+        .oneshot(logsql_request(
+            "level:error | math 1 + 1 as selected | fields selected | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_math_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

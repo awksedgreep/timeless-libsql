@@ -135,7 +135,7 @@
     {"case": "week-fri", "_msg": "week Friday", "week_group": "week", "utc_weekday": "Fri", "utc_time_of_day": "12:00:00.000000"},
     {"case": "week-sat", "_msg": "week Saturday", "week_group": "week", "utc_weekday": "Sat", "utc_time_of_day": "12:00:00.000000"},
     {"case": "comment-hash", "_msg": "hash#inside", "comment_group": "comments", "hash#field": "hash#value"},
-    {"case": "format-row", "_msg": "hello \"world\"\nnext", "format_group": "format", "host": "aцC", "lower": "aBП", "unicode_edge": "ßİ", "url": "a b+ц", "encoded_url": "a+b%2B%D1%86", "hex": "D099D0A6D0A3D09A", "invalid_hex": "qwert", "b64": "YdGGQw==", "invalid_b64": "al", "duration": "1h5m35s", "duration_ns": "210123456789", "duration_min": "-9223372036854775808", "unix_seconds_fraction": "1717328141.12", "unix_millis": "1717328141123", "unix_micros": "1717328141123456", "unix_ns": "1717328141123456789", "unix_scientific": "1.717328141123456789e18", "unix_plus": "+1717328141", "unix_negative": "-1717328141.123", "number": "1234", "hex_number": "00000000000004D2", "ipv4": "1234567890", "result": "original"},
+    {"case": "format-row", "_msg": "hello \"world\"\nnext", "format_group": "format", "host": "aцC", "lower": "aBП", "unicode_edge": "ßİ", "url": "a b+ц", "encoded_url": "a+b%2B%D1%86", "hex": "D099D0A6D0A3D09A", "invalid_hex": "qwert", "b64": "YdGGQw==", "invalid_b64": "al", "duration": "1h5m35s", "duration_ns": "210123456789", "duration_min": "-9223372036854775808", "unix_seconds_fraction": "1717328141.12", "unix_millis": "1717328141123", "unix_micros": "1717328141123456", "unix_ns": "1717328141123456789", "unix_scientific": "1.717328141123456789e18", "unix_plus": "+1717328141", "unix_negative": "-1717328141.123", "number": "1234", "hex_number": "00000000000004D2", "ipv4": "1234567890", "result": "original", "math_a": "2", "math_b": "3", "math_bad": "nope", "math_empty": "", "math_null": null, "math_duration": "10m5s", "math_bytes": "1.5KiB", "math_timestamp": "2024-05-30T01:02:03Z", "math_ipv4": "123.45.67.89", "math abs": "7", "math left field": "2", "math_nested": {"value": "4"}, "math_array": [1, 2]},
     {"case": "delete-row", "_msg": "delete message", "delete_group": "delete", "level": "warning", "keep": "kept", "drop_exact": "gone", "drop_prefix_a": "one", "drop_prefix_b": "two", "Drop_prefix_caps": "caps", "delete,weird": "comma", "delete|pipe": "pipe", "drop,prefix.one": "quoted-prefix", "star*literal": "literal-star", "nested": {"drop": "nested-gone", "keep": "nested-kept"}, "array": ["x", 1], "null_value": null, "empty_value": ""}
   ],
   "query_cases": [
@@ -3038,6 +3038,116 @@
       "id": "LQL-P22-format-empty-condition-matches",
       "query": "case:=format-row | format if () 'replacement' as result | fields case, result",
       "expected_rows": [{"case": "format-row", "result": "replacement"}]
+    },
+    {
+      "id": "LQL-P23-math-precedence-parentheses-and-left-power",
+      "query": "case:=format-row | math math_a + math_b * 4 as precedence, (math_a + math_b) * 4 as wrapped, 2 ^ 3 ^ 2 as power | fields case, precedence, wrapped, power",
+      "expected_rows": [{"case": "format-row", "precedence": "14", "wrapped": "20", "power": "64"}]
+    },
+    {
+      "id": "LQL-P23-eval-sequential-results-and-optional-as",
+      "query": "case:=format-row | eval math_a + 1 first, first * math_b as second, second - 1 total | fields case, first, second, total",
+      "expected_rows": [{"case": "format-row", "first": "3", "second": "9", "total": "8"}]
+    },
+    {
+      "id": "LQL-P23-math-binary-bitwise-and-default",
+      "query": "case:=format-row | math math_a ^ math_b pow, 7 % 4 rem, 7 & 3 band, 4 or 1 bor, 6 xor 3 bxor, math_bad default 5 fallback | fields case, pow, rem, band, bor, bxor, fallback",
+      "expected_rows": [{"case": "format-row", "pow": "8", "rem": "3", "band": "3", "bor": "5", "bxor": "5", "fallback": "5"}]
+    },
+    {
+      "id": "LQL-P23-math-functions-and-nan-skipping-extrema",
+      "query": "case:=format-row | math abs(-math_b) absolute, ceil(2.1) ceiling, floor(2.9) floored, round(2.5) rounded, exp(1) exponential, ln(exp(1)) logarithm, max(math_a, math_bad, math_b) maximum, min(math_b, math_bad, math_a) minimum | fields case, absolute, ceiling, floored, rounded, exponential, logarithm, maximum, minimum",
+      "expected_rows": [{"case": "format-row", "absolute": "3", "ceiling": "3", "floored": "2", "rounded": "3", "exponential": "2.718281828459045", "logarithm": "1", "maximum": "3", "minimum": "2"}]
+    },
+    {
+      "id": "LQL-P23-math-round-nearest-and-signed-modulo",
+      "query": "case:=format-row | math round(3.14159, 0.01) rounded, round(-3.14159, 0.01) negative_rounded, -5 % 2 signed_remainder, 5.5 % 2 fractional_remainder | fields case, rounded, negative_rounded, signed_remainder, fractional_remainder",
+      "expected_rows": [{"case": "format-row", "rounded": "3.14", "negative_rounded": "-3.14", "signed_remainder": "-1", "fractional_remainder": "1.5"}]
+    },
+    {
+      "id": "LQL-P23-math-duration-bytes-time-and-ip-coercion",
+      "query": "case:=format-row | math math_duration + 10e9 duration_result, math_bytes + 512B bytes_result, math_timestamp + 10e9 time_result, math_ipv4 + 1000 ip_result | fields case, duration_result, bytes_result, time_result, ip_result",
+      "expected_rows": [{"case": "format-row", "duration_result": "615000000000", "bytes_result": "2048", "time_result": "1717030933000000000", "ip_result": "2066564929"}]
+    },
+    {
+      "id": "LQL-P23-math-missing-null-empty-rich-and-invalid-defaults",
+      "query": "case:=format-row | math math_bad as invalid_result, math_empty default 1 empty_result, math_null default 2 null_result, math_missing default 3 missing_result, math_array default 4 array_result | fields case, invalid_result, empty_result, null_result, missing_result, array_result",
+      "expected_rows": [{"case": "format-row", "invalid_result": "NaN", "empty_result": "1", "null_result": "2", "missing_result": "3", "array_result": "4"}]
+    },
+    {
+      "id": "LQL-P23-math-default-result-name",
+      "query": "case:=format-row | math math_a / math_b default 10 | fields case, \"math_a / math_b default 10\"",
+      "expected_rows": [{"case": "format-row", "math_a / math_b default 10": "0.6666666666666666"}]
+    },
+    {
+      "id": "LQL-P23-math-quoted-and-flattened-fields",
+      "query": "case:=format-row | math \"math abs\" + \"math left field\" + math_nested.value as total | fields case, total",
+      "expected_rows": [{"case": "format-row", "total": "13"}]
+    },
+    {
+      "id": "LQL-P23-math-fixed-float-rendering-and-nonfinite-values",
+      "query": "case:=format-row | math 1e20 huge, 0.000000001 tiny, 1 / 0 positive_inf, -1 / 0 negative_inf, 0 / 0 not_a_number, (1 / 0) default 7 inf_default | fields case, huge, tiny, positive_inf, negative_inf, not_a_number, inf_default",
+      "expected_rows": [{"case": "format-row", "huge": "100000000000000000000", "tiny": "0.000000001", "positive_inf": "+Inf", "negative_inf": "-Inf", "not_a_number": "NaN", "inf_default": "+Inf"}]
+    },
+    {
+      "id": "LQL-P23-math-now-is-numeric",
+      "query": "case:=format-row | math now() as clock, round(clock / clock) as unity | fields case, unity",
+      "expected_rows": [{"case": "format-row", "unity": "1"}]
+    },
+    {
+      "id": "LQL-P23-math-rand-range",
+      "query": "case:=format-row | math floor(rand()) as bucket | fields case, bucket",
+      "expected_rows": [{"case": "format-row", "bucket": "0"}]
+    },
+    {
+      "id": "LQL-P23-math-case-insensitive-command-and-functions",
+      "query": "case:=format-row | EVAL ROUND(ABS(-2.5)) AS result_value | fields case, result_value",
+      "expected_rows": [{"case": "format-row", "result_value": "3"}]
+    },
+    {
+      "id": "LQL-P23-math-composes-with-format",
+      "query": "case:=format-row | math math_duration + 10e9 as duration_result | format '<duration:duration_result>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "10m15s"}]
+    },
+    {
+      "id": "LQL-P23-math-as-keyword-can-be-a-right-operand",
+      "query": "case:=format-row | math math_a + as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "NaN"}]
+    },
+    {
+      "id": "LQL-P23-math-adjacent-star-is-multiplication",
+      "query": "case:=format-row | math math_a* as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "NaN"}]
+    },
+    {
+      "id": "LQL-P23-math-quoted-time-ip-and-signed-unit-constants",
+      "query": "case:=format-row | math '2024-05-30T01:02:03Z' + 10e9 time_result, '123.45.67.89' + 1000 ip_result, -1.5K scaled, -45ms negative_duration | fields case, time_result, ip_result, scaled, negative_duration",
+      "expected_rows": [{"case": "format-row", "time_result": "1717030933000000000", "ip_result": "2066564929", "scaled": "-1500", "negative_duration": "-45000000"}]
+    },
+    {
+      "id": "LQL-P23-math-negative-nearest-and-complex-parentheses",
+      "query": "case:=format-row | math round((2 * math_b + (math_a % math_b)) / (math_b - math_a) ^ (math_a - 1), -0.001) as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "8"}]
+    },
+    {
+      "id": "LQL-P23-math-function-trailing-comma-is-accepted",
+      "query": "case:=format-row | math max(math_a, math_b,) maximum, round(3.14,) rounded | fields case, maximum, rounded",
+      "expected_rows": [{"case": "format-row", "maximum": "3", "rounded": "3"}]
+    },
+    {
+      "id": "LQL-P23-math-default-replaces-only-nan",
+      "query": "case:=format-row | math (0 / 0) default math_b zero_default, math_bad default math_missing both_invalid | fields case, zero_default, both_invalid",
+      "expected_rows": [{"case": "format-row", "zero_default": "3", "both_invalid": "NaN"}]
+    },
+    {
+      "id": "LQL-P23-math-bitwise-negative-uses-uint64-conversion",
+      "query": "case:=numeric-negative | math n & 3 as result | fields case, result",
+      "expected_rows": [{"case": "numeric-negative", "result": "2"}]
+    },
+    {
+      "id": "LQL-P23-math-bitwise-nonfinite-and-out-of-range-conversion",
+      "query": "case:=format-row | math (1 / 0) & 1 inf_and, 18446744073709551616 & 1 overflow_and, -1 or 1 negative_or | fields case, inf_and, overflow_and, negative_or",
+      "expected_rows": [{"case": "format-row", "inf_and": "0", "overflow_and": "0", "negative_or": "18446744073709552000"}]
     }
   ],
   "error_cases": [
@@ -4346,6 +4456,139 @@
     {
       "id": "LQL-P22-format-rejects-trailing-token",
       "query": "* | format value trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-requires-expression",
+      "query": "* | math",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-eval-requires-expression",
+      "query": "* | eval",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-rejects-leading-operator",
+      "query": "* | math * as result",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-requires-closing-parenthesis",
+      "query": "* | math (a + b as result",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-rejects-wildcard-destination",
+      "query": "* | math source as result*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-requires-destination-after-as",
+      "query": "* | math source as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-rejects-empty-middle-expression",
+      "query": "* | math a as x,, b as y",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-rejects-trailing-comma",
+      "query": "* | math a as x,",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-abs-requires-one-argument",
+      "query": "* | math abs(a, b) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-abs-rejects-empty-arguments",
+      "query": "* | math abs() as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-min-requires-two-arguments",
+      "query": "* | math min(a) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-max-rejects-empty-arguments",
+      "query": "* | math max() as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-max-requires-two-arguments",
+      "query": "* | math max(a) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-round-rejects-empty-arguments",
+      "query": "* | math round() as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-round-rejects-three-arguments",
+      "query": "* | math round(a, b, c) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-rand-rejects-arguments",
+      "query": "* | math rand(1) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-now-rejects-arguments",
+      "query": "* | math now(1) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-negative-scientific-exponent-is-invalid",
+      "query": "* | math 1e-9 as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P23-math-function-requires-parentheses",
+      "query": "* | math abs value as x",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

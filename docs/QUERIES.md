@@ -864,6 +864,54 @@ private table is used. Exact-build evidence measures 3.297/39.353 ms
 narrow/wide p95 versus 3.090/35.941 ms for byte-identical same-scan controls;
 `QSF-171` accepts the +6.7%/+9.5% bounded formatting cost.
 
+## LogsQL `math` / `eval` over rich current rows
+
+`math` and its alias `eval` calculate one or more binary64 expressions and
+write string results into the current response row:
+
+```text
+* | math duration + 10e9 as adjusted_ns
+* | eval attempts + 1 next_attempt, next_attempt * backoff as delay
+* | math round(bytes / 1KiB, 0.01) as kib
+* | math invalid default 0 as safe_value
+```
+
+Comma-separated entries execute left to right, and a later entry can read an
+earlier destination. `as` is optional. If the destination is omitted, the
+canonical expression—including necessary parentheses—becomes the field name.
+Only exact destinations are accepted.
+
+From tightest to loosest, the binary operators are `^`, `*`/`/`/`%`,
+`+`/`-`, `&`, `xor`, `or`, and `default`. All associate left, including
+power. Unary plus/minus and explicit parentheses are supported. Available
+functions are `abs`, `ceil`, `exp`, `floor`, `ln`, `max`, `min`, `now`,
+`rand`, and `round`. `max`/`min` require at least two arguments and skip NaN
+operands in evaluation order. `round(value)` rounds to an integer;
+`round(value, nearest)` uses the pinned VictoriaLogs decimal-scale rule.
+`now()` returns a pipeline-invocation Unix timestamp in nanoseconds and
+`rand()` returns a value in `[0,1)`.
+
+Numbers may be decimal, base-zero, scaled, durations, byte sizes, RFC3339
+timestamps, or IPv4 addresses; durations and timestamps become nanoseconds.
+Current-row fields use the same coercion. Missing, null, empty, arrays,
+objects, and invalid text become NaN. `default` replaces only NaN—not
+infinity. Results use fixed, non-exponent strings, including `NaN`, `+Inf`,
+and `-Inf`. Bitwise operands follow the pinned VictoriaLogs unsigned
+conversion even for negative, nonfinite, or out-of-range values, so results
+do not depend on Rust target cast behavior.
+
+Rich source values are never changed. Scalar destinations are overwritten;
+replacing an object or descending through a scalar returns HTTP 422 reason
+`field_conflict`. Parser AST size/nesting, evaluated work, temporary state,
+result rows, response bytes, and cancellation use the hard request limits.
+Executable [`SQL-LOG-036`](QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)
+shows a parameterized public JSON1 equivalent for ordinary arithmetic over
+two exact numeric metadata fields. SQL deliberately returns `NULL` for
+invalid inputs instead of SQLite's misleading `CAST('bad' AS REAL) = 0`;
+the complete LogsQL grammar, coercion chain, functions, sequential mutation,
+and error envelopes remain Rust API behavior. No extension primitive or
+private table is used.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

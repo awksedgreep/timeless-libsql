@@ -608,3 +608,23 @@ The fixture contains 296 row-query cases, 187 error cases, and 166
 statistics/pipeline cases: 649 cases total, all passing against the immutable
 image.
 The fixture now contains 649 cases.
+
+`LQL-P23` adds twenty-two successful pipeline cases and nineteen error cases
+for `math`/`eval`; sequential destinations and optional `as`; canonical
+default result names; unary operators, parentheses, left-associative binary
+precedence, arithmetic, remainder, power, bitwise operators, and NaN-only
+`default`; every supported function and strict arity; trailing function
+commas; decimal, base-zero, scaled-number, duration, byte-size, RFC3339, and
+IPv4 coercion; fixed float and nonfinite rendering; missing/null/empty/rich
+invalid values; quoted/dotted fields; volatile `now`/`rand`; format
+composition; and the pinned parser ambiguities around `as`, adjacent `*`, and
+negative scientific exponents. Two final cases pin VictoriaLogs' unsigned
+conversion of negative, nonfinite, and out-of-range values before bitwise
+operations. Source audit is against `pipe_math.go`, `pipe_math_test.go`,
+`parser.go`, `values_encoder.go`, and the numeric/duration/byte/time/IP parser
+helpers at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+The fixture contains 296 row-query cases, 206 error cases, and 188
+statistics/pipeline cases: 690 cases total, all passing against the immutable
+image.
+The fixture now contains 690 cases.

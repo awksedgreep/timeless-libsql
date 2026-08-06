@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -20,7 +20,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    parse_victorialogs_human_duration, CoalesceSpec, CopySpec, FacetsSpec, FirstSpec, FormatSpec,
+    parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CopySpec,
+    FacetsSpec, FirstSpec, FormatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec,
     PipelineField, PipelineOp, RenameSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
@@ -199,6 +200,9 @@ pub(crate) fn execute(
                 execution.limits,
                 execution.cancelled,
             )?,
+            PipelineOp::Math(spec) => {
+                math_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -1309,6 +1313,278 @@ fn format_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn math_fields(
+    rows: Vec<Value>,
+    spec: &MathSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let math_now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(f64::NAN, |duration| duration.as_nanos() as f64);
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            let mut state_bytes = size_of::<Value>();
+            let mut work_items = 0usize;
+            for entry in &spec.entries {
+                ensure_active(cancelled)?;
+                let result = evaluate_math_expression(
+                    &row,
+                    &entry.expression,
+                    &mut state_bytes,
+                    &mut work_items,
+                    limits,
+                    cancelled,
+                    math_now,
+                )?;
+                let rendered = victorialogs_math_float(result);
+                charge_transfer_string(
+                    &rendered,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "math",
+                )?;
+                let PipelineField::Exact {
+                    path: destination_path,
+                    name: destination_name,
+                } = &entry.destination
+                else {
+                    return Err("LogsQL math destination is not exact".into());
+                };
+                charge_transfer_string(
+                    destination_name,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "math",
+                )?;
+                for segment in destination_path {
+                    charge_transfer_string(
+                        segment,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                        "math",
+                    )?;
+                }
+                let object = row
+                    .as_object_mut()
+                    .ok_or_else(|| "LogsQL math input row is not a JSON object".to_string())?;
+                if copy_destination_replaces_object(object, destination_path) {
+                    return Err(format!(
+                        "LogsQL math destination conflict: field {destination_name:?} would replace a retained object"
+                    ));
+                }
+                insert_path(object, destination_path, Value::String(rendered))
+                    .map_err(|error| format!("LogsQL math destination conflict: {error}"))?;
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+fn evaluate_math_expression(
+    row: &Value,
+    expression: &MathExpression,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+    math_now: f64,
+) -> Result<f64, String> {
+    charge_transfer_work(work_items, limits.max_state_items, "math")?;
+    check_periodically(cancelled, *work_items)?;
+    *state_bytes = state_bytes
+        .checked_add(size_of::<f64>())
+        .ok_or_else(|| "LogsQL math state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "math")?;
+    match expression {
+        MathExpression::Constant { value, .. } => Ok(*value),
+        MathExpression::Field { path, .. } => {
+            let value =
+                coalesce_exact_value(row, path).filter(|value| !matches!(value, Value::Object(_)));
+            let text = projected_text(value);
+            *state_bytes = state_bytes
+                .checked_add(text.len())
+                .ok_or_else(|| "LogsQL math state size overflow".to_string())?;
+            ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "math")?;
+            Ok(parse_logsql_math_number(text.as_ref()).unwrap_or(f64::NAN))
+        }
+        MathExpression::UnaryMinus(argument) => Ok(-evaluate_math_expression(
+            row,
+            argument,
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+            math_now,
+        )?),
+        MathExpression::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let left = evaluate_math_expression(
+                row,
+                left,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+                math_now,
+            )?;
+            let right = evaluate_math_expression(
+                row,
+                right,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+                math_now,
+            )?;
+            Ok(evaluate_math_binary(*operator, left, right))
+        }
+        MathExpression::Function {
+            function,
+            arguments,
+        } => {
+            let mut values = Vec::with_capacity(arguments.len());
+            *state_bytes = state_bytes
+                .checked_add(arguments.len().saturating_mul(size_of::<f64>()))
+                .ok_or_else(|| "LogsQL math state size overflow".to_string())?;
+            ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "math")?;
+            for argument in arguments {
+                values.push(evaluate_math_expression(
+                    row,
+                    argument,
+                    state_bytes,
+                    work_items,
+                    limits,
+                    cancelled,
+                    math_now,
+                )?);
+            }
+            Ok(evaluate_math_function(*function, &values, math_now))
+        }
+    }
+}
+
+fn evaluate_math_binary(operator: MathBinaryOperator, left: f64, right: f64) -> f64 {
+    match operator {
+        MathBinaryOperator::Power => left.powf(right),
+        MathBinaryOperator::Multiply => left * right,
+        MathBinaryOperator::Divide => left / right,
+        MathBinaryOperator::Modulo => left % right,
+        MathBinaryOperator::Add => left + right,
+        MathBinaryOperator::Subtract => left - right,
+        MathBinaryOperator::BitAnd => math_bitwise(left, right, |left, right| left & right),
+        MathBinaryOperator::BitXor => math_bitwise(left, right, |left, right| left ^ right),
+        MathBinaryOperator::BitOr => math_bitwise(left, right, |left, right| left | right),
+        MathBinaryOperator::Default => {
+            if left.is_nan() {
+                right
+            } else {
+                left
+            }
+        }
+    }
+}
+
+fn math_bitwise(left: f64, right: f64, operation: impl FnOnce(u64, u64) -> u64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else {
+        operation(victorialogs_math_u64(left), victorialogs_math_u64(right)) as f64
+    }
+}
+
+fn victorialogs_math_u64(value: f64) -> u64 {
+    const TWO_TO_63: f64 = 9_223_372_036_854_775_808.0;
+    const TWO_TO_64: f64 = 18_446_744_073_709_551_616.0;
+
+    if value.is_finite() && (-TWO_TO_63..0.0).contains(&value) {
+        (value.trunc() as i64) as u64
+    } else if value.is_finite() && (0.0..TWO_TO_64).contains(&value) {
+        value.trunc() as u64
+    } else {
+        // The pinned linux/amd64 VictoriaLogs build converts values outside
+        // the uint64 range through the architecture's signed overflow value.
+        // Make that oracle behavior deterministic on every Timeless target.
+        1_u64 << 63
+    }
+}
+
+fn evaluate_math_function(function: MathFunction, arguments: &[f64], math_now: f64) -> f64 {
+    match function {
+        MathFunction::Abs => arguments[0].abs(),
+        MathFunction::Ceil => arguments[0].ceil(),
+        MathFunction::Exp => arguments[0].exp(),
+        MathFunction::Floor => arguments[0].floor(),
+        MathFunction::Ln => arguments[0].ln(),
+        MathFunction::Max => arguments.iter().copied().fold(f64::NAN, |result, value| {
+            if result.is_nan() || value > result {
+                value
+            } else {
+                result
+            }
+        }),
+        MathFunction::Min => arguments.iter().copied().fold(f64::NAN, |result, value| {
+            if result.is_nan() || value < result {
+                value
+            } else {
+                result
+            }
+        }),
+        MathFunction::Now => math_now,
+        MathFunction::Rand => f64::from(fastrand::u32(..)) / 4_294_967_296.0,
+        MathFunction::Round if arguments.len() == 1 => arguments[0].round(),
+        MathFunction::Round => round_to_nearest(arguments[0], arguments[1]),
+    }
+}
+
+fn round_to_nearest(value: f64, nearest: f64) -> f64 {
+    let exponent = shortest_decimal_exponent(nearest);
+    let decimal_scale = 10f64.powi(exponent.saturating_neg());
+    let adjusted = value + 0.5 * nearest.copysign(value);
+    let adjusted = adjusted - adjusted % nearest;
+    (adjusted * decimal_scale).trunc() / decimal_scale
+}
+
+fn shortest_decimal_exponent(value: f64) -> i32 {
+    if value == 0.0 || !value.is_finite() {
+        return 0;
+    }
+    let text = value.abs().to_string();
+    let (mantissa, explicit_exponent) = text
+        .split_once(['e', 'E'])
+        .map_or((text.as_str(), 0), |(mantissa, exponent)| {
+            (mantissa, exponent.parse::<i32>().unwrap_or(0))
+        });
+    let fraction_digits = mantissa
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len()) as i32;
+    let trailing_zeros = mantissa
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'0')
+        .count() as i32;
+    explicit_exponent
+        .saturating_sub(fraction_digits)
+        .saturating_add(trailing_zeros)
+}
+
+fn victorialogs_math_float(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".into()
+    } else if value == f64::INFINITY {
+        "+Inf".into()
+    } else if value == f64::NEG_INFINITY {
+        "-Inf".into()
+    } else {
+        value.to_string()
+    }
 }
 
 fn format_row(
@@ -4749,6 +5025,119 @@ mod tests {
             )
             .unwrap_err(),
             "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn math_evaluates_sequentially_preserves_rich_values_and_observes_bounds() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Math(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected math plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let rows = vec![json!({
+            "a":"2",
+            "b":"3",
+            "bad":"nope",
+            "nested":{"value":"4"},
+            "source_array":[1,2],
+            "source_null":null
+        })];
+        let spec = parse_spec(
+            "* | math a + 1 first, first * b second, second + nested.value total, bad default 7 fallback, source_array array_value",
+        );
+        assert_eq!(
+            math_fields(rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [json!({
+                "a":"2",
+                "b":"3",
+                "bad":"nope",
+                "nested":{"value":"4"},
+                "source_array":[1,2],
+                "source_null":null,
+                "first":"3",
+                "second":"9",
+                "total":"13",
+                "fallback":"7",
+                "array_value":"NaN"
+            })]
+        );
+
+        let work_error = math_fields(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL math"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = math_fields(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL math"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | math a + b as nested");
+        let conflict_error = math_fields(rows.clone(), &conflict, limits, &cancelled).unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL math destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            math_fields(rows, &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn math_float_format_and_rounding_match_victorialogs_fixed_output() {
+        for (value, expected) in [
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "+Inf"),
+            (f64::NEG_INFINITY, "-Inf"),
+            (1e20, "100000000000000000000"),
+            (1e-9, "0.000000001"),
+            (-0.0, "-0"),
+        ] {
+            assert_eq!(victorialogs_math_float(value), expected, "{value:?}");
+        }
+        assert_eq!(round_to_nearest(12.3456, 0.01), 12.35);
+        assert_eq!(round_to_nearest(-12.3456, 0.01), -12.35);
+        assert_eq!(round_to_nearest(14.0, 10.0), 10.0);
+        assert!(round_to_nearest(1.0, 0.0).is_nan());
+        assert_eq!(math_bitwise(-2.0, 3.0, |left, right| left & right), 2.0);
+        assert_eq!(
+            math_bitwise(f64::INFINITY, 1.0, |left, right| left & right),
+            0.0
+        );
+        assert_eq!(
+            victorialogs_math_float(math_bitwise(-1.0, 1.0, |left, right| left | right)),
+            "18446744073709552000"
         );
     }
 

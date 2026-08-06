@@ -714,6 +714,39 @@ response size, and cancellation are bounded. Executable
 provides direct users the public exact-field JSON1/`printf` foundation. No
 extension primitive, private table, or durable storage mutation is involved.
 
+LogsQL `math` and its alias `eval` evaluate bounded binary64 expressions over
+the current rich row:
+
+```text
+* | math duration + 10e9 as adjusted_ns
+* | eval attempts + 1 next_attempt, next_attempt * backoff delay
+* | math round(bytes / 1KiB, 0.01) as kib
+* | math invalid default 0 as safe_value
+```
+
+Entries execute sequentially; `as` is optional, and an omitted destination
+uses the canonical expression string. Operators, from tightest to loosest,
+are `^`, `*`/`/`/`%`, `+`/`-`, `&`, `xor`, `or`, and NaN-only `default`.
+All are left-associative. Unary signs and parentheses compose with `abs`,
+`ceil`, `exp`, `floor`, `ln`, `max`, `min`, `now`, `rand`, and `round`.
+
+Constants and fields accept VictoriaLogs numeric, duration, byte-size,
+RFC3339, and IPv4 coercions. Missing/null/empty/invalid or retained rich
+values produce NaN. Results are strings with fixed finite rendering and
+`NaN`/`+Inf`/`-Inf`; bitwise operators use the pinned unsigned conversion for
+negative, nonfinite, and out-of-range values. Later entries observe earlier
+results, while durable typed inputs remain immutable.
+
+Exact scalar destinations may be replaced. Replacing a rich object or
+descending through a scalar returns HTTP 422 `field_conflict`. AST
+size/nesting, work, temporary state, results, response bytes, and
+cancellation are bounded. Executable
+[`SQL-LOG-036`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)
+provides direct users a parameterized JSON1 arithmetic foundation without
+claiming SQLite `CAST` implements LogsQL coercion. Language syntax,
+functions, sequential composition, limits, and errors stay in this Rust API;
+no extension primitive or private storage table is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

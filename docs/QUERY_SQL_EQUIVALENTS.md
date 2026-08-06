@@ -143,6 +143,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-033`](#sql-log-033-copy-one-exact-retained-metadata-field) | `LQL-P20` | current foundation | typed copy of one exact retained metadata path to one exact top-level destination with missing/object-parent compatibility behavior; API owns pair grammar, flattened prefixes, sequential composition, nested destination conflicts, limits, cancellation, and envelopes |
 | [`SQL-LOG-034`](#sql-log-034-rename-one-exact-top-level-retained-metadata-field) | `LQL-P21` | current foundation | typed move of one exact top-level retained metadata field to one exact top-level destination, including source removal and missing/object-parent compatibility behavior; API owns flattened prefixes, sequential composition, nested-parent pruning/conflicts, limits, cancellation, and envelopes |
 | [`SQL-LOG-035`](#sql-log-035-format-two-exact-retained-metadata-fields) | `LQL-P22` | current foundation | bounded `printf` interpolation of two exact public metadata paths with explicit rich-value textual projection; API owns LogsQL patterns, codecs, conditions, destination mutation/preservation, limits, cancellation, and envelopes |
+| [`SQL-LOG-036`](#sql-log-036-arithmetic-over-exact-retained-numeric-fields) | `LQL-P23` | current foundation | bounded row-local arithmetic over two exact typed numeric metadata paths; API owns LogsQL math grammar, broader coercions, functions, sequential destinations, fixed float rendering, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6589,6 +6590,79 @@ primitive, private shadow-table access, or storage-format change.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_format_is_complete_bounded_rich_and_durable`.
+
+### SQL-LOG-036: arithmetic over exact retained numeric fields
+
+Bind two exact SQLite JSON paths, a numeric multiplier, inclusive native
+timestamp bounds, and positive work/result limits. This ordinary statement
+evaluates `first * multiplier + second` over public log rows:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), numeric_fields AS (
+  SELECT
+    ts,
+    level,
+    message,
+    json_type(metadata, :math_source_path_1) AS first_type,
+    json_extract(metadata, :math_source_path_1) AS first_value,
+    json_type(metadata, :math_source_path_2) AS second_type,
+    json_extract(metadata, :math_source_path_2) AS second_value
+  FROM bounded
+), calculated AS (
+  SELECT
+    ts,
+    level,
+    message,
+    CASE
+      WHEN first_type IN ('integer', 'real')
+       AND second_type IN ('integer', 'real')
+      THEN first_value * :math_multiplier + second_value
+      ELSE NULL
+    END AS calculated_value
+  FROM numeric_fields
+)
+SELECT ts, level, message, calculated_value
+FROM calculated
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, calculated_value
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit.
+`:math_source_path_1` and `:math_source_path_2` are exact SQLite JSON paths,
+such as `$.duration_ms` and `$.nested.count`; `:math_multiplier` is bound as a
+number. SQLite JSON `integer` and `real` values participate. Missing, null,
+string, boolean, array, or object inputs produce SQL `NULL`, an explicit
+invalid-result sentinel rather than SQLite's misleading `CAST('bad' AS REAL)
+= 0`. Results are deterministic in ascending timestamp, level, message, and
+calculated-value order.
+
+The complete `LQL-P23` API additionally accepts case-insensitive `math` and
+`eval`, comma-separated sequential expressions, optional `as`, canonical
+expression destinations, unary signs, parentheses, left-associative `^`,
+`*`, `/`, `%`, `+`, `-`, `&`, `xor`, `or`, and NaN-only `default`. It supports
+`abs`, `ceil`, `exp`, `floor`, `ln`, `max`, `min`, `now`, `rand`, and `round`;
+coerces VictoriaLogs numbers, durations, byte sizes, RFC3339 timestamps, and
+IPv4 addresses; and emits fixed shortest `NaN`/`+Inf`/`-Inf` float strings.
+Invalid or rich values become `NaN`, not SQL `NULL`. The API owns this
+language behavior, sequential current-row mutation, rich destination
+conflicts, AST/work/state/result/response limits, cancellation, and HTTP
+envelopes. Direct users should compose ordinary SQL expressions and `CASE`
+branches when those operations are sufficient.
+
+Every selected value already crosses the bounded public log-row interface.
+SQLite JSON1 and arithmetic perform the direct operation without a new
+extension primitive, private shadow-table access, or storage-format change.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_math_is_sequential_typed_and_durable`.
 
 ## Adding the next recipe
 

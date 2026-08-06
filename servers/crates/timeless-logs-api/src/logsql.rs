@@ -948,6 +948,542 @@ fn parse_format_pipe(
     }))
 }
 
+const MAX_MATH_AST_NODES: usize = 4_096;
+const MAX_MATH_NESTING: usize = 128;
+
+#[derive(Clone, Debug)]
+struct MathToken {
+    value: String,
+    raw: String,
+    quoted: bool,
+    separated: bool,
+}
+
+struct MathParser {
+    tokens: Vec<MathToken>,
+    cursor: usize,
+    nodes: usize,
+}
+
+fn parse_math_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_math_pipe(segment)?;
+    let mut parser = MathParser {
+        tokens,
+        cursor: 0,
+        nodes: 0,
+    };
+    let command = parser
+        .take()
+        .ok_or_else(|| LogsqlError::malformed("LogsQL math/eval pipe is empty"))?;
+    if command.quoted
+        || (!command.value.eq_ignore_ascii_case("math")
+            && !command.value.eq_ignore_ascii_case("eval"))
+    {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL math/eval pipe, not {:?}",
+            command.value
+        )));
+    }
+    if parser.peek().is_none() {
+        return Err(LogsqlError::malformed(
+            "LogsQL math/eval requires at least one expression",
+        ));
+    }
+
+    let mut entries = Vec::new();
+    loop {
+        if parser.peek_is(",") {
+            return Err(LogsqlError::malformed(
+                "LogsQL math/eval requires an expression after each comma",
+            ));
+        }
+        let expression = parser.parse_expression(1, 0)?;
+        let destination = if parser.peek().is_none() || parser.peek_is(",") {
+            let name = math_expression_string(&expression);
+            PipelineField::Exact {
+                path: vec![name.clone()],
+                name,
+            }
+        } else {
+            if parser.peek_keyword("as") {
+                parser.cursor += 1;
+            }
+            let token = parser.take_compound(false).map_err(|error| {
+                LogsqlError::malformed(format!(
+                    "LogsQL math/eval requires a destination field: {error}"
+                ))
+            })?;
+            match parse_pipeline_field(&token.raw, false)? {
+                field @ PipelineField::Exact { .. } => field,
+                PipelineField::Prefix { .. } | PipelineField::All => {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL math/eval destination must be an exact field",
+                    ));
+                }
+            }
+        };
+        entries.push(MathEntry {
+            expression,
+            destination,
+        });
+
+        match parser.peek().map(|token| token.value.as_str()) {
+            None => break,
+            Some(",") => {
+                parser.cursor += 1;
+                if parser.peek().is_none() {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL math/eval requires an expression after each comma",
+                    ));
+                }
+            }
+            Some(token) => {
+                return Err(LogsqlError::malformed(format!(
+                    "unexpected LogsQL math/eval token {token:?}; expected ',' or end of pipe"
+                )));
+            }
+        }
+    }
+    Ok(PipelineOp::Math(MathSpec { entries }))
+}
+
+impl MathParser {
+    fn peek(&self) -> Option<&MathToken> {
+        self.tokens.get(self.cursor)
+    }
+
+    fn take(&mut self) -> Option<MathToken> {
+        let token = self.tokens.get(self.cursor)?.clone();
+        self.cursor += 1;
+        Some(token)
+    }
+
+    fn peek_is(&self, value: &str) -> bool {
+        self.peek().is_some_and(|token| token.value == value)
+    }
+
+    fn peek_keyword(&self, value: &str) -> bool {
+        self.peek()
+            .is_some_and(|token| !token.quoted && token.value.eq_ignore_ascii_case(value))
+    }
+
+    fn charge_node(&mut self) -> Result<(), LogsqlError> {
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL math AST size overflow"))?;
+        if self.nodes > MAX_MATH_AST_NODES {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL math AST exceeds {MAX_MATH_AST_NODES} nodes"
+            )));
+        }
+        Ok(())
+    }
+
+    fn parse_expression(
+        &mut self,
+        minimum_precedence: u8,
+        depth: usize,
+    ) -> Result<MathExpression, LogsqlError> {
+        let mut left = self.parse_operand(depth)?;
+        while let Some(operator) = self.peek().and_then(math_binary_operator) {
+            let precedence = operator.precedence();
+            if precedence < minimum_precedence {
+                break;
+            }
+            self.cursor += 1;
+            let right = self.parse_expression(precedence + 1, depth)?;
+            self.charge_node()?;
+            left = MathExpression::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_operand(&mut self, depth: usize) -> Result<MathExpression, LogsqlError> {
+        if depth >= MAX_MATH_NESTING {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL math expression nesting exceeds {MAX_MATH_NESTING}"
+            )));
+        }
+        if self.peek_is("(") {
+            self.cursor += 1;
+            let expression = self.parse_expression(1, depth + 1)?;
+            if !self.peek_is(")") {
+                return Err(LogsqlError::malformed(
+                    "LogsQL math expression is missing ')'",
+                ));
+            }
+            self.cursor += 1;
+            return Ok(expression);
+        }
+        if self.peek_is("-") {
+            self.cursor += 1;
+            let expression = self.parse_operand(depth + 1)?;
+            self.charge_node()?;
+            return Ok(MathExpression::UnaryMinus(Box::new(expression)));
+        }
+        if self.peek_is("+") {
+            self.cursor += 1;
+            return self.parse_operand(depth + 1);
+        }
+
+        if let Some(function) = self.peek().and_then(math_function) {
+            self.cursor += 1;
+            if !self.peek_is("(") {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL math function {} requires '('",
+                    function.name()
+                )));
+            }
+            self.cursor += 1;
+            let mut arguments = Vec::new();
+            while !self.peek_is(")") {
+                if self.peek().is_none() {
+                    return Err(LogsqlError::malformed(format!(
+                        "LogsQL math function {} is missing ')'",
+                        function.name()
+                    )));
+                }
+                arguments.push(self.parse_expression(1, depth + 1)?);
+                if self.peek_is(")") {
+                    break;
+                }
+                if !self.peek_is(",") {
+                    return Err(LogsqlError::malformed(format!(
+                        "LogsQL math function {} expects ',' or ')'",
+                        function.name()
+                    )));
+                }
+                self.cursor += 1;
+                // VictoriaLogs accepts a trailing comma in function calls.
+                if self.peek_is(")") {
+                    break;
+                }
+            }
+            self.cursor += 1;
+            validate_math_function_arity(function, arguments.len())?;
+            self.charge_node()?;
+            return Ok(MathExpression::Function {
+                function,
+                arguments,
+            });
+        }
+
+        let numeric_prefix = self
+            .peek()
+            .is_some_and(|token| is_math_number_prefix(&token.value));
+        let token = self.take_compound(true)?;
+        if numeric_prefix {
+            let value = parse_logsql_math_number(&token.value).ok_or_else(|| {
+                LogsqlError::malformed(format!("cannot parse LogsQL math number {:?}", token.value))
+            })?;
+            self.charge_node()?;
+            return Ok(MathExpression::Constant {
+                value,
+                source: token.value,
+            });
+        }
+        let field = parse_pipeline_field(&token.raw, false)?;
+        let PipelineField::Exact { path, name } = field else {
+            return Err(LogsqlError::malformed(
+                "LogsQL math operands must be exact fields",
+            ));
+        };
+        self.charge_node()?;
+        Ok(MathExpression::Field { path, name })
+    }
+
+    fn take_compound(&mut self, math: bool) -> Result<MathToken, LogsqlError> {
+        let mut token = self.take().ok_or_else(|| {
+            LogsqlError::malformed("LogsQL math expression is missing an operand")
+        })?;
+        if token.quoted {
+            return Ok(token);
+        }
+        if !math_compound_token_allowed(&token.value, math) {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL math field/number cannot start with {:?}",
+                token.value
+            )));
+        }
+        while self.peek().is_some_and(|next| {
+            !next.separated && !next.quoted && math_compound_token_allowed(&next.value, math)
+        }) {
+            let next = self.take().expect("peeked token remains available");
+            token.value.push_str(&next.value);
+            token.raw.push_str(&next.raw);
+        }
+        if matches!(token.value.as_str(), "+" | "-" | "/" | ":" | "." | "$") {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL math compound token cannot be {:?}",
+                token.value
+            )));
+        }
+        Ok(token)
+    }
+}
+
+fn lex_math_pipe(value: &str) -> Result<Vec<MathToken>, LogsqlError> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < value.len() {
+        let mut separated = false;
+        while let Some(character) = value[cursor..].chars().next() {
+            if !character.is_whitespace() {
+                break;
+            }
+            separated = true;
+            cursor += character.len_utf8();
+        }
+        if cursor == value.len() {
+            break;
+        }
+        let rest = &value[cursor..];
+        if matches!(rest.chars().next(), Some('"' | '\'' | '`')) {
+            let (decoded, consumed) = parse_quoted_prefix(rest)?
+                .ok_or_else(|| LogsqlError::malformed("invalid quoted LogsQL math token"))?;
+            tokens.push(MathToken {
+                value: decoded,
+                raw: rest[..consumed].to_owned(),
+                quoted: true,
+                separated,
+            });
+            cursor += consumed;
+            continue;
+        }
+        let first = rest
+            .chars()
+            .next()
+            .expect("cursor remains before the string end");
+        let consumed = if math_word_character(first) {
+            rest.char_indices()
+                .take_while(|(_, character)| math_word_character(*character))
+                .map(|(index, character)| index + character.len_utf8())
+                .last()
+                .unwrap_or(first.len_utf8())
+        } else {
+            first.len_utf8()
+        };
+        let raw = rest[..consumed].to_owned();
+        tokens.push(MathToken {
+            value: raw.clone(),
+            raw,
+            quoted: false,
+            separated,
+        });
+        cursor += consumed;
+    }
+    Ok(tokens)
+}
+
+fn math_word_character(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
+}
+
+fn math_compound_token_allowed(token: &str, math: bool) -> bool {
+    token.chars().all(math_word_character)
+        || matches!(token, ":" | "." | "$")
+        || (!math && matches!(token, "+" | "-" | "/"))
+}
+
+fn is_math_number_prefix(value: &str) -> bool {
+    let value = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
+    if value
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("inf"))
+    {
+        return true;
+    }
+    let value = value.strip_prefix('.').unwrap_or(value);
+    value.as_bytes().first().is_some_and(u8::is_ascii_digit)
+}
+
+fn math_binary_operator(token: &MathToken) -> Option<MathBinaryOperator> {
+    if token.quoted {
+        return None;
+    }
+    match token.value.to_ascii_lowercase().as_str() {
+        "^" => Some(MathBinaryOperator::Power),
+        "*" => Some(MathBinaryOperator::Multiply),
+        "/" => Some(MathBinaryOperator::Divide),
+        "%" => Some(MathBinaryOperator::Modulo),
+        "+" => Some(MathBinaryOperator::Add),
+        "-" => Some(MathBinaryOperator::Subtract),
+        "&" => Some(MathBinaryOperator::BitAnd),
+        "xor" => Some(MathBinaryOperator::BitXor),
+        "or" => Some(MathBinaryOperator::BitOr),
+        "default" => Some(MathBinaryOperator::Default),
+        _ => None,
+    }
+}
+
+fn math_function(token: &MathToken) -> Option<MathFunction> {
+    if token.quoted {
+        return None;
+    }
+    match token.value.to_ascii_lowercase().as_str() {
+        "abs" => Some(MathFunction::Abs),
+        "ceil" => Some(MathFunction::Ceil),
+        "exp" => Some(MathFunction::Exp),
+        "floor" => Some(MathFunction::Floor),
+        "ln" => Some(MathFunction::Ln),
+        "max" => Some(MathFunction::Max),
+        "min" => Some(MathFunction::Min),
+        "now" => Some(MathFunction::Now),
+        "rand" => Some(MathFunction::Rand),
+        "round" => Some(MathFunction::Round),
+        _ => None,
+    }
+}
+
+fn validate_math_function_arity(
+    function: MathFunction,
+    arguments: usize,
+) -> Result<(), LogsqlError> {
+    let valid = match function {
+        MathFunction::Abs
+        | MathFunction::Ceil
+        | MathFunction::Exp
+        | MathFunction::Floor
+        | MathFunction::Ln => arguments == 1,
+        MathFunction::Max | MathFunction::Min => arguments >= 2,
+        MathFunction::Now | MathFunction::Rand => arguments == 0,
+        MathFunction::Round => matches!(arguments, 1 | 2),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(LogsqlError::malformed(format!(
+            "LogsQL math function {} received {arguments} argument(s)",
+            function.name()
+        )))
+    }
+}
+
+fn math_expression_string(expression: &MathExpression) -> String {
+    match expression {
+        MathExpression::Constant { source, .. } => source.clone(),
+        MathExpression::Field { name, .. } => quote_math_field(name),
+        MathExpression::UnaryMinus(argument) => {
+            let argument = math_expression_string(argument);
+            if matches!(argument_expression_kind(expression), Some(true)) {
+                format!("-({argument})")
+            } else {
+                format!("-{argument}")
+            }
+        }
+        MathExpression::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let mut left_text = math_expression_string(left);
+            let mut right_text = math_expression_string(right);
+            if math_binary_precedence(left).is_some_and(|value| value < operator.precedence()) {
+                left_text = format!("({left_text})");
+            }
+            if math_binary_precedence(right).is_some_and(|value| value <= operator.precedence()) {
+                right_text = format!("({right_text})");
+            }
+            format!("{left_text} {} {right_text}", operator.token())
+        }
+        MathExpression::Function {
+            function,
+            arguments,
+        } => format!(
+            "{}({})",
+            function.name(),
+            arguments
+                .iter()
+                .map(math_expression_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn argument_expression_kind(expression: &MathExpression) -> Option<bool> {
+    let MathExpression::UnaryMinus(argument) = expression else {
+        return None;
+    };
+    Some(matches!(argument.as_ref(), MathExpression::Binary { .. }))
+}
+
+fn math_binary_precedence(expression: &MathExpression) -> Option<u8> {
+    match expression {
+        MathExpression::Binary { operator, .. } => Some(operator.precedence()),
+        _ => None,
+    }
+}
+
+fn quote_math_field(value: &str) -> String {
+    const RESERVED: &[&str] = &[
+        "and",
+        "or",
+        "not",
+        "as",
+        "default",
+        "xor",
+        "math",
+        "eval",
+        "abs",
+        "ceil",
+        "exp",
+        "floor",
+        "ln",
+        "max",
+        "min",
+        "now",
+        "rand",
+        "round",
+        "filter",
+        "where",
+        "fields",
+        "keep",
+        "delete",
+        "del",
+        "drop",
+        "rm",
+        "stats",
+        "sort",
+        "limit",
+        "head",
+        "offset",
+        "skip",
+        "first",
+        "last",
+        "top",
+        "uniq",
+        "facets",
+        "coalesce",
+        "copy",
+        "cp",
+        "rename",
+        "mv",
+        "format",
+        "field_names",
+        "field_values",
+        "query_stats",
+    ];
+    let needs_quote = value.is_empty()
+        || !value.chars().all(math_word_character)
+        || RESERVED
+            .iter()
+            .any(|keyword| value.eq_ignore_ascii_case(keyword));
+    if needs_quote {
+        serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
+    } else {
+        value.to_owned()
+    }
+}
+
 fn starts_format_keyword(value: &str, keyword: &str) -> bool {
     value
         .get(..keyword.len())
@@ -1364,6 +1900,10 @@ fn is_rename_pipe(segment: &str) -> bool {
 
 fn is_format_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "format")
+}
+
+fn is_math_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "math") || is_first_last_pipe(segment, "eval")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -1849,6 +2389,113 @@ pub(crate) struct FormatSpec {
     pub condition: Option<LogPredicate>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MathBinaryOperator {
+    Power,
+    Multiply,
+    Divide,
+    Modulo,
+    Add,
+    Subtract,
+    BitAnd,
+    BitXor,
+    BitOr,
+    Default,
+}
+
+impl MathBinaryOperator {
+    fn precedence(self) -> u8 {
+        match self {
+            Self::Power => 7,
+            Self::Multiply | Self::Divide | Self::Modulo => 6,
+            Self::Add | Self::Subtract => 5,
+            Self::BitAnd => 4,
+            Self::BitXor => 3,
+            Self::BitOr => 2,
+            Self::Default => 1,
+        }
+    }
+
+    fn token(self) -> &'static str {
+        match self {
+            Self::Power => "^",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Modulo => "%",
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::BitAnd => "&",
+            Self::BitXor => "xor",
+            Self::BitOr => "or",
+            Self::Default => "default",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MathFunction {
+    Abs,
+    Ceil,
+    Exp,
+    Floor,
+    Ln,
+    Max,
+    Min,
+    Now,
+    Rand,
+    Round,
+}
+
+impl MathFunction {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Abs => "abs",
+            Self::Ceil => "ceil",
+            Self::Exp => "exp",
+            Self::Floor => "floor",
+            Self::Ln => "ln",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::Now => "now",
+            Self::Rand => "rand",
+            Self::Round => "round",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum MathExpression {
+    Constant {
+        value: f64,
+        source: String,
+    },
+    Field {
+        path: Vec<String>,
+        name: String,
+    },
+    UnaryMinus(Box<MathExpression>),
+    Binary {
+        operator: MathBinaryOperator,
+        left: Box<MathExpression>,
+        right: Box<MathExpression>,
+    },
+    Function {
+        function: MathFunction,
+        arguments: Vec<MathExpression>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MathEntry {
+    pub expression: MathExpression,
+    pub destination: PipelineField,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MathSpec {
+    pub entries: Vec<MathEntry>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -1879,6 +2526,7 @@ pub(crate) enum PipelineOp {
     Copy(CopySpec),
     Rename(RenameSpec),
     Format(FormatSpec),
+    Math(MathSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2246,6 +2894,10 @@ pub fn parse_at(
             }
             _ if is_format_pipe(segment) => {
                 pipeline.push(parse_format_pipe(segment, timestamp_unit, query_now)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_math_pipe(segment) => {
+                pipeline.push(parse_math_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -3099,7 +3751,7 @@ fn parse_natural_u64(digits: &[u8]) -> Option<u64> {
     })
 }
 
-fn parse_logsql_math_number(value: &str) -> Option<f64> {
+pub(crate) fn parse_logsql_math_number(value: &str) -> Option<f64> {
     parse_victorialogs_decimal(value)
         .or_else(|| parse_victorialogs_human_duration(value).map(|value| value as f64))
         .or_else(|| parse_victorialogs_human_bytes(value).map(|value| value as f64))
@@ -6868,6 +7520,22 @@ mod tests {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
         }
+
+        let nested = format!(
+            "* | math {}a{} as result",
+            "(".repeat(MAX_MATH_NESTING + 1),
+            ")".repeat(MAX_MATH_NESTING + 1)
+        );
+        let error = parse_at(&nested, TimestampUnit::Microseconds, 0).unwrap_err();
+        assert!(
+            error.message.contains("math expression nesting"),
+            "{error:?}"
+        );
+
+        let operands = MAX_MATH_AST_NODES / 2 + 2;
+        let oversized = format!("* | math {} as result", vec!["a"; operands].join("+"));
+        let error = parse_at(&oversized, TimestampUnit::Microseconds, 0).unwrap_err();
+        assert!(error.message.contains("math AST exceeds"), "{error:?}");
     }
 
     #[test]
@@ -7319,6 +7987,57 @@ mod tests {
             r#"* | format "value" as result*"#,
             r#"* | format "value" keep_original_fields skip_empty_results"#,
             r#"* | format "value" trailing"#,
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_math_grammar_is_complete_and_strict() {
+        for query in [
+            "* | math a + b * 4 as result",
+            "* | eval (a + b) * 4 result",
+            "* | math a ^ b as power, 7 % 4 remainder",
+            "* | math 7 & 3 as band, 4 or 1 as bor, 6 xor 3 as bxor",
+            "* | math bad default 5 as fallback",
+            "* | math abs(-a) as absolute, ceil(a) ceiling, floor(a) floored",
+            "* | math exp(a) exponential, ln(a) logarithm, round(a, 0.1) rounded",
+            "* | math max(a, b, c) maximum, min(a, b, c) minimum",
+            "* | math now() clock, floor(rand()) bucket",
+            r#"* | math "abs" + "left field" + nested.value as total"#,
+            "* | EVAL ROUND(ABS(-2.5)) AS result",
+            "* | math '2024-05-30T01:02:03Z' + 10e9 time, '123.45.67.89' + 1000 ip",
+            "* | math -1.5K scaled, -45ms negative_duration",
+            "* | math max(a, b,) maximum, round(3.14,) rounded",
+            "* | math a + as result",
+            "* | math source* as result",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | math",
+            "* | eval",
+            "* | math * as result",
+            "* | math (a + b as result",
+            "* | math source as result*",
+            "* | math source as",
+            "* | math a as x,, b as y",
+            "* | math a as x,",
+            "* | math abs(a, b) as x",
+            "* | math abs() as x",
+            "* | math min(a) as x",
+            "* | math max() as x",
+            "* | math max(a) as x",
+            "* | math round() as x",
+            "* | math round(a, b, c) as x",
+            "* | math rand(1) as x",
+            "* | math now(1) as x",
+            "* | math 1e-9 as x",
+            "* | math abs value as x",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

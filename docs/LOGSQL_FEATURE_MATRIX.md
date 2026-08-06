@@ -126,7 +126,7 @@ extension.
 | `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P23` | `math` / `eval` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P23` | `math` / `eval` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P26` | `collapse_nums` | missing | no | `SQL` | `API` | P3 |
@@ -355,6 +355,42 @@ private table, or storage-contract change is required. Exact-build evidence
 records 3.297/39.353 ms narrow/wide p95 versus 3.090/35.941 ms for
 byte-identical same-scan controls; `QSF-171` accepts the +6.7%/+9.5% bounded
 formatting cost.
+
+`LQL-P23` evaluates one or more comma-separated floating-point expressions
+with case-insensitive `math` or `eval`. Entries execute from left to right, so
+a later expression can read an earlier result. `as` is optional; without an
+explicit destination, the canonical parenthesized expression text becomes
+the field name. Exact quoted and dotted retained fields are accepted, while
+wildcard destinations fail explicitly.
+
+The precedence order is `^`, `*`/`/`/`%`, `+`/`-`, `&`, `xor`, `or`, then
+`default`; every binary operator, including power, associates left. Unary
+plus/minus and parentheses are supported. Functions are `abs`, `ceil`,
+`exp`, `floor`, `ln`, `max`, `min`, `now`, `rand`, and one- or two-argument
+`round`. Function calls accept the pinned trailing comma. `default` replaces
+only NaN, while `max` and `min` skip NaN operands in VictoriaLogs order.
+
+Fields and constants use the established VictoriaLogs math coercion chain:
+decimal/base-zero/scaled numbers, durations as nanoseconds, byte sizes,
+RFC3339 timestamps as Unix nanoseconds, and IPv4 addresses as unsigned
+integers. Missing, null, empty, arrays, objects, and invalid text become NaN.
+Results are string fields using fixed non-exponent rendering plus `NaN`,
+`+Inf`, and `-Inf`. Bitwise operations use the pinned unsigned conversion for
+negative, nonfinite, and out-of-range inputs rather than Rust's saturating
+float cast. `now()` is sampled once for the pipeline invocation; `rand()` is
+uniform on `[0,1)`.
+
+Timeless overwrites compatible scalar destinations but returns HTTP 422
+`field_conflict` rather than replacing a retained object or descending
+through a scalar. AST nodes/nesting, evaluated work, temporary state, result
+rows, response bytes, and cancellation are bounded; durable rich source rows
+remain unchanged. Executable `SQL-LOG-036` gives direct users an ordinary
+JSON1 arithmetic foundation for exact retained numeric fields and documents
+why SQLite `CAST` alone is not the complete coercion or language contract.
+Grammar, sequential composition, functions, coercions, destinations, limits,
+and HTTP envelopes remain Rust API work. The complete 690-case pinned oracle
+and `QSF-172` record the language and retained-model boundary; no extension
+primitive, private table, or storage-contract change is required.
 
 ## Statistics functions
 
