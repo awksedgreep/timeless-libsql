@@ -1070,6 +1070,39 @@ public storage work and emits the same 2,112 response bytes. The 65.292 ms
 wide p99 is retained honestly. This bounded rich JSON parse/select/write cost
 does not justify moving LogsQL syntax into the extension.
 
+LogsQL `json_array_len` counts top-level array elements without changing
+durable log metadata:
+
+```text
+* | json_array_len(tags)
+* | json_array_len(tags) as tag_count
+* | json_array_len payload.items item_count
+* | json_array_len("left field") as "item count"
+```
+
+The command is case-insensitive and accepts one parenthesized or bare exact
+source, an optional `as`, and one exact destination that defaults to `_msg`.
+Quoted and dotted paths are supported. Wildcards, prefixes, multiple sources,
+and trailing tokens fail explicitly. The source is snapshotted before its
+request-local destination is written.
+
+Native retained arrays are counted directly. Whitespace-padded JSON-array
+text is parsed, including the pinned VictoriaLogs bare `NaN` token. Nested
+arrays and objects count as one element. Empty arrays, missing fields, nulls,
+malformed text, JSON scalar text, and native scalar or object values return
+text `0`. Rich native sources stay unchanged. Object-replacing destinations
+return HTTP 422. Parse state, paths, work, result rows, response bytes,
+deadlines, and cancellation are bounded, and real-extension tests pin
+optimize, shutdown, and reopen behavior.
+
+The complete 897-case pinned VictoriaLogs fixture records upstream grammar
+and value behavior. Direct SQLite/libSQL users can use executable
+[`SQL-LOG-043`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)
+for a fixed exact native-array or JSON-array-text path through public `logs`
+and JSON1. LogsQL grammar, current-row writes, bare-`NaN` compatibility,
+limits, cancellation, and envelopes stay in the Rust API; no private table,
+language-specific extension primitive, or storage-format change is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

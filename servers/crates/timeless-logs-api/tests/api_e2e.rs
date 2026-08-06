@@ -5297,6 +5297,206 @@ async fn session_seventeen_unpack_json_is_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_json_array_len_is_typed_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("json-array-len-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [LogEntry {
+                ts: 1_800_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: "array lengths".into(),
+                metadata_json: serde_json::json!({
+                    "case":"json-array-len",
+                    "array_len_group":"json-array-len",
+                    "native_array":[null,"",0,false,[1],{"x":1}],
+                    "text_array":" \t[\"a\",2,true,{\"x\":1},[null],NaN] \r\n",
+                    "empty_array":[],
+                    "malformed_array":"[1,",
+                    "scalar":"not-an-array",
+                    "null_value":null,
+                    "number":42,
+                    "object":{"child":"value"},
+                    "nested":{"array":[1,2,3],"sibling":"retained"},
+                    "result":"original",
+                    "left field":["quoted", "path"]
+                })
+                .to_string(),
+            }]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let query = r#"case:="json-array-len" | json_array_len(native_array) as native_len | json_array_len text_array text_len | json_array_len(empty_array) empty_len | json_array_len(malformed_array) malformed_len | json_array_len(scalar) scalar_len | json_array_len(null_value) null_len | json_array_len(number) number_len | json_array_len(object) object_len | json_array_len(missing) missing_len | json_array_len(nested.array) nested_len | json_array_len("left field") as "quoted length" | fields case, native_len, text_len, empty_len, malformed_len, scalar_len, null_len, number_len, object_len, missing_len, nested_len, "quoted length""#;
+    assert_eq!(
+        pipeline_rows(&app, query).await,
+        [serde_json::json!({
+            "case":"json-array-len",
+            "native_len":"6",
+            "text_len":"6",
+            "empty_len":"0",
+            "malformed_len":"0",
+            "scalar_len":"0",
+            "null_len":"0",
+            "number_len":"0",
+            "object_len":"0",
+            "missing_len":"0",
+            "nested_len":"3",
+            "quoted length":"2"
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="json-array-len" | JsOn_ArRaY_LeN(native_array) | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({"case":"json-array-len", "_msg":"6"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="json-array-len" | json_array_len(native_array) as result | json_array_len(native_array) as second | fields case, result, second"#,
+        )
+        .await,
+        [serde_json::json!({"case":"json-array-len", "result":"6", "second":"6"})]
+    );
+
+    for malformed in [
+        "* | json_array_len",
+        "* | json_array_len()",
+        "* | json_array_len(source, other)",
+        "* | json_array_len(*)",
+        "* | json_array_len(source*)",
+        "* | json_array_len(source) result trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="json-array-len" | json_array_len(native_array) as nested"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="json-array-len" | json_array_len(text_array) as length"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let work_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(work_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(work_limited["reason"], "max_work_rows", "{work_limited}");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_response_bytes: 8,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="json-array-len" | json_array_len(native_array) as length"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="json-array-len" | fields case, native_array, text_array, empty_array, malformed_array, scalar, null_value, number, object, nested, result, "left field""#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"json-array-len",
+            "native_array":[null,"",0,false,[1],{"x":1}],
+            "text_array":" \t[\"a\",2,true,{\"x\":1},[null],NaN] \r\n",
+            "empty_array":[],
+            "malformed_array":"[1,",
+            "scalar":"not-an-array",
+            "null_value":null,
+            "number":42,
+            "object":{"child":"value"},
+            "nested":{"array":[1,2,3],"sibling":"retained"},
+            "result":"original",
+            "left field":["quoted", "path"]
+        })],
+        "json_array_len must not mutate durable rich source values"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(&router(reopened.clone()), query).await.len(),
+        1
+    );
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="json-array-len" | json_array_len(native_array) as length | fields case, length, native_array"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"json-array-len",
+            "length":"6",
+            "native_array":[null,"",0,false,[1],{"x":1}]
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

@@ -251,13 +251,13 @@ fn setup(connection: &mut Connection) -> Result<()> {
             1000,
             "error",
             "request timeout",
-            r#"{"service":"api","host":"web-1","deployment":{"region":"us-east"},"duration_ms":12,"client_ip":"010.000.000.001","nested":{"ok":true,"count":2,"none":null,"empty":""},"tags":["prod","",123,true,false,null,{"nested":"ignored"},["ignored"],"a\u0062","*"]}"#,
+            r#"{"service":"api","host":"web-1","deployment":{"region":"us-east"},"duration_ms":12,"client_ip":"010.000.000.001","nested":{"ok":true,"count":2,"none":null,"empty":"","array_text":"  [1,{\"x\":2},[3],null]  "},"tags":["prod","",123,true,false,null,{"nested":"ignored"},["ignored"],"a\u0062","*"]}"#,
         ])?;
         insert.execute(params![
             2000,
             "info",
             "request ok",
-            r#"{"service":"api","host":"web-2","deployment":{"region":"us-west"},"duration_ms":4,"client_ip":"10.0.1.1","nested":{"ok":"true","count":"2","empty":null},"tags":["dev",1.5,-2,"123","a\"b","a\nb","a/b"]}"#,
+            r#"{"service":"api","host":"web-2","deployment":{"region":"us-west"},"duration_ms":4,"client_ip":"10.0.1.1","nested":{"ok":"true","count":"2","empty":null,"array_text":"  [1,{\"x\":2},[3],null]  "},"tags":["dev",1.5,-2,"123","a\"b","a\nb","a/b"]}"#,
         ])?;
     }
     transaction.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
@@ -405,6 +405,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "unpack_path_3" => Value::Text("$.none".to_owned()),
         "unpack_path_4" => Value::Text("$.empty".to_owned()),
         "unpack_path_5" => Value::Text("$.missing".to_owned()),
+        "json_array_source_path" => Value::Text("$.tags".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1701,6 +1702,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let extract_rows = recipe_values("SQL-LOG-040", 0)?;
     let pack_json_rows = recipe_values("SQL-LOG-041", 0)?;
     let unpack_json_rows = recipe_values("SQL-LOG-042", 0)?;
+    let json_array_len_rows = recipe_values("SQL-LOG-043", 0)?;
     if [
         bounded,
         substring,
@@ -2200,6 +2202,65 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if source_unpacked_fields != source_packed_fields {
         bail!("SQL-LOG-042 mutated its public source: {source_unpacked_fields:?}");
+    }
+    if json_array_len_rows
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text("error".into()),
+                Value::Text("request timeout".into()),
+                Value::Text("10".into()),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text("info".into()),
+                Value::Text("request ok".into()),
+                Value::Text("7".into()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-043 native array lengths changed: {json_array_len_rows:?}");
+    }
+    let json_array_len_sql = recipe_sql("SQL-LOG-043", 0)?;
+    let measured_json_array_lengths = |source_path: &str| -> Result<Vec<String>> {
+        let mut statement = connection.prepare(&json_array_len_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-043 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "json_array_source_path" => Value::Text(source_path.to_owned()),
+                _ => parameter("SQL-LOG-043", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        statement
+            .raw_query()
+            .mapped(|row| row.get::<_, String>(3))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    for (path, expected) in [
+        ("$.nested.array_text", vec!["4", "4"]),
+        ("$.tags[7]", vec!["1", "0"]),
+        ("$.nested.count", vec!["0", "0"]),
+        ("$.nested", vec!["0", "0"]),
+        ("$.client_ip", vec!["0", "0"]),
+        ("$.nested.none", vec!["0", "0"]),
+        ("$.missing", vec!["0", "0"]),
+    ] {
+        let actual = measured_json_array_lengths(path)?;
+        if actual != expected {
+            bail!("SQL-LOG-043 path {path:?} changed: {actual:?}");
+        }
+    }
+    let source_after_array_lengths = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_after_array_lengths != source_packed_fields {
+        bail!("SQL-LOG-043 mutated its public source: {source_after_array_lengths:?}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3426,13 +3487,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 108);
+        assert_eq!(recipes.len(), 109);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            138
+            139
         );
         assert_eq!(
             recipes
@@ -3440,7 +3501,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            144
+            145
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -1697,13 +1697,26 @@ fn parse_math_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
 }
 
 fn parse_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
-    let tokens = lex_first_pipe(segment, "len")?;
+    Ok(PipelineOp::Len(parse_length_pipe(segment, "len")?))
+}
+
+fn parse_json_array_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    Ok(PipelineOp::JsonArrayLen(parse_length_pipe(
+        segment,
+        "json_array_len",
+    )?))
+}
+
+fn parse_length_pipe(segment: &str, operation: &str) -> Result<LenSpec, LogsqlError> {
+    let tokens = lex_first_pipe(segment, operation)?;
     let Some(command) = tokens.first() else {
-        return Err(LogsqlError::malformed("LogsQL len pipe is empty"));
-    };
-    if !command.eq_ignore_ascii_case("len") {
         return Err(LogsqlError::malformed(format!(
-            "expected LogsQL len pipe, not {command:?}"
+            "LogsQL {operation} pipe is empty"
+        )));
+    };
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL {operation} pipe, not {command:?}"
         )));
     }
 
@@ -1715,12 +1728,16 @@ fn parse_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     let source_token = tokens
         .get(cursor)
         .filter(|token| !matches!(token.as_str(), "(" | ")" | ","))
-        .ok_or_else(|| LogsqlError::malformed("LogsQL len requires a source field"))?;
-    let source = parse_len_exact_field(source_token, "source")?;
+        .ok_or_else(|| {
+            LogsqlError::malformed(format!("LogsQL {operation} requires a source field"))
+        })?;
+    let source = parse_length_exact_field(source_token, operation, "source")?;
     cursor += 1;
     if parenthesized {
         if tokens.get(cursor).is_none_or(|token| token != ")") {
-            return Err(LogsqlError::malformed("LogsQL len source is missing ')'"));
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {operation} source is missing ')'"
+            )));
         }
         cursor += 1;
     }
@@ -1736,22 +1753,26 @@ fn parse_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         cursor += 1;
     }
     if let Some(token) = tokens.get(cursor) {
-        destination = parse_len_exact_field(token, "destination")?;
+        destination = parse_length_exact_field(token, operation, "destination")?;
         cursor += 1;
     }
     if let Some(token) = tokens.get(cursor) {
         return Err(LogsqlError::malformed(format!(
-            "unexpected LogsQL len token {token:?}"
+            "unexpected LogsQL {operation} token {token:?}"
         )));
     }
 
-    Ok(PipelineOp::Len(LenSpec {
+    Ok(LenSpec {
         source,
         destination,
-    }))
+    })
 }
 
-fn parse_len_exact_field(value: &str, role: &str) -> Result<PipelineField, LogsqlError> {
+fn parse_length_exact_field(
+    value: &str,
+    operation: &str,
+    role: &str,
+) -> Result<PipelineField, LogsqlError> {
     if matches!(value.chars().next(), Some('"' | '\'' | '`'))
         && quoted_value(value)?.is_some_and(|value| value.is_empty())
     {
@@ -1763,7 +1784,7 @@ fn parse_len_exact_field(value: &str, role: &str) -> Result<PipelineField, Logsq
     match parse_pipeline_field(value, false)? {
         field @ PipelineField::Exact { .. } => Ok(field),
         PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
-            "LogsQL len {role} must be an exact field"
+            "LogsQL {operation} {role} must be an exact field"
         ))),
     }
 }
@@ -2644,6 +2665,10 @@ fn is_math_pipe(segment: &str) -> bool {
 
 fn is_len_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "len")
+}
+
+fn is_json_array_len_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "json_array_len")
 }
 
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
@@ -3699,6 +3724,7 @@ pub(crate) enum PipelineOp {
     Format(FormatSpec),
     Math(MathSpec),
     Len(LenSpec),
+    JsonArrayLen(LenSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
     ReplaceRegexp(ReplaceRegexpSpec),
@@ -4081,6 +4107,10 @@ pub fn parse_at(
             }
             _ if is_len_pipe(segment) => {
                 pipeline.push(parse_len_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_json_array_len_pipe(segment) => {
+                pipeline.push(parse_json_array_len_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_drop_empty_fields_pipe(segment) => {
@@ -9288,6 +9318,38 @@ mod tests {
             "* | len(source*)",
             "* | len(source) as result*",
             "* | len(source) result trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_json_array_len_grammar_is_complete_and_strict() {
+        for query in [
+            "* | json_array_len(source)",
+            "* | json_array_len source result",
+            "* | json_array_len(source) as result",
+            "* | JsOn_ArRaY_LeN ( source ) AS result",
+            r#"* | json_array_len("left field") as "item count""#,
+            "* | json_array_len(nested.value) result",
+            "* | json_array_len(source) as",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | json_array_len",
+            "* | json_array_len(",
+            "* | json_array_len()",
+            "* | json_array_len(source",
+            "* | json_array_len(source, other)",
+            "* | json_array_len(*)",
+            "* | json_array_len(source*)",
+            "* | json_array_len(source) as result*",
+            "* | json_array_len(source) result trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

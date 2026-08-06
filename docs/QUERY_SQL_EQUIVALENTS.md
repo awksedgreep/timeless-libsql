@@ -150,6 +150,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-040`](#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field) | `LQL-P32` | current foundation | two unquoted captures from one exact public metadata path using fixed literal prefix/middle/suffix delimiters; API owns LogsQL patterns, quoted-string decoding, conditions, current-row mutation/preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-041`](#sql-log-041-pack-selected-rich-metadata-fields-as-json) | `LQL-P34` | current foundation | bounded packing of a fixed list of exact public metadata paths into one typed nested JSON object; API owns current-row/canonical fields, prefix selection, destination mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-042`](#sql-log-042-unpack-selected-rich-fields-from-a-json-object) | `LQL-P36` | current foundation | bounded unpacking of fixed exact paths from one public native-object or JSON-text metadata field into a typed nested JSON object; API owns LogsQL grammar, dynamic selection, current-row mutation/preservation, limits, cancellation, and envelopes |
+| [`SQL-LOG-043`](#sql-log-043-top-level-json-array-length) | `LQL-P41` | current foundation | bounded top-level element count for one exact public native-array or JSON-array-text metadata path; API owns LogsQL grammar, current-row mutation, bare-`NaN` compatibility, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7192,6 +7193,93 @@ format change is warranted.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_unpack_json_is_rich_bounded_and_durable`.
+
+### SQL-LOG-043: top-level JSON array length
+
+Bind one exact SQLite JSON source path, inclusive native timestamp bounds, and
+positive work/result limits. This statement counts only the top-level elements
+of either a retained native JSON array or a string containing a valid JSON
+array:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), sources AS MATERIALIZED (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    json_type(metadata, :json_array_source_path) AS source_type,
+    json_extract(metadata, :json_array_source_path) AS source_value
+  FROM bounded
+), lengths AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN source_type = 'array'
+      THEN json_array_length(metadata, :json_array_source_path)
+      WHEN source_type = 'text'
+      THEN CASE
+        WHEN json_valid(source_value)
+        THEN CASE
+          WHEN json_type(source_value) = 'array'
+          THEN json_array_length(source_value)
+          ELSE 0
+        END
+        ELSE 0
+      END
+      ELSE 0
+    END AS array_length
+  FROM sources
+)
+SELECT
+  ts,
+  level,
+  message,
+  CAST(array_length AS TEXT) AS array_length
+FROM lengths
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, array_length
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit.
+`:json_array_source_path` is one exact SQLite JSON path such as `$.tags` or
+`$.nested.array_text`. A native array or valid JSON-array string may contain
+any JSON element types; nested arrays and objects each count as one top-level
+element. Surrounding JSON whitespace is accepted. An empty array returns
+`"0"`. Missing paths, explicit nulls, malformed JSON text, JSON scalar text,
+and native scalar or object values also return `"0"`. The result is decimal
+TEXT to match the LogsQL field result. The statement is read-only and leaves
+the retained source unchanged.
+
+The complete `LQL-P41` API additionally owns case-insensitive
+`json_array_len` grammar; parenthesized and bare exact fields; quoted and
+dotted paths; optional `as`; default `_msg`; sequential current-row mutation;
+destination conflict protection; and work, response, deadline, cancellation,
+and HTTP error envelopes. It accepts the pinned VictoriaLogs bare `NaN` token
+inside JSON-array text and counts it as one element. SQLite JSON1 deliberately
+does not claim that non-standard compatibility behavior in this ordinary SQL
+recipe.
+
+Every source value already crosses the bounded public `logs` row interface,
+and SQLite JSON1 supplies the fixed-path count without decoding private block
+state. Moving the LogsQL grammar or request-local destination mutation into
+the extension would not avoid a storage read, block decode, or row crossing.
+No extension primitive, private shadow-table access, or storage-format change
+is warranted.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_json_array_len_is_typed_bounded_and_durable`.
 
 ## Adding the next recipe
 

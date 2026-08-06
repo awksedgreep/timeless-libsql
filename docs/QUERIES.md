@@ -1369,6 +1369,51 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 above the unchanged public storage boundary and retains the wide p99 without
 hiding it.
 
+## LogsQL top-level JSON array length
+
+`json_array_len` snapshots one exact request-owned field, counts its top-level
+array elements, and writes a decimal string to the current result row:
+
+```text
+* | json_array_len(tags)
+* | json_array_len(tags) as tag_count
+* | json_array_len payload.items item_count
+* | json_array_len("left field") as "item count"
+```
+
+Keywords are case-insensitive. Parenthesized and bare exact sources are
+accepted; `as` is optional and a terminal `as` retains the default `_msg`
+destination. Sources and destinations may be quoted or dotted exact paths.
+Wildcards, prefixes, multiple sources, and trailing tokens fail explicitly.
+The source is read before the destination is written, so
+`json_array_len(tags) as tags` deterministically replaces the request-local
+field with its count without changing storage.
+
+Retained native arrays are counted directly. Strings containing valid JSON
+arrays may have surrounding whitespace and are parsed; the pinned
+VictoriaLogs bare `NaN` token counts as one element. Nested arrays and objects
+each count once. Empty arrays, missing fields, explicit nulls, malformed JSON,
+JSON scalar text, and native scalar or object values return `"0"`. Native
+source arrays and all of their element types remain unchanged. Writes that
+would replace a retained object fail with HTTP 422. Parsing, temporary state,
+paths, rows, response bytes, deadlines, and cancellation all use the shared
+request limits, and the reader remains reusable after rejection.
+
+The pinned VictoriaLogs v1.52.0 oracle covers the command's grammar, array,
+scalar, malformed, default-destination, overwrite, case, and error behavior in
+the complete 897-case fixture. The real-extension regression additionally
+pins Timeless's native rich arrays, microsecond durability, optimize,
+shutdown, and reopen.
+
+Executable
+[`SQL-LOG-043`](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)
+uses public `logs`, `json_type`, `json_valid`, and `json_array_length` for a
+bounded fixed exact path. It returns textual zero for nonarrays and leaves the
+source untouched. Language grammar, current-row destination writes,
+VictoriaLogs bare-`NaN` compatibility, limits, cancellation, and envelopes
+remain Rust API composition. No extension primitive or private storage access
+is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

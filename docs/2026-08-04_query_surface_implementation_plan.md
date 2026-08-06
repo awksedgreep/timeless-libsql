@@ -819,6 +819,37 @@ variation, records unchanged four-block storage and the HWM verdict, and
 closes `LQL-P33`. Session 17 continues with its remaining declared P2 rows;
 none may be skipped before Session 18 begins.
 
+`LQL-P34` now has strict case-insensitive `pack_json` grammar; exact, prefix,
+empty-list, and all-field snapshots; deterministic idempotent selector union;
+native rich JSON preservation; default and exact destinations; sequential
+composition; explicit conflicts; work/state/result/response limits; deadline
+cancellation; optimize/reopen coverage; and immutable durable sources. Eleven
+exact-result and four error cases pass the complete 850-case pinned
+VictoriaLogs oracle with an explicit richer retained-model policy. Executable
+`SQL-LOG-041` gives direct users the fixed exact-path JSON1 foundation.
+Exact-build commit `1e20d8f49e440e27f0f12930e71778277bf92f06`
+measures 3.146/37.921 ms narrow/wide p95 versus 3.098/35.717 ms for
+same-scan controls. `QSF-187` accepts the +1.5%/+6.2% bounded selection/write
+variation, records unchanged four-block storage and the HWM verdict, and
+closes `LQL-P34`.
+
+`LQL-P36` now has strict case-insensitive `unpack_json` grammar; conditional,
+exact, prefix, empty-list, all-field, preservation, and prefix selection;
+native-object and JSON-text sources; deterministic source snapshots; rich
+type/nesting/literal-key fidelity; pinned malformed-object and bare-`NaN`
+behavior; sequential composition; explicit conflicts; work/state/result/
+response limits; deadline cancellation; optimize/reopen coverage; and
+immutable durable sources. Seventeen exact-result/statistics and eight error
+cases pass the complete 875-case pinned VictoriaLogs oracle with an explicit
+richer retained-model policy. Executable `SQL-LOG-042` gives direct users the
+fixed-path JSON1 foundation. Exact-build commit
+`035c76baf3b684e29714bd1a2b8f955864fa752a` measures 3.151/40.062 ms
+narrow/wide p95 versus 3.763/38.694 ms for equal-output controls. `QSF-189`
+accepts the -16.3%/+3.5% bounded parse/select/write variation, retains the
+65.292 ms wide p99 honestly, records unchanged four-block storage and the HWM
+verdict, and closes `LQL-P36`. Session 17 continues with `LQL-P41`; its
+remaining declared P2 rows must not be skipped before Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

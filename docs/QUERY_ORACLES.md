@@ -761,3 +761,19 @@ richer retained-model policy: native JSON types, literal dotted keys, explicit
 empty/null values, and reconstructed nesting rather than flattened textual
 columns.
 The fixture now contains 875 cases.
+
+`LQL-P41` adds twelve exact pipeline/statistics cases and ten error cases for
+`json_array_len`. They pin top-level counts for string, mixed, nested, and
+empty arrays; zero for scalar, object, missing, and malformed sources;
+surrounding whitespace; the accepted bare `NaN` token; case-insensitive bare
+and parenthesized grammar; quoted fields; default `_msg`; and source
+snapshotting before overwrite. Missing or unclosed sources, empty/multiple
+arguments, wildcard or prefix sources/destinations, and trailing tokens fail.
+Source audit is against `pipe_json_array_len.go` and
+`pipe_json_array_len_test.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 298
+row-query cases, 285 error cases, and 314 statistics/pipeline cases: 897 cases
+total, all passing against the immutable image. Timeless also accepts retained
+native arrays and preserves their rich values rather than requiring a
+flattened textual source.
+The fixture now contains 897 cases.

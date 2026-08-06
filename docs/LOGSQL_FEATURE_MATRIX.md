@@ -144,7 +144,7 @@ extension.
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P41` | `json_array_len` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P42` | `unroll` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P43` | `join` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P44` | `union` | missing | no | `SQL` | `API` | P3 |
@@ -611,6 +611,36 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 `unpack_json` p99 is retained honestly at 65.292 ms. `QSF-189` accepts the
 bounded rich parse/select/write cost above the unchanged public storage
 boundary.
+
+`LQL-P41` counts the top-level elements of one exact current-row field. The
+Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare
+exact source fields, optional `as`, bare or quoted exact destinations, and the
+default `_msg` destination. Source and destination may be dotted paths. The
+source is snapshotted before the destination write, so replacing it is
+deterministic and later pipeline stages observe the textual decimal result.
+Wildcard and prefix sources or destinations, multiple sources, missing
+parentheses, and trailing tokens fail explicitly.
+
+A retained native array is counted without flattening or reparsing it. A
+string containing a whitespace-padded JSON array is parsed and counted; the
+pinned VictoriaLogs bare `NaN` token counts as one element. Nested arrays and
+objects each count as one top-level element. Empty arrays, missing paths,
+explicit nulls, malformed text, JSON scalar text, and native scalar or object
+values return `"0"`. The transform preserves the rich source value, protects
+retained object destinations with an actionable 422 conflict, and bounds row,
+parse-tree, path, result, response, deadline, and cancellation work. Durable
+rows remain unchanged across optimize, shutdown, and reopen.
+
+Public
+[`SQL-LOG-043`](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)
+uses only `logs` plus SQLite JSON1 to count one fixed exact native-array or
+JSON-array-text path and return decimal TEXT. LogsQL grammar, current-row
+mutation, bare-`NaN` compatibility, limits, cancellation, and HTTP envelopes
+remain bounded Rust API composition over public rows. No extension primitive,
+private table, durable mutation, or storage-contract change is required. The
+complete 897-case pinned oracle records upstream grammar and scalar/malformed
+behavior; Timeless additionally pins native rich-array fidelity through the
+real extension.
 
 ## Statistics functions
 

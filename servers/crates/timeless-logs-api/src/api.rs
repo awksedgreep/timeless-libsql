@@ -462,6 +462,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL format destination conflict:")
         || error.starts_with("LogsQL math destination conflict:")
         || error.starts_with("LogsQL len destination conflict:")
+        || error.starts_with("LogsQL json_array_len destination conflict:")
         || error.starts_with("LogsQL extract destination conflict:")
         || error.starts_with("LogsQL extract_regexp destination conflict:")
         || error.starts_with("LogsQL pack_json destination conflict:")

@@ -206,6 +206,9 @@ pub(crate) fn execute(
                 math_fields(rows, spec, execution.limits, execution.cancelled)?
             }
             PipelineOp::Len(spec) => len_fields(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::JsonArrayLen(spec) => {
+                json_array_len_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
             PipelineOp::DropEmptyFields => {
                 drop_empty_fields(rows, execution.limits, execution.cancelled)?
             }
@@ -452,7 +455,7 @@ fn parse_unpack_json_source(
             if !source.starts_with('{') {
                 return Ok(UnpackJsonSource::NotObject);
             }
-            let normalized = normalize_unpack_json_nan(source);
+            let normalized = normalize_victorialogs_json_nan(source);
             if let Cow::Owned(normalized) = &normalized {
                 charge_transfer_string(
                     normalized,
@@ -481,7 +484,7 @@ fn parse_unpack_json_source(
     Ok(UnpackJsonSource::Object(parsed))
 }
 
-fn normalize_unpack_json_nan(source: &str) -> Cow<'_, str> {
+fn normalize_victorialogs_json_nan(source: &str) -> Cow<'_, str> {
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     let mut copied_through = 0usize;
@@ -2120,6 +2123,149 @@ fn len_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn json_array_len_fields(
+    rows: Vec<Value>,
+    spec: &LenSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path,
+        name: source_name,
+    } = &spec.source
+    else {
+        return Err("LogsQL json_array_len source is not exact".into());
+    };
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL json_array_len destination is not exact".into());
+    };
+
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(
+                &mut work_items,
+                limits.max_state_items,
+                "json_array_len",
+            )?;
+            let mut state_bytes = size_of::<Value>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "json_array_len")?;
+            charge_transfer_string(
+                source_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "json_array_len",
+            )?;
+            for segment in source_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "json_array_len",
+                )?;
+            }
+
+            let length = victorialogs_json_array_len(
+                coalesce_exact_value(&row, source_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            let rendered = length.to_string();
+            charge_transfer_string(
+                &rendered,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "json_array_len",
+            )?;
+            charge_transfer_string(
+                destination_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "json_array_len",
+            )?;
+            for segment in destination_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "json_array_len",
+                )?;
+            }
+
+            let object = row.as_object_mut().ok_or_else(|| {
+                "LogsQL json_array_len input row is not a JSON object".to_string()
+            })?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL json_array_len destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(rendered))
+                .map_err(|error| format!("LogsQL json_array_len destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn victorialogs_json_array_len(
+    value: Option<&Value>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<usize, String> {
+    ensure_active(cancelled)?;
+    match value {
+        Some(Value::Array(values)) => Ok(values.len()),
+        Some(Value::String(source)) => {
+            charge_transfer_string(
+                source,
+                state_bytes,
+                limits.max_state_bytes,
+                "json_array_len",
+            )?;
+            let source = source.trim();
+            if !source.starts_with('[') {
+                return Ok(0);
+            }
+            let normalized = normalize_victorialogs_json_nan(source);
+            if let Cow::Owned(normalized) = &normalized {
+                charge_transfer_string(
+                    normalized,
+                    state_bytes,
+                    limits.max_state_bytes,
+                    "json_array_len",
+                )?;
+            }
+            let Ok(parsed @ Value::Array(_)) = serde_json::from_str::<Value>(&normalized) else {
+                return Ok(0);
+            };
+            charge_transfer_value(
+                &parsed,
+                state_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                work_items,
+                limits.max_state_items,
+                "json_array_len",
+            )?;
+            let Value::Array(values) = parsed else {
+                unreachable!("the parse pattern accepted only arrays")
+            };
+            Ok(values.len())
+        }
+        None | Some(Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Ok(0),
+    }
 }
 
 fn victorialogs_len(
@@ -7231,6 +7377,110 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             len_fields(vec![row], &array_spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn json_array_len_counts_native_and_text_arrays_without_flattening_sources() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "native":[null,"",0,false,[1],{"x":1}],
+            "text":" \t[\"a\",2,true,{\"x\":1},[null],NaN] \r\n",
+            "empty":[],
+            "malformed":"[1,",
+            "scalar":"not-an-array",
+            "null_value":null,
+            "number":42,
+            "object":{"child":"value"},
+            "nested":{"array":[1,2,3],"sibling":"retained"}
+        });
+        let plan = crate::logsql::parse_at(
+            "* | json_array_len(native) as native_len | json_array_len(text) as text_len | json_array_len(empty) as empty_len | json_array_len(malformed) as malformed_len | json_array_len(scalar) as scalar_len | json_array_len(null_value) as null_len | json_array_len(number) as number_len | json_array_len(object) as object_len | json_array_len(missing) as missing_len | json_array_len(nested.array) as nested_len",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["native_len"], "6");
+        assert_eq!(result[0]["text_len"], "6");
+        assert_eq!(result[0]["empty_len"], "0");
+        assert_eq!(result[0]["malformed_len"], "0");
+        assert_eq!(result[0]["scalar_len"], "0");
+        assert_eq!(result[0]["null_len"], "0");
+        assert_eq!(result[0]["number_len"], "0");
+        assert_eq!(result[0]["object_len"], "0");
+        assert_eq!(result[0]["missing_len"], "0");
+        assert_eq!(result[0]["nested_len"], "3");
+        assert_eq!(result[0]["native"], row["native"]);
+        assert_eq!(result[0]["text"], row["text"]);
+        assert_eq!(result[0]["nested"], row["nested"]);
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::JsonArrayLen(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected json_array_len plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let text_spec = parse_spec("* | json_array_len(text) as length");
+        let work_error = json_array_len_fields(
+            vec![row.clone()],
+            &text_spec,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL json_array_len"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = json_array_len_fields(
+            vec![row.clone()],
+            &text_spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | json_array_len(native) as nested");
+        let conflict_error =
+            json_array_len_fields(vec![row.clone()], &conflict, limits, &cancelled).unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL json_array_len destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            json_array_len_fields(vec![row], &text_spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

@@ -3758,6 +3758,66 @@
       "id": "LQL-P36-unpack-json-accepts-nonstandard-nan-as-text",
       "query": "case:=format-row | format '{\"special\":NaN}' as source | unpack_json from source | fields case, special",
       "expected_rows": [{"case": "format-row", "special": "NaN"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-counts-string-elements",
+      "query": "case:=json-array-strings | json_array_len(tags) as length | fields case, length",
+      "expected_rows": [{"case": "json-array-strings", "length": "3"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-counts-mixed-elements",
+      "query": "case:=json-array-mixed | json_array_len(tags) as length | fields case, length",
+      "expected_rows": [{"case": "json-array-mixed", "length": "7"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-counts-nested-elements",
+      "query": "case:=json-array-nested | json_array_len(tags) as length | fields case, length",
+      "expected_rows": [{"case": "json-array-nested", "length": "3"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-empty-array-is-zero",
+      "query": "case:=json-array-empty | json_array_len(tags) as length | fields case, length",
+      "expected_rows": [{"case": "json-array-empty", "length": "0"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-scalar-is-zero",
+      "query": "case:=json-array-scalar | json_array_len(tags) as length | fields case, length",
+      "expected_rows": [{"case": "json-array-scalar", "length": "0"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-object-is-zero",
+      "query": "case:=json-array-object | json_array_len(tags) as length | fields case, length",
+      "expected_rows": [{"case": "json-array-object", "length": "0"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-missing-is-zero",
+      "query": "case:=json-array-missing | json_array_len(tags) as length | fields case, length",
+      "expected_rows": [{"case": "json-array-missing", "length": "0"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-trims-space-and-accepts-nan",
+      "query": "case:=format-row | format '  [1,{\"x\":2},[3],NaN]  ' as source | json_array_len(source) as length | fields case, length",
+      "expected_rows": [{"case": "format-row", "length": "4"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-malformed-array-is-zero",
+      "query": "case:=format-row | format '[1,' as source | json_array_len(source) as length | fields case, length",
+      "expected_rows": [{"case": "format-row", "length": "0"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-bare-fields-and-keywords-are-case-insensitive",
+      "query": "case:=format-row | format '[1,2]' as \"left field\" | JsOn_ArRaY_LeN \"left field\" \"item count\" | fields case, \"item count\"",
+      "expected_rows": [{"case": "format-row", "item count": "2"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-defaults-to-message",
+      "query": "case:=json-array-strings | json_array_len(tags) | fields case, _msg",
+      "expected_rows": [{"case": "json-array-strings", "_msg": "3"}]
+    },
+    {
+      "id": "LQL-P41-json-array-len-snapshots-source-before-overwrite",
+      "query": "case:=json-array-strings | json_array_len(tags) as tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-strings", "tags": "3"}]
     }
   ],
   "error_cases": [
@@ -5682,6 +5742,76 @@
     {
       "id": "LQL-P36-unpack-json-rejects-both-preservation-modifiers",
       "query": "* | unpack_json keep_original_fields skip_empty_results",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-requires-source",
+      "query": "* | json_array_len",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-open-parenthesis",
+      "query": "* | json_array_len(",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-empty-source",
+      "query": "* | json_array_len()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-requires-closing-parenthesis",
+      "query": "* | json_array_len(source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-multiple-sources",
+      "query": "* | json_array_len(source, other)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-wildcard-source",
+      "query": "* | json_array_len(*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-prefix-source",
+      "query": "* | json_array_len(source*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-wildcard-destination",
+      "query": "* | json_array_len(source) as *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-prefix-destination",
+      "query": "* | json_array_len(source) as result*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P41-json-array-len-rejects-trailing-token",
+      "query": "* | json_array_len(source) result trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
