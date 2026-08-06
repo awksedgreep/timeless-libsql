@@ -1441,6 +1441,16 @@ bytes and whole-process HWM is 64,604KiB. `QSF-124` retains the bounded API
 composition and rejects both a redundant extension primitive and an inexact
 portable-SQL claim.
 
+Session 18 ordered `seq` measured 3.906ms/40.608ms message and
+3.548ms/48.358ms rich-object narrow/wide p95 while returning 128/8,192 rows.
+Same-cardinality `contains_all` controls measured 3.325ms/38.151ms and
+3.386ms/47.309ms, so ordered search is 17.5%/6.4% and 4.8%/2.2% higher at p95.
+Every pair reads the same one/four blocks, 1,024/8,192 entries, and
+235,778/1,914,055 payload bytes and returns identical response bytes. Storage
+remains four raw blocks, 1,914,055 logical bytes, and 2,022,736 physical bytes;
+whole-process logs HWM is 100,236KiB. `QSF-201` retains the 52.146ms rich wide
+p99 and rejects both an inexact SQL claim and a redundant extension primitive.
+
 Session 16 `json_array_contains_any` measured 2.416ms/33.611ms string and
 2.447ms/33.549ms boolean narrow/wide p95 while returning 128/8,192 rows. All
 four shapes perform the same one-block/1,024-entry or four-block/8,192-entry
