@@ -123,7 +123,7 @@ extension.
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
 | `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P20` | `copy` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` | missing | no | `SQL` | `API` | P2 |
@@ -268,6 +268,31 @@ change.
 Exact-build evidence records 3.570/39.597 ms narrow/wide p95 versus
 3.329/38.277 ms for byte-identical same-scan controls; `QSF-165` accepts the
 +7.2%/+3.4% bounded row-transform cost above the public storage boundary.
+
+`LQL-P20` copies exact, all-field, or suffix-star prefix sources to exact,
+all-field, or suffix-star destinations. `copy` and `cp` are
+case-insensitive, `as` is optional, comma-separated pairs execute from left
+to right, and every later pair observes fields created by earlier pairs.
+Each wildcard source takes a snapshot at that pair, expands recursively
+flattened leaves in deterministic bytewise order, and keeps arrays atomic.
+Prefix-to-prefix copies substitute the source prefix; prefix-to-exact copies
+every match to one field, so the last deterministic match wins. An exact
+source with a wildcard destination preserves VictoriaLogs' unusual literal
+destination name, including the `*`.
+
+Exact strings, numbers, booleans, arrays, null, and empty strings retain their
+JSON types and the source remains present. A missing exact source or exact
+rich-object parent becomes an explicit empty string because VictoriaLogs'
+query view contains flattened leaves rather than object parents. A
+wildcard-generated empty suffix is a literal empty field and is not the
+canonical `_msg`; exact quoted `""` remains the established message alias.
+Timeless overwrites compatible scalar destinations but returns HTTP 422
+`field_conflict` rather than replacing a retained object or descending
+through a scalar parent. Work, cloned temporary values, destination paths,
+results, response bytes, and cancellation use existing request limits.
+Executable `SQL-LOG-033` provides the public exact-field JSON1 foundation;
+the operation requires no extension primitive, private table, or storage
+contract change.
 
 ## Statistics functions
 

@@ -623,6 +623,33 @@ work/state/result/response limits and cancellation apply. Executable
 provides the ordinary public exact-field equivalent; no extension primitive
 or private table is used.
 
+LogsQL `copy` (alias `cp`) clones fields while retaining their sources:
+
+```text
+* | copy trace_id as correlation_id
+* | cp context.* as copied.*, copied.attempt as retry_attempt
+* | copy service saved, host service, saved host
+```
+
+`as` is optional and comma-separated pairs execute sequentially. Exact,
+all-field, and suffix-star prefix filters are accepted on both sides. Each
+wildcard source snapshots recursively flattened leaves at that pair in
+deterministic bytewise order, arrays remain atomic, and a prefix destination
+substitutes the source prefix. Multiple matches copied to one exact field are
+last-write-wins; unmatched wildcard sources are no-ops. An exact source with a
+wildcard destination keeps the literal destination name, including its `*`.
+
+Exact values retain their JSON type and their source. Missing exact fields and
+exact object parents become explicit empty strings to match the upstream
+flattened view. A wildcard-generated empty suffix remains a literal empty
+field, distinct from `_msg`; exact quoted `""` remains the message alias.
+Replacing a retained object or descending through a scalar destination parent
+returns HTTP 422 `field_conflict` without mutating storage. Work, temporary
+cloned state, result/response size, and cancellation are bounded. Executable
+[`SQL-LOG-033`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)
+provides the direct public exact-field JSON1 foundation. No extension
+primitive or private table is used.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

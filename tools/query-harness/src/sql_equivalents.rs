@@ -374,6 +374,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "source_path_1" => Value::Text("$.nested.empty".to_owned()),
         "source_path_2" => Value::Text("$.host".to_owned()),
         "source_path_3" => Value::Text("$.service".to_owned()),
+        "copy_source_path" => Value::Text("$.duration_ms".to_owned()),
+        "copy_destination_path" => Value::Text("$.copied".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1660,6 +1662,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let uniq_rows = recipe_values("SQL-LOG-030", 0)?;
     let facet_rows = recipe_values("SQL-LOG-031", 0)?;
     let coalesce_rows = recipe_values("SQL-LOG-032", 0)?;
+    let copy_rows = recipe_values("SQL-LOG-033", 0)?;
     if [
         bounded,
         substring,
@@ -1929,6 +1932,20 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     {
         bail!("SQL-LOG-032 coalesce result changed: {coalesce_rows:?}");
     }
+    if copy_rows.len() != 2 {
+        bail!("SQL-LOG-033 copy result changed: {copy_rows:?}");
+    }
+    for row in &copy_rows {
+        let Value::Text(metadata) = &row[3] else {
+            bail!("SQL-LOG-033 copied metadata is not JSON text: {row:?}");
+        };
+        let metadata: serde_json::Value = serde_json::from_str(metadata)?;
+        if metadata.pointer("/copied") != metadata.pointer("/duration_ms")
+            || metadata.pointer("/host").is_none()
+        {
+            bail!("SQL-LOG-033 exact typed copy or source retention changed: {metadata}");
+        }
+    }
     let coalesce_sql = recipe_sql("SQL-LOG-032", 0)?;
     let coalesced = |source_path_1: &str,
                      source_path_2: &str,
@@ -1964,6 +1981,70 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     }
     if coalesced("$.absent", "$.missing", "$.never", "fallback")? != ["fallback", "fallback"] {
         bail!("SQL-LOG-032 default projection changed");
+    }
+    let copy_sql = recipe_sql("SQL-LOG-033", 0)?;
+    let copied = |source_path: &str| -> Result<Vec<serde_json::Value>> {
+        let mut statement = connection.prepare(&copy_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-033 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "copy_source_path" => Value::Text(source_path.to_owned()),
+                "copy_destination_path" => Value::Text("$.copied".to_owned()),
+                _ => parameter("SQL-LOG-033", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        statement
+            .raw_query()
+            .mapped(|row| {
+                let metadata = row.get::<_, String>(3)?;
+                serde_json::from_str(&metadata).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    let boolean_or_string = copied("$.nested.ok")?;
+    if boolean_or_string[0].pointer("/copied") != Some(&serde_json::json!(true))
+        || boolean_or_string[1].pointer("/copied") != Some(&serde_json::json!("true"))
+    {
+        bail!("SQL-LOG-033 boolean/string type preservation changed: {boolean_or_string:?}");
+    }
+    let arrays = copied("$.tags")?;
+    if !arrays.iter().all(|metadata| {
+        metadata
+            .pointer("/copied")
+            .is_some_and(serde_json::Value::is_array)
+    }) {
+        bail!("SQL-LOG-033 array preservation changed: {arrays:?}");
+    }
+    let object_parents = copied("$.nested")?;
+    if !object_parents
+        .iter()
+        .all(|metadata| metadata.pointer("/copied") == Some(&serde_json::json!("")))
+    {
+        bail!("SQL-LOG-033 flattened object-parent behavior changed: {object_parents:?}");
+    }
+    let missing = copied("$.absent")?;
+    if !missing
+        .iter()
+        .all(|metadata| metadata.pointer("/copied") == Some(&serde_json::json!("")))
+    {
+        bail!("SQL-LOG-033 missing-source behavior changed: {missing:?}");
+    }
+    let null_or_missing = copied("$.nested.none")?;
+    if null_or_missing[0].pointer("/copied") != Some(&serde_json::Value::Null)
+        || null_or_missing[1].pointer("/copied") != Some(&serde_json::json!(""))
+    {
+        bail!("SQL-LOG-033 null/missing fidelity changed: {null_or_missing:?}");
     }
     let facets_sql = recipe_sql("SQL-LOG-031", 0)?;
     let facet_values = |max_values_per_field: i64,
@@ -2926,13 +3007,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 98);
+        assert_eq!(recipes.len(), 99);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            128
+            129
         );
         assert_eq!(
             recipes
@@ -2940,7 +3021,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            134
+            135
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

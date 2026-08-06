@@ -2131,6 +2131,280 @@ async fn session_seventeen_coalesce_is_textual_bounded_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_copy_is_typed_sequential_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("copy-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let entries = [
+        LogEntry {
+            ts: 1_800_000_000_000_001,
+            level: 1,
+            severity: "info".into(),
+            message: "copy rich".into(),
+            metadata_json: serde_json::json!({
+                "case":"copy-rich",
+                "copy_group":"copy",
+                "probe":2,
+                "flag":false,
+                "nested":{"a":"one","b":[1,"x"]},
+                "null_value":null,
+                "empty_value":""
+            })
+            .to_string(),
+        },
+        LogEntry {
+            ts: 1_800_000_000_000_002,
+            level: 1,
+            severity: "info".into(),
+            message: "copy missing".into(),
+            metadata_json: serde_json::json!({
+                "case":"copy-missing",
+                "copy_group":"copy"
+            })
+            .to_string(),
+        },
+    ];
+    storage.ingest(entries.into()).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy probe as selected, flag flag_copy, nested.b as array_copy, null_value as null_copy, empty_value as empty_copy, missing as missing_copy | fields case, probe, selected, flag_copy, array_copy, null_copy, empty_copy, missing_copy"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"copy-rich",
+            "probe":2,
+            "selected":2,
+            "flag_copy":false,
+            "array_copy":[1,"x"],
+            "null_copy":null,
+            "empty_copy":"",
+            "missing_copy":""
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | CP probe first, first AS second, case selected, probe selected | fields case, first, second, selected"#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","first":2,"second":2,"selected":2})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy nested.* as copied.* | fields case, copied.a, copied.b"#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","copied":{"a":"one","b":[1,"x"]}})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy nested.* as selected | fields case, selected"#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","selected":[1,"x"]})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy nested as object_parent_copy, absent* as copied* | fields case, object_parent_copy"#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","object_parent_copy":""})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy probe as probe, case as saved, probe as case, saved as probe | fields case, probe"#,
+        )
+        .await,
+        [serde_json::json!({"case":2,"probe":"copy-rich"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy * as * | fields case, probe, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"copy-rich",
+            "probe":2,
+            "nested":{"a":"one","b":[1,"x"]}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy * as copied.* | fields copied.case, copied.probe, copied.nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "copied":{
+                "case":"copy-rich",
+                "probe":2,
+                "nested":{"a":"one","b":[1,"x"]}
+            }
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy case* as * | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","_msg":"copy rich"})]
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"case:="copy-rich" | fields case | copy case* as *"#,).await,
+        [serde_json::json!({"case":"copy-rich","":"copy-rich"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy probe* as copied*, copied* as chained* | fields case, copied, chained"#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","copied":2,"chained":2})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | copy probe as selected* | fields case, "selected*""#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","selected*":2})]
+    );
+    assert!(pipeline_rows(
+        &app,
+        r#"case:="copy-does-not-exist" | copy case as selected"#,
+    )
+    .await
+    .is_empty());
+
+    for malformed in [
+        "* | copy",
+        "* | copy source",
+        "* | copy source as",
+        "* | copy , source as destination",
+        "* | copy source as destination,",
+        "* | copy source as destination trailing",
+        "* | copy source * as destination",
+        "* | copy source as destination *",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for query in [
+        r#"case:="copy-rich" | copy case as probe.child"#,
+        r#"case:="copy-rich" | copy probe as nested"#,
+    ] {
+        let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "query_execution");
+        assert_eq!(body["reason"], "field_conflict");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"copy_group:="copy" | copy case as selected | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="copy-rich" | copy * as copied*"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 8,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="copy-rich" | copy probe as a, probe as b, probe as c, probe as d, probe as e, probe as f, probe as g, probe as h, probe as i"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason);
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="copy-rich" | fields case, probe, nested, null_value, empty_value"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"copy-rich",
+            "probe":2,
+            "nested":{"a":"one","b":[1,"x"]},
+            "null_value":null,
+            "empty_value":""
+        })],
+        "copy must not mutate rich source fields and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="copy-rich" | COPY nested.* AS copied.* | fields case, copied.a, copied.b"#,
+        )
+        .await,
+        [serde_json::json!({"case":"copy-rich","copied":{"a":"one","b":[1,"x"]}})]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -7430,12 +7704,45 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_coalesce);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_coalesce_cancel = default_app
+        .clone()
         .oneshot(logsql_request(
             "level:error | coalesce(_msg) as selected | fields selected | limit 1",
         ))
         .await
         .unwrap();
     assert_eq!(reused_after_coalesce_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_copy = storage.stats().await.unwrap().api_query_cancelled;
+    let copy_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | copy * as copied* | fields copied* | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(copy_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_copy && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_copy);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_copy_cancel = default_app
+        .oneshot(logsql_request(
+            "level:error | copy _msg as selected | fields selected | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_copy_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

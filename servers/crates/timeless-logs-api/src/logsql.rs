@@ -812,6 +812,70 @@ fn parse_coalesce_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     }))
 }
 
+fn parse_copy_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "copy")?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL copy pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("copy") && !command.eq_ignore_ascii_case("cp") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL copy/cp pipe, not {command:?}"
+        )));
+    }
+
+    let mut cursor = 1usize;
+    let mut pairs = Vec::new();
+    loop {
+        let source_token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL copy requires at least one source/destination pair")
+        })?;
+        if source_token == "," {
+            return Err(LogsqlError::malformed(
+                "LogsQL copy requires a source field before each comma",
+            ));
+        }
+        let source = parse_delete_field(source_token)?;
+        cursor += 1;
+
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("as"))
+        {
+            cursor += 1;
+        }
+        let destination_token = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL copy requires a destination field"))?;
+        if destination_token == "," {
+            return Err(LogsqlError::malformed(
+                "LogsQL copy requires a destination field before each comma",
+            ));
+        }
+        let destination = parse_delete_field(destination_token)?;
+        cursor += 1;
+        pairs.push((source, destination));
+
+        match tokens.get(cursor).map(String::as_str) {
+            None => break,
+            Some(",") => {
+                cursor += 1;
+                if cursor == tokens.len() {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL copy requires a pair after each comma",
+                    ));
+                }
+            }
+            Some(token) => {
+                return Err(LogsqlError::malformed(format!(
+                    "unexpected LogsQL copy token {token:?}; expected ',' or end of pipe"
+                )))
+            }
+        }
+    }
+
+    Ok(PipelineOp::Copy(CopySpec { pairs }))
+}
+
 fn parse_uniq_fields(
     tokens: &[String],
     cursor: &mut usize,
@@ -1048,6 +1112,10 @@ fn is_facets_pipe(segment: &str) -> bool {
 
 fn is_coalesce_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "coalesce")
+}
+
+fn is_copy_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "copy") || is_first_last_pipe(segment, "cp")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -1500,6 +1568,11 @@ pub(crate) struct CoalesceSpec {
     pub default_value: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CopySpec {
+    pub pairs: Vec<(PipelineField, PipelineField)>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -1527,6 +1600,7 @@ pub(crate) enum PipelineOp {
     Uniq(UniqSpec),
     Facets(FacetsSpec),
     Coalesce(CoalesceSpec),
+    Copy(CopySpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1882,6 +1956,10 @@ pub fn parse_at(
             }
             _ if is_coalesce_pipe(segment) => {
                 pipeline.push(parse_coalesce_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_copy_pipe(segment) => {
+                pipeline.push(parse_copy_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -6814,6 +6892,39 @@ mod tests {
             assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
         }
 
+        let plan = parse_at(
+            r#"* | CP "" message_copy, "nested."* AS "copied."*"#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::Copy(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected copy plan: {plan:?}");
+        };
+        assert_eq!(
+            spec.pairs,
+            [
+                (
+                    PipelineField::Exact {
+                        path: vec!["_msg".into()],
+                        name: "_msg".into(),
+                    },
+                    PipelineField::Exact {
+                        path: vec!["message_copy".into()],
+                        name: "message_copy".into(),
+                    },
+                ),
+                (
+                    PipelineField::Prefix {
+                        prefix: "nested.".into(),
+                    },
+                    PipelineField::Prefix {
+                        prefix: "copied.".into(),
+                    },
+                ),
+            ]
+        );
+
         for malformed in [
             "* | coalesce",
             "* | coalesce a, b",
@@ -6826,6 +6937,37 @@ mod tests {
             "* | coalesce(a) as",
             "* | coalesce(a) as result*",
             "* | coalesce(a) trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_copy_grammar_is_complete_and_strict() {
+        for query in [
+            "* | copy source as destination",
+            "* | cp source destination",
+            "* | COPY a AS b, b AS c",
+            "* | copy foo* as bar*",
+            r#"* | copy "foo."* as "bar."*"#,
+            "* | copy * as copied*",
+            r#"* | copy "" as message_copy"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | copy",
+            "* | copy source",
+            "* | copy source as",
+            "* | copy , source as destination",
+            "* | copy source as destination,",
+            "* | copy source as destination trailing",
+            "* | copy source * as destination",
+            "* | copy source as destination *",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

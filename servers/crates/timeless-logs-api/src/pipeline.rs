@@ -17,8 +17,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    CoalesceSpec, FacetsSpec, FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind,
-    TopSpec, UniqSpec,
+    CoalesceSpec, CopySpec, FacetsSpec, FirstSpec, PipelineField, PipelineOp, StatsExpression,
+    StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -182,6 +182,9 @@ pub(crate) fn execute(
             PipelineOp::Facets(spec) => facets(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Coalesce(spec) => {
                 coalesce(rows, spec, execution.limits, execution.cancelled)?
+            }
+            PipelineOp::Copy(spec) => {
+                copy_fields(rows, spec, execution.limits, execution.cancelled)?
             }
         };
     }
@@ -1042,6 +1045,266 @@ fn remember_coalesce_field(
     ensure_first_state_bytes(*state_bytes, max_state_bytes, "coalesce")?;
     seen.insert(name.to_owned());
     Ok(true)
+}
+
+fn copy_fields(
+    rows: Vec<Value>,
+    spec: &CopySpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            let mut work_items = 0usize;
+            for (source, destination) in &spec.pairs {
+                ensure_active(cancelled)?;
+                let mut copies = Vec::new();
+                let mut state_bytes = size_of::<Vec<(String, Value)>>();
+                match source {
+                    PipelineField::Exact { path, name } => {
+                        charge_copy_work(&mut work_items, limits.max_state_items)?;
+                        let value = coalesce_exact_value(&row, path)
+                            .filter(|value| !matches!(value, Value::Object(_)))
+                            .cloned()
+                            .unwrap_or_else(|| Value::String(String::new()));
+                        charge_copy_string(
+                            name,
+                            &mut state_bytes,
+                            limits.max_state_bytes,
+                        )?;
+                        charge_copy_value(
+                            &value,
+                            &mut state_bytes,
+                            limits.max_state_bytes,
+                            cancelled,
+                            &mut work_items,
+                            limits.max_state_items,
+                        )?;
+                        copies.push((name.clone(), value));
+                    }
+                    PipelineField::Prefix { prefix } => collect_copy_leaves(
+                        &row,
+                        &mut String::new(),
+                        Some(prefix),
+                        &mut copies,
+                        &mut state_bytes,
+                        limits,
+                        cancelled,
+                        &mut work_items,
+                    )?,
+                    PipelineField::All => collect_copy_leaves(
+                        &row,
+                        &mut String::new(),
+                        None,
+                        &mut copies,
+                        &mut state_bytes,
+                        limits,
+                        cancelled,
+                        &mut work_items,
+                    )?,
+                }
+
+                for (copy_index, (source_name, value)) in copies.into_iter().enumerate() {
+                    check_periodically(cancelled, copy_index)?;
+                    let (destination_name, destination_path) =
+                        copy_destination(source, destination, &source_name)?;
+                    charge_copy_string(
+                        &destination_name,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                    )?;
+                    let object = row.as_object_mut().ok_or_else(|| {
+                        "LogsQL copy input row is not a JSON object".to_string()
+                    })?;
+                    if copy_destination_replaces_object(object, &destination_path) {
+                        return Err(format!(
+                            "LogsQL copy destination conflict: field {destination_name:?} would replace a retained object"
+                        ));
+                    }
+                    insert_path(object, &destination_path, value)
+                        .map_err(|error| format!("LogsQL copy destination conflict: {error}"))?;
+                }
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_copy_leaves(
+    value: &Value,
+    path: &mut String,
+    prefix: Option<&str>,
+    output: &mut Vec<(String, Value)>,
+    state_bytes: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+) -> Result<(), String> {
+    charge_copy_work(work_items, limits.max_state_items)?;
+    check_periodically(cancelled, *work_items)?;
+    if let Value::Object(object) = value {
+        for (name, child) in object {
+            let original_len = path.len();
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(name);
+            collect_copy_leaves(
+                child,
+                path,
+                prefix,
+                output,
+                state_bytes,
+                limits,
+                cancelled,
+                work_items,
+            )?;
+            path.truncate(original_len);
+        }
+        return Ok(());
+    }
+    if prefix.is_some_and(|prefix| !path.starts_with(prefix)) {
+        return Ok(());
+    }
+    charge_copy_string(path, state_bytes, limits.max_state_bytes)?;
+    charge_copy_value(
+        value,
+        state_bytes,
+        limits.max_state_bytes,
+        cancelled,
+        work_items,
+        limits.max_state_items,
+    )?;
+    output.push((path.clone(), value.clone()));
+    Ok(())
+}
+
+fn copy_destination(
+    source: &PipelineField,
+    destination: &PipelineField,
+    source_name: &str,
+) -> Result<(String, Vec<String>), String> {
+    if matches!(source, PipelineField::Exact { .. }) {
+        return Ok(match destination {
+            PipelineField::Exact { path, name } => (name.clone(), path.clone()),
+            // VictoriaLogs accepts these unusual forms. With an exact source,
+            // the destination filter is the literal destination column name;
+            // prefix substitution only occurs for a wildcard source.
+            PipelineField::Prefix { prefix } => {
+                let name = format!("{prefix}*");
+                (name.clone(), vec![name])
+            }
+            PipelineField::All => ("*".into(), vec!["*".into()]),
+        });
+    }
+
+    let suffix = match source {
+        PipelineField::Prefix { prefix } => source_name.strip_prefix(prefix).ok_or_else(|| {
+            format!("LogsQL copy source field {source_name:?} does not match prefix {prefix:?}")
+        })?,
+        PipelineField::All => source_name,
+        PipelineField::Exact { .. } => unreachable!("handled above"),
+    };
+    match destination {
+        PipelineField::Exact { path, name } => Ok((name.clone(), path.clone())),
+        PipelineField::Prefix { prefix } => {
+            let name = format!("{prefix}{suffix}");
+            Ok(copy_flattened_destination(name))
+        }
+        PipelineField::All => Ok(copy_flattened_destination(suffix.to_owned())),
+    }
+}
+
+fn copy_flattened_destination(name: String) -> (String, Vec<String>) {
+    // Unlike an exact parsed empty field, a wildcard substitution may produce
+    // a literal empty destination name. VictoriaLogs keeps that generated
+    // column distinct from the canonical message field.
+    let path = name.split('.').map(str::to_owned).collect();
+    (name, path)
+}
+
+fn copy_destination_replaces_object(object: &Map<String, Value>, path: &[String]) -> bool {
+    let Some((last, parents)) = path.split_last() else {
+        return false;
+    };
+    let mut current = object;
+    for parent in parents {
+        let Some(Value::Object(child)) = current.get(parent) else {
+            return false;
+        };
+        current = child;
+    }
+    matches!(current.get(last), Some(Value::Object(_)))
+}
+
+fn charge_copy_work(used: &mut usize, limit: usize) -> Result<(), String> {
+    *used = used
+        .checked_add(1)
+        .ok_or_else(|| "LogsQL copy work size overflow".to_string())?;
+    if *used > limit {
+        return Err(format!(
+            "LogsQL copy traversal exceeds max_work_rows={limit}"
+        ));
+    }
+    Ok(())
+}
+
+fn charge_copy_string(value: &str, used: &mut usize, limit: usize) -> Result<(), String> {
+    *used = used
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(value.len()))
+        .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
+    ensure_first_state_bytes(*used, limit, "copy")
+}
+
+fn charge_copy_value(
+    value: &Value,
+    used: &mut usize,
+    limit: usize,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+    max_work_items: usize,
+) -> Result<(), String> {
+    ensure_active(cancelled)?;
+    *used = used
+        .checked_add(size_of::<Value>())
+        .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
+    ensure_first_state_bytes(*used, limit, "copy")?;
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        Value::String(value) => {
+            *used = used
+                .checked_add(value.len())
+                .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
+            ensure_first_state_bytes(*used, limit, "copy")
+        }
+        Value::Array(values) => {
+            *used = used
+                .checked_add(size_of::<Vec<Value>>())
+                .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
+            ensure_first_state_bytes(*used, limit, "copy")?;
+            for value in values {
+                charge_copy_work(work_items, max_work_items)?;
+                charge_copy_value(value, used, limit, cancelled, work_items, max_work_items)?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            *used = used
+                .checked_add(size_of::<Map<String, Value>>())
+                .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
+            ensure_first_state_bytes(*used, limit, "copy")?;
+            for (name, value) in object {
+                charge_copy_work(work_items, max_work_items)?;
+                charge_copy_string(name, used, limit)?;
+                charge_copy_value(value, used, limit, cancelled, work_items, max_work_items)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn first_row_comparison(
@@ -3197,6 +3460,159 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             coalesce(rows, &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn copy_preserves_rich_values_sequences_prefixes_and_bounds_temporary_state() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: name.split('.').map(str::to_owned).collect(),
+            name: name.to_owned(),
+        };
+        let prefix = |prefix: &str| PipelineField::Prefix {
+            prefix: prefix.to_owned(),
+        };
+        let spec = CopySpec {
+            pairs: vec![
+                (exact("probe"), exact("selected")),
+                (exact("selected"), exact("chained")),
+                (prefix("nested."), prefix("copied.")),
+                (exact("missing"), exact("absent")),
+            ],
+        };
+        let rows = vec![json!({
+            "probe": 2,
+            "nested": {"a": "one", "b": [1, "x"]},
+            "null_value": null,
+            "empty_value": ""
+        })];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 10_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            copy_fields(rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [json!({
+                "probe": 2,
+                "selected": 2,
+                "chained": 2,
+                "nested": {"a": "one", "b": [1, "x"]},
+                "copied": {"a": "one", "b": [1, "x"]},
+                "null_value": null,
+                "empty_value": "",
+                "absent": ""
+            })]
+        );
+
+        assert_eq!(
+            copy_fields(
+                rows.clone(),
+                &CopySpec {
+                    pairs: vec![(prefix("nested."), exact("last"))],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({
+                "probe": 2,
+                "nested": {"a": "one", "b": [1, "x"]},
+                "null_value": null,
+                "empty_value": "",
+                "last": [1, "x"]
+            })]
+        );
+        assert_eq!(
+            copy_fields(
+                rows.clone(),
+                &CopySpec {
+                    pairs: vec![(PipelineField::All, PipelineField::All)],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            rows
+        );
+        assert_eq!(
+            copy_fields(
+                vec![json!({"case":"copy","probe":2})],
+                &CopySpec {
+                    pairs: vec![
+                        (prefix("case"), PipelineField::All),
+                        (prefix("probe"), prefix("copied")),
+                        (prefix("copied"), prefix("chained")),
+                    ],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({
+                "case":"copy",
+                "probe":2,
+                "":"copy",
+                "copied":2,
+                "chained":2
+            })]
+        );
+        assert_eq!(
+            copy_fields(
+                rows.clone(),
+                &CopySpec {
+                    pairs: vec![(exact("probe"), prefix("literal"))],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap()[0]["literal*"],
+            2
+        );
+
+        assert!(copy_fields(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_response_bytes=1"));
+        assert!(copy_fields(
+            rows.clone(),
+            &CopySpec {
+                pairs: vec![(PipelineField::All, prefix("copied."))],
+            },
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_work_rows=1"));
+
+        for destination in [exact("probe.child"), exact("nested")] {
+            let error = copy_fields(
+                rows.clone(),
+                &CopySpec {
+                    pairs: vec![(exact("probe"), destination)],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(error.contains("destination conflict"), "{error}");
+        }
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            copy_fields(rows, &spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

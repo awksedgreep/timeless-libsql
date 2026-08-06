@@ -558,3 +558,18 @@ audit is against `pipe_coalesce.go`, `pipe_coalesce_test.go`,
 row-query cases, 161 error cases, and 102 statistics/pipeline cases: 559 cases
 total.
 The fixture now contains 559 cases.
+
+`LQL-P20` adds twenty successful pipeline cases and eight error cases for
+typed exact copies; retained sources; missing and flattened object-parent
+behavior; `copy`/`cp`; optional `as`; strict pair/comma grammar; sequential
+chains, swaps, and overwrite order; exact self-copy; all-field identity;
+prefix substitution; prefix-to-exact deterministic last-write behavior;
+all-field-to-prefix mapping; unmatched prefixes; wildcard-pair chaining;
+exact-to-wildcard literal destinations; the literal empty field produced by
+an empty wildcard suffix; current message preservation; and empty input.
+Source audit is against `pipe_copy.go`, `pipe_copy_test.go`,
+`parser_utils.go`, `block_result.go`, and `prefixfilter/filter.go` at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+The fixture contains 296 row-query cases, 169 error cases, and 122
+statistics/pipeline cases: 587 cases total.
+The fixture now contains 587 cases.

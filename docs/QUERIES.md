@@ -736,6 +736,45 @@ cancellation are bounded. Executable
 shows the ordinary public `CASE`/`NULLIF`/`COALESCE` equivalent for exact
 metadata paths. No extension primitive or private table is needed.
 
+## LogsQL `copy` over rich current rows
+
+`copy` (alias `cp`) preserves source fields while cloning them to one or more
+destinations:
+
+```text
+* | copy trace_id as correlation_id
+* | cp context.* as copied.*, copied.attempt as retry_attempt
+* | copy service saved, host service, saved host
+```
+
+`as` is optional. Comma-separated pairs execute left to right, so later pairs
+observe earlier copies and can form chains or swaps. Sources and destinations
+may be exact fields, `*`, or suffix-star prefix filters. A wildcard source is
+snapshotted at the start of its pair and expands recursively flattened leaves
+in bytewise field-name order; arrays remain atomic values. Prefix destinations
+replace the matched source prefix. Copying many wildcard sources to one exact
+destination is deterministic last-write-wins. A missing wildcard source is a
+no-op.
+
+Exact copies preserve JSON strings, numbers, booleans, arrays, null, and empty
+strings without deleting or coercing the source. A missing exact source or an
+exact rich-object parent produces an explicit empty string, matching the
+upstream flattened-column view; copy an exact dotted leaf or use a prefix to
+clone object contents. An exact source paired with a wildcard destination
+uses the literal destination name, including `*`, matching VictoriaLogs.
+When prefix removal yields an empty destination suffix, it creates a literal
+empty field distinct from `_msg`; exact quoted `""` still names `_msg`.
+
+Existing compatible scalar destinations are overwritten. A destination that
+would replace a retained object or descend through a scalar fails with HTTP
+422 reason `field_conflict`, preserving rich-row fidelity. Source traversal,
+temporary cloned values and paths, result rows, response bytes, and
+cancellation are bounded. Executable
+[`SQL-LOG-033`](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)
+shows the public JSON1 equivalent for one exact retained metadata source and
+one exact top-level destination. Sequential/wildcard language composition
+remains in the Rust API; no extension primitive or private table is used.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

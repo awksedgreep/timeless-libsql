@@ -2717,6 +2717,106 @@
       "id": "LQL-P19-coalesce-empty-input",
       "query": "case:=coalesce-missing | coalesce(case) as selected",
       "expected_rows": []
+    },
+    {
+      "id": "LQL-P20-copy-exact-preserves-source",
+      "query": "case:=state-string | copy probe as selected | fields case, probe, selected",
+      "expected_rows": [{"case": "state-string", "probe": "value", "selected": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-missing-exact-produces-empty",
+      "query": "case:=state-missing | copy probe as selected | fields case, selected",
+      "expected_rows": [{"case": "state-missing"}]
+    },
+    {
+      "id": "LQL-P20-copy-flattened-nested-leaf",
+      "query": "case:=delete-row | copy nested.drop as selected | fields case, nested.drop, selected",
+      "expected_rows": [{"case": "delete-row", "nested.drop": "nested-gone", "selected": "nested-gone"}]
+    },
+    {
+      "id": "LQL-P20-copy-flattened-object-parent-is-missing",
+      "query": "case:=delete-row | copy nested as selected | fields case, selected",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P20-copy-alias-and-optional-as",
+      "query": "case:=state-string | CP probe selected | fields case, selected",
+      "expected_rows": [{"case": "state-string", "selected": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-pairs-compose-sequentially",
+      "query": "case:=state-string | copy probe as first, first as second | fields case, first, second",
+      "expected_rows": [{"case": "state-string", "first": "value", "second": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-last-write-wins",
+      "query": "case:=state-string | copy probe as selected, case as selected | fields case, selected",
+      "expected_rows": [{"case": "state-string", "selected": "state-string"}]
+    },
+    {
+      "id": "LQL-P20-copy-prefix-substitution",
+      "query": "case:=delete-row | copy drop_prefix* as copied* | fields case, copied_a, copied_b",
+      "expected_rows": [{"case": "delete-row", "copied_a": "one", "copied_b": "two"}]
+    },
+    {
+      "id": "LQL-P20-copy-prefix-to-exact-last-write-wins",
+      "query": "case:=delete-row | copy drop_prefix* as selected | fields case, selected",
+      "expected_rows": [{"case": "delete-row", "selected": "two"}]
+    },
+    {
+      "id": "LQL-P20-copy-unmatched-prefix-is-noop",
+      "query": "case:=delete-row | copy absent* as copied* | fields case, copied",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P20-copy-overwrites-existing-destination",
+      "query": "case:=state-string | copy probe as case | fields case",
+      "expected_rows": [{"case": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-empty-input",
+      "query": "case:=copy-missing | copy case as selected",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P20-copy-exact-to-itself",
+      "query": "case:=state-string | copy probe as probe | fields case, probe",
+      "expected_rows": [{"case": "state-string", "probe": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-swaps-through-sequential-pairs",
+      "query": "case:=state-string | copy case as saved, probe as case, saved as probe | fields case, probe",
+      "expected_rows": [{"case": "value", "probe": "state-string"}]
+    },
+    {
+      "id": "LQL-P20-copy-all-to-itself",
+      "query": "case:=state-string | copy * as * | fields case, probe",
+      "expected_rows": [{"case": "state-string", "probe": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-all-to-prefix",
+      "query": "case:=state-string | copy * as copied.* | fields copied.case, copied.probe",
+      "expected_rows": [{"copied.case": "state-string", "copied.probe": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-empty-prefix-suffix-targets-message",
+      "query": "case:=state-string | copy case* as * | fields case, _msg",
+      "expected_rows": [{"case": "state-string", "_msg": "state string"}]
+    },
+    {
+      "id": "LQL-P20-copy-empty-prefix-suffix-is-literal-field",
+      "query": "case:=state-string | fields case | copy case* as *",
+      "expected_rows": [{"case": "state-string", "": "state-string"}]
+    },
+    {
+      "id": "LQL-P20-copy-wildcard-pairs-compose-sequentially",
+      "query": "case:=state-string | copy probe* as copied*, copied* as chained* | fields case, copied, chained",
+      "expected_rows": [{"case": "state-string", "copied": "value", "chained": "value"}]
+    },
+    {
+      "id": "LQL-P20-copy-exact-to-wildcard-keeps-literal-destination",
+      "query": "case:=state-string | copy probe as selected* | fields case, \"selected*\"",
+      "expected_rows": [{"case": "state-string", "selected*": "value"}]
     }
   ],
   "error_cases": [
@@ -3843,6 +3943,62 @@
     {
       "id": "LQL-P19-coalesce-rejects-trailing-token",
       "query": "* | coalesce(a) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-requires-a-pair",
+      "query": "* | copy",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-requires-destination",
+      "query": "* | copy source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-requires-destination-after-as",
+      "query": "* | copy source as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-rejects-leading-comma",
+      "query": "* | copy , source as destination",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-rejects-trailing-comma",
+      "query": "* | copy source as destination,",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-rejects-trailing-token",
+      "query": "* | copy source as destination trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-rejects-separated-source-wildcard",
+      "query": "* | copy source * as destination",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P20-copy-rejects-separated-destination-wildcard",
+      "query": "* | copy source as destination *",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -140,6 +140,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-030`](#sql-log-030-unique-textual-values) | `LQL-P16` | current foundation | bounded unique textual groups, optional case-sensitive filtering, deterministic limiting, and optional hits over one public JSON path; API owns multi-field/current-row grammar, omitted empty fields, collision naming, strict limits, cancellation, and envelopes |
 | [`SQL-LOG-031`](#sql-log-031-bounded-facets-over-public-log-fields) | `LQL-P18` | current foundation | recursive rich-field flattening, textual nonempty frequencies, per-field limits, constant/high-cardinality/long-value exclusion, and deterministic ordering; API owns grammar, pipeline composition, hard state limits, cancellation, and envelopes |
 | [`SQL-LOG-032`](#sql-log-032-first-nonempty-textual-log-field) | `LQL-P19` | current foundation | bounded first-nonempty textual selection across three exact public metadata paths with a default; API owns exact/all/prefix current-row expansion, destination mutation, conflicts, limits, cancellation, and envelopes |
+| [`SQL-LOG-033`](#sql-log-033-copy-one-exact-retained-metadata-field) | `LQL-P20` | current foundation | typed copy of one exact retained metadata path to one exact top-level destination with missing/object-parent compatibility behavior; API owns pair grammar, flattened prefixes, sequential composition, nested destination conflicts, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6359,6 +6360,72 @@ justified.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_coalesce_is_textual_bounded_and_durable`.
+
+### SQL-LOG-033: copy one exact retained metadata field
+
+Bind one SQLite JSON source path, one exact top-level destination path, native
+timestamp bounds, and positive row/result limits. This ordinary statement
+copies one retained metadata value without changing its JSON type or removing
+the source:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), copied AS (
+  SELECT
+    ts,
+    level,
+    message,
+    json_set(
+      metadata,
+      :copy_destination_path,
+      json(
+        CASE
+          WHEN json_type(metadata, :copy_source_path) IS NULL
+            OR json_type(metadata, :copy_source_path) = 'object'
+          THEN '""'
+          ELSE metadata -> :copy_source_path
+        END
+      )
+    ) AS copied_metadata
+  FROM bounded
+)
+SELECT ts, level, message, copied_metadata
+FROM copied
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, copied_metadata
+LIMIT :max_result_rows;
+```
+
+`:copy_source_path` and `:copy_destination_path` use SQLite JSON-path syntax;
+this recipe intentionally constrains the destination to one top-level path
+such as `$.copied`. Strings, numbers, booleans, arrays, null, and empty strings
+retain their JSON types. A missing exact source becomes an explicit empty
+string. An exact object parent is absent from VictoriaLogs' flattened-column
+view and therefore also becomes an empty string; copy an exact leaf or use a
+prefix operation in the Rust API instead. The original source and every other
+metadata value remain unchanged.
+
+Repeat `json_set` in query order for multiple exact pairs. The Rust API owns
+case-insensitive `copy`/`cp`, optional `as`, quoted fields, comma-separated
+sequential pairs, exact/all/prefix flattened source expansion, prefix
+substitution, deterministic last-write-wins behavior, canonical fields,
+current-pipeline composition, and explicit nested rich-object conflict
+errors. It also enforces work/state/result/response limits, cancellation, and
+HTTP envelopes. Timeless retains explicit null, empty, and missing-copy values
+in rich responses; VictoriaLogs stream JSON omits empty-valued columns.
+
+Every source value already crosses the public bounded log-row interface.
+JSON1 provides the complete direct exact-field operation, so no extension
+primitive or private shadow-table access is justified.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_copy_is_typed_sequential_bounded_and_durable`.
 
 ## Adding the next recipe
 
