@@ -608,6 +608,25 @@ equal-cardinality controls. `QSF-161` accepts the -5.0%/+4.7% p95 variation,
 records byte-identical storage and the HWM verdict, and closes the row.
 Session 17 continues with `LQL-P18`.
 
+`LQL-P18` implements VictoriaLogs-compatible `facets` as bounded Rust API
+aggregation over recursively flattened public current-pipeline rows. Eleven
+successful and ten error oracle cases pin per-field limits, textual rich
+values, empty exclusion, constant retention, whole-field cardinality/length
+exclusion, modifier ordering/repetition/case, positive-fraction truncation,
+empty input, and strict syntax. Timeless adds deterministic field-name and
+equal-hit value ordering where the local pinned processor promises none.
+Executable `SQL-LOG-031` gives direct SQLite/libSQL users the complete public
+JSON1/window-function foundation, including native timestamp units and
+pre-epoch rendering. Input/field/value/traversal/sort/output/result/response
+limits, HTTP deadline cancellation, optimize, shutdown, reopen, and reader
+reuse are pinned without an extension primitive or storage-contract change.
+`QSF-162` records the semantic boundary. Exact-build commit
+`85332944a7a9d9c2f476558e1d519eaa6aecf23e` measures `facets` at
+3.239/44.087 ms narrow/wide p95 versus 4.464/41.116 ms for byte-identical
+same-scan controls. `QSF-163` accepts the -27.4%/+7.2% p95 variation, records
+unchanged four-block storage and the HWM verdict, and closes the row. Session
+17 continues with `LQL-P19`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

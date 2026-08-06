@@ -121,7 +121,7 @@ extension.
 | `LQL-P15` | `top` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P16` | `uniq` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)) | shipped | no | `VALUES`, `SQL` | `API` | P2 |
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | in progress | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
+| `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
 | `LQL-P19` | `coalesce` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` | missing | no | `SQL` | `API` | P2 |
@@ -244,6 +244,9 @@ state, sort/output allocations, result rows, response bytes, and cancellation
 use existing request limits. Executable `SQL-LOG-031` exposes the complete
 public JSON1/window-function foundation, including canonical special fields
 and native timestamp units. No storage primitive or private table is used.
+Exact-build evidence records 3.239/44.087 ms narrow/wide p95 versus
+4.464/41.116 ms for byte-identical same-scan controls; `QSF-163` accepts the
+mixed -27.4%/+7.2% variation above the unchanged public storage boundary.
 
 ## Statistics functions
 
