@@ -4587,3 +4587,58 @@ compression, indexes, retention, optimize, transactions, migrations, and
 public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or downstream
 repository was used or modified.
+
+## Session 17 LogsQL P2: bounded `drop_empty_fields`
+
+The checked-in
+[`2026-08-06_session17_lql_p28_drop_empty_fields.json`](evidence/2026-08-06_session17_lql_p28_drop_empty_fields.json)
+was captured from exact release extension and server build
+`88b26b01194a2d863107406f6aba099380683dd7`. The narrow shape scans one
+indexed host, projects the rich `context` object and numeric `status`, applies
+`drop_empty_fields`, and returns 64 rows. The wide shape performs the same
+recursive typed traversal across all 8,192 entries before its 64-row limit.
+Same-run controls scan the identical source rowsets, sort by time, and project
+the same fields and cardinality. The fixture contains no empty values in this
+projection, so responses are byte-identical; removal paths, sequentially
+created empties, parent/row pruning, and native-type retention are exercised
+by the semantic regressions rather than changing benchmark output.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `drop_empty_fields`, indexed host | 64 | 3,370 | 3.392 | 4.542 | 4.727 | 1 | 1,024 | 235,778 | 128 |
+| `drop_empty_fields`, full fixture | 64 | 3,370 | 37.190 | 38.151 | 38.617 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 64 | 3,370 | 3.176 | 6.994 | 7.827 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 64 | 3,370 | 32.644 | 35.779 | 39.217 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 35.1% below/6.6% above its narrow/wide same-run control.
+Its internal API timer averages 2.681/35.722 ms versus 2.772/32.183 ms, or
+3.3% lower/11.0% higher. The narrow control's higher tail is retained as run
+variation rather than treated as an optimization. Every equal-width pair
+performs exactly the same public storage scan, block decode, payload read, row
+materialization, and response encoding. Recursive rich-object traversal,
+typed empty decisions, parent/row pruning, nesting/work limits, cancellation,
+and errors remain bounded Rust API work. `SQL-LOG-038` already gives direct
+SQLite/libSQL users ordinary exact-path JSON1 removal, so a new extension
+primitive would not avoid storage work.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+17.354 ms and the explicit durability barrier took 35.479 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Those values are byte-identical to LQL-P24.
+Logs HWM was 92,544 KiB, 3,516 KiB below LQL-P24; metrics HWM was 50,516 KiB,
+2,232 KiB below it. Each maximum spans the enlarged complete workload and is
+retained as whole-process variation rather than attributed to one transform
+request. Cancellation ended with zero requests in flight; direct evaluator
+and HTTP deadline regressions pin nesting/work/result/response bounds,
+rejection, cancellation, and reader reuse.
+
+All 722 pinned VictoriaLogs v1.52.0 cases pass live. The final 42-test logs
+real-extension suite, 90 logs library tests, complete supported extension and
+Rust server workspaces, complete 45-section CLI/crash/transaction suite,
+30-test Rust query harness, documentation contracts, Clippy with warnings
+denied, formatting, and all 104 SQL recipes (140 statements) pass locally.
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or downstream
+repository was used or modified.

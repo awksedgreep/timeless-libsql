@@ -741,9 +741,13 @@ five exact-result, and four error cases pass the complete 722-case pinned
 VictoriaLogs oracle. Timeless preserves zero, false, arrays, and every other
 rich source type while matching the upstream flattened empty-field set.
 `QSF-176` records the semantic boundary and the decision to keep dynamic
-traversal in the Rust API. Exact-build performance/HWM evidence remains to be
-recorded before the row closes. Session 17 must continue with its remaining
-declared P2 rows before Session 18 begins.
+traversal in the Rust API. Exact-build commit
+`88b26b01194a2d863107406f6aba099380683dd7` measures 4.542/38.151 ms
+narrow/wide p95 versus 6.994/35.779 ms for byte-identical same-scan controls.
+`QSF-177` accepts the -35.1%/+6.6% bounded traversal variation, records
+unchanged four-block storage and the HWM verdict, and closes `LQL-P28`.
+Session 17 continues with `LQL-P29`; its remaining declared P2 rows must not
+be skipped before Session 18 begins.
 
 ### Session 18: applicable LogsQL P3
 

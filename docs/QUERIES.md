@@ -1000,8 +1000,13 @@ handling, recursive empty-parent and all-empty-row pruning, resource limits,
 cancellation, and HTTP envelopes remain Rust API behavior. No extension
 primitive or private storage table is used.
 
-Exact-build performance/HWM evidence remains to be recorded before this row
-is marked shipped.
+Exact-build `drop_empty_fields` evidence measures 4.542/38.151 ms narrow/wide
+p95 while returning 64 rows, versus 6.994/35.779 ms for byte-identical same-
+scan controls. The -35.1%/+6.6% p95 and -3.3%/+11.0% internal API variation
+follows the same one/four candidate blocks, 1,024/8,192 decoded entries, and
+235,778/1,914,055 payload bytes. Responses are byte-identical. `QSF-177`
+accepts the bounded in-place rich-row traversal above the unchanged public
+storage boundary.
 
 ## Public log storage statistics
 

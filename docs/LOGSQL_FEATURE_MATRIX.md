@@ -131,7 +131,7 @@ extension.
 | `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P26` | `collapse_nums` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
@@ -438,7 +438,9 @@ discovery, canonical fields, recursive parent/row pruning, limits, and HTTP
 envelopes remain Rust API work. The complete 722-case pinned oracle and
 `QSF-176` record the flattened-versus-rich boundary. No extension primitive,
 private table, durable mutation, or storage-contract change is required.
-Exact-build performance/HWM evidence remains to be recorded before shipment.
+Exact-build evidence records 4.542/38.151 ms narrow/wide p95 versus
+6.994/35.779 ms for byte-identical same-scan controls; `QSF-177` accepts the
+-35.1%/+6.6% bounded in-place traversal variation.
 
 ## Statistics functions
 
