@@ -1129,6 +1129,13 @@ xxHash64 UDF for their own bounded public `logs` queries, but that is not a
 `timeless-libsql` contract. The Rust logs API owns this row-local transform;
 no extension primitive, private table, or storage-format change is involved.
 
+Exact-build evidence measures 3.455/36.785 ms narrow/wide p95 versus
+3.481/36.223 ms for byte-identical public-storage-work controls. Both pairs
+read one/four blocks, decode 1,024/8,192 entries, and read
+235,778/1,914,055 payload bytes per query. Decimal hashes make the 64-row
+response 502/506 bytes larger. `QSF-210` accepts the -0.7%/+1.6% p95
+variation and keeps hashing above the unchanged public storage boundary.
+
 ## LogsQL `drop_empty_fields` over current rows
 
 `drop_empty_fields` removes empty fields from each current pipeline row:

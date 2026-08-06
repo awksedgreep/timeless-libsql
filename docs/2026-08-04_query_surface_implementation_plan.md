@@ -972,7 +972,7 @@ The real-extension grammar/fidelity/limit/cancellation/optimize/flush/reopen
 regression, all 1,015 pinned VictoriaLogs cases, executable `SQL-LOG-049`,
 documentation contracts, and complete local gates pass.
 
-Session 18 next implements `LQL-P25` as an API-owned `hash` pipe. Pinned
+Session 18's `LQL-P25` row is closed as an API-owned `hash` pipe. Pinned
 VictoriaLogs source and live probes establish seed-zero xxHash64 masked to 53
 bits, decimal-string output, optional parentheses/aliases, current-row
 sequential behavior, and flattened textual field projection. Ten exact and
@@ -981,8 +981,20 @@ evaluator streams compact arrays through the hasher, bounds traversal/state,
 preserves rich sources, and changes no extension or storage contract. Core
 SQLite/libSQL has no portable exact xxHash64 expression, so the SQL cookbook
 records an explicit no-recipe disposition rather than inventing an extension
-scalar without measured avoidable storage work. Exact-build evidence and the
-complete local gates remain required before the row closes.
+scalar without measured avoidable storage work.
+
+Exact-build commit `36e269fcb875262827f1f6cd49e9fc2d8ae46b3b` measures
+3.206/3.455/3.566 ms narrow and 34.628/36.785/37.534 ms wide p50/p95/p99.
+Same-public-work copy controls measure 3.168/3.481/3.922 and
+35.594/36.223/36.263 ms. Every pair performs identical public reads and
+decode: one/four candidate blocks, 1,024/8,192 decoded entries, and
+235,778/1,914,055 payload bytes per query. Decimal hashes increase the
+64-row response by 502/506 bytes. `QSF-210` accepts the bounded API cost and
+records that no extension primitive or storage-contract change is justified.
+The real-extension regression, all 1,033 pinned VictoriaLogs cases, explicit
+no-SQL disposition, documentation contracts, and complete local gates pass.
+
+Session 18 next implements `LQL-P26` as the next declared P3 row.
 
 ### Session 19: experimental and data-model dispositions
 

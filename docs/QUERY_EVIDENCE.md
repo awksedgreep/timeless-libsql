@@ -4182,6 +4182,53 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `hash`
+
+The checked-in
+[`2026-08-06_session18_lql_p25_hash.json`](evidence/2026-08-06_session18_lql_p25_hash.json)
+was captured from exact release extension and server build
+`36e269fcb875262827f1f6cd49e9fc2d8ae46b3b` and has SHA-256
+`c13f32bc39fb7420f8ffd2e0aa1a0b83986cd32224f7b1320745109f356e931e`.
+The narrow shapes select one indexed host and return 64 rows; the wide shapes
+hash all 8,192 retained entries before their 64-row limit. Controls copy the
+same source into the same destination, so both paths perform identical public
+storage work while isolating the bounded hash transform and larger result.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| masked xxHash64, indexed host | 64 | 2,038 | 3.206 | 3.455 | 3.566 | 1 | 1,024 | 235,778 | 128 |
+| masked xxHash64, full fixture | 64 | 2,042 | 34.628 | 36.785 | 37.534 | 4 | 8,192 | 1,914,055 | 8,192 |
+| exact-field copy control, indexed host | 64 | 1,536 | 3.168 | 3.481 | 3.922 | 1 | 1,024 | 235,778 | 128 |
+| exact-field copy control, full fixture | 64 | 1,536 | 35.594 | 36.223 | 36.263 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Hash p95 is 0.7% lower/1.6% higher than its narrow/wide control. Its
+request-attributed API timer averages 2.464/33.501 ms versus 2.459/34.423 ms,
+or 0.2% higher/2.7% lower. Every equal-width pair executes 50 public queries
+and performs identical candidate-block selection, entry decode, payload read,
+row match, and row return work. Decimal hash values add 502/506 bytes to the
+64-row response. The differences are bounded row-local hash and response work,
+not storage pushdown. Core SQLite/libSQL has no portable exact xxHash64 scalar;
+adding one would not avoid any block read, decode, payload transfer, or row
+crossing, so the explicit no-SQL/no-extension disposition remains correct.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.295 ms and the explicit durability barrier took 37.144 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 101,196 KiB and metrics HWM was
+52,848 KiB across the complete enlarged workload. Cancellation ended with
+zero requests in flight; direct evaluator and HTTP regressions pin grammar,
+exact bits, rich-value fidelity, work/state/result/response bounds,
+cancellation, conflicts, optimize, flush, shutdown, durability, and reopen.
+
+All 1,033 pinned VictoriaLogs cases pass live. The complete local extension,
+real-extension logs, server workspace, Rust query harness, documentation,
+oracle, SQL-cookbook, formatting, Clippy, CLI/crash/transaction, and dbhealth
+gates pass. The authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 17 LogsQL P2: `quantile` and `stddev`
 
 The checked-in

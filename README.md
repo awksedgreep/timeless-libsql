@@ -844,6 +844,9 @@ no-SQL-recipe disposition instead of an inexact claim or storage primitive.
 Exact-build `len` p95 is 3.785/40.724 ms narrow/wide versus 3.620/36.622 ms
 for byte-identical same-scan controls; the bounded +4.6%/+11.2% variation does
 not justify another storage primitive.
+Exact-build `hash` p95 is 3.455/36.785 ms versus 3.481/36.223 ms for
+same-public-work controls. The -0.7%/+1.6% variation and larger decimal result
+remain bounded API/wire costs; no extension hash primitive is justified.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,
