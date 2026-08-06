@@ -161,6 +161,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-051`](#sql-log-051-literal-split-of-one-exact-field) | `LQL-P31` | current foundation | literal non-overlapping split of one bounded public row field into a JSON array, including Unicode-scalar empty-separator behavior; API owns LogsQL grammar, current-row mutation, exact wire spelling, limits, cancellation, and envelopes |
 | [`SQL-LOG-052`](#sql-log-052-pack-fixed-exact-fields-as-logfmt) | `LQL-P35` | current foundation | deterministic logfmt packing of a fixed ordered list of exact public metadata paths with missing/null/object-parent textualization and Victoria-compatible quoting; API owns dynamic selectors, canonical/current fields, rich flattening, mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-053`](#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt) | `LQL-P37` | current foundation | bounded extraction of fixed keys from well-formed space-delimited unquoted logfmt in one public metadata path, with last-duplicate-wins and exact-missing empties; API owns the complete quoted/escaped grammar, dynamic selection, mutation, limits, cancellation, and envelopes |
+| [`SQL-LOG-054`](#sql-log-054-decode-one-fixed-rfc5424-header) | `LQL-P38` | current foundation | bounded decoding of PRI and the five fixed RFC5424 header fields when structured data is `-`; API owns RFC3164, structured data, CEF/CEE, timezone/year rules, mutation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -8477,6 +8478,210 @@ language operation is bounded Rust composition after the same scan. Neither
 case justifies a storage-specific extension opcode. Direct regression:
 `tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
 regression: `session_eighteen_unpack_logfmt_is_exact_rich_bounded_and_durable`.
+
+### SQL-LOG-054: decode one fixed RFC5424 header
+
+Bind one exact metadata JSON path containing syslog text, inclusive native
+timestamp bounds, positive work/source/result limits, and optionally a source
+override. This read-only statement decodes the fixed RFC5424 form
+`[<PRI>]1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID - MSG`. It intentionally
+accepts only RFC PRI values `0..191` and the `-` structured-data marker, making
+the useful ordinary-SQL foundation explicit without pretending that core
+SQLite is a complete syslog parser.
+
+```sql
+WITH
+bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    ltrim(
+      COALESCE(
+        :syslog_source_override,
+        CAST(json_extract(metadata, :syslog_source_path) AS TEXT),
+        ''
+      ),
+      char(9) || char(10) || char(13) || ' '
+    ) AS source
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), accepted AS MATERIALIZED (
+  SELECT row_id, ts, source
+  FROM bounded
+  WHERE :max_source_bytes > 0
+    AND length(CAST(source AS BLOB)) <= :max_source_bytes
+), header AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    CASE
+      WHEN substr(source, 1, 1) = '<' AND instr(source, '>') > 1
+        THEN substr(source, 2, instr(source, '>') - 2)
+    END AS priority,
+    CASE
+      WHEN substr(source, 1, 1) = '<' AND instr(source, '>') > 1
+        THEN substr(source, instr(source, '>') + 1)
+      ELSE source
+    END AS rest
+  FROM accepted
+), versioned AS MATERIALIZED (
+  SELECT row_id, ts, priority, substr(rest, 3) AS body
+  FROM header
+  WHERE substr(rest, 1, 2) = '1 '
+    AND (
+      priority IS NULL
+      OR (
+        priority <> ''
+        AND priority NOT GLOB '*[^0-9]*'
+        AND length(priority) <= 3
+        AND CAST(priority AS INTEGER) BETWEEN 0 AND 191
+      )
+    )
+), timestamp_field AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    priority,
+    substr(body, 1, instr(body, ' ') - 1) AS syslog_timestamp,
+    substr(body, instr(body, ' ') + 1) AS rest
+  FROM versioned
+  WHERE instr(body, ' ') > 0
+), hostname_field AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    priority,
+    syslog_timestamp,
+    substr(rest, 1, instr(rest, ' ') - 1) AS hostname,
+    substr(rest, instr(rest, ' ') + 1) AS rest
+  FROM timestamp_field
+  WHERE instr(rest, ' ') > 0
+), app_field AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    priority,
+    syslog_timestamp,
+    hostname,
+    substr(rest, 1, instr(rest, ' ') - 1) AS app_name,
+    substr(rest, instr(rest, ' ') + 1) AS rest
+  FROM hostname_field
+  WHERE instr(rest, ' ') > 0
+), proc_field AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    priority,
+    syslog_timestamp,
+    hostname,
+    app_name,
+    substr(rest, 1, instr(rest, ' ') - 1) AS proc_id,
+    substr(rest, instr(rest, ' ') + 1) AS rest
+  FROM app_field
+  WHERE instr(rest, ' ') > 0
+), msgid_field AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    priority,
+    syslog_timestamp,
+    hostname,
+    app_name,
+    proc_id,
+    substr(rest, 1, instr(rest, ' ') - 1) AS msg_id,
+    substr(rest, instr(rest, ' ') + 1) AS rest
+  FROM proc_field
+  WHERE instr(rest, ' ') > 0
+), decoded AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    priority,
+    syslog_timestamp,
+    hostname,
+    app_name,
+    proc_id,
+    msg_id,
+    CASE WHEN rest = '-' THEN NULL ELSE substr(rest, 3) END AS decoded_message
+  FROM msgid_field
+  WHERE rest = '-' OR substr(rest, 1, 2) = '- '
+)
+SELECT
+  ts,
+  priority,
+  CASE priority
+    WHEN NULL THEN NULL
+    ELSE CAST(CAST(priority AS INTEGER) / 8 AS TEXT)
+  END AS facility,
+  CASE priority
+    WHEN NULL THEN NULL
+    ELSE CAST(CAST(priority AS INTEGER) % 8 AS TEXT)
+  END AS severity,
+  CASE CAST(priority AS INTEGER) / 8
+    WHEN 0 THEN 'kern' WHEN 1 THEN 'user' WHEN 2 THEN 'mail'
+    WHEN 3 THEN 'daemon' WHEN 4 THEN 'auth' WHEN 5 THEN 'syslog'
+    WHEN 6 THEN 'lpr' WHEN 7 THEN 'news' WHEN 8 THEN 'uucp'
+    WHEN 9 THEN 'cron' WHEN 10 THEN 'authpriv' WHEN 11 THEN 'ftp'
+    WHEN 12 THEN 'ntp' WHEN 13 THEN 'security' WHEN 14 THEN 'console'
+    WHEN 15 THEN 'solaris-cron' WHEN 16 THEN 'local0'
+    WHEN 17 THEN 'local1' WHEN 18 THEN 'local2' WHEN 19 THEN 'local3'
+    WHEN 20 THEN 'local4' WHEN 21 THEN 'local5' WHEN 22 THEN 'local6'
+    WHEN 23 THEN 'local7'
+  END AS facility_keyword,
+  CASE CAST(priority AS INTEGER) % 8
+    WHEN 0 THEN 'emerg' WHEN 1 THEN 'alert' WHEN 2 THEN 'critical'
+    WHEN 3 THEN 'error' WHEN 4 THEN 'warning' WHEN 5 THEN 'notice'
+    WHEN 6 THEN 'info' WHEN 7 THEN 'debug'
+  END AS level,
+  'rfc5424' AS format,
+  syslog_timestamp,
+  hostname,
+  app_name,
+  proc_id,
+  msg_id,
+  decoded_message AS message
+FROM decoded
+WHERE :max_result_rows > 0
+ORDER BY ts, row_id
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:max_work_entries` to `100000`, `:max_source_bytes` to `4096`, and
+`:max_result_rows` to `100`. Bind `:syslog_source_override` to
+`<165>1 2023-06-03T17:42:32.123456789Z host.example app 123 ID47 - test message  `.
+Production callers normally bind the override to `NULL` and
+`:syslog_source_path` to the public metadata path containing the source. Both
+fixture rows yield PRI `165`, facility `20`/`local4`, severity `5`/`notice`,
+the five lexical header fields, and the message with both trailing spaces.
+
+The source cap counts UTF-8 bytes after the row crosses the public extension;
+over-limit and malformed rows are omitted instead of partially decoded.
+`max_work_entries` independently bounds the public storage scan. Timestamps
+use the table's native unit (microseconds for the default `timeless_logs`
+table), bounds are inclusive, output is source-row ordered, syslog fields are
+SQLite TEXT, `-` header values remain literal text, an absent message is SQL
+`NULL`, and the statement never changes durable rows. The lexical RFC5424
+timestamp is deliberately not normalized, matching VictoriaLogs.
+
+This is not complete `LQL-P38`. The Rust API owns case-insensitive grammar;
+optional conditions; default, bare, quoted, and explicit sources; signed
+duration offsets; result prefixes; source snapshots; current-row preservation
+and conflicts; partial invalid-input behavior; arbitrary unsigned priorities;
+RFC3164 current/previous-year and host-timezone rules; RFC5424 structured
+data and escapes; CEF and CEE decoding; retained nested metadata; and
+cumulative work, state, result, response, deadline, and cancellation limits.
+Use that API whenever input can be RFC3164, structured RFC5424, CEF, CEE, or
+requires exact VictoriaLogs compatibility.
+
+Every source row already crosses the bounded public `logs` interface. This
+fixed header is ordinary SQL, while complete syslog parsing is bounded Rust
+composition after the same scan. An extension parser would not avoid block
+reads, decode, payload transfer, or row crossing. Direct regression:
+`tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
+regression: `session_eighteen_unpack_syslog_is_exact_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

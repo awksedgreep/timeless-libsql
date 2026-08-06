@@ -1,5 +1,6 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use chrono::Datelike;
 use rusqlite::Connection;
 use std::time::Duration;
 use timeless_logs_api::{
@@ -6628,6 +6629,18 @@ async fn session_eighteen_unpack_logfmt_is_exact_rich_bounded_and_durable() {
     assert_eq!(
         pipeline_rows(
             &app,
+            r#"case:="unpack-logfmt-admin" | unpack_logfmt if (kind:in(case:="unpack-logfmt-admin" | fields kind)) from source fields (foo) result_prefix query_backed. | fields case, query_backed.foo"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "query_backed":{"foo":"bar"}
+        })],
+        "query-backed conditions must resolve for unpack_logfmt"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
             r#"case:="unpack-logfmt-admin" | unpack_logfmt from malformed_source | fields case, malformed, next"#,
         )
         .await,
@@ -6766,6 +6779,392 @@ async fn session_eighteen_unpack_logfmt_is_exact_rich_bounded_and_durable() {
                 "duplicate":"second",
                 "nested":{"keep":"yes"},
                 "escaped":"line\nnext\t☺"
+            }
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_unpack_syslog_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("unpack-syslog-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: r#"<165>1 2023-06-03T17:42:32.123456789Z host.example app 123 ID47 [meta keep="yes"] test message  "#.into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-syslog-rfc5424",
+                        "unpack_syslog_group":"unpack-syslog",
+                        "kind":"admin",
+                        "app_name":"original",
+                        "nested":{"sibling":"retained"}
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "Jan  1 00:00:00 classic-host classic[9]: classic message".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-syslog-rfc3164",
+                        "unpack_syslog_group":"unpack-syslog"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_003,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: r#"Sep 29 08:26:10 cef-host CEF:1|Security|product|1.0|100|name\|value|10|src=10.0.0.1 msg=two words"#.into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-syslog-cef",
+                        "unpack_syslog_group":"unpack-syslog"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_004,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: r#"Jun  3 12:08:33 cee-host app[1]: @cee: {"number":123,"flag":false,"null_value":null,"nested":{"leaf":7},"array":[1,"x"],"message":"cee message"}"#.into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-syslog-cee",
+                        "unpack_syslog_group":"unpack-syslog",
+                        "nested":{"sibling":"retained"}
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_005,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "custom source".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-syslog-custom",
+                        "unpack_syslog_group":"unpack-syslog",
+                        "source":"\t\n  <46>2025-01-23T12:15:23.965512+01:00 iso-host rsyslogd: start  "
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_006,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: r#"<165>1 2023-06-03T17:42:00Z host app 1 ID [conflict value="changed"] tail"#.into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-syslog-conflict",
+                        "unpack_syslog_group":"unpack-syslog",
+                        "conflict":"scalar"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_007,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "dictionary".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-syslog-dictionary",
+                        "role":"syslog-dictionary",
+                        "lookup":"admin"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-rfc5424" | unpack_syslog | fields case, priority, facility_keyword, level, facility, severity, format, timestamp, hostname, app_name, proc_id, msg_id, meta, message, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-rfc5424",
+            "priority":"165",
+            "facility_keyword":"local4",
+            "level":"notice",
+            "facility":"20",
+            "severity":"5",
+            "format":"rfc5424",
+            "timestamp":"2023-06-03T17:42:32.123456789Z",
+            "hostname":"host.example",
+            "app_name":"app",
+            "proc_id":"123",
+            "msg_id":"ID47",
+            "meta":{"keep":"yes"},
+            "message":"test message  ",
+            "nested":{"sibling":"retained"}
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-rfc5424" | unpack_syslog keep_original_fields | fields case, app_name, hostname, meta"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-rfc5424",
+            "app_name":"original",
+            "hostname":"host.example",
+            "meta":{"keep":"yes"}
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-custom" | UnPaCk_SySlOg FrOm source OfFsEt -8h ReSuLt_PrEfIx "decoded." | fields case, source, decoded"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-custom",
+            "source":"\t\n  <46>2025-01-23T12:15:23.965512+01:00 iso-host rsyslogd: start  ",
+            "decoded":{
+                "priority":"46",
+                "facility_keyword":"syslog",
+                "level":"info",
+                "facility":"5",
+                "severity":"6",
+                "format":"rfc3164",
+                "timestamp":"2025-01-23T11:15:23.965512Z",
+                "hostname":"iso-host",
+                "app_name":"rsyslogd",
+                "message":"start  "
+            }
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-rfc5424" | unpack_syslog if (kind:=user) | fields case, app_name, priority"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-rfc5424",
+            "app_name":"original"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-rfc5424" | unpack_syslog if (kind:in(role:="syslog-dictionary" | fields lookup)) result_prefix selected. | fields case, selected.app_name"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-rfc5424",
+            "selected":{"app_name":"app"}
+        })],
+        "query-backed conditions must resolve for unpack transforms"
+    );
+
+    let current_year = chrono::Utc::now().year();
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-rfc3164" | unpack_syslog offset 0s | fields case, format, timestamp, hostname, app_name, proc_id, message"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-rfc3164",
+            "format":"rfc3164",
+            "timestamp":format!("{current_year}-01-01T00:00:00Z"),
+            "hostname":"classic-host",
+            "app_name":"classic",
+            "proc_id":"9",
+            "message":"classic message"
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-cef" | unpack_syslog offset 0s | fields case, app_name, cef"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-cef",
+            "app_name":"CEF",
+            "cef":{
+                "version":"1",
+                "device_vendor":"Security",
+                "device_product":"product",
+                "device_version":"1.0",
+                "device_event_class_id":"100",
+                "name":"name|value",
+                "severity":"10",
+                "extension":{"src":"10.0.0.1", "msg":"two words"}
+            }
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-cee" | unpack_syslog offset 0s | fields case, number, flag, null_value, nested, array, message"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-cee",
+            "number":"123",
+            "flag":"false",
+            "nested":{"sibling":"retained", "leaf":"7"},
+            "array":r#"[1,"x"]"#,
+            "message":"cee message"
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-rfc5424" | unpack_syslog from absent | fields case, app_name"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-rfc5424",
+            "app_name":"original"
+        })]
+    );
+
+    for malformed in [
+        "* | unpack_syslog if",
+        "* | unpack_syslog from",
+        "* | unpack_syslog from *",
+        "* | unpack_syslog offset",
+        "* | unpack_syslog offset invalid",
+        "* | unpack_syslog result_prefix",
+        "* | unpack_syslog keep_original_fields trailing",
+        "* | unpack_syslog.extra",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="unpack-syslog-conflict" | unpack_syslog"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                r#"unpack_syslog_group:="unpack-syslog" | unpack_syslog | limit 10000"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-syslog-conflict" | fields case, conflict, _msg"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-conflict",
+            "conflict":"scalar",
+            "_msg":r#"<165>1 2023-06-03T17:42:00Z host app 1 ID [conflict value="changed"] tail"#
+        })],
+        "failed unpack_syslog must not mutate durable source values"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="unpack-syslog-rfc5424" | unpack_syslog result_prefix reopened. | fields case, reopened"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-syslog-rfc5424",
+            "reopened":{
+                "priority":"165",
+                "facility_keyword":"local4",
+                "level":"notice",
+                "facility":"20",
+                "severity":"5",
+                "format":"rfc5424",
+                "timestamp":"2023-06-03T17:42:32.123456789Z",
+                "hostname":"host.example",
+                "app_name":"app",
+                "proc_id":"123",
+                "msg_id":"ID47",
+                "meta":{"keep":"yes"},
+                "message":"test message  "
             }
         })]
     );
@@ -13336,6 +13735,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_unpack_logfmt_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_unpack_syslog = storage.stats().await.unwrap().api_query_cancelled;
+    let unpack_syslog_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | unpack_syslog result_prefix selected. | fields selected | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(unpack_syslog_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_unpack_syslog
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_unpack_syslog);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_unpack_syslog_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            r#"level:error | unpack_syslog result_prefix selected. | fields selected | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_unpack_syslog_cancel.status(), StatusCode::OK);
 
     let cancelled_before_extract_regexp = storage.stats().await.unwrap().api_query_cancelled;
     let extract_regexp_timeout = router_with_limits(

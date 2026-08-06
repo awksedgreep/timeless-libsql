@@ -2704,6 +2704,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "unpack_syslog_narrow",
+                "logs-unpack-syslog-narrow",
+                r#"host:="h00" AND query | fields range_key | format '<165>1 2023-06-03T17:42:00Z bench-host bench-app 1 ID47 - <range_key>' as packed | unpack_syslog from packed result_prefix decoded_ | limit 64 | fields decoded_message"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_syslog_wide",
+                "logs-unpack-syslog-wide",
+                r#"query | fields range_key | format '<165>1 2023-06-03T17:42:00Z bench-host bench-app 1 ID47 - <range_key>' as packed | unpack_syslog from packed result_prefix decoded_ | limit 64 | fields decoded_message"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_syslog_control_narrow",
+                "logs-unpack-syslog-control-narrow",
+                r#"host:="h00" AND query | fields range_key | format '<165>1 2023-06-03T17:42:00Z bench-host bench-app 1 ID47 - <range_key>' as packed | copy range_key as decoded_message | limit 64 | fields decoded_message"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_syslog_control_wide",
+                "logs-unpack-syslog-control-wide",
+                r#"query | fields range_key | format '<165>1 2023-06-03T17:42:00Z bench-host bench-app 1 ID47 - <range_key>' as packed | copy range_key as decoded_message | limit 64 | fields decoded_message"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3243,6 +3271,16 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             &queries,
             "unpack_logfmt_control_wide",
             "unpack_logfmt_wide",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "unpack_syslog_control_narrow",
+            "unpack_syslog_narrow",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "unpack_syslog_control_wide",
+            "unpack_syslog_wide",
         )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;

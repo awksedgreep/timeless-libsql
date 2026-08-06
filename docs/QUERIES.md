@@ -1817,6 +1817,65 @@ and 41.166/42.437/43.357 ms wide p50/p95/p99 while returning 64 rows and
 selection, and nested destination work above the unchanged public storage
 boundary.
 
+## LogsQL `unpack_syslog` over current rows
+
+`unpack_syslog` snapshots one request-owned field, parses syslog, and writes
+decoded string fields back into the current result row:
+
+```text
+* | unpack_syslog
+* | unpack_syslog from payload
+* | unpack_syslog payload offset -5h result_prefix decoded.
+* | unpack_syslog if (kind:=audit) from payload
+    offset 30m result_prefix decoded. keep_original_fields
+```
+
+Keywords are case-insensitive. Clauses must remain in the displayed order:
+optional `if (...)`, optional bare or `from` exact source, optional signed
+duration `offset`, optional `result_prefix`, then optional terminal
+`keep_original_fields`. The source defaults to `_msg`; missing sources are
+no-ops. Only leading ASCII spaces, tabs, carriage returns, and newlines are
+trimmed. Sources are snapshotted before writes, so decoding into a source or
+prefixed sibling is deterministic.
+
+The parser accepts RFC3164 and RFC5424 with optional PRI. It emits textual
+`priority`, `facility_keyword`, `level`, `facility`, `severity`, `format`,
+`timestamp`, `hostname`, `app_name`, `proc_id`, `msg_id`, and `message` when
+present. RFC5424 timestamps retain their lexical spelling and structured data
+becomes `SD-ID.parameter`. Classic RFC3164 timestamps use the request year and
+host timezone unless `offset` supplies a fixed offset; a value more than one
+day in the future moves to the previous year. Leap-day normalization matches
+Go `time.Date`. RFC3164 messages carrying RFC3339/ISO timestamps normalize to
+UTC and do not use the classic-time `offset`.
+
+CEF messages produce `cef.version`, device fields, severity, and
+`cef.extension.*`. CEE JSON objects become decoded fields: strings remain
+text, numbers and booleans become text, arrays become compact JSON text,
+nested objects flatten to dotted names, and null members are omitted. Invalid
+PRI and CEF inputs retain VictoriaLogs' partial/fallback behavior rather than
+being silently reinterpreted.
+
+Timeless reconstructs dotted decoded fields and result prefixes as retained
+nested metadata while preserving unrelated siblings. This is the explicit
+richer-model compatibility policy over VictoriaLogs' flattened textual rows.
+Default writes replace scalar destinations; `keep_original_fields` retains an
+existing nonempty destination. Replacing a retained object or descending
+through a scalar returns HTTP 422. Source bytes, decoded names/values, nesting,
+paths, temporary state, work, results, response bytes, deadlines, and
+cancellation use shared hard limits. Query-backed conditions share those
+limits. Request-local writes never mutate durable `logs` rows through
+optimize, shutdown, or reopen.
+
+The complete 1,155-case immutable VictoriaLogs fixture records grammar,
+header/structured parsing, CEF/CEE, conditions, prefixes, preservation,
+partial input, and errors. Executable
+[`SQL-LOG-054`](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)
+uses only bounded public `logs` rows and core SQLite for the fixed RFC5424
+header when structured data is `-`. RFC3164, structured data, CEF/CEE,
+timezone/year behavior, current-row mutation, limits, cancellation, and
+envelopes remain Rust API composition. No extension primitive, private table,
+or storage-format change is involved.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level

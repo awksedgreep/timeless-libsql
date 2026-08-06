@@ -141,7 +141,7 @@ extension.
 | `LQL-P35` | `pack_logfmt` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P38` | `unpack_syslog` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
@@ -804,6 +804,51 @@ candidate blocks, 1,024/8,192 decoded entries, 128/8,192 returned public
 rows, and 235,778/1,914,055 payload bytes per query. The row-local parse,
 escape decode, selection, and nesting cost is bounded and does not justify
 storage pushdown.
+
+`LQL-P38` parses one exact current-row field as syslog and writes decoded
+string fields back into that request-owned row. The Rust logs API accepts
+case-insensitive `unpack_syslog`, an optional leading `if (...)`, default
+`_msg`, one optional bare or `from` exact source, an optional signed-duration
+`offset`, an optional `result_prefix`, and terminal
+`keep_original_fields`. Clause order is strict and unsupported syntax fails
+before storage execution. The source is snapshotted, missing sources are
+no-ops, and only leading ASCII space, tab, carriage return, and newline are
+trimmed; trailing message bytes remain exact.
+
+The bounded parser covers RFC3164 and RFC5424, optional PRI, all 24 facility
+keywords, all eight severity levels, partial invalid-input behavior,
+RFC5424 structured-data identifiers and quoted parameters, CEF base and
+extension fields, and CEE JSON objects. RFC5424 timestamps remain lexical.
+RFC3164 RFC3339/ISO timestamps normalize to UTC independently of `offset`;
+classic timestamps use the request year and host timezone or explicit fixed
+offset, move to the previous year only when more than one day in the future,
+and reproduce Go's leap-day normalization. CEE numbers and booleans become
+text, arrays become compact JSON text, nested objects flatten to dotted names,
+and null members are omitted.
+
+Timeless reconstructs dotted decoded names and result prefixes as retained
+nested metadata while preserving unrelated siblings. This is the explicit
+richer-model policy over VictoriaLogs' flattened textual columns. Default
+writes replace scalar destinations; `keep_original_fields` retains existing
+nonempty destinations. Writes cannot replace retained objects or descend
+through scalar parents. Parsing, decoded fields and bytes, nesting, paths,
+temporary state, work, results, response bytes, deadlines, and cancellation
+are bounded. Query-backed conditions resolve under the same cumulative
+limits. Request-local mutation never changes durable public rows through
+optimize, shutdown, or reopen.
+
+The complete 1,155-case pinned oracle establishes grammar, header and
+structured-data parsing, conditions, prefixes, preservation, CEF/CEE,
+partial invalid-input behavior, and strict errors. Direct source-parity tests
+also pin RFC3164 leap-day normalization that depends on the evaluation year.
+Public
+[`SQL-LOG-054`](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)
+uses only bounded `logs` rows and core SQLite to decode the fixed RFC5424
+header when structured data is `-`. RFC3164, structured RFC5424, CEF/CEE,
+timezone/year rules, current-row mutation, limits, cancellation, and HTTP
+envelopes remain Rust API composition over the same public rows. No extension
+primitive, private table, durable mutation, or storage-contract change is
+required.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare

@@ -1110,6 +1110,24 @@ real-extension, 1,134-case oracle, 45-section CLI, six-section focused
 correctness, dbhealth, SQL, documentation-contract, formatting, and lint gates
 close the row.
 
+Session 18's `LQL-P38` semantic implementation is complete as an API-owned
+`unpack_syslog` pipe over public `logs` rows. Pinned VictoriaLogs source and
+the complete 1,155-case live oracle establish strict grammar, optional PRI,
+facility/severity mapping, partial invalid-input behavior, RFC3164 and
+RFC5424 headers, structured data, CEF, CEE, conditions, source snapshots,
+prefixes, preservation, and errors. Direct source-parity regressions also pin
+evaluation-year-dependent Go leap-day normalization. Timeless deliberately
+reconstructs dotted decoded names in retained nested metadata while keeping
+all decoded values textual. The parser/evaluator and query-backed conditions
+are bounded and cancellable; durable storage and the public extension remain
+unchanged. Executable `SQL-LOG-054` gives direct SQLite/libSQL users the
+fixed RFC5424 header foundation when structured data is `-`; complete syslog
+and LogsQL semantics remain Rust API composition after the same public scan.
+`QSF-221` records the semantic/storage boundary and `QSF-222` records the
+adjacent query-backed unpack-condition regression. Exact-build performance,
+storage-work, durability, cancellation, and HWM evidence remains the final
+exit item before the row can be marked shipped.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

@@ -25,9 +25,10 @@ use crate::logsql::{
     MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec,
     PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
     SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
-    UnpackLogfmtSpec,
+    UnpackLogfmtSpec, UnpackSyslogSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
+use crate::syslog;
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
 use xxhash_rust::xxh64::{xxh64, Xxh64};
 
@@ -277,6 +278,13 @@ pub(crate) fn execute(
                 execution.cancelled,
             )?,
             PipelineOp::UnpackLogfmt(spec) => unpack_logfmt_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
+            PipelineOp::UnpackSyslog(spec) => unpack_syslog_fields(
                 rows,
                 spec,
                 execution.timestamp_unit,
@@ -876,6 +884,143 @@ fn unpack_logfmt_destination_path(name: &str) -> Vec<String> {
     } else {
         vec![name.to_owned()]
     }
+}
+
+fn unpack_syslog_fields(
+    rows: Vec<Value>,
+    spec: &UnpackSyslogSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path,
+        name: source_name,
+    } = &spec.source
+    else {
+        return Err("LogsQL unpack_syslog source is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "unpack_syslog")?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let mut state_bytes = size_of::<Vec<(String, String)>>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "unpack_syslog")?;
+            charge_transfer_string(
+                source_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "unpack_syslog",
+            )?;
+            for segment in source_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "unpack_syslog",
+                )?;
+            }
+            let source = textual_transform_projection(
+                field_value(&row, source_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "unpack_syslog",
+            )?;
+            charge_transfer_string(
+                source.as_ref(),
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "unpack_syslog",
+            )?;
+            let source = source.trim_start_matches([' ', '\t', '\n', '\r']);
+            let parsed = syslog::parse(syslog::ParseRequest {
+                source,
+                offset_seconds: spec.offset_seconds,
+                current_year: spec.current_year,
+                query_now_seconds: spec.query_now_seconds,
+                state_bytes: &mut state_bytes,
+                work_items: &mut work_items,
+                max_state_bytes: limits.max_state_bytes,
+                max_work_items: limits.max_state_items,
+                cancelled,
+            })?;
+            for (position, (name, value)) in parsed.into_iter().enumerate() {
+                check_periodically(cancelled, position)?;
+                apply_unpack_syslog_field(
+                    &mut row,
+                    &name,
+                    value,
+                    spec,
+                    &mut state_bytes,
+                    &mut work_items,
+                    limits,
+                    cancelled,
+                )?;
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_unpack_syslog_field(
+    row: &mut Value,
+    name: &str,
+    value: String,
+    spec: &UnpackSyslogSpec,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, limits.max_state_items, "unpack_syslog")?;
+    check_periodically(cancelled, *work_items)?;
+    let destination_name = format!("{}{name}", spec.result_prefix);
+    charge_transfer_string(
+        &destination_name,
+        state_bytes,
+        limits.max_state_bytes,
+        "unpack_syslog",
+    )?;
+    let destination_path = unpack_logfmt_destination_path(&destination_name);
+    charge_json_path(
+        &destination_path,
+        state_bytes,
+        limits.max_state_bytes,
+        "unpack_syslog",
+    )?;
+    if spec.keep_original_fields && field_value(row, &destination_path).is_some_and(is_nonempty) {
+        return Ok(());
+    }
+    charge_transfer_value(
+        &Value::String(value.clone()),
+        state_bytes,
+        limits.max_state_bytes,
+        cancelled,
+        work_items,
+        limits.max_state_items,
+        "unpack_syslog",
+    )?;
+    let object = row
+        .as_object_mut()
+        .ok_or_else(|| "LogsQL unpack_syslog input row is not a JSON object".to_string())?;
+    if copy_destination_replaces_object(object, &destination_path) {
+        return Err(format!(
+            "LogsQL unpack_syslog destination conflict: field {destination_name:?} would replace a retained object"
+        ));
+    }
+    insert_path(object, &destination_path, Value::String(value))
+        .map_err(|error| format!("LogsQL unpack_syslog destination conflict: {error}"))
 }
 
 fn parse_logfmt_fields(
@@ -11417,6 +11562,157 @@ mod tests {
             unpack_logfmt_fields(
                 vec![row],
                 &selected,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn unpack_syslog_is_exact_rich_and_bounded() {
+        let parse_spec = |query: &str| {
+            let plan =
+                crate::logsql::parse_at(query, TimestampUnit::Microseconds, 1_719_836_800_000_000)
+                    .unwrap();
+            let [PipelineOp::UnpackSyslog(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected unpack_syslog plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 500,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let source = r#"<165>1 2023-06-03T17:42:00Z host app 123 ID47 [meta keep="yes"] tail  "#;
+        let row = json!({
+            "kind":"admin",
+            "source":source,
+            "app_name":"original",
+            "nested":{"sibling":"retained"}
+        });
+
+        let all = parse_spec("* | unpack_syslog from source");
+        let unpacked = unpack_syslog_fields(
+            vec![row.clone()],
+            &all,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(unpacked[0]["priority"], "165");
+        assert_eq!(unpacked[0]["facility_keyword"], "local4");
+        assert_eq!(unpacked[0]["level"], "notice");
+        assert_eq!(unpacked[0]["facility"], "20");
+        assert_eq!(unpacked[0]["severity"], "5");
+        assert_eq!(unpacked[0]["format"], "rfc5424");
+        assert_eq!(unpacked[0]["timestamp"], "2023-06-03T17:42:00Z");
+        assert_eq!(unpacked[0]["hostname"], "host");
+        assert_eq!(unpacked[0]["app_name"], "app");
+        assert_eq!(unpacked[0]["proc_id"], "123");
+        assert_eq!(unpacked[0]["msg_id"], "ID47");
+        assert_eq!(unpacked[0]["meta"]["keep"], "yes");
+        assert_eq!(unpacked[0]["message"], "tail  ");
+        assert_eq!(unpacked[0]["source"], source, "source is snapshotted");
+        assert_eq!(unpacked[0]["nested"], row["nested"]);
+
+        let prefixed = parse_spec(
+            r#"* | unpack_syslog if (kind:=admin) from source result_prefix "decoded.""#,
+        );
+        let prefixed_rows = unpack_syslog_fields(
+            vec![row.clone()],
+            &prefixed,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(prefixed_rows[0]["decoded"]["app_name"], "app");
+        assert_eq!(prefixed_rows[0]["decoded"]["meta"]["keep"], "yes");
+
+        let keep = parse_spec("* | unpack_syslog from source keep_original_fields");
+        let kept = unpack_syslog_fields(
+            vec![row.clone()],
+            &keep,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(kept[0]["app_name"], "original");
+        assert_eq!(kept[0]["hostname"], "host");
+
+        let condition_miss = parse_spec("* | unpack_syslog if (kind:=user) from source");
+        assert_eq!(
+            unpack_syslog_fields(
+                vec![row.clone()],
+                &condition_miss,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            std::slice::from_ref(&row)
+        );
+
+        let missing = parse_spec("* | unpack_syslog from absent");
+        assert_eq!(
+            unpack_syslog_fields(
+                vec![row.clone()],
+                &missing,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            std::slice::from_ref(&row)
+        );
+
+        for constrained in [
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+        ] {
+            let error = unpack_syslog_fields(
+                vec![row.clone()],
+                &all,
+                TimestampUnit::Microseconds,
+                constrained,
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(error.contains("LogsQL unpack_syslog"), "{error}");
+        }
+
+        let conflict = parse_spec(r#"* | unpack_syslog from source result_prefix "nested.""#);
+        let conflict_error = unpack_syslog_fields(
+            vec![json!({"source":source, "nested":"scalar"})],
+            &conflict,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL unpack_syslog destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            unpack_syslog_fields(
+                vec![row],
+                &all,
                 TimestampUnit::Microseconds,
                 limits,
                 &cancelled,

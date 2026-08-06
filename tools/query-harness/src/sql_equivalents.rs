@@ -395,6 +395,11 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "unpack_logfmt_name_2" => Value::Text("status".to_owned()),
         "unpack_logfmt_name_3" => Value::Text("empty".to_owned()),
         "unpack_logfmt_name_4" => Value::Text("missing".to_owned()),
+        "syslog_source_override" => Value::Text(
+            "<165>1 2023-06-03T17:42:32.123456789Z host.example app 123 ID47 - test message  "
+                .to_owned(),
+        ),
+        "syslog_source_path" => Value::Text("$.syslog".to_owned()),
         "max_source_bytes" => Value::Integer(4_096),
         "max_tokens_per_row" => Value::Integer(256),
         "source_path_1" => Value::Text("$.nested.empty".to_owned()),
@@ -1756,6 +1761,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let split_rows = recipe_values("SQL-LOG-051", 0)?;
     let pack_logfmt_rows = recipe_values("SQL-LOG-052", 0)?;
     let unpack_logfmt_rows = recipe_values("SQL-LOG-053", 0)?;
+    let unpack_syslog_rows = recipe_values("SQL-LOG-054", 0)?;
     if [
         bounded,
         substring,
@@ -1879,6 +1885,30 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-053 unpack_logfmt rows changed: {unpack_logfmt_rows:?}");
+    }
+    let expected_unpack_syslog = vec![
+        Value::Integer(1000),
+        Value::Text("165".to_owned()),
+        Value::Text("20".to_owned()),
+        Value::Text("5".to_owned()),
+        Value::Text("local4".to_owned()),
+        Value::Text("notice".to_owned()),
+        Value::Text("rfc5424".to_owned()),
+        Value::Text("2023-06-03T17:42:32.123456789Z".to_owned()),
+        Value::Text("host.example".to_owned()),
+        Value::Text("app".to_owned()),
+        Value::Text("123".to_owned()),
+        Value::Text("ID47".to_owned()),
+        Value::Text("test message  ".to_owned()),
+    ];
+    if unpack_syslog_rows
+        != [expected_unpack_syslog.clone(), {
+            let mut row = expected_unpack_syslog;
+            row[0] = Value::Integer(2000);
+            row
+        }]
+    {
+        bail!("SQL-LOG-054 unpack_syslog rows changed: {unpack_syslog_rows:?}");
     }
     let split_sql = recipe_sql("SQL-LOG-051", 0)?;
     for (source, separator, expected) in [
@@ -4019,13 +4049,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 119);
+        assert_eq!(recipes.len(), 120);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            151
+            152
         );
         assert_eq!(
             recipes
@@ -4033,7 +4063,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            157
+            158
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

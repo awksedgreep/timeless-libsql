@@ -286,6 +286,16 @@ fn resolve_query_backed_plan<'a>(
                         resolve_query_backed_predicate(storage, predicate, resolution).await?;
                     }
                 }
+                crate::logsql::PipelineOp::UnpackLogfmt(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
+                crate::logsql::PipelineOp::UnpackSyslog(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -760,6 +770,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL unpack_json destination conflict:")
         || error.starts_with("LogsQL unpack_json field selection conflict:")
         || error.starts_with("LogsQL unpack_logfmt destination conflict:")
+        || error.starts_with("LogsQL unpack_syslog destination conflict:")
     {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -912,6 +923,16 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                 }
             }
             crate::logsql::PipelineOp::UnpackJson(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::UnpackLogfmt(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::UnpackSyslog(spec) => {
                 if let Some(predicate) = &mut spec.condition {
                     apply_query_backed_predicate_limits(predicate, limits)?;
                 }

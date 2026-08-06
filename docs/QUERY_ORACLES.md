@@ -1005,3 +1005,25 @@ VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture
 now contains 155 source rows, 344 row-query cases, one stochastic case, 388
 error cases, and 401 statistics/pipeline cases: 1,134 cases total, all passing
 against the immutable image. The fixture now contains 1134 cases.
+
+`LQL-P38` adds eleven exact pipeline/statistics cases and ten error cases for
+`unpack_syslog`. They pin default `_msg`, bare and explicit sources, leading
+whitespace trimming, matching and nonmatching conditions, case-insensitive
+keywords, signed duration offsets, result prefixes, pre-write snapshots,
+default and keep-original writes, optional and invalid PRI, facility/severity
+mapping, lexical RFC5424 headers and structured-data escaping, classic and
+RFC3339 RFC3164 forms, CEF base/extensions, CEE textual flattening and null
+omission, missing-source no-ops, and invalid CEF fallback. Error cases pin
+missing conditions/sources/offsets/prefixes, wildcard and prefix sources,
+out-of-order clauses, attached suffixes, and trailing tokens. Source audit
+covers `pipe_unpack_syslog.go`, `pipe_unpack_syslog_test.go`,
+`syslog_parser.go`, `syslog_parser_test.go`, `pipe_unpack.go`,
+`logfmt_parser.go`, `json_parser.go`, and the public LogsQL documentation at
+immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 162
+source rows, 344 row-query cases, one stochastic case, 398 error cases, and
+412 statistics/pipeline cases: 1,155 cases total, all passing against the
+immutable image. Evaluation-year-dependent RFC3164 leap-day normalization is
+additionally pinned directly against the audited Go `time.Date` behavior in
+the Rust parser regression rather than encoded as a date-stale oracle row.
+The fixture now contains 1155 cases.

@@ -1465,6 +1465,47 @@ Quoted/unquoted parsing, escape decoding, dynamic selection, and retained
 nesting remain bounded row-local work and do not justify moving LogsQL syntax
 into the extension.
 
+LogsQL `unpack_syslog` parses one current-row syslog source without changing
+durable log metadata:
+
+```text
+* | unpack_syslog
+* | unpack_syslog from payload
+* | unpack_syslog payload offset -5h result_prefix decoded.
+* | unpack_syslog if (kind:=audit) from payload
+    offset 30m result_prefix decoded. keep_original_fields
+```
+
+The command and clauses are case-insensitive and strictly ordered. The source
+defaults to `_msg` and may be one bare or `from` exact field. Missing sources
+are no-ops; only leading ASCII whitespace is trimmed; and sources are
+snapshotted before request-local writes. `offset` is a signed fixed offset for
+classic RFC3164 timestamps, `result_prefix` namespaces decoded names, and
+`keep_original_fields` retains existing nonempty destinations.
+
+The bounded parser covers optional PRI, all facility/severity mappings,
+RFC3164, RFC5424 lexical headers and structured data, CEF, and CEE. Classic
+RFC3164 timestamps use the request year and host timezone or explicit offset,
+apply the pinned previous-year rule, and match Go leap-day normalization.
+RFC3339/ISO variants normalize to UTC independently of the offset. CEE
+numbers/booleans become text, arrays compact JSON text, nested objects dotted
+fields, and null members disappear. Partial invalid PRI/CEF input follows the
+pinned VictoriaLogs behavior.
+
+Timeless reconstructs dotted fields and prefixes into retained nested
+metadata, preserving unrelated siblings. Scalar/object conflicts return HTTP
+422. Parse bytes, decoded state, paths, work, results, response bytes,
+deadlines, cancellation, and query-backed conditions are bounded. Real-
+extension tests pin optimize, shutdown, and reopen behavior.
+
+The complete 1,155-case pinned VictoriaLogs fixture records upstream grammar
+and parser behavior. Direct SQLite/libSQL users can run executable
+[`SQL-LOG-054`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)
+for a fixed RFC5424 header with `-` structured data through bounded public
+`logs` rows. Full syslog parsing and current-row mutation stay in the Rust
+API; no private table, language-specific extension primitive, or storage-
+format change is involved.
+
 LogsQL `json_array_len` counts top-level array elements without changing
 durable log metadata:
 

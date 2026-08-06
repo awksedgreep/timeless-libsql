@@ -920,6 +920,18 @@ Exact-build p50/p95/p99 is 3.355/3.619/4.494 ms narrow and
 `QSF-220` accepts the +1.3%/+1.9% p95 and +1.2%/+5.9%
 request-attributed API mean after byte-identical public storage work; storage
 remains four raw blocks with no new extension primitive.
+`unpack_syslog` snapshots `_msg` or one exact current-row field and decodes
+optional PRI, RFC3164, RFC5424 structured data, CEF, and CEE into bounded
+request-local string fields. Signed classic-time offsets, result prefixes,
+keep-original writes, query-backed conditions, Go-compatible current/previous
+year and leap-day rules, partial invalid-input behavior, conflicts, limits,
+cancellation, optimize, shutdown, and reopen are pinned without changing
+durable rows. Timeless reconstructs dotted decoded names as retained nested
+metadata; VictoriaLogs' flattened textual output remains the documented
+compatibility boundary. Direct SQLite/libSQL users can run executable
+`SQL-LOG-054` for a fixed RFC5424 header with `-` structured data through
+public `logs`; complete syslog parsing does not justify an extension opcode or
+private-table path after the same required public scan.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

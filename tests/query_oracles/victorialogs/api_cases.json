@@ -155,7 +155,14 @@
     {"case": "common-title-lower", "_msg": "common title lower", "common_group": "common", "common_value": "ǆx"},
     {"case": "common-star", "_msg": "common star", "common_group": "common", "common_value": "*"},
     {"case": "common-comma", "_msg": "common comma", "common_group": "common", "common_value": "Error,Retry"},
-    {"case": "unpack-logfmt-row", "_msg": "default=yes quoted=\"message value\"", "unpack_logfmt_group": "unpack-logfmt", "kind": "admin", "source": "foo=bar quoted=\"x y=z\" empty= lone duplicate=first duplicate=second nested.value=7 escaped=\"line\\nnext\\t\\u263a\" single='a\\tb' raw=`a\\tb` source=replaced", "malformed_source": "malformed=\"unterminated next=still-parsed", "foo": "original", "empty": "original-empty", "duplicate": "original-duplicate", "nested.value": "original-flat", "result": "original"}
+    {"case": "unpack-logfmt-row", "_msg": "default=yes quoted=\"message value\"", "unpack_logfmt_group": "unpack-logfmt", "kind": "admin", "source": "foo=bar quoted=\"x y=z\" empty= lone duplicate=first duplicate=second nested.value=7 escaped=\"line\\nnext\\t\\u263a\" single='a\\tb' raw=`a\\tb` source=replaced", "malformed_source": "malformed=\"unterminated next=still-parsed", "foo": "original", "empty": "original-empty", "duplicate": "original-duplicate", "nested.value": "original-flat", "result": "original"},
+    {"case": "unpack-syslog-rfc5424", "_msg": "<165>1 2023-06-03T17:42:00-0500 host.example app 123 ID47 [meta keep=\"yes\" event=\"quote \\\"test\\\" and \\] bracket\"][bare@9] test message  ", "unpack_syslog_group": "unpack-syslog", "kind": "admin", "app_name": "original"},
+    {"case": "unpack-syslog-classic", "_msg": "Jan  1 00:00:00 classic-host classic[9]: classic message", "unpack_syslog_group": "unpack-syslog"},
+    {"case": "unpack-syslog-iso", "_msg": "custom source", "unpack_syslog_group": "unpack-syslog", "source": "\t\n  <46>2025-01-23T12:15:23.965512+01:00 iso-host rsyslogd: start  "},
+    {"case": "unpack-syslog-cef", "_msg": "Sep 29 08:26:10 cef-host CEF:1|Security|product|1.0|100|name\\|value|10|src=10.0.0.1 msg=two words", "unpack_syslog_group": "unpack-syslog"},
+    {"case": "unpack-syslog-cee", "_msg": "Jun  3 12:08:33 cee-host app[1]: @cee: {\"number\":123,\"flag\":false,\"null_value\":null,\"nested\":{\"leaf\":7},\"array\":[1,\"x\"],\"message\":\"cee message\"}", "unpack_syslog_group": "unpack-syslog"},
+    {"case": "unpack-syslog-invalid-priority", "_msg": "<abc>1 2023-06-03T17:42:00Z host app 1 ID - tail", "unpack_syslog_group": "unpack-syslog"},
+    {"case": "unpack-syslog-invalid-cef", "_msg": "Sep 29 08:26:10 host CEF:1|Security|too-short", "unpack_syslog_group": "unpack-syslog"}
   ],
   "query_cases": [
     {
@@ -1270,6 +1277,9 @@
         "common-dot-original", "common-dot-lower", "common-dot-upper", "common-dot-decomposed",
         "common-title-original", "common-title-upper", "common-title-lower", "common-star", "common-comma",
         "unpack-logfmt-row",
+        "unpack-syslog-rfc5424", "unpack-syslog-classic", "unpack-syslog-iso",
+        "unpack-syslog-cef", "unpack-syslog-cee", "unpack-syslog-invalid-priority",
+        "unpack-syslog-invalid-cef",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
         "word-unicode-boundary", "word-unicode", "word-unicode-case"
@@ -2638,7 +2648,7 @@
     {
       "id": "LQL-P12-query-stats-full-fixture-cardinality",
       "query": "* | query_stats | keep RowsFound",
-      "expected_rows": [{"RowsFound": "155"}]
+      "expected_rows": [{"RowsFound": "162"}]
     },
     {
       "id": "LQL-P12-query-stats-composes-after-limit",
@@ -4532,6 +4542,61 @@
       "id": "LQL-P37-pack-unpack-logfmt-round-trip-preserves-textual-paths",
       "query": "case:=unpack-logfmt-row | fields case, foo, nested.value | pack_logfmt fields (foo, nested.value) as packed | unpack_logfmt from packed result_prefix decoded. | fields case, packed, decoded.foo, decoded.nested.value",
       "expected_rows": [{"case": "unpack-logfmt-row", "packed": "foo=original nested.value=original-flat", "decoded.foo": "original", "decoded.nested.value": "original-flat"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-rfc5424-priority-header-and-structured-data",
+      "query": "case:=unpack-syslog-rfc5424 | unpack_syslog | fields case, priority, facility_keyword, level, facility, severity, format, timestamp, hostname, app_name, proc_id, msg_id, meta.keep, meta.event, \"bare@9\", message",
+      "expected_rows": [{"case": "unpack-syslog-rfc5424", "priority": "165", "facility_keyword": "local4", "level": "notice", "facility": "20", "severity": "5", "format": "rfc5424", "timestamp": "2023-06-03T17:42:00-0500", "hostname": "host.example", "app_name": "app", "proc_id": "123", "msg_id": "ID47", "meta.keep": "yes", "meta.event": "quote \"test\" and ] bracket", "message": "test message  "}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-preserves-original-nonempty-fields",
+      "query": "case:=unpack-syslog-rfc5424 | unpack_syslog keep_original_fields | fields case, app_name, hostname, meta.keep",
+      "expected_rows": [{"case": "unpack-syslog-rfc5424", "app_name": "original", "hostname": "host.example", "meta.keep": "yes"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-prefixes-results-and-accepts-bare-source",
+      "query": "case:=unpack-syslog-iso | unpack_syslog source result_prefix decoded. | fields case, source, decoded.priority, decoded.facility_keyword, decoded.level, decoded.facility, decoded.severity, decoded.format, decoded.timestamp, decoded.hostname, decoded.app_name, decoded.message",
+      "expected_rows": [{"case": "unpack-syslog-iso", "source": "\t\n  <46>2025-01-23T12:15:23.965512+01:00 iso-host rsyslogd: start  ", "decoded.priority": "46", "decoded.facility_keyword": "syslog", "decoded.level": "info", "decoded.facility": "5", "decoded.severity": "6", "decoded.format": "rfc3164", "decoded.timestamp": "2025-01-23T11:15:23.965512Z", "decoded.hostname": "iso-host", "decoded.app_name": "rsyslogd", "decoded.message": "start  "}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-condition-miss-is-noop",
+      "query": "case:=unpack-syslog-rfc5424 | unpack_syslog if (kind:=user) | fields case, app_name, priority",
+      "expected_rows": [{"case": "unpack-syslog-rfc5424", "app_name": "original"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-condition-match-and-keywords-are-case-insensitive",
+      "query": "case:=unpack-syslog-rfc5424 | UnPaCk_SySlOg If (kind:=admin) ReSuLt_PrEfIx selected. | fields case, selected.app_name, selected.priority",
+      "expected_rows": [{"case": "unpack-syslog-rfc5424", "selected.app_name": "app", "selected.priority": "165"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-classic-offset-parses-without-changing-other-fields",
+      "query": "case:=unpack-syslog-classic | unpack_syslog offset 5h30m | fields case, format, hostname, app_name, proc_id, message",
+      "expected_rows": [{"case": "unpack-syslog-classic", "format": "rfc3164", "hostname": "classic-host", "app_name": "classic", "proc_id": "9", "message": "classic message"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-cef-base-and-extension-fields",
+      "query": "case:=unpack-syslog-cef | unpack_syslog offset 0s | fields case, app_name, cef.version, cef.device_vendor, cef.device_product, cef.device_version, cef.device_event_class_id, cef.name, cef.severity, cef.extension.src, cef.extension.msg",
+      "expected_rows": [{"case": "unpack-syslog-cef", "app_name": "CEF", "cef.version": "1", "cef.device_vendor": "Security", "cef.device_product": "product", "cef.device_version": "1.0", "cef.device_event_class_id": "100", "cef.name": "name|value", "cef.severity": "10", "cef.extension.src": "10.0.0.1", "cef.extension.msg": "two words"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-cee-flattens-json-textually-and-omits-null",
+      "query": "case:=unpack-syslog-cee | unpack_syslog offset 0s | fields case, number, flag, null_value, nested.leaf, array, message",
+      "expected_rows": [{"case": "unpack-syslog-cee", "number": "123", "flag": "false", "nested.leaf": "7", "array": "[1,\"x\"]", "message": "cee message"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-invalid-priority-keeps-only-lexical-priority",
+      "query": "case:=unpack-syslog-invalid-priority | unpack_syslog | fields case, priority, facility, format, message",
+      "expected_rows": [{"case": "unpack-syslog-invalid-priority", "priority": "abc"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-invalid-cef-restores-fallback-message",
+      "query": "case:=unpack-syslog-invalid-cef | unpack_syslog offset 0s | fields case, app_name, cef.version, message",
+      "expected_rows": [{"case": "unpack-syslog-invalid-cef", "app_name": "CEF", "message": "1|Security|too-short"}]
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-missing-source-is-noop",
+      "query": "case:=unpack-syslog-rfc5424 | unpack_syslog from absent | fields case, app_name, priority",
+      "expected_rows": [{"case": "unpack-syslog-rfc5424", "app_name": "original"}]
     },
     {
       "id": "LQL-P41-json-array-len-counts-string-elements",
@@ -6974,6 +7039,76 @@
     {
       "id": "LQL-P37-unpack-logfmt-rejects-attached-suffix",
       "query": "* | unpack_logfmt.extra",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-condition-requires-parentheses",
+      "query": "* | unpack_syslog if",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-requires-source-after-from",
+      "query": "* | unpack_syslog from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-rejects-wildcard-source",
+      "query": "* | unpack_syslog from *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-rejects-prefix-source",
+      "query": "* | unpack_syslog from source*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-offset-requires-duration",
+      "query": "* | unpack_syslog offset",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-rejects-invalid-offset",
+      "query": "* | unpack_syslog offset invalid",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-result-prefix-requires-value",
+      "query": "* | unpack_syslog result_prefix",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-rejects-trailing-token",
+      "query": "* | unpack_syslog from source trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-rejects-out-of-order-options",
+      "query": "* | unpack_syslog result_prefix decoded offset 1h",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P38-unpack-syslog-rejects-attached-suffix",
+      "query": "* | unpack_syslog.extra",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

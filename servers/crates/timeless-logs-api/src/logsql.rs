@@ -11,7 +11,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use regex::{Regex, RegexBuilder};
 
 use serde_json::Value;
@@ -3070,6 +3070,13 @@ fn is_unpack_logfmt_pipe(segment: &str) -> bool {
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
+fn is_unpack_syslog_pipe(segment: &str) -> bool {
+    let operation = "unpack_syslog";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -3338,6 +3345,142 @@ fn parse_unpack_logfmt_pipe(
         keep_original_fields: parsed.keep_original_fields,
         skip_empty_results: parsed.skip_empty_results,
         condition: parsed.condition,
+    }))
+}
+
+fn parse_unpack_syslog_pipe(
+    segment: &str,
+    context: &mut ParseContext,
+) -> Result<PipelineOp, LogsqlError> {
+    const OPERATION: &str = "unpack_syslog";
+    let command = segment
+        .get(..OPERATION.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL unpack_syslog pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(OPERATION) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL unpack_syslog pipe, not {command:?}"
+        )));
+    }
+    if segment[OPERATION.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "unexpected text attached to LogsQL unpack_syslog pipe",
+        ));
+    }
+
+    let mut rest = segment[OPERATION.len()..].trim_start();
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, OPERATION)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(&expression, None, context)?)
+        }
+    } else {
+        None
+    };
+
+    let tokens = lex_first_pipe(rest, OPERATION)?;
+    let mut cursor = 0usize;
+    let mut source = parse_pipeline_field("_msg", false)?;
+    let source_is_implicit = tokens.get(cursor).is_none_or(|token| {
+        ["offset", "result_prefix", "keep_original_fields"]
+            .iter()
+            .any(|keyword| token.eq_ignore_ascii_case(keyword))
+    });
+    if !source_is_implicit {
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("from"))
+        {
+            cursor += 1;
+        }
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL unpack_syslog from requires an exact source field")
+        })?;
+        source = match parse_delete_field(token)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL unpack_syslog source must be an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+
+    let mut offset_seconds = None;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("offset"))
+    {
+        cursor += 1;
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL unpack_syslog offset requires a duration")
+        })?;
+        let duration = quoted_value(token)?.unwrap_or_else(|| token.clone());
+        let nanoseconds = parse_victorialogs_human_duration(&duration).ok_or_else(|| {
+            LogsqlError::malformed(format!("invalid LogsQL unpack_syslog offset {duration:?}"))
+        })?;
+        offset_seconds = Some(nanoseconds / 1_000_000_000);
+        cursor += 1;
+    }
+
+    let mut result_prefix = String::new();
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("result_prefix"))
+    {
+        cursor += 1;
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL unpack_syslog result_prefix requires a prefix")
+        })?;
+        if matches!(token.as_str(), "(" | ")" | ",") {
+            return Err(LogsqlError::malformed(
+                "LogsQL unpack_syslog result_prefix requires a prefix",
+            ));
+        }
+        result_prefix = quoted_value(token)?.unwrap_or_else(|| token.clone());
+        cursor += 1;
+    }
+
+    let mut keep_original_fields = false;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("keep_original_fields"))
+    {
+        keep_original_fields = true;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL unpack_syslog token {token:?}"
+        )));
+    }
+
+    let divisor = match context.timestamp_unit {
+        TimestampUnit::Milliseconds => 1_000,
+        TimestampUnit::Microseconds => 1_000_000,
+    };
+    let query_now_seconds = context.query_now.div_euclid(divisor);
+    let current_year = DateTime::<Utc>::from_timestamp(query_now_seconds, 0)
+        .map_or(1970, |timestamp| timestamp.year());
+
+    Ok(PipelineOp::UnpackSyslog(UnpackSyslogSpec {
+        source,
+        offset_seconds,
+        result_prefix,
+        keep_original_fields,
+        condition,
+        current_year,
+        query_now_seconds,
     }))
 }
 
@@ -4209,6 +4352,17 @@ pub(crate) struct UnpackLogfmtSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct UnpackSyslogSpec {
+    pub source: PipelineField,
+    pub offset_seconds: Option<i64>,
+    pub result_prefix: String,
+    pub keep_original_fields: bool,
+    pub condition: Option<LogPredicate>,
+    pub current_year: i32,
+    pub query_now_seconds: i64,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -4255,6 +4409,7 @@ pub(crate) enum PipelineOp {
     PackLogfmt(PackLogfmtSpec),
     UnpackJson(UnpackJsonSpec),
     UnpackLogfmt(UnpackLogfmtSpec),
+    UnpackSyslog(UnpackSyslogSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4714,6 +4869,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_unpack_logfmt_pipe(segment) => {
                 pipeline.push(parse_unpack_logfmt_pipe(segment, context)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_unpack_syslog_pipe(segment) => {
+                pipeline.push(parse_unpack_syslog_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_extract_pipe(segment) => {
@@ -10947,6 +11106,36 @@ mod tests {
             "* | unpack_logfmt result_prefix decoded trailing",
             "* | unpack_logfmt keep_original_fields skip_empty_results",
             "* | unpack_logfmt.extra",
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_unpack_syslog_grammar_is_complete_and_strict() {
+        for query in [
+            "* | unpack_syslog",
+            "* | unpack_syslog source",
+            "* | unpack_syslog from source",
+            "* | unpack_syslog offset 5h30m",
+            r#"* | UnPaCk_SySlOg if (kind:=admin) FrOm "source field" OfFsEt -6h30m ReSuLt_PrEfIx "decoded." KeEp_OrIgInAl_FiElDs"#,
+        ] {
+            parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+
+        for query in [
+            "* | unpack_syslog if",
+            "* | unpack_syslog from",
+            "* | unpack_syslog from *",
+            "* | unpack_syslog from source*",
+            "* | unpack_syslog offset",
+            "* | unpack_syslog offset invalid",
+            "* | unpack_syslog result_prefix",
+            "* | unpack_syslog from source trailing",
+            "* | unpack_syslog keep_original_fields trailing",
+            "* | unpack_syslog.extra",
         ] {
             let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
