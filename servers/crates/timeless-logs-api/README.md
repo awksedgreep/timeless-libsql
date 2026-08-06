@@ -1417,6 +1417,46 @@ public storage work and emits the same 2,112 response bytes. The 65.292 ms
 wide p99 is retained honestly. This bounded rich JSON parse/select/write cost
 does not justify moving LogsQL syntax into the extension.
 
+LogsQL `unpack_logfmt` parses one current-row logfmt source without changing
+durable log metadata:
+
+```text
+* | unpack_logfmt
+* | unpack_logfmt from payload
+* | unpack_logfmt payload fields (host, status, context.*)
+* | unpack_logfmt if (kind:=audit) from payload
+    fields (host, context.*) result_prefix decoded. keep_original_fields
+* | unpack_logfmt from payload fields () skip_empty_results
+```
+
+The command and clauses are case-insensitive. The source defaults to `_msg`
+and may be one bare or `from` exact field. Omitted or empty `fields ()`
+selects every parsed name; exact and prefix selectors may be mixed; missing
+exact names become empty strings; and `result_prefix` namespaces results.
+
+Unquoted values end at ASCII space. Double and single quotes decode
+Go-compatible control, quote, backslash, octal, `\x`, `\u`, and `\U`
+escapes. Backticks are raw and discard carriage returns. Invalid or
+unterminated quoted prefixes fall back to unquoted parsing. Lone names become
+empty values, duplicate names are last-wins, and every decoded value is text.
+
+Timeless reconstructs dotted names into retained nested metadata, preserving
+unrelated siblings; names with empty path components remain literal. Sources
+are snapshotted before writes. `keep_original_fields` retains existing
+nonempty destinations, while `skip_empty_results` suppresses empty decoded
+values. Scalar/object path conflicts return HTTP 422. Parse bytes, names,
+paths, state, work, results, response bytes, deadlines, and cancellation are
+bounded, and real-extension tests pin optimize, shutdown, and reopen behavior.
+
+The complete 1,134-case pinned VictoriaLogs fixture records upstream grammar,
+quoting, escapes, malformed fallback, selection, duplicates, and preservation.
+Direct SQLite/libSQL users can use executable
+[`SQL-LOG-053`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)
+for fixed keys in well-formed unquoted logfmt through public `logs` and a
+recursive CTE. Full language parsing and request-local mutation stay in the
+Rust API; no private table, language-specific extension primitive, or
+storage-format change is involved.
+
 LogsQL `json_array_len` counts top-level array elements without changing
 durable log metadata:
 

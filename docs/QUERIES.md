@@ -1755,6 +1755,58 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 above the unchanged public storage boundary and retains the wide p99 without
 hiding it.
 
+## LogsQL string `unpack_logfmt` over current rows
+
+`unpack_logfmt` snapshots one request-owned field, parses logfmt, and writes
+selected string values back into the current result row:
+
+```text
+* | unpack_logfmt
+* | unpack_logfmt from payload
+* | unpack_logfmt payload fields (host, status, context.*)
+* | unpack_logfmt if (kind:=audit) from payload
+    fields (host, context.*) result_prefix decoded. keep_original_fields
+* | unpack_logfmt from payload fields () skip_empty_results
+```
+
+Keywords are case-insensitive. The source defaults to `_msg`; one exact
+source may appear bare or after `from`. Omitted or empty `fields ()` selects
+all parsed names. Exact and prefix selectors may be mixed. Missing exact
+names become empty strings, while unmatched prefixes add nothing.
+`result_prefix` is prepended to every selected name.
+
+Unquoted values end at ASCII space. Double- and single-quoted values decode
+Go-compatible control, quote, backslash, octal, `\x`, `\u`, and `\U`
+escapes. Backtick-quoted values are raw and discard carriage returns. Invalid
+or unterminated quoted prefixes fall back to unquoted parsing, matching the
+pinned VictoriaLogs behavior. Lone names become empty values, duplicate names
+are last-wins, and every decoded value is a string.
+
+Timeless reconstructs dotted decoded names and prefixes as nested metadata
+while preserving unrelated siblings. A name containing an empty path segment
+stays a literal top-level key rather than creating an invalid nested path.
+The source is snapshotted before writes, including when one decoded name
+replaces it. By default decoded strings replace scalar destinations.
+`keep_original_fields` retains an existing nonempty destination;
+`skip_empty_results` suppresses decoded empty strings. A write that would
+replace a retained object or descend through a scalar returns HTTP 422.
+
+Strings, projected native numbers/booleans/arrays, names, paths, decoded
+bytes, work, temporary state, result rows, response bytes, deadlines, and
+cancellation use the shared hard limits. The transform changes only
+request-owned rows, never the public durable `logs` source, including after
+optimize, shutdown, and reopen. The complete 1,134-case pinned VictoriaLogs
+fixture records upstream grammar and value behavior; real-extension tests pin
+Timeless's retained nesting policy.
+
+Executable
+[`SQL-LOG-053`](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)
+uses a bounded recursive CTE over public `logs` to extract a fixed set of keys
+from well-formed unquoted logfmt. Full quoted/escaped parsing, dynamic
+selectors, current-row writes, errors, limits, cancellation, and envelopes
+remain Rust API composition. No extension primitive, private table, or
+storage-format change is involved.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level

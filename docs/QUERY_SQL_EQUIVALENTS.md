@@ -160,6 +160,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-050`](#sql-log-050-strip-csi-color-sequences-from-one-exact-field) | `LQL-P27` | current foundation | exact byte-state removal of CSI sequences from one bounded public row field; API owns LogsQL grammar, current-row composition, rich no-op preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-051`](#sql-log-051-literal-split-of-one-exact-field) | `LQL-P31` | current foundation | literal non-overlapping split of one bounded public row field into a JSON array, including Unicode-scalar empty-separator behavior; API owns LogsQL grammar, current-row mutation, exact wire spelling, limits, cancellation, and envelopes |
 | [`SQL-LOG-052`](#sql-log-052-pack-fixed-exact-fields-as-logfmt) | `LQL-P35` | current foundation | deterministic logfmt packing of a fixed ordered list of exact public metadata paths with missing/null/object-parent textualization and Victoria-compatible quoting; API owns dynamic selectors, canonical/current fields, rich flattening, mutation, limits, cancellation, and envelopes |
+| [`SQL-LOG-053`](#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt) | `LQL-P37` | current foundation | bounded extraction of fixed keys from well-formed space-delimited unquoted logfmt in one public metadata path, with last-duplicate-wins and exact-missing empties; API owns the complete quoted/escaped grammar, dynamic selection, mutation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -8330,6 +8331,152 @@ extension opcode would not eliminate a block read, decode, allocation, or row
 crossing. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
 harness; HTTP/oracle/optimize/reopen regression:
 `session_eighteen_pack_logfmt_is_exact_rich_bounded_and_durable`.
+
+### SQL-LOG-053: unpack fixed fields from unquoted logfmt
+
+Bind one exact metadata JSON path containing logfmt, inclusive native
+timestamp bounds, positive work/result/source/token limits, and four fixed key
+names. This read-only statement extracts a deliberately narrow but useful SQL
+foundation: well-formed `key=value` tokens separated by ASCII spaces whose
+values do not contain quoted spaces or escapes. Repeated keys use the final
+value, and requested missing keys become empty text.
+
+```sql
+WITH RECURSIVE
+bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    COALESCE(
+      :logfmt_source_override,
+      CAST(json_extract(metadata, :logfmt_source_path) AS TEXT),
+      ''
+    ) AS source
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), accepted AS MATERIALIZED (
+  SELECT row_id, ts, trim(source) AS source
+  FROM bounded
+  WHERE :max_source_bytes > 0
+    AND length(CAST(source AS BLOB)) <= :max_source_bytes
+), tokens(row_id, ts, ordinal, token, rest) AS (
+  SELECT row_id, ts, 0, '', source
+  FROM accepted
+  UNION ALL
+  SELECT
+    row_id,
+    ts,
+    ordinal + 1,
+    CASE
+      WHEN instr(ltrim(rest, ' '), ' ') = 0 THEN ltrim(rest, ' ')
+      ELSE substr(ltrim(rest, ' '), 1, instr(ltrim(rest, ' '), ' ') - 1)
+    END,
+    CASE
+      WHEN instr(ltrim(rest, ' '), ' ') = 0 THEN ''
+      ELSE ltrim(
+        substr(ltrim(rest, ' '), instr(ltrim(rest, ' '), ' ') + 1),
+        ' '
+      )
+    END
+  FROM tokens
+  WHERE rest <> ''
+    AND ordinal < :max_tokens_per_row
+), complete AS MATERIALIZED (
+  SELECT accepted.row_id, accepted.ts
+  FROM accepted
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM tokens
+    WHERE tokens.row_id = accepted.row_id
+      AND tokens.rest <> ''
+      AND tokens.ordinal = :max_tokens_per_row
+  )
+), pairs AS MATERIALIZED (
+  SELECT
+    tokens.row_id,
+    tokens.ordinal,
+    substr(tokens.token, 1, instr(tokens.token, '=') - 1) AS name,
+    substr(tokens.token, instr(tokens.token, '=') + 1) AS value
+  FROM tokens
+  JOIN complete USING (row_id)
+  WHERE instr(tokens.token, '=') > 1
+), latest AS MATERIALIZED (
+  SELECT
+    row_id,
+    name,
+    value,
+    row_number() OVER (
+      PARTITION BY row_id, name
+      ORDER BY ordinal DESC
+    ) AS duplicate_rank
+  FROM pairs
+)
+SELECT
+  complete.ts,
+  COALESCE(max(CASE
+    WHEN latest.name = :unpack_logfmt_name_1
+      AND latest.duplicate_rank = 1 THEN latest.value
+  END), '') AS field_1,
+  COALESCE(max(CASE
+    WHEN latest.name = :unpack_logfmt_name_2
+      AND latest.duplicate_rank = 1 THEN latest.value
+  END), '') AS field_2,
+  COALESCE(max(CASE
+    WHEN latest.name = :unpack_logfmt_name_3
+      AND latest.duplicate_rank = 1 THEN latest.value
+  END), '') AS field_3,
+  COALESCE(max(CASE
+    WHEN latest.name = :unpack_logfmt_name_4
+      AND latest.duplicate_rank = 1 THEN latest.value
+  END), '') AS field_4
+FROM complete
+LEFT JOIN latest ON latest.row_id = complete.row_id
+WHERE :max_result_rows > 0
+GROUP BY complete.row_id, complete.ts
+ORDER BY complete.ts, complete.row_id
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:max_work_entries` to `100000`, `:max_source_bytes` to `4096`,
+`:max_tokens_per_row` to `256`, and `:max_result_rows` to `100`. Bind
+`:logfmt_source_override` to
+`host=web-1 status=200 empty= status=500`; production callers normally bind
+that parameter to `NULL` and bind `:logfmt_source_path` to the public metadata
+path containing the source. The four requested names are `host`, `status`,
+`empty`, and `missing`, producing `web-1`, `500`, empty, and empty. Static
+aliases `field_1` through `field_4` avoid treating bound values as trusted SQL
+identifiers; applications may replace those aliases when preparing fixed
+schema SQL.
+
+The source-byte cap is measured after the public row crosses the extension;
+rows exceeding it are omitted. The token cap likewise omits a row rather than
+returning a partial parse. `max_work_entries` independently bounds storage
+decode before that API-independent SQL work. Timestamps use the table's native
+unit (microseconds for the default `timeless_logs` table), bounds are
+inclusive, output is timestamp/source-row ordered, decoded values are SQLite
+TEXT, repeated keys are last-wins, and missing and explicit empty values are
+both empty text in this fixed projection. The statement never changes the
+stored row.
+
+This SQL intentionally does **not** claim complete LogsQL `unpack_logfmt`
+semantics. The `LQL-P37` Rust API owns case-insensitive grammar; optional
+conditions; default, bare, explicit, quoted, and dotted sources; exact,
+prefix, empty-list, and all-current-field selection; destination prefixes;
+source snapshots; current-row mutation and preservation modes; nested retained
+metadata reconstruction; Go-compatible double/single/backtick quoting and
+escapes; malformed-quote fallback; field conflicts; and cumulative work,
+state, result, response, deadline, and cancellation limits. Use that API for
+quoted values, escapes, dynamic keys, or complete VictoriaLogs compatibility.
+
+Every source row already crosses the bounded public `logs` interface. Fixed
+unquoted-token extraction is ordinary recursive SQL, while the complete
+language operation is bounded Rust composition after the same scan. Neither
+case justifies a storage-specific extension opcode. Direct regression:
+`tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
+regression: `session_eighteen_unpack_logfmt_is_exact_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

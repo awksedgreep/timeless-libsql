@@ -6494,6 +6494,284 @@ async fn session_seventeen_unpack_json_is_rich_bounded_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_unpack_logfmt_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("unpack-logfmt-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let source = r#"foo=bar quoted="x y=z" empty= lone duplicate=first duplicate=second nested.keep=yes escaped="line\nnext\t\u263a" source=replaced"#;
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: "default=yes quoted=\"message value\"".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-logfmt-admin",
+                        "unpack_logfmt_group":"unpack-logfmt",
+                        "kind":"admin",
+                        "source":source,
+                        "malformed_source":r#"malformed="unterminated next=still-parsed"#,
+                        "conflict_source":"conflict_parent.value=changed",
+                        "conflict_parent":"scalar",
+                        "foo":"original",
+                        "empty":"original-empty",
+                        "duplicate":"original-duplicate",
+                        "nested":{"sibling":"retained"},
+                        "result":["native"]
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "default=changed".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-logfmt-user",
+                        "unpack_logfmt_group":"unpack-logfmt",
+                        "kind":"user",
+                        "source":"foo=changed",
+                        "foo":"untouched"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-logfmt-admin" | unpack_logfmt from source fields (foo, quoted, empty, lone, duplicate, nested.*, escaped, source, missing) | fields case, foo, quoted, empty, lone, duplicate, nested, escaped, source, missing"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "foo":"bar",
+            "quoted":"x y=z",
+            "empty":"",
+            "lone":"",
+            "duplicate":"second",
+            "nested":{"sibling":"retained", "keep":"yes"},
+            "escaped":"line\nnext\t☺",
+            "source":"replaced",
+            "missing":""
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-logfmt-admin" | UnPaCk_LoGfMt FrOm source FiElDs (foo, missing, "nested."*) ReSuLt_PrEfIx "decoded." | fields case, decoded"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "decoded":{"foo":"bar", "missing":"", "nested":{"keep":"yes"}}
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-logfmt-admin" | unpack_logfmt from source keep_original_fields | fields case, foo, empty, duplicate, quoted, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "foo":"original",
+            "empty":"original-empty",
+            "duplicate":"original-duplicate",
+            "quoted":"x y=z",
+            "nested":{"sibling":"retained", "keep":"yes"}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-logfmt-admin" | unpack_logfmt from source skip_empty_results | fields case, foo, empty, lone, duplicate"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "foo":"bar",
+            "empty":"original-empty",
+            "duplicate":"second"
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-logfmt-user" | unpack_logfmt if (kind:=admin) from source | fields case, foo"#,
+        )
+        .await,
+        [serde_json::json!({"case":"unpack-logfmt-user", "foo":"untouched"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-logfmt-admin" | unpack_logfmt from malformed_source | fields case, malformed, next"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "malformed":"\"unterminated",
+            "next":"still-parsed"
+        })]
+    );
+
+    let round_trip = pipeline_rows(
+        &app,
+        r#"case:="unpack-logfmt-admin" | fields case, nested.sibling, result | pack_logfmt fields (case, nested.*, result) as packed | unpack_logfmt from packed result_prefix roundtrip. | fields case, roundtrip"#,
+    )
+    .await;
+    assert_eq!(
+        round_trip[0]["roundtrip"],
+        serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "nested":{"sibling":"retained"},
+            "result":r#"["native"]"#
+        })
+    );
+
+    for malformed in [
+        "* | unpack_logfmt if",
+        "* | unpack_logfmt from",
+        "* | unpack_logfmt from *",
+        "* | unpack_logfmt fields",
+        "* | unpack_logfmt fields (case missing)",
+        "* | unpack_logfmt result_prefix",
+        "* | unpack_logfmt keep_original_fields skip_empty_results",
+        "* | unpack_logfmt.extra",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="unpack-logfmt-admin" | unpack_logfmt from conflict_source"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                r#"unpack_logfmt_group:="unpack-logfmt" | unpack_logfmt from source | limit 10000"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-logfmt-admin" | fields case, source, malformed_source, conflict_source, conflict_parent, foo, empty, duplicate, nested, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "source":source,
+            "malformed_source":r#"malformed="unterminated next=still-parsed"#,
+            "conflict_source":"conflict_parent.value=changed",
+            "conflict_parent":"scalar",
+            "foo":"original",
+            "empty":"original-empty",
+            "duplicate":"original-duplicate",
+            "nested":{"sibling":"retained"},
+            "result":["native"]
+        })],
+        "unpack_logfmt must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="unpack-logfmt-admin" | unpack_logfmt from source fields (foo, duplicate, nested.*, escaped) result_prefix reopened. | fields case, reopened"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-logfmt-admin",
+            "reopened":{
+                "foo":"bar",
+                "duplicate":"second",
+                "nested":{"keep":"yes"},
+                "escaped":"line\nnext\t☺"
+            }
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_seventeen_json_array_len_is_typed_bounded_and_durable() {
@@ -13023,6 +13301,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_unpack_json_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_unpack_logfmt = storage.stats().await.unwrap().api_query_cancelled;
+    let unpack_logfmt_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | pack_logfmt fields (_msg, level, service) as packed | unpack_logfmt from packed result_prefix selected. | fields selected | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(unpack_logfmt_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_unpack_logfmt
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_unpack_logfmt);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_unpack_logfmt_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            r#"level:error | pack_logfmt fields (_msg, level) as packed | unpack_logfmt from packed result_prefix selected. | fields selected | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_unpack_logfmt_cancel.status(), StatusCode::OK);
 
     let cancelled_before_extract_regexp = storage.stats().await.unwrap().api_query_cancelled;
     let extract_regexp_timeout = router_with_limits(

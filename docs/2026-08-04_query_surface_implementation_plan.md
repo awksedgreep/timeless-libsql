@@ -1088,6 +1088,20 @@ mean as bounded current-row selection and encoding. The full oracle,
 executable SQL, documentation contracts, real-extension/API suites,
 formatting, lint, crash/transaction, and lifecycle gates pass.
 
+Session 18's `LQL-P37` semantic implementation is complete as an API-owned
+`unpack_logfmt` pipe over public `logs` rows. Pinned VictoriaLogs source and
+the complete 1,134-case live oracle establish the shared unpack grammar,
+unquoted and double/single/backtick quote decoding, Go escapes, malformed
+quote fallback, exact/prefix/all selection, missing exact empties, source
+snapshots, duplicate handling, preservation modes, and strict errors.
+Timeless deliberately reconstructs dotted decoded names into its retained
+nested metadata and keeps every decoded value textual. The parser and
+evaluator are bounded and cancellable; durable storage and the public
+extension remain unchanged. Executable `SQL-LOG-053` gives direct
+SQLite/libSQL users the fixed-key, well-formed-unquoted recursive-SQL
+foundation. Exact-build performance, HWM, storage, and final local gate
+evidence remain the row's closing work.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

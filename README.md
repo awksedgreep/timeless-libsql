@@ -902,6 +902,18 @@ Exact-build p50/p95/p99 is 3.459/3.805/4.335 ms narrow and
 accepts the +1.0%/+2.4% p95 and -0.2%/+8.2% request-attributed API mean as
 bounded row-local selection/encoding after byte-identical public storage work;
 storage remains four raw blocks with no new extension primitive.
+`unpack_logfmt` snapshots `_msg` or one exact current-row field, decodes
+unquoted and Go-compatible double/single/backtick-quoted logfmt, applies
+exact/prefix/all selectors, and writes string values with an optional result
+prefix and preservation policy. Missing exact names become empty, duplicate
+names are last-wins, malformed quotes follow the pinned unquoted fallback,
+and dotted names reconstruct retained nested metadata without changing
+durable rows. Work, state, results, response bytes, cancellation, and
+conflicts remain bounded Rust API contracts over public `logs` rows. Direct
+SQLite/libSQL users can run executable `SQL-LOG-053` for fixed keys in
+well-formed unquoted logfmt. Full quoting, escapes, dynamic selection, and
+current-row mutation do not justify a language opcode or private-table path
+after the same required public scan.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

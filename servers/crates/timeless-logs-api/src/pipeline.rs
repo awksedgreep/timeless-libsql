@@ -25,6 +25,7 @@ use crate::logsql::{
     MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec,
     PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
     SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
+    UnpackLogfmtSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -269,6 +270,13 @@ pub(crate) fn execute(
                 pack_logfmt_fields(rows, spec, execution.limits, execution.cancelled)?
             }
             PipelineOp::UnpackJson(spec) => unpack_json_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
+            PipelineOp::UnpackLogfmt(spec) => unpack_logfmt_fields(
                 rows,
                 spec,
                 execution.timestamp_unit,
@@ -681,6 +689,449 @@ fn logfmt_needs_quote(value: &str) -> bool {
     value
         .chars()
         .any(|character| character <= '\u{20}' || matches!(character, '"' | '\\'))
+}
+
+fn unpack_logfmt_fields(
+    rows: Vec<Value>,
+    spec: &UnpackLogfmtSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path,
+        name: source_name,
+    } = &spec.source
+    else {
+        return Err("LogsQL unpack_logfmt source is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "unpack_logfmt")?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let mut state_bytes = size_of::<Vec<(String, String)>>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "unpack_logfmt")?;
+            charge_transfer_string(
+                source_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "unpack_logfmt",
+            )?;
+            for segment in source_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "unpack_logfmt",
+                )?;
+            }
+
+            let source = textual_transform_projection(
+                field_value(&row, source_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "unpack_logfmt",
+            )?;
+            charge_transfer_string(
+                source.as_ref(),
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "unpack_logfmt",
+            )?;
+            let parsed = parse_logfmt_fields(
+                source.as_ref(),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+
+            let mut matched_exact = BTreeSet::new();
+            for (position, (name, value)) in parsed.into_iter().enumerate() {
+                check_periodically(cancelled, position)?;
+                if !unpack_logfmt_field_selected(name.as_str(), &spec.fields) {
+                    continue;
+                }
+                for field in &spec.fields {
+                    if matches!(field, PipelineField::Exact { name: expected, .. } if expected == &name)
+                    {
+                        matched_exact.insert(name.clone());
+                    }
+                }
+                apply_unpack_logfmt_field(
+                    &mut row,
+                    &name,
+                    value,
+                    spec,
+                    &mut state_bytes,
+                    &mut work_items,
+                    limits,
+                    cancelled,
+                )?;
+            }
+
+            let mut synthesized = BTreeSet::new();
+            for field in &spec.fields {
+                let PipelineField::Exact { name, .. } = field else {
+                    continue;
+                };
+                if matched_exact.contains(name) || !synthesized.insert(name.clone()) {
+                    continue;
+                }
+                apply_unpack_logfmt_field(
+                    &mut row,
+                    name,
+                    String::new(),
+                    spec,
+                    &mut state_bytes,
+                    &mut work_items,
+                    limits,
+                    cancelled,
+                )?;
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+fn unpack_logfmt_field_selected(name: &str, fields: &[PipelineField]) -> bool {
+    fields.is_empty()
+        || fields.iter().any(|field| match field {
+            PipelineField::Exact { name: expected, .. } => name == expected,
+            PipelineField::Prefix { prefix } => name.starts_with(prefix),
+            PipelineField::All => true,
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_unpack_logfmt_field(
+    row: &mut Value,
+    name: &str,
+    value: String,
+    spec: &UnpackLogfmtSpec,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, limits.max_state_items, "unpack_logfmt")?;
+    check_periodically(cancelled, *work_items)?;
+    if spec.skip_empty_results && value.is_empty() {
+        return Ok(());
+    }
+
+    let destination_name = format!("{}{name}", spec.result_prefix);
+    charge_transfer_string(
+        &destination_name,
+        state_bytes,
+        limits.max_state_bytes,
+        "unpack_logfmt",
+    )?;
+    let destination_path = unpack_logfmt_destination_path(&destination_name);
+    charge_json_path(
+        &destination_path,
+        state_bytes,
+        limits.max_state_bytes,
+        "unpack_logfmt",
+    )?;
+    if spec.keep_original_fields
+        && field_value(row, &destination_path).is_some_and(is_nonempty)
+    {
+        return Ok(());
+    }
+
+    charge_transfer_value(
+        &Value::String(value.clone()),
+        state_bytes,
+        limits.max_state_bytes,
+        cancelled,
+        work_items,
+        limits.max_state_items,
+        "unpack_logfmt",
+    )?;
+    let object = row
+        .as_object_mut()
+        .ok_or_else(|| "LogsQL unpack_logfmt input row is not a JSON object".to_string())?;
+    if copy_destination_replaces_object(object, &destination_path) {
+        return Err(format!(
+            "LogsQL unpack_logfmt destination conflict: field {destination_name:?} would replace a retained object"
+        ));
+    }
+    insert_path(object, &destination_path, Value::String(value))
+        .map_err(|error| format!("LogsQL unpack_logfmt destination conflict: {error}"))
+}
+
+fn unpack_logfmt_destination_path(name: &str) -> Vec<String> {
+    let path = name.split('.').map(str::to_owned).collect::<Vec<_>>();
+    if path.iter().all(|segment| !segment.is_empty()) {
+        path
+    } else {
+        vec![name.to_owned()]
+    }
+}
+
+fn parse_logfmt_fields(
+    mut source: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut fields = Vec::new();
+    let mut scanned = 0usize;
+    loop {
+        check_periodically(cancelled, scanned)?;
+        let Some(separator) = source.bytes().position(|byte| matches!(byte, b'=' | b' ')) else {
+            add_logfmt_field(
+                &mut fields,
+                source,
+                "",
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?;
+            return Ok(fields);
+        };
+        scanned = scanned.saturating_add(separator).saturating_add(1);
+        let name = &source[..separator];
+        let delimiter = source.as_bytes()[separator];
+        source = &source[separator + 1..];
+        if delimiter == b' ' {
+            add_logfmt_field(
+                &mut fields,
+                name,
+                "",
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?;
+            continue;
+        }
+        if source.is_empty() {
+            add_logfmt_field(
+                &mut fields,
+                name,
+                "",
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?;
+            return Ok(fields);
+        }
+
+        if let Some((value, consumed)) = try_unquote_logfmt_prefix(source, cancelled)? {
+            add_logfmt_field(
+                &mut fields,
+                name,
+                &value,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?;
+            source = &source[consumed..];
+            if source.is_empty() {
+                return Ok(fields);
+            }
+            if source.as_bytes()[0] != b' ' {
+                return Ok(fields);
+            }
+            source = &source[1..];
+            scanned = scanned.saturating_add(consumed).saturating_add(1);
+            continue;
+        }
+
+        let Some(space) = source.bytes().position(|byte| byte == b' ') else {
+            add_logfmt_field(
+                &mut fields,
+                name,
+                source,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?;
+            return Ok(fields);
+        };
+        add_logfmt_field(
+            &mut fields,
+            name,
+            &source[..space],
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+        )?;
+        source = &source[space + 1..];
+        scanned = scanned.saturating_add(space).saturating_add(1);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_logfmt_field(
+    fields: &mut Vec<(String, String)>,
+    name: &str,
+    value: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    ensure_active(cancelled)?;
+    let name = name.trim();
+    if name.is_empty() && value.is_empty() {
+        return Ok(());
+    }
+    charge_transfer_work(work_items, limits.max_state_items, "unpack_logfmt")?;
+    *state_bytes = state_bytes
+        .checked_add(size_of::<(String, String)>())
+        .ok_or_else(|| "LogsQL unpack_logfmt state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "unpack_logfmt")?;
+    charge_transfer_string(
+        name,
+        state_bytes,
+        limits.max_state_bytes,
+        "unpack_logfmt",
+    )?;
+    charge_transfer_string(
+        value,
+        state_bytes,
+        limits.max_state_bytes,
+        "unpack_logfmt",
+    )?;
+    fields.push((name.to_owned(), value.to_owned()));
+    Ok(())
+}
+
+fn try_unquote_logfmt_prefix(
+    source: &str,
+    cancelled: &AtomicBool,
+) -> Result<Option<(String, usize)>, String> {
+    let Some(delimiter) = source.as_bytes().first().copied() else {
+        return Ok(None);
+    };
+    if !matches!(delimiter, b'"' | b'\'' | b'`') {
+        return Ok(None);
+    }
+    if delimiter == b'`' {
+        let Some(relative) = source[1..].find('`') else {
+            return Ok(None);
+        };
+        let consumed = relative + 2;
+        let value = source[1..consumed - 1].replace('\r', "");
+        ensure_active(cancelled)?;
+        return Ok(Some((value, consumed)));
+    }
+
+    let bytes = source.as_bytes();
+    let mut decoded = Vec::with_capacity(source.len());
+    let mut cursor = 1usize;
+    while cursor < bytes.len() {
+        check_periodically(cancelled, cursor)?;
+        let byte = bytes[cursor];
+        if byte == delimiter {
+            let value = String::from_utf8_lossy(&decoded).into_owned();
+            return Ok(Some((value, cursor + 1)));
+        }
+        if byte == b'\n' {
+            return Ok(None);
+        }
+        if byte != b'\\' {
+            let character = source[cursor..]
+                .chars()
+                .next()
+                .expect("cursor remains on a UTF-8 boundary");
+            let width = character.len_utf8();
+            decoded.extend_from_slice(&bytes[cursor..cursor + width]);
+            cursor += width;
+            continue;
+        }
+
+        cursor += 1;
+        let Some(escape) = bytes.get(cursor).copied() else {
+            return Ok(None);
+        };
+        cursor += 1;
+        match escape {
+            b'a' => decoded.push(0x07),
+            b'b' => decoded.push(0x08),
+            b'f' => decoded.push(0x0c),
+            b'n' => decoded.push(b'\n'),
+            b'r' => decoded.push(b'\r'),
+            b't' => decoded.push(b'\t'),
+            b'v' => decoded.push(0x0b),
+            b'\\' => decoded.push(b'\\'),
+            b'\'' | b'"' if escape == delimiter => decoded.push(escape),
+            b'x' => {
+                let Some(value) = decode_logfmt_digits(bytes, &mut cursor, 2, 16) else {
+                    return Ok(None);
+                };
+                decoded.push(value as u8);
+            }
+            b'u' => {
+                let Some(value) = decode_logfmt_digits(bytes, &mut cursor, 4, 16) else {
+                    return Ok(None);
+                };
+                let Some(character) = char::from_u32(value) else {
+                    return Ok(None);
+                };
+                let mut encoded = [0_u8; 4];
+                decoded.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            }
+            b'U' => {
+                let Some(value) = decode_logfmt_digits(bytes, &mut cursor, 8, 16) else {
+                    return Ok(None);
+                };
+                let Some(character) = char::from_u32(value) else {
+                    return Ok(None);
+                };
+                let mut encoded = [0_u8; 4];
+                decoded.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            }
+            b'0'..=b'7' => {
+                cursor -= 1;
+                let Some(value) = decode_logfmt_digits(bytes, &mut cursor, 3, 8) else {
+                    return Ok(None);
+                };
+                if value > u8::MAX as u32 {
+                    return Ok(None);
+                }
+                decoded.push(value as u8);
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+fn decode_logfmt_digits(
+    bytes: &[u8],
+    cursor: &mut usize,
+    count: usize,
+    radix: u32,
+) -> Option<u32> {
+    let end = cursor.checked_add(count)?;
+    let digits = bytes.get(*cursor..end)?;
+    let mut value = 0_u32;
+    for byte in digits {
+        let digit = char::from(*byte).to_digit(radix)?;
+        value = value.checked_mul(radix)?.checked_add(digit)?;
+    }
+    *cursor = end;
+    Some(value)
 }
 
 fn unpack_json_fields(
@@ -10809,6 +11260,182 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             pack_logfmt_fields(vec![row], &all, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn unpack_logfmt_is_exact_rich_and_bounded() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::UnpackLogfmt(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected unpack_logfmt plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 500,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "source": r#"foo=bar quoted="x y=z" empty= lone duplicate=first duplicate=second nested.keep=yes escaped="line\nnext\t\u263a" single='a\tb' raw=`a\tb` source=replaced"#,
+            "foo":"original",
+            "empty":"original-empty",
+            "duplicate":"original-duplicate",
+            "nested":{"sibling":"retained"},
+            "result":["native"]
+        });
+
+        let selected = parse_spec(
+            "* | unpack_logfmt from source fields (foo, quoted, empty, lone, duplicate, nested.*, escaped, single, raw, source, missing)",
+        );
+        let selected_rows = unpack_logfmt_fields(
+            vec![row.clone()],
+            &selected,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(selected_rows[0]["foo"], "bar");
+        assert_eq!(selected_rows[0]["quoted"], "x y=z");
+        assert_eq!(selected_rows[0]["empty"], "");
+        assert_eq!(selected_rows[0]["lone"], "");
+        assert_eq!(selected_rows[0]["duplicate"], "second");
+        assert_eq!(
+            selected_rows[0]["nested"],
+            json!({"sibling":"retained", "keep":"yes"})
+        );
+        assert_eq!(selected_rows[0]["escaped"], "line\nnext\t☺");
+        assert_eq!(selected_rows[0]["single"], "a\tb");
+        assert_eq!(selected_rows[0]["raw"], r"a\tb");
+        assert_eq!(selected_rows[0]["source"], "replaced");
+        assert_eq!(selected_rows[0]["missing"], "");
+        assert_eq!(selected_rows[0]["result"], row["result"]);
+
+        let prefixed = parse_spec(
+            r#"* | unpack_logfmt from source fields (foo, missing, "nested."*) result_prefix decoded."#,
+        );
+        let prefixed_rows = unpack_logfmt_fields(
+            vec![row.clone()],
+            &prefixed,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            prefixed_rows[0]["decoded"],
+            json!({"foo":"bar", "missing":"", "nested":{"keep":"yes"}})
+        );
+
+        let keep = parse_spec("* | unpack_logfmt from source keep_original_fields");
+        let kept = unpack_logfmt_fields(
+            vec![row.clone()],
+            &keep,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(kept[0]["foo"], "original");
+        assert_eq!(kept[0]["empty"], "original-empty");
+        assert_eq!(kept[0]["duplicate"], "original-duplicate");
+        assert_eq!(kept[0]["nested"]["keep"], "yes");
+
+        let skip = parse_spec("* | unpack_logfmt from source skip_empty_results");
+        let skipped = unpack_logfmt_fields(
+            vec![row.clone()],
+            &skip,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(skipped[0]["foo"], "bar");
+        assert_eq!(skipped[0]["empty"], "original-empty");
+        assert!(skipped[0].get("lone").is_none());
+
+        let malformed = parse_spec("* | unpack_logfmt from source");
+        let malformed_rows = unpack_logfmt_fields(
+            vec![json!({"source":r#"first="unterminated second=parsed"#})],
+            &malformed,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(malformed_rows[0]["first"], "\"unterminated");
+        assert_eq!(malformed_rows[0]["second"], "parsed");
+
+        let missing = parse_spec("* | unpack_logfmt from absent fields (wanted)");
+        let missing_rows = unpack_logfmt_fields(
+            vec![json!({"case":"missing"})],
+            &missing,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(missing_rows[0]["wanted"], "");
+
+        let work_error = unpack_logfmt_fields(
+            vec![row.clone()],
+            &selected,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL unpack_logfmt"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = unpack_logfmt_fields(
+            vec![row.clone()],
+            &selected,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL unpack_logfmt"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | unpack_logfmt from source");
+        let conflict_error = unpack_logfmt_fields(
+            vec![json!({"source":"nested.value=changed", "nested":"scalar"})],
+            &conflict,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL unpack_logfmt destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            unpack_logfmt_fields(
+                vec![row],
+                &selected,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

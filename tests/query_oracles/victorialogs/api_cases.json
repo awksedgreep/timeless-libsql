@@ -154,7 +154,8 @@
     {"case": "common-title-upper", "_msg": "common title upper", "common_group": "common", "common_value": "ǄX"},
     {"case": "common-title-lower", "_msg": "common title lower", "common_group": "common", "common_value": "ǆx"},
     {"case": "common-star", "_msg": "common star", "common_group": "common", "common_value": "*"},
-    {"case": "common-comma", "_msg": "common comma", "common_group": "common", "common_value": "Error,Retry"}
+    {"case": "common-comma", "_msg": "common comma", "common_group": "common", "common_value": "Error,Retry"},
+    {"case": "unpack-logfmt-row", "_msg": "default=yes quoted=\"message value\"", "unpack_logfmt_group": "unpack-logfmt", "kind": "admin", "source": "foo=bar quoted=\"x y=z\" empty= lone duplicate=first duplicate=second nested.value=7 escaped=\"line\\nnext\\t\\u263a\" single='a\\tb' raw=`a\\tb` source=replaced", "malformed_source": "malformed=\"unterminated next=still-parsed", "foo": "original", "empty": "original-empty", "duplicate": "original-duplicate", "nested.value": "original-flat", "result": "original"}
   ],
   "query_cases": [
     {
@@ -1268,6 +1269,7 @@
         "common-invalid-mixed", "common-boundary", "common-attached", "common-punctuation",
         "common-dot-original", "common-dot-lower", "common-dot-upper", "common-dot-decomposed",
         "common-title-original", "common-title-upper", "common-title-lower", "common-star", "common-comma",
+        "unpack-logfmt-row",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
         "word-unicode-boundary", "word-unicode", "word-unicode-case"
@@ -2636,7 +2638,7 @@
     {
       "id": "LQL-P12-query-stats-full-fixture-cardinality",
       "query": "* | query_stats | keep RowsFound",
-      "expected_rows": [{"RowsFound": "154"}]
+      "expected_rows": [{"RowsFound": "155"}]
     },
     {
       "id": "LQL-P12-query-stats-composes-after-limit",
@@ -4465,6 +4467,71 @@
       "id": "LQL-P36-unpack-json-accepts-nonstandard-nan-as-text",
       "query": "case:=format-row | format '{\"special\":NaN}' as source | unpack_json from source | fields case, special",
       "expected_rows": [{"case": "format-row", "special": "NaN"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-defaults-to-message",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt | fields case, default, quoted",
+      "expected_rows": [{"case": "unpack-logfmt-row", "default": "yes", "quoted": "message value"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-decodes-values-and-last-duplicate-wins",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from source | fields case, foo, quoted, empty, lone, duplicate, nested.value, escaped, single, raw",
+      "expected_rows": [{"case": "unpack-logfmt-row", "foo": "bar", "quoted": "x y=z", "duplicate": "second", "nested.value": "7", "escaped": "line\nnext\t☺", "single": "a\tb", "raw": "a\\tb"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-selects-prefix-and-prefixes-results",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from source fields (foo, missing, nested*) result_prefix decoded_ | fields case, decoded_foo, decoded_missing, decoded_nested.value",
+      "expected_rows": [{"case": "unpack-logfmt-row", "decoded_foo": "bar", "decoded_nested.value": "7"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-synthesizes-selected-missing-empty",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from source fields (missing) result_prefix decoded_ | stats count_empty(decoded_missing) as empty",
+      "expected_rows": [{"empty": "1"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-keep-original-preserves-nonempty-values",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from source keep_original_fields | fields case, foo, empty, duplicate, nested.value, quoted",
+      "expected_rows": [{"case": "unpack-logfmt-row", "foo": "original", "empty": "original-empty", "duplicate": "original-duplicate", "nested.value": "original-flat", "quoted": "x y=z"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-skip-empty-preserves-existing-values",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from source skip_empty_results | fields case, foo, empty, lone, duplicate",
+      "expected_rows": [{"case": "unpack-logfmt-row", "foo": "bar", "empty": "original-empty", "duplicate": "second"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-condition-matches-current-row",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt if (kind:=admin) from source fields (foo) result_prefix decoded_ | fields case, decoded_foo",
+      "expected_rows": [{"case": "unpack-logfmt-row", "decoded_foo": "bar"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-condition-miss-is-noop",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt if (kind:=user) from source fields (foo) result_prefix decoded_ | fields case, decoded_foo",
+      "expected_rows": [{"case": "unpack-logfmt-row"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-malformed-quote-falls-back-to-unquoted",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from malformed_source | fields case, malformed, next",
+      "expected_rows": [{"case": "unpack-logfmt-row", "malformed": "\"unterminated", "next": "still-parsed"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-snapshots-source-before-overwrite",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from source fields (source, foo) | fields case, source, foo",
+      "expected_rows": [{"case": "unpack-logfmt-row", "source": "replaced", "foo": "bar"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-empty-fields-list-and-keywords-are-case-insensitive",
+      "query": "case:=unpack-logfmt-row | UnPaCk_LoGfMt FrOm source FiElDs () ReSuLt_PrEfIx decoded_ | fields case, decoded_foo, decoded_duplicate",
+      "expected_rows": [{"case": "unpack-logfmt-row", "decoded_foo": "bar", "decoded_duplicate": "second"}]
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-missing-source-synthesizes-requested-empty",
+      "query": "case:=unpack-logfmt-row | unpack_logfmt from absent fields (wanted) | stats count_empty(wanted) as empty",
+      "expected_rows": [{"empty": "1"}]
+    },
+    {
+      "id": "LQL-P37-pack-unpack-logfmt-round-trip-preserves-textual-paths",
+      "query": "case:=unpack-logfmt-row | fields case, foo, nested.value | pack_logfmt fields (foo, nested.value) as packed | unpack_logfmt from packed result_prefix decoded. | fields case, packed, decoded.foo, decoded.nested.value",
+      "expected_rows": [{"case": "unpack-logfmt-row", "packed": "foo=original nested.value=original-flat", "decoded.foo": "original", "decoded.nested.value": "original-flat"}]
     },
     {
       "id": "LQL-P41-json-array-len-counts-string-elements",
@@ -6837,6 +6904,76 @@
     {
       "id": "LQL-P36-unpack-json-rejects-both-preservation-modifiers",
       "query": "* | unpack_json keep_original_fields skip_empty_results",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-condition-requires-parentheses",
+      "query": "* | unpack_logfmt if",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-requires-source-after-from",
+      "query": "* | unpack_logfmt from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-rejects-wildcard-source",
+      "query": "* | unpack_logfmt from *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-rejects-prefix-source",
+      "query": "* | unpack_logfmt from source*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-fields-requires-parentheses",
+      "query": "* | unpack_logfmt fields source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-fields-require-commas",
+      "query": "* | unpack_logfmt fields (foo bar)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-result-prefix-requires-value",
+      "query": "* | unpack_logfmt result_prefix",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-rejects-trailing-token",
+      "query": "* | unpack_logfmt from source trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-rejects-both-preservation-modifiers",
+      "query": "* | unpack_logfmt keep_original_fields skip_empty_results",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P37-unpack-logfmt-rejects-attached-suffix",
+      "query": "* | unpack_logfmt.extra",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

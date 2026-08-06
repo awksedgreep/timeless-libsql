@@ -2676,6 +2676,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "unpack_logfmt_narrow",
+                "logs-unpack-logfmt-narrow",
+                r#"host:="h00" AND query | fields range_key | pack_logfmt fields (range_key) as packed | unpack_logfmt from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_logfmt_wide",
+                "logs-unpack-logfmt-wide",
+                r#"query | fields range_key | pack_logfmt fields (range_key) as packed | unpack_logfmt from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_logfmt_control_narrow",
+                "logs-unpack-logfmt-control-narrow",
+                r#"host:="h00" AND query | fields range_key | pack_logfmt fields (range_key) as packed | copy range_key as decoded_range_key | limit 64 | fields decoded_range_key"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_logfmt_control_wide",
+                "logs-unpack-logfmt-control-wide",
+                r#"query | fields range_key | pack_logfmt fields (range_key) as packed | copy range_key as decoded_range_key | limit 64 | fields decoded_range_key"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3209,6 +3237,16 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             &queries,
             "pack_logfmt_control_wide",
             "pack_logfmt_wide",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "unpack_logfmt_control_narrow",
+            "unpack_logfmt_narrow",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "unpack_logfmt_control_wide",
+            "unpack_logfmt_wide",
         )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;

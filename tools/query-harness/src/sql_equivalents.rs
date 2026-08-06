@@ -387,6 +387,16 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "logfmt_path_3" => Value::Text("$.nested.array_text".to_owned()),
         "logfmt_name_4" => Value::Text("tags".to_owned()),
         "logfmt_path_4" => Value::Text("$.tags".to_owned()),
+        "logfmt_source_override" => {
+            Value::Text("host=web-1 status=200 empty= status=500".to_owned())
+        }
+        "logfmt_source_path" => Value::Text("$.logfmt".to_owned()),
+        "unpack_logfmt_name_1" => Value::Text("host".to_owned()),
+        "unpack_logfmt_name_2" => Value::Text("status".to_owned()),
+        "unpack_logfmt_name_3" => Value::Text("empty".to_owned()),
+        "unpack_logfmt_name_4" => Value::Text("missing".to_owned()),
+        "max_source_bytes" => Value::Integer(4_096),
+        "max_tokens_per_row" => Value::Integer(256),
         "source_path_1" => Value::Text("$.nested.empty".to_owned()),
         "source_path_2" => Value::Text("$.host".to_owned()),
         "source_path_3" => Value::Text("$.service".to_owned()),
@@ -1745,6 +1755,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let decolorize_rows = recipe_values("SQL-LOG-050", 0)?;
     let split_rows = recipe_values("SQL-LOG-051", 0)?;
     let pack_logfmt_rows = recipe_values("SQL-LOG-052", 0)?;
+    let unpack_logfmt_rows = recipe_values("SQL-LOG-053", 0)?;
     if [
         bounded,
         substring,
@@ -1848,6 +1859,26 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-052 pack_logfmt rows changed: {pack_logfmt_rows:?}");
+    }
+    if unpack_logfmt_rows
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text("web-1".to_owned()),
+                Value::Text("500".to_owned()),
+                Value::Text(String::new()),
+                Value::Text(String::new()),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text("web-1".to_owned()),
+                Value::Text("500".to_owned()),
+                Value::Text(String::new()),
+                Value::Text(String::new()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-053 unpack_logfmt rows changed: {unpack_logfmt_rows:?}");
     }
     let split_sql = recipe_sql("SQL-LOG-051", 0)?;
     for (source, separator, expected) in [
@@ -3988,13 +4019,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 118);
+        assert_eq!(recipes.len(), 119);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            150
+            151
         );
         assert_eq!(
             recipes
@@ -4002,7 +4033,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            156
+            157
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

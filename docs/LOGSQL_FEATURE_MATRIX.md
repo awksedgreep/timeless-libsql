@@ -140,7 +140,7 @@ extension.
 | `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P37` | `unpack_logfmt` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
@@ -757,6 +757,43 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 `unpack_json` p99 is retained honestly at 65.292 ms. `QSF-189` accepts the
 bounded rich parse/select/write cost above the unchanged public storage
 boundary.
+
+`LQL-P37` parses one exact current-row field as logfmt and writes decoded
+string values back into that request-owned row. The Rust logs API accepts
+case-insensitive `unpack_logfmt`, optional `if (...)`, default `_msg`, optional
+bare or `from` source fields, exact/prefix/all `fields (...)`, arbitrary
+`result_prefix`, and one terminal `keep_original_fields` or
+`skip_empty_results` modifier. The source is snapshotted before writes;
+omitted or empty `fields (...)` selects all parsed names; unmatched prefixes
+add nothing; and every missing exact selection becomes an empty string.
+
+Unquoted values end at ASCII space. Double- and single-quoted values use the
+pinned Go escape forms, including control, octal, `\x`, `\u`, and `\U`
+escapes; backtick values are raw and discard carriage returns. A malformed or
+unterminated quoted prefix falls back to unquoted parsing, lone names become
+empty values, and repeated names are last-wins. All decoded values are
+strings. Timeless reconstructs dotted names and prefixes into retained nested
+metadata while preserving unrelated siblings; names with empty path segments
+remain literal keys. This is the explicit richer-model policy over
+VictoriaLogs' flattened textual columns.
+
+Default writes replace scalar destinations, `keep_original_fields` retains
+existing nonempty values, and `skip_empty_results` suppresses empty decoded
+values. Writes cannot replace retained objects or descend through scalar
+parents. Parsing, names, decoded bytes, paths, temporary state, work, results,
+response bytes, deadlines, and cancellation are bounded. Request-local
+mutation never changes durable source rows through optimize, shutdown, or
+reopen. The complete 1,134-case pinned oracle establishes grammar, quote and
+escape decoding, malformed fallback, selection, snapshots, duplicates,
+conditions, prefixes, preservation, and error behavior.
+
+Public
+[`SQL-LOG-053`](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)
+uses only bounded `logs` rows and a recursive CTE for a fixed set of keys in
+well-formed unquoted logfmt. Complete quoting/escaping, dynamic selection,
+current-row mutation, rich nesting, limits, cancellation, and HTTP envelopes
+remain Rust API composition over the same public rows. No extension primitive,
+private table, durable mutation, or storage-contract change is required.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare

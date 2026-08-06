@@ -3063,6 +3063,13 @@ fn is_unpack_json_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "unpack_json")
 }
 
+fn is_unpack_logfmt_pipe(segment: &str) -> bool {
+    let operation = "unpack_logfmt";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -3306,13 +3313,65 @@ fn parse_unpack_json_pipe(
     segment: &str,
     context: &mut ParseContext,
 ) -> Result<PipelineOp, LogsqlError> {
-    let operation = "unpack_json";
+    let parsed = parse_unpack_pipe(segment, context, "unpack_json", true)?;
+    Ok(PipelineOp::UnpackJson(UnpackJsonSpec {
+        source: parsed.source,
+        fields: parsed.fields,
+        preserve_keys: parsed.preserve_keys,
+        result_prefix: parsed.result_prefix,
+        keep_original_fields: parsed.keep_original_fields,
+        skip_empty_results: parsed.skip_empty_results,
+        condition: parsed.condition,
+    }))
+}
+
+fn parse_unpack_logfmt_pipe(
+    segment: &str,
+    context: &mut ParseContext,
+) -> Result<PipelineOp, LogsqlError> {
+    let parsed = parse_unpack_pipe(segment, context, "unpack_logfmt", false)?;
+    debug_assert!(parsed.preserve_keys.is_empty());
+    Ok(PipelineOp::UnpackLogfmt(UnpackLogfmtSpec {
+        source: parsed.source,
+        fields: parsed.fields,
+        result_prefix: parsed.result_prefix,
+        keep_original_fields: parsed.keep_original_fields,
+        skip_empty_results: parsed.skip_empty_results,
+        condition: parsed.condition,
+    }))
+}
+
+struct ParsedUnpackSpec {
+    source: PipelineField,
+    fields: Vec<PipelineField>,
+    preserve_keys: Vec<PipelineField>,
+    result_prefix: String,
+    keep_original_fields: bool,
+    skip_empty_results: bool,
+    condition: Option<LogPredicate>,
+}
+
+fn parse_unpack_pipe(
+    segment: &str,
+    context: &mut ParseContext,
+    operation: &str,
+    allow_preserve_keys: bool,
+) -> Result<ParsedUnpackSpec, LogsqlError> {
     let command = segment
         .get(..operation.len())
-        .ok_or_else(|| LogsqlError::malformed("LogsQL unpack_json pipe is empty"))?;
+        .ok_or_else(|| LogsqlError::malformed(format!("LogsQL {operation} pipe is empty")))?;
     if !command.eq_ignore_ascii_case(operation) {
         return Err(LogsqlError::malformed(format!(
-            "expected LogsQL unpack_json pipe, not {command:?}"
+            "expected LogsQL {operation} pipe, not {command:?}"
+        )));
+    }
+    if segment[operation.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected text attached to LogsQL {operation} pipe"
         )));
     }
     let mut rest = segment[operation.len()..].trim_start();
@@ -3337,13 +3396,13 @@ fn parse_unpack_json_pipe(
     let source_is_implicit = tokens.get(cursor).is_none_or(|token| {
         [
             "fields",
-            "preserve_keys",
             "result_prefix",
             "keep_original_fields",
             "skip_empty_results",
         ]
         .iter()
         .any(|keyword| token.eq_ignore_ascii_case(keyword))
+            || (allow_preserve_keys && token.eq_ignore_ascii_case("preserve_keys"))
     });
     if !source_is_implicit {
         if tokens
@@ -3353,13 +3412,15 @@ fn parse_unpack_json_pipe(
             cursor += 1;
         }
         let token = tokens.get(cursor).ok_or_else(|| {
-            LogsqlError::malformed("LogsQL unpack_json from requires an exact source field")
+            LogsqlError::malformed(format!(
+                "LogsQL {operation} from requires an exact source field"
+            ))
         })?;
         source = match parse_delete_field(token)? {
             field @ PipelineField::Exact { .. } => field,
             PipelineField::Prefix { .. } | PipelineField::All => {
                 return Err(LogsqlError::malformed(
-                    "LogsQL unpack_json source must be an exact field",
+                    format!("LogsQL {operation} source must be an exact field"),
                 ));
             }
         };
@@ -3372,7 +3433,7 @@ fn parse_unpack_json_pipe(
         .is_some_and(|token| token.eq_ignore_ascii_case("fields"))
     {
         cursor += 1;
-        fields = parse_unpack_json_field_list(&tokens, &mut cursor, "fields", true)?;
+        fields = parse_unpack_field_list(&tokens, &mut cursor, operation, "fields", true)?;
         if fields
             .iter()
             .any(|field| matches!(field, PipelineField::All))
@@ -3382,12 +3443,14 @@ fn parse_unpack_json_pipe(
     }
 
     let mut preserve_keys = Vec::new();
-    if tokens
-        .get(cursor)
-        .is_some_and(|token| token.eq_ignore_ascii_case("preserve_keys"))
+    if allow_preserve_keys
+        && tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("preserve_keys"))
     {
         cursor += 1;
-        preserve_keys = parse_unpack_json_field_list(&tokens, &mut cursor, "preserve_keys", false)?;
+        preserve_keys =
+            parse_unpack_field_list(&tokens, &mut cursor, operation, "preserve_keys", false)?;
     }
 
     let mut result_prefix = String::new();
@@ -3397,12 +3460,14 @@ fn parse_unpack_json_pipe(
     {
         cursor += 1;
         let token = tokens.get(cursor).ok_or_else(|| {
-            LogsqlError::malformed("LogsQL unpack_json result_prefix requires a prefix")
+            LogsqlError::malformed(format!(
+                "LogsQL {operation} result_prefix requires a prefix"
+            ))
         })?;
         if matches!(token.as_str(), "(" | ")" | ",") {
-            return Err(LogsqlError::malformed(
-                "LogsQL unpack_json result_prefix requires a prefix",
-            ));
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {operation} result_prefix requires a prefix"
+            )));
         }
         result_prefix = quoted_value(token)?.unwrap_or_else(|| token.clone());
         cursor += 1;
@@ -3421,11 +3486,11 @@ fn parse_unpack_json_pipe(
     }
     if let Some(token) = tokens.get(cursor) {
         return Err(LogsqlError::malformed(format!(
-            "unexpected LogsQL unpack_json token {token:?}"
+            "unexpected LogsQL {operation} token {token:?}"
         )));
     }
 
-    Ok(PipelineOp::UnpackJson(UnpackJsonSpec {
+    Ok(ParsedUnpackSpec {
         source,
         fields,
         preserve_keys,
@@ -3433,18 +3498,19 @@ fn parse_unpack_json_pipe(
         keep_original_fields,
         skip_empty_results,
         condition,
-    }))
+    })
 }
 
-fn parse_unpack_json_field_list(
+fn parse_unpack_field_list(
     tokens: &[String],
     cursor: &mut usize,
+    operation: &str,
     clause: &str,
     allow_wildcards: bool,
 ) -> Result<Vec<PipelineField>, LogsqlError> {
     if tokens.get(*cursor).is_none_or(|token| token != "(") {
         return Err(LogsqlError::malformed(format!(
-            "LogsQL unpack_json {clause} requires parenthesized fields"
+            "LogsQL {operation} {clause} requires parenthesized fields"
         )));
     }
     *cursor += 1;
@@ -3461,15 +3527,15 @@ fn parse_unpack_json_field_list(
             }
             Some(",") | None => {
                 return Err(LogsqlError::malformed(format!(
-                    "LogsQL unpack_json {clause} requires a field after each comma"
+                    "LogsQL {operation} {clause} requires a field after each comma"
                 )));
             }
             Some(token) => {
                 let field = parse_delete_field(token)?;
                 if !allow_wildcards && !matches!(field, PipelineField::Exact { .. }) {
-                    return Err(LogsqlError::malformed(
-                        "LogsQL unpack_json preserve_keys requires exact fields",
-                    ));
+                    return Err(LogsqlError::malformed(format!(
+                        "LogsQL {operation} preserve_keys requires exact fields"
+                    )));
                 }
                 fields.push(field);
                 *cursor += 1;
@@ -3487,12 +3553,12 @@ fn parse_unpack_json_field_list(
                     }
                     Some(token) => {
                         return Err(LogsqlError::malformed(format!(
-                            "LogsQL unpack_json {clause} requires commas, not {token:?}"
+                            "LogsQL {operation} {clause} requires commas, not {token:?}"
                         )));
                     }
                     None => {
                         return Err(LogsqlError::malformed(format!(
-                            "unterminated LogsQL unpack_json {clause} list"
+                            "unterminated LogsQL {operation} {clause} list"
                         )));
                     }
                 }
@@ -4133,6 +4199,16 @@ pub(crate) struct UnpackJsonSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct UnpackLogfmtSpec {
+    pub source: PipelineField,
+    pub fields: Vec<PipelineField>,
+    pub result_prefix: String,
+    pub keep_original_fields: bool,
+    pub skip_empty_results: bool,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -4178,6 +4254,7 @@ pub(crate) enum PipelineOp {
     PackJson(PackJsonSpec),
     PackLogfmt(PackLogfmtSpec),
     UnpackJson(UnpackJsonSpec),
+    UnpackLogfmt(UnpackLogfmtSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4633,6 +4710,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_unpack_json_pipe(segment) => {
                 pipeline.push(parse_unpack_json_pipe(segment, context)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_unpack_logfmt_pipe(segment) => {
+                pipeline.push(parse_unpack_logfmt_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_extract_pipe(segment) => {
@@ -10834,6 +10915,38 @@ mod tests {
             "* | unpack_json result_prefix",
             "* | unpack_json result_prefix decoded trailing",
             "* | unpack_json keep_original_fields skip_empty_results",
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_unpack_logfmt_grammar_is_complete_and_strict() {
+        for query in [
+            "* | unpack_logfmt",
+            "* | unpack_logfmt source",
+            "* | unpack_logfmt from source fields (case, nested.*, missing)",
+            r#"* | UnPaCk_LoGfMt if (kind:=admin) FrOm "source field" FiElDs (nested.*, value) ReSuLt_PrEfIx "decoded." KeEp_OrIgInAl_FiElDs"#,
+            "* | unpack_logfmt fields () skip_empty_results",
+            "* | unpack_logfmt fields (case,)",
+        ] {
+            parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+
+        for query in [
+            "* | unpack_logfmt if",
+            "* | unpack_logfmt if (case:=x) from",
+            "* | unpack_logfmt from *",
+            "* | unpack_logfmt from source trailing",
+            "* | unpack_logfmt fields",
+            "* | unpack_logfmt fields source",
+            "* | unpack_logfmt fields (case missing)",
+            "* | unpack_logfmt result_prefix",
+            "* | unpack_logfmt result_prefix decoded trailing",
+            "* | unpack_logfmt keep_original_fields skip_empty_results",
+            "* | unpack_logfmt.extra",
         ] {
             let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
