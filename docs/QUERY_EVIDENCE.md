@@ -4331,6 +4331,56 @@ transactions, migrations, and public batch/SQL contracts are unchanged. No
 private shadow table, Elixir/BEAM/NIF/process fallback, workflow invocation,
 tag, release, or downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded literal split
+
+The checked-in
+[`2026-08-06_session18_lql_p31_split.json`](evidence/2026-08-06_session18_lql_p31_split.json)
+was captured from exact release extension and server build
+`e80b1afb9d7f0cfc559f2db0338575f1f8caa4e1` and has SHA-256
+`20157693726cd77f47bb272c0c7204273163dfba5d4e46435bf0cec33761ed46`.
+The candidate splits `range_key` on `-` into compact JSON-array text. The
+control extracts the same suffix and formats byte-identical JSON-array text.
+Both return identical rows and perform identical public storage and wire
+work; measured differences are therefore row-local API composition and
+whole-run variation after the unavoidable public scan.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| literal split, indexed host | 64 | 1,984 | 3.219 | 3.481 | 4.063 | 1 | 1,024 | 235,778 | 128 |
+| literal split, full fixture | 64 | 1,984 | 37.529 | 38.655 | 40.113 | 4 | 8,192 | 1,914,055 | 8,192 |
+| identical-output extract/format control, indexed host | 64 | 1,984 | 3.078 | 4.786 | 4.878 | 1 | 1,024 | 235,778 | 128 |
+| identical-output extract/format control, full fixture | 64 | 1,984 | 37.964 | 40.047 | 40.151 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Split p95 is 27.3%/3.5% lower than its narrow/wide control. Its
+request-attributed API timer averages 2.813/36.053 ms versus 2.729/36.562 ms,
+or 3.1% higher/1.4% lower. Every equal-width pair executes 50 public queries
+and performs identical candidate-block selection, entry decode, payload read,
+row match, row return, result cardinality, and response-byte work. The larger
+narrow control tail is retained honestly; the opposing API-mean direction
+precludes a split speedup claim. Bounded literal scanning, JSON escaping, and
+current-row assignment happen after unchanged storage work. Executable
+`SQL-LOG-051` remains the direct SQLite/libSQL foundation, and no extension
+primitive is justified.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+12.792 ms and the explicit durability barrier took 38.656 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 99,288 KiB and metrics HWM was
+51,468 KiB across the complete enlarged workload. Cancellation ended with
+zero requests in flight; direct evaluator, direct SQL, and HTTP regressions
+pin grammar, literal/Unicode/empty/escape behavior, rich-value fidelity,
+work/state/result/response bounds, cancellation, optimize, flush, shutdown,
+durability, and reopen.
+
+All 1,091 pinned VictoriaLogs cases pass live. The complete local extension,
+real-extension logs, server workspace, Rust query harness, documentation,
+oracle, 117-recipe/155-statement SQL cookbook, formatting, Clippy,
+CLI/crash/transaction, and dbhealth gates pass. The authoritative 8,192-entry
+batching, storage formats, compression, indexes, retention, optimize,
+transactions, migrations, and public batch/SQL contracts are unchanged. No
+private shadow table, Elixir/BEAM/NIF/process fallback, workflow invocation,
+tag, release, or downstream repository was used or modified.
+
 ## Session 17 LogsQL P2: `quantile` and `stddev`
 
 The checked-in

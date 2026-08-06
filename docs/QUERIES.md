@@ -1283,6 +1283,15 @@ VictoriaLogs wire text plus LogsQL grammar, rich current-row mutation,
 limits, cancellation, and envelopes. Since every source row already crossed
 the public storage surface, an extension split primitive would not avoid a
 block read, decode, allocation, payload transfer, or row crossing.
+`QSF-215` records the exact pinned semantic and ownership boundary.
+`QSF-216` measures 3.219/3.481/4.063 ms narrow and
+37.529/38.655/40.113 ms wide p50/p95/p99, versus
+3.078/4.786/4.878 and 37.964/40.047/40.151 ms for identical-output controls.
+Every pair has the same 64 rows, 1,984 response bytes, candidate blocks,
+decoded entries, extension payload bytes, and public rows. Split p95 is
+27.3%/3.5% lower; request-attributed API means are 3.1% higher/1.4% lower.
+These are accepted bounded run/API differences after the unchanged public
+scan, not evidence for a split-specific extension primitive.
 
 ## LogsQL `drop_empty_fields` over current rows
 

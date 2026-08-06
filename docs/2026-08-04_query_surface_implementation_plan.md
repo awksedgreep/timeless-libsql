@@ -1041,6 +1041,30 @@ The full 1,069-case oracle, executable SQL, documentation contracts,
 real-extension/API suites, formatting, lint, crash/transaction, and lifecycle
 gates pass.
 
+Session 18's `LQL-P31` row is closed as an API-owned `split` pipe over the
+public logs surface. Pinned VictoriaLogs source and the complete 1,091-case
+live oracle establish default `_msg`, optional `from`/`as` and shorthand,
+strict exact-field grammar, literal non-overlapping separators, preserved
+empty pieces, Unicode-scalar empty-separator behavior, flattened textual
+projection, exact JSON-array-string escaping, nested destinations, and
+sequential composition. The bounded Rust evaluator changes no durable storage
+or extension contract. Executable `SQL-LOG-051` gives direct SQLite/libSQL
+users a recursive-CTE/JSON1 foundation over bounded public rows. Focused
+parser, evaluator, and real-extension ingest/flush/optimize/shutdown/reopen
+regressions pass.
+
+Exact-build commit `e80b1afb9d7f0cfc559f2db0338575f1f8caa4e1` measures
+3.219/3.481/4.063 ms narrow and 37.529/38.655/40.113 ms wide p50/p95/p99.
+Identical-output controls measure 3.078/4.786/4.878 and
+37.964/40.047/40.151 ms. Every pair returns the same 64 rows and 1,984 bytes
+while reading the same one/four candidate blocks, decoding 1,024/8,192
+entries, and transferring 235,778/1,914,055 extension payload bytes per query.
+`QSF-216` retains the 27.3%/3.5% lower p95 alongside +3.1%/-1.4%
+request-attributed means as bounded whole-run/API variation, not storage
+pushdown. The full 1,091-case oracle, executable SQL, documentation contracts,
+real-extension/API suites, formatting, lint, crash/transaction, and lifecycle
+gates pass.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

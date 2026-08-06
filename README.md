@@ -877,6 +877,12 @@ exact VictoriaLogs JSON escaping, current-row composition, resource limits,
 cancellation, and envelopes. The same public rows have already crossed the
 storage boundary, so no split-specific extension primitive or private-table
 path is added.
+Exact-build p50/p95/p99 is 3.219/3.481/4.063 ms narrow and
+37.529/38.655/40.113 ms wide, versus 3.078/4.786/4.878 and
+37.964/40.047/40.151 ms for identical-output, same-public-work controls.
+`QSF-216` records the 27.3%/3.5% lower p95 alongside the more stable +3.1%/
+-1.4% request-attributed mean differences as bounded whole-run/API variation,
+not storage pushdown.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,
