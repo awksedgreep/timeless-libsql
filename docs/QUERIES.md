@@ -1569,6 +1569,21 @@ or the API's retained rich policy, so those remain bounded Rust composition.
 The required public scan already materializes every candidate row; no private
 table or language-specific extension primitive is involved.
 
+Exact release build `9a0303ff2f9820fb5a20da3686c30fdb33595d7c`
+measures `any` at 3.077/3.293/3.597 ms narrow and 32.767/33.764/36.128 ms
+wide p50/p95/p99. Equal-output `min` controls measure 3.085/4.476/8.065 and
+34.858/37.518/38.095 ms, making `any` p95 26.4%/10.0% lower. Companion
+`field_min` plus `field_max` measure 3.182/3.306/3.849 and
+34.004/36.738/42.084 ms versus 3.356/3.704/4.390 and
+37.000/38.270/38.988 ms for equal-output numeric extrema controls, or
+10.7%/4.0% lower p95. All pairs read the same one/four blocks, decode the same
+1,024/8,192 entries, transfer the same 235,778/1,914,055 extension bytes, and
+materialize the same 128/8,192 public rows. The 42.084 ms wide extrema p99 is
+retained honestly. The checked evidence artifact is
+[`2026-08-06_session17_lql_s10_any_field_extrema.json`](evidence/2026-08-06_session17_lql_s10_any_field_extrema.json)
+with SHA-256
+`711d80e590550a2e4655103a60b7ec3da0c9fda84fb2f9dcdd1500428c674d2f`.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

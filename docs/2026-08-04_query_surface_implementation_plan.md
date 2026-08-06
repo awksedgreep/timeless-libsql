@@ -906,9 +906,14 @@ Five exact statistics cases and six errors pass the complete 928-case pinned
 VictoriaLogs oracle. The upstream `any` result is physically arbitrary, so
 the oracle pins selection only for a single candidate and Timeless documents
 its deterministic strengthening. Executable `SQL-LOG-046` gives direct users
-deterministic exact-path and finite-number foundations. Exact-build benchmark,
-HWM, storage, and final row disposition remain the exit work before Session 17
-may continue to `LQL-S11`.
+deterministic exact-path and finite-number foundations. Exact-build commit
+`9a0303ff2f9820fb5a20da3686c30fdb33595d7c` measures 3.293/33.764 ms
+narrow/wide `any` p95 versus 4.476/37.518 ms for equal-output controls and
+3.306/36.738 ms companion-extrema p95 versus 3.704/38.270 ms for controls.
+`QSF-197` accepts the 26.4%/10.0% and 10.7%/4.0% lower tails, records
+identical public reads, unchanged four-block storage, and the HWM verdict, and
+closes `LQL-S10`. Session 17 continues with `LQL-S11`; its remaining declared
+P2 rows must not be skipped before Session 18 begins.
 
 ### Session 18: applicable LogsQL P3
 

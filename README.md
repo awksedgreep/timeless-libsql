@@ -749,6 +749,10 @@ LogsQL natural comparator and return a retained rich companion value. Direct
 SQLite/libSQL users have deterministic exact-path and finite-number
 foundations in `SQL-LOG-046`; rich language semantics remain bounded Rust API
 composition over public rows.
+Exact-build p95 is 3.293/33.764 ms for narrow/wide `any` and
+3.306/36.738 ms for companion extrema, respectively 26.4%/10.0% and
+10.7%/4.0% below equal-output controls with byte-identical public storage
+work.
 The bounded `first` pipeline selects an optional positive number of rows by
 exact fields with per-field direction, optional partitioning, and an optional
 one-based string rank. Its coercion chain covers exact signed/unsigned

@@ -667,7 +667,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S07` | `quantile` / `stddev` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S08` | `rate` / `rate_sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
 | `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | shipped | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | in progress | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -721,6 +721,18 @@ deadline-cancellable. `SQL-LOG-046` gives direct users deterministic exact-
 path `any` and finite-native-number companion extrema through public `logs`;
 the complete comparator, canonical fields, rich policy, limits, cancellation,
 grammar, and envelopes remain Rust API composition.
+
+Exact-build `any` evidence records 3.077/3.293/3.597 ms narrow and
+32.767/33.764/36.128 ms wide p50/p95/p99 versus 3.085/4.476/8.065 and
+34.858/37.518/38.095 ms for equal-output numeric-minimum controls. Companion
+extrema record 3.182/3.306/3.849 and 34.004/36.738/42.084 ms versus
+3.356/3.704/4.390 and 37.000/38.270/38.988 ms for equal-output native extrema
+controls. Their p95 values are respectively 26.4%/10.0% and 10.7%/4.0%
+lower. Every pair performs byte-identical public work: one/four candidate
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 materialized rows. `QSF-197` accepts the bounded deterministic/rich
+Rust reductions above the unchanged public storage boundary and retains the
+42.084 ms wide companion-extrema p99 honestly.
 
 ## Query options and HTTP behavior
 
