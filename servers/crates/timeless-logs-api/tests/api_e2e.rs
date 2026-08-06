@@ -3909,6 +3909,265 @@ async fn session_seventeen_replace_is_literal_typed_bounded_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_replace_regexp_matches_re2_captures_and_durability() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("replace-regexp-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "foo a\n b bar / foo".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"replace-regexp-admin",
+                        "replace_regexp_group":"replace-regexp",
+                        "kind":"admin",
+                        "host":"aцC",
+                        "password":"secret secret",
+                        "text":"hello",
+                        "number":101,
+                        "flag":false,
+                        "array":["prod",1],
+                        "null_value":null,
+                        "nested":{"value":"a_a", "keep":1}
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "public".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"replace-regexp-user",
+                        "replace_regexp_group":"replace-regexp",
+                        "kind":"user",
+                        "password":"secret secret"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="replace-regexp-admin" | replace_regexp ("foo(.+?)bar", "capture=$1") | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"replace-regexp-admin",
+            "_msg":"capture= a\n b  / foo"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="replace-regexp-admin" | replace_regexp ("(?-s)foo(.+?)bar", "nope") | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"replace-regexp-admin",
+            "_msg":"foo a\n b bar / foo"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="replace-regexp-admin" | RePlAcE_ReGeXp ("(?P<lead>a)(?P<rest>.+)", "${rest}-${lead}") at host | replace_regexp ("", X) at nested.value limit 2 | fields case, host, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"replace-regexp-admin",
+            "host":"цC-a",
+            "nested":{"value":"XaX_a", "keep":1}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="replace-regexp-admin" | replace_regexp ("h(e)", "$$-$9-$1x-${1}x") at text | fields case, text"#,
+        )
+        .await,
+        [serde_json::json!({"case":"replace-regexp-admin", "text":"$---exllo"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="replace-regexp-admin" | replace_regexp (l, L) at text limit 0 | replace_regexp ("^|$", X) at host | replace_regexp (X, Z) at host limit 1 | fields case, text, host"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"replace-regexp-admin",
+            "text":"heLLo",
+            "host":"ZaцCX"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"replace_regexp_group:=replace-regexp | replace_regexp if (kind:=admin) (secret, "***") at password limit 1 | fields case, password"#,
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case":"replace-regexp-admin",
+                "password":"*** secret"
+            }),
+            serde_json::json!({
+                "case":"replace-regexp-user",
+                "password":"secret secret"
+            }),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="replace-regexp-admin" | replace_regexp ("1", x) at number | replace_regexp (missing, ignored) at flag | replace_regexp (prod, stage) at array | replace_regexp ("_", ".") at nested.value | fields case, number, flag, array, null_value, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"replace-regexp-admin",
+            "number":"x0x",
+            "flag":false,
+            "array":"[\"stage\",1]",
+            "null_value":null,
+            "nested":{"value":"a.a", "keep":1}
+        })]
+    );
+
+    for malformed in [
+        "* | replace_regexp(foo,bar)",
+        "* | replace_regexp (foo)",
+        r#"* | replace_regexp ("foo[", bar)"#,
+        r#"* | replace_regexp ("(a)\\1", bar)"#,
+        r#"* | replace_regexp ("a(?=b)", bar)"#,
+        "* | replace_regexp (foo, bar) at *",
+        "* | replace_regexp (foo, bar) limit N",
+        "* | replace_regexp (foo, bar) trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="replace-regexp-admin" | replace_regexp ("[a-z]", expanded)"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let work_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(work_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(work_limited["reason"], "max_work_rows", "{work_limited}");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_response_bytes: 8,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="replace-regexp-admin" | replace_regexp (".", replacement-expands)"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(response_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response_limited["reason"], "max_response_bytes",
+        "{response_limited}"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="replace-regexp-admin" | fields case, _msg, host, password, text, number, flag, array, null_value, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"replace-regexp-admin",
+            "_msg":"foo a\n b bar / foo",
+            "host":"aцC",
+            "password":"secret secret",
+            "text":"hello",
+            "number":101,
+            "flag":false,
+            "array":["prod",1],
+            "null_value":null,
+            "nested":{"value":"a_a", "keep":1}
+        })],
+        "replace_regexp must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="replace-regexp-admin" | replace_regexp ("[/ ]", "-") limit 2 | replace_regexp ("(?P<lead>a)(?P<rest>.+)", "${rest}-${lead}") at host | fields case, _msg, host, number, array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"replace-regexp-admin",
+            "_msg":"foo-a\n-b bar / foo",
+            "host":"цC-a",
+            "number":101,
+            "array":["prod",1],
+            "nested":{"value":"a_a", "keep":1}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -9373,12 +9632,47 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_replace);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_replace_cancel = default_app
+        .clone()
         .oneshot(logsql_request(
             "level:error | replace (e, E) | fields _msg | limit 1",
         ))
         .await
         .unwrap();
     assert_eq!(reused_after_replace_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_replace_regexp = storage.stats().await.unwrap().api_query_cancelled;
+    let replace_regexp_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | replace_regexp ("[a-z]", replacement-expands) | fields _msg | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(replace_regexp_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_replace_regexp
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_replace_regexp);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_replace_regexp_cancel = default_app
+        .oneshot(logsql_request(
+            r#"level:error | replace_regexp ("e", E) | fields _msg | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_replace_regexp_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

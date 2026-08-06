@@ -766,6 +766,20 @@ records unchanged four-block storage and the HWM verdict, and closes
 `LQL-P29`. Session 17 continues with `LQL-P30`; its remaining declared P2
 rows must not be skipped before Session 18 begins.
 
+`LQL-P30` now has strict case-insensitive `replace_regexp` grammar, optional
+current-row `if (...)`, default `_msg` and exact quoted/dotted targets,
+zero/unbounded and first-`N` replacement, RE2-family dot/flag/anchor/UTF-8
+boundary behavior, Go-compatible numbered/named/full-match/dollar template
+expansion, typed textual projection, native no-op preservation, hard compiled-
+pattern/work/state/result/response limits, cancellation, optimize/reopen
+coverage, and immutable rich sources. Fifteen exact-result and ten error cases
+pass the complete 765-case pinned VictoriaLogs oracle. `QSF-180` records the
+retained-model boundary and the absence of a portable SQLite/public-extension
+RE2 capture-replacement scalar. Accordingly, this row has no dishonest SQL
+recipe and does not justify a language-specific extension primitive. Exact-
+build performance, storage, and HWM evidence remains before `LQL-P30` can
+ship; Session 17 then continues through its remaining declared P2 rows.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

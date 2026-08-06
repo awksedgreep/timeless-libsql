@@ -8,9 +8,10 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::net::IpAddr;
+use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 
 use serde_json::Value;
 
@@ -1012,8 +1013,8 @@ fn parse_replace_pipe(
             arguments.len()
         )));
     }
-    let old_substring = parse_replace_substring(&arguments[0], "old")?;
-    let new_substring = parse_replace_substring(&arguments[1], "new")?;
+    let old_substring = parse_replace_argument(&arguments[0], operation, "old substring")?;
+    let new_substring = parse_replace_argument(&arguments[1], operation, "new substring")?;
     rest = rest[close + 1..].trim_start();
 
     let tokens = pipeline_words(rest)?;
@@ -1048,7 +1049,7 @@ fn parse_replace_pipe(
             LogsqlError::malformed("LogsQL replace limit requires an unsigned integer")
         })?;
         let value = quoted_value(value)?.unwrap_or_else(|| value.clone());
-        limit = parse_replace_limit(&value)?;
+        limit = parse_replace_limit(&value, operation)?;
         cursor += 1;
     }
     if let Some(token) = tokens.get(cursor) {
@@ -1066,7 +1067,7 @@ fn parse_replace_pipe(
     }))
 }
 
-fn parse_replace_substring(value: &str, role: &str) -> Result<String, LogsqlError> {
+fn parse_replace_argument(value: &str, operation: &str, role: &str) -> Result<String, LogsqlError> {
     let value = value.trim();
     if let Some(value) = quoted_value(value)? {
         return Ok(value);
@@ -1078,18 +1079,18 @@ fn parse_replace_substring(value: &str, role: &str) -> Result<String, LogsqlErro
             .any(|character| matches!(character, '(' | ')' | ',' | '"' | '\'' | '`'))
     {
         return Err(LogsqlError::malformed(format!(
-            "LogsQL replace {role} substring must be one token or a quoted value"
+            "LogsQL {operation} {role} must be one token or a quoted value"
         )));
     }
     Ok(value.to_owned())
 }
 
-fn parse_replace_limit(value: &str) -> Result<u64, LogsqlError> {
+fn parse_replace_limit(value: &str, operation: &str) -> Result<u64, LogsqlError> {
     const MAX_TEXT_LEN: usize = "18_446_744_073_709_551_615".len();
     if value.is_empty() || value.len() > MAX_TEXT_LEN || (value.len() > 1 && value.starts_with('0'))
     {
         return Err(LogsqlError::malformed(format!(
-            "LogsQL replace limit must be an unsigned integer, not {value:?}"
+            "LogsQL {operation} limit must be an unsigned integer, not {value:?}"
         )));
     }
     let mut parsed = 0u64;
@@ -1099,7 +1100,7 @@ fn parse_replace_limit(value: &str) -> Result<u64, LogsqlError> {
         }
         if !byte.is_ascii_digit() {
             return Err(LogsqlError::malformed(format!(
-                "LogsQL replace limit must be an unsigned integer, not {value:?}"
+                "LogsQL {operation} limit must be an unsigned integer, not {value:?}"
             )));
         }
         parsed = parsed
@@ -1107,11 +1108,214 @@ fn parse_replace_limit(value: &str) -> Result<u64, LogsqlError> {
             .and_then(|parsed| parsed.checked_add(u64::from(byte - b'0')))
             .ok_or_else(|| {
                 LogsqlError::malformed(format!(
-                    "LogsQL replace limit must be an unsigned integer, not {value:?}"
+                    "LogsQL {operation} limit must be an unsigned integer, not {value:?}"
                 ))
             })?;
     }
     Ok(parsed)
+}
+
+fn parse_replace_regexp_pipe(
+    segment: &str,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<PipelineOp, LogsqlError> {
+    let operation = "replace_regexp";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL replace_regexp pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL replace_regexp pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[operation.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL replace_regexp requires whitespace before its arguments",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL replace_regexp requires a regexp and replacement",
+        ));
+    }
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, operation)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(
+                &expression,
+                None,
+                timestamp_unit,
+                query_now,
+            )?)
+        }
+    } else {
+        None
+    };
+
+    if !rest.starts_with('(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL replace_regexp requires a parenthesized regexp and replacement",
+        ));
+    }
+    let close = matching_parenthesis(rest, 0)?;
+    let arguments = split_top_level(&rest[1..close], ',')?;
+    if arguments.len() != 2 {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL replace_regexp requires exactly two arguments, got {}",
+            arguments.len()
+        )));
+    }
+    let pattern = parse_replace_argument(&arguments[0], operation, "regexp")?;
+    let replacement = parse_replace_argument(&arguments[1], operation, "replacement")?;
+    let regex = RegexBuilder::new(&pattern)
+        .dot_matches_new_line(true)
+        .size_limit(1 << 20)
+        .build()
+        .map_err(|error| {
+            LogsqlError::malformed(format!(
+                "invalid LogsQL replace_regexp regexp {pattern:?}: {error}"
+            ))
+        })?;
+    let replacement = parse_regexp_replacement(&replacement);
+    rest = rest[close + 1..].trim_start();
+
+    let tokens = pipeline_words(rest)?;
+    let mut cursor = 0usize;
+    let mut field = parse_delete_field("_msg")?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("at"))
+    {
+        cursor += 1;
+        let value = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL replace_regexp at requires an exact field")
+        })?;
+        field = match parse_delete_field(value)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL replace_regexp at requires an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+
+    let mut limit = 0u64;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("limit"))
+    {
+        cursor += 1;
+        let value = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL replace_regexp limit requires an unsigned integer")
+        })?;
+        let value = quoted_value(value)?.unwrap_or_else(|| value.clone());
+        limit = parse_replace_limit(&value, operation)?;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL replace_regexp token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::ReplaceRegexp(ReplaceRegexpSpec {
+        regex,
+        replacement,
+        field,
+        limit,
+        condition,
+    }))
+}
+
+fn parse_regexp_replacement(value: &str) -> Vec<RegexpReplacementStep> {
+    let mut steps = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(relative) = value[cursor..].find('$') {
+        let dollar = cursor + relative;
+        push_regexp_replacement_literal(&mut steps, &value[cursor..dollar]);
+        let after_dollar = dollar + 1;
+        if value.as_bytes().get(after_dollar) == Some(&b'$') {
+            push_regexp_replacement_literal(&mut steps, "$");
+            cursor = after_dollar + 1;
+            continue;
+        }
+
+        let mut name_start = after_dollar;
+        let braced = value.as_bytes().get(name_start) == Some(&b'{');
+        if braced {
+            name_start += 1;
+        }
+        let name_len = regexp_replacement_name_prefix(&value[name_start..]);
+        let name_end = name_start + name_len;
+        let end = if braced {
+            if name_len == 0 || value.as_bytes().get(name_end) != Some(&b'}') {
+                push_regexp_replacement_literal(&mut steps, "$");
+                cursor = after_dollar;
+                continue;
+            }
+            name_end + 1
+        } else if name_len == 0 {
+            push_regexp_replacement_literal(&mut steps, "$");
+            cursor = after_dollar;
+            continue;
+        } else {
+            name_end
+        };
+
+        let name = &value[name_start..name_end];
+        let numeric = name.len() <= 9
+            && name.bytes().all(|byte| byte.is_ascii_digit())
+            && (name.len() == 1 || !name.starts_with('0'));
+        if numeric {
+            steps.push(RegexpReplacementStep::CaptureIndex(
+                name.parse().expect("at most nine ASCII digits fit usize"),
+            ));
+        } else {
+            steps.push(RegexpReplacementStep::CaptureName(name.to_owned()));
+        }
+        cursor = end;
+    }
+    push_regexp_replacement_literal(&mut steps, &value[cursor..]);
+    steps
+}
+
+fn regexp_replacement_name_prefix(value: &str) -> usize {
+    static NAME: OnceLock<Regex> = OnceLock::new();
+    NAME.get_or_init(|| {
+        RegexBuilder::new(r"^[\p{L}\p{Nd}_]+")
+            .size_limit(1 << 16)
+            .build()
+            .expect("replacement-name regexp is valid")
+    })
+    .find(value)
+    .map_or(0, |matched| matched.end())
+}
+
+fn push_regexp_replacement_literal(steps: &mut Vec<RegexpReplacementStep>, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    if let Some(RegexpReplacementStep::Literal(existing)) = steps.last_mut() {
+        existing.push_str(value);
+    } else {
+        steps.push(RegexpReplacementStep::Literal(value.to_owned()));
+    }
 }
 
 const MAX_MATH_AST_NODES: usize = 4_096;
@@ -2174,6 +2378,10 @@ fn is_replace_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "replace")
 }
 
+fn is_replace_regexp_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "replace_regexp")
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -2782,6 +2990,24 @@ pub(crate) struct ReplaceSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) enum RegexpReplacementStep {
+    Literal(String),
+    CaptureIndex(usize),
+    CaptureName(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReplaceRegexpSpec {
+    pub regex: Regex,
+    pub replacement: Vec<RegexpReplacementStep>,
+    pub field: PipelineField,
+    /// Zero means unbounded at the language layer. API work and response
+    /// limits remain authoritative.
+    pub limit: u64,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -2815,6 +3041,7 @@ pub(crate) enum PipelineOp {
     Len(LenSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
+    ReplaceRegexp(ReplaceRegexpSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3198,6 +3425,14 @@ pub fn parse_at(
             }
             _ if is_replace_pipe(segment) => {
                 pipeline.push(parse_replace_pipe(segment, timestamp_unit, query_now)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_replace_regexp_pipe(segment) => {
+                pipeline.push(parse_replace_regexp_pipe(
+                    segment,
+                    timestamp_unit,
+                    query_now,
+                )?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -8429,6 +8664,40 @@ mod tests {
             "* | replace (foo, bar) limit 01",
             "* | replace (foo, bar) trailing",
             "* | replace if (kind:=admin) (foo, bar",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_replace_regexp_grammar_is_complete_and_strict() {
+        for query in [
+            r#"* | replace_regexp ("[_/]", "-")"#,
+            r#"* | RePlAcE_ReGeXp ("foo(.+?)bar", "q-${1}-x") at host limit 1"#,
+            r#"* | replace_regexp if (kind:=admin) ("secret", "***") at password"#,
+            r#"* | replace_regexp if () ("(?P<left>a)(?P<right>.+)", "${right}-${left}") at "left field" limit 0"#,
+            r#"* | replace_regexp ("", "boundary") at nested.value"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | replace_regexp",
+            "* | replace_regexp(foo,bar)",
+            "* | replace_regexp (foo)",
+            "* | replace_regexp (foo, bar, baz)",
+            r#"* | replace_regexp ("foo[", bar)"#,
+            r#"* | replace_regexp ("(a)\\1", bar)"#,
+            r#"* | replace_regexp ("a(?=b)", bar)"#,
+            "* | replace_regexp (foo, bar) at *",
+            "* | replace_regexp (foo, bar) at field*",
+            "* | replace_regexp (foo, bar) limit",
+            "* | replace_regexp (foo, bar) limit N",
+            "* | replace_regexp (foo, bar) limit 01",
+            "* | replace_regexp (foo, bar) trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

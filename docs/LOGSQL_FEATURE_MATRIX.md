@@ -133,7 +133,7 @@ extension.
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P30` | `replace_regexp` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P30` | `replace_regexp` | in progress | no | none | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | missing | no | `SQL` | `API` | P2 |
@@ -441,6 +441,32 @@ private table, durable mutation, or storage-contract change is required.
 Exact-build evidence records 4.542/38.151 ms narrow/wide p95 versus
 6.994/35.779 ms for byte-identical same-scan controls; `QSF-177` accepts the
 -35.1%/+6.6% bounded in-place traversal variation.
+
+`LQL-P29` performs case-sensitive literal replacement over one exact current-
+row field, with optional `if`, `at`, and first-`N`/zero-unbounded `limit`
+modifiers. Timeless preserves native retained values when no literal matches
+and materializes a query-row string only when a replacement occurs. Public
+`SQL-LOG-039` covers ordinary all-occurrence exact-field replacement through
+SQLite JSON1 and core `replace()`; conditional, limited, sequential, typed,
+bounded, and envelope semantics remain Rust API work. `QSF-178` and
+`QSF-179` record complete 740-case oracle parity and exact-build evidence.
+
+`LQL-P30` performs case-sensitive RE2-family replacement over one exact
+current-row field. It supports optional `if`, `at`, and zero-unbounded or
+first-`N` `limit`; dot-newline behavior and inline flags; numbered, named, and
+full-match capture expansion; literal dollar escaping; UTF-8 empty-pattern
+boundaries; and sequential current-row composition. Native values remain
+native on a no-match, while an actual replacement becomes a query-row string
+without mutating durable rich metadata. Pattern compilation, capture work,
+projected values, output, result/response size, and cancellation are bounded.
+
+Core SQLite and the public extension have no portable RE2-compatible regexp-
+replacement scalar with capture-template expansion, so this row honestly has
+no SQL foundation or recipe. Direct users must compose it in their host or
+load a separate regexp extension. `QSF-180` records the language/storage
+boundary and the complete 765-case pinned oracle. No extension primitive,
+private table, or storage-contract change is required by correctness; exact-
+build evidence remains required before the row ships.
 
 ## Statistics functions
 

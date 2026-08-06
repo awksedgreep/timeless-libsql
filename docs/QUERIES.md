@@ -1063,6 +1063,61 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 128/8,192 public rows. `QSF-179` accepts this bounded literal row transform
 above the unchanged public storage boundary.
 
+## LogsQL `replace_regexp` over current rows
+
+`replace_regexp` substitutes non-overlapping RE2-family matches in one exact
+current-row field:
+
+```text
+* | replace_regexp ("[/ ]", "-")
+* | replace_regexp ("(?P<name>[a-z]+)-(?P<id>[0-9]+)", "${id}:${name}") at host
+* | replace_regexp if (kind:=admin) ("secret=([^ ]+)", "secret=***") limit 1
+* | replace_regexp ("^|$", X) at host limit 0
+```
+
+The command, `if`, `at`, and `limit` keywords are case-insensitive. Exactly
+two parenthesized arguments are required. The target defaults to `_msg` and
+may be one quoted or dotted exact field. A missing or zero limit replaces all
+non-overlapping matches; a positive limit replaces only the first `N`.
+Optional `if (...)` observes the current row before replacement, and later
+pipeline stages observe the transformed value.
+
+Patterns use the pinned VictoriaLogs/Go RE2-family contract: matching is
+case-sensitive unless an inline flag changes it, dot matches a newline by
+default, `(?-s)` restores single-line dot behavior, and backreferences and
+lookaround are rejected. An empty pattern matches UTF-8 boundaries, including
+the start and end of a nonempty value. An empty source remains a no-op, as it
+does upstream. Patterns are compiled once per request with a one-MiB compiled
+program ceiling.
+
+Replacement templates support `$0`, `$1`, `${1}`, `$name`, `${name}`, and
+`$$`. Missing or unmatched captures expand to empty text. Unbraced names are
+maximal: `$1x` denotes the capture named `1x`, while `${1}x` denotes capture
+one followed by `x`. This distinction is covered by the pinned oracle.
+
+Strings, lowercase booleans, numbers, and compact JSON arrays use the same
+textual projection as literal `replace`; missing fields, null, and exact
+object parents project to empty text. A no-match operation preserves the
+original native value. An actual replacement writes a string only to the
+request-owned query row, so durable rich metadata remains unchanged.
+Sequential transformations see prior results.
+
+Parsing, pattern compilation, captures, replacement expansion, projected
+arrays, output sizing, field paths, work, result rows, response bytes, and
+cancellation are bounded. Invalid patterns, attached syntax, wrong arity,
+wildcard targets, invalid or leading-zero limits, and trailing tokens fail
+explicitly.
+
+There is no executable SQL-equivalent recipe for this row. Core SQLite and
+the public timeless-libsql extension expose no portable RE2-compatible
+replacement function with capture-template expansion. Claiming ordinary SQL
+support would therefore be false; applications using SQLite directly must
+compose this transformation outside SQL or deliberately load a separate
+regexp extension. The existing public `logs` scan remains the storage
+boundary, and measurements decide whether a future general-purpose extension
+primitive is justified. Promoting LogsQL syntax or a language-specific
+replacement helper into the storage extension is not justified.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

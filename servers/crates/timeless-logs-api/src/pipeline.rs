@@ -22,8 +22,8 @@ use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CopySpec,
     FacetsSpec, FirstSpec, FormatSpec, LenSpec, MathBinaryOperator, MathExpression, MathFunction,
-    MathSpec, PipelineField, PipelineOp, RenameSpec, ReplaceSpec, StatsExpression, StatsKind,
-    TopSpec, UniqSpec,
+    MathSpec, PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec,
+    ReplaceSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -209,6 +209,13 @@ pub(crate) fn execute(
                 drop_empty_fields(rows, execution.limits, execution.cancelled)?
             }
             PipelineOp::Replace(spec) => replace_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
+            PipelineOp::ReplaceRegexp(spec) => replace_regexp_fields(
                 rows,
                 spec,
                 execution.timestamp_unit,
@@ -1548,6 +1555,7 @@ fn replace_fields(
                 &mut work_items,
                 limits,
                 cancelled,
+                "replace",
             )?;
             let Some(replaced) = bounded_literal_replace(
                 projected.as_ref(),
@@ -1602,18 +1610,19 @@ fn replace_projected_text<'a>(
     work_items: &mut usize,
     limits: PipelineLimits,
     cancelled: &AtomicBool,
+    operation: &str,
 ) -> Result<Cow<'a, str>, String> {
     match value {
         None | Some(Value::Null | Value::Object(_)) => Ok(Cow::Borrowed("")),
         Some(Value::String(value)) => Ok(Cow::Borrowed(value)),
         Some(Value::Bool(value)) => {
             let rendered = value.to_string();
-            charge_transfer_string(&rendered, state_bytes, limits.max_state_bytes, "replace")?;
+            charge_transfer_string(&rendered, state_bytes, limits.max_state_bytes, operation)?;
             Ok(Cow::Owned(rendered))
         }
         Some(Value::Number(value)) => {
             let rendered = value.to_string();
-            charge_transfer_string(&rendered, state_bytes, limits.max_state_bytes, "replace")?;
+            charge_transfer_string(&rendered, state_bytes, limits.max_state_bytes, operation)?;
             Ok(Cow::Owned(rendered))
         }
         Some(value @ Value::Array(_)) => {
@@ -1623,17 +1632,19 @@ fn replace_projected_text<'a>(
                 work_items,
                 limits.max_state_items,
                 cancelled,
-                "replace",
+                operation,
             )?;
             *state_bytes = state_bytes
                 .checked_add(size_of::<String>())
                 .and_then(|bytes| bytes.checked_add(length))
-                .ok_or_else(|| "LogsQL replace state size overflow".to_string())?;
-            ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "replace")?;
+                .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+            ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, operation)?;
             let rendered = serde_json::to_string(value)
-                .map_err(|error| format!("encode LogsQL replace array: {error}"))?;
+                .map_err(|error| format!("encode LogsQL {operation} array: {error}"))?;
             if rendered.len() != length {
-                return Err("LogsQL replace array length accounting mismatch".into());
+                return Err(format!(
+                    "LogsQL {operation} array length accounting mismatch"
+                ));
             }
             Ok(Cow::Owned(rendered))
         }
@@ -1714,6 +1725,210 @@ fn next_literal_match(
         }
     }
     Ok(None)
+}
+
+fn replace_regexp_fields(
+    rows: Vec<Value>,
+    spec: &ReplaceRegexpSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: field_path,
+        name: field_name,
+    } = &spec.field
+    else {
+        return Err("LogsQL replace_regexp target is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(
+                &mut work_items,
+                limits.max_state_items,
+                "replace_regexp",
+            )?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let source = coalesce_exact_value(&row, field_path);
+            let mut state_bytes = size_of::<Value>();
+            let projected = replace_projected_text(
+                source,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "replace_regexp",
+            )?;
+            let Some(replaced) = bounded_regexp_replace(
+                projected.as_ref(),
+                spec,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?
+            else {
+                return Ok(row);
+            };
+
+            charge_transfer_string(
+                field_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "replace_regexp",
+            )?;
+            for segment in field_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "replace_regexp",
+                )?;
+            }
+            let object = row.as_object_mut().ok_or_else(|| {
+                "LogsQL replace_regexp input row is not a JSON object".to_string()
+            })?;
+            if copy_destination_replaces_object(object, field_path) {
+                return Err(format!(
+                    "LogsQL replace_regexp target conflict: field {field_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, field_path, Value::String(replaced))
+                .map_err(|error| format!("LogsQL replace_regexp target conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn bounded_regexp_replace(
+    source: &str,
+    spec: &ReplaceRegexpSpec,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Option<String>, String> {
+    if source.is_empty() {
+        return Ok(None);
+    }
+
+    let mut replacements = 0u64;
+    let mut output_len = source.len();
+    for captures in spec.regex.captures_iter(source) {
+        if spec.limit > 0 && replacements >= spec.limit {
+            break;
+        }
+        check_periodically(cancelled, replacements as usize)?;
+        charge_transfer_work(work_items, limits.max_state_items, "replace_regexp")?;
+        let matched = captures
+            .get(0)
+            .ok_or_else(|| "LogsQL replace_regexp match omitted capture zero".to_string())?;
+        let expansion_len = regexp_replacement_len(
+            &captures,
+            &spec.replacement,
+            work_items,
+            limits.max_state_items,
+            cancelled,
+        )?;
+        output_len = output_len
+            .checked_sub(matched.end() - matched.start())
+            .and_then(|length| length.checked_add(expansion_len))
+            .ok_or_else(|| "LogsQL replace_regexp result size overflow".to_string())?;
+        replacements += 1;
+    }
+    if replacements == 0 {
+        return Ok(None);
+    }
+
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL replace_regexp state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "replace_regexp")?;
+
+    let mut output = String::with_capacity(output_len);
+    let mut previous_end = 0usize;
+    let mut rendered = 0u64;
+    for captures in spec.regex.captures_iter(source) {
+        if rendered >= replacements {
+            break;
+        }
+        check_periodically(cancelled, rendered as usize)?;
+        let matched = captures
+            .get(0)
+            .ok_or_else(|| "LogsQL replace_regexp match omitted capture zero".to_string())?;
+        output.push_str(&source[previous_end..matched.start()]);
+        append_regexp_replacement(&mut output, &captures, &spec.replacement);
+        previous_end = matched.end();
+        rendered += 1;
+    }
+    if rendered != replacements {
+        return Err("LogsQL replace_regexp source changed during evaluation".into());
+    }
+    output.push_str(&source[previous_end..]);
+    if output.len() != output_len {
+        return Err("LogsQL replace_regexp result length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    Ok(Some(output))
+}
+
+fn regexp_replacement_len(
+    captures: &regex::Captures<'_>,
+    steps: &[RegexpReplacementStep],
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<usize, String> {
+    let mut length = 0usize;
+    for (index, step) in steps.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        charge_transfer_work(work_items, max_work_items, "replace_regexp")?;
+        let value = match step {
+            RegexpReplacementStep::Literal(value) => Some(value.as_str()),
+            RegexpReplacementStep::CaptureIndex(index) => {
+                captures.get(*index).map(|matched| matched.as_str())
+            }
+            RegexpReplacementStep::CaptureName(name) => {
+                captures.name(name).map(|matched| matched.as_str())
+            }
+        };
+        if let Some(value) = value {
+            length = length
+                .checked_add(value.len())
+                .ok_or_else(|| "LogsQL replace_regexp expansion size overflow".to_string())?;
+        }
+    }
+    Ok(length)
+}
+
+fn append_regexp_replacement(
+    output: &mut String,
+    captures: &regex::Captures<'_>,
+    steps: &[RegexpReplacementStep],
+) {
+    for step in steps {
+        let value = match step {
+            RegexpReplacementStep::Literal(value) => Some(value.as_str()),
+            RegexpReplacementStep::CaptureIndex(index) => {
+                captures.get(*index).map(|matched| matched.as_str())
+            }
+            RegexpReplacementStep::CaptureName(name) => {
+                captures.name(name).map(|matched| matched.as_str())
+            }
+        };
+        if let Some(value) = value {
+            output.push_str(value);
+        }
+    }
 }
 
 fn retain_nonempty_value(
@@ -5922,6 +6137,158 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             replace_fields(
+                vec![row],
+                &replace_many,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn replace_regexp_is_re2_capture_compatible_typed_and_bounded() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 1_000,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "kind":"admin",
+            "text":"foo a\n b bar",
+            "host":"aцC",
+            "number":101,
+            "flag":false,
+            "null_value":null,
+            "array":["prod",1],
+            "nested":{"value":"a_a", "keep":1}
+        });
+        let plan = crate::logsql::parse_at(
+            r#"* | replace_regexp ("foo(.+?)bar", "capture=$1") at text | replace_regexp ("1", "x") at number | replace_regexp (missing, ignored) at flag | replace_regexp (prod, stage) at array | replace_regexp ("_", ".") at nested.value"#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["text"], "capture= a\n b ");
+        assert_eq!(result[0]["number"], "x0x");
+        assert_eq!(result[0]["flag"], row["flag"]);
+        assert_eq!(result[0]["null_value"], row["null_value"]);
+        assert_eq!(result[0]["array"], r#"["stage",1]"#);
+        assert_eq!(result[0]["nested"], json!({"value":"a.a", "keep":1}));
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::ReplaceRegexp(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected replace_regexp plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let dollars = parse_spec(r#"* | replace_regexp ("h(e)", "$$-$9-$1x-${1}x") at text"#);
+        assert_eq!(
+            replace_regexp_fields(
+                vec![json!({"text":"hello"})],
+                &dollars,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"text":"$---exllo"})]
+        );
+        let named = parse_spec(
+            r#"* | replace_regexp ("(?P<lead>a)(?P<rest>.+)", "${rest}-${lead}") at host"#,
+        );
+        assert_eq!(
+            replace_regexp_fields(
+                vec![json!({"host":"aцC"})],
+                &named,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"host":"цC-a"})]
+        );
+        let boundaries = parse_spec(r#"* | replace_regexp ("", X) at host"#);
+        assert_eq!(
+            replace_regexp_fields(
+                vec![json!({"host":"aцC"})],
+                &boundaries,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"host":"XaXцXCX"})]
+        );
+
+        let replace_many = parse_spec(r#"* | replace_regexp ("[a-z]", expanded) at text"#);
+        let work_error = replace_regexp_fields(
+            vec![row.clone()],
+            &replace_many,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL replace_regexp"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = replace_regexp_fields(
+            vec![row.clone()],
+            &replace_many,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("LogsQL replace_regexp"),
+            "{state_error}"
+        );
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let false_condition =
+            parse_spec(r#"* | replace_regexp if (kind:=user) (a, changed) at nested.value"#);
+        let unchanged = replace_regexp_fields(
+            vec![row.clone()],
+            &false_condition,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(unchanged.as_slice(), std::slice::from_ref(&row));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            replace_regexp_fields(
                 vec![row],
                 &replace_many,
                 TimestampUnit::Microseconds,

@@ -3326,6 +3326,88 @@
       "id": "LQL-P29-replace-composes-sequentially",
       "query": "case:=format-row | replace (a, x) at host | replace (x, z) at host limit 1 | fields case, host",
       "expected_rows": [{"case": "format-row", "host": "zцC"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-replaces-all-nonoverlapping-matches",
+      "query": "case:=format-row | replace_regexp (\"[lo]+\", X) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "heX \"wXrXd\"\nnext"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-expands-numbered-captures-and-full-match",
+      "query": "case:=format-row | replace_regexp (\"h(e)(l+)\", \"H-${2}-$1-$0\") | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "H-ll-e-hello \"world\"\nnext"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-pins-dollar-and-ambiguous-capture-syntax",
+      "query": "case:=format-row | replace_regexp (\"h(e)\", \"$$-$9-$1x-${1}x\") | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "$---exllo \"world\"\nnext"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-limits-first-match",
+      "query": "case:=format-row | replace_regexp (l, L) limit 1 | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "heLlo \"world\"\nnext"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-zero-limit-is-unbounded",
+      "query": "case:=format-row | replace_regexp (l, L) limit 0 | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "heLLo \"worLd\"\nnext"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-dot-matches-newline-by-default",
+      "query": "case:=format-row | replace_regexp (\"world.+next\", tail) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "hello \"tail"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-inline-flag-disables-dot-newline",
+      "query": "case:=format-row | replace_regexp (\"(?-s)world.+next\", tail) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "hello \"world\"\nnext"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-expands-named-captures",
+      "query": "case:=format-row | RePlAcE_ReGeXp (\"(?P<lead>a)(?P<rest>.+)\", \"${rest}-${lead}\") at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "цC-a"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-empty-pattern-matches-utf8-boundaries",
+      "query": "case:=format-row | replace_regexp (\"\", X) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "XaXцXCX"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-start-and-end-anchors",
+      "query": "case:=format-row | replace_regexp (\"^|$\", X) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "XaцCX"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-conditional-match",
+      "query": "case:=format-row | replace_regexp if (host:=aцC) (a, X) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "XцC"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-conditional-miss-preserves-value",
+      "query": "case:=format-row | replace_regexp if (host:=other) (a, X) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "aцC"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-textualizes-numeric-and-boolean-fields",
+      "query": "state_group:=state | replace_regexp (\"^(0|false)$\", \"<$1>\") at probe | fields case, probe | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty"},
+        {"case": "state-false", "probe": "<false>"},
+        {"case": "state-missing"},
+        {"case": "state-null"},
+        {"case": "state-string", "probe": "value"},
+        {"case": "state-zero", "probe": "<0>"}
+      ]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-textualizes-json-array-target",
+      "query": "case:=json-array-strings | replace_regexp (\"prod|canary\", stage) at tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-strings", "tags": "[\"stage\",\"stage\",\"\"]"}]
+    },
+    {
+      "id": "LQL-P30-replace-regexp-composes-sequentially",
+      "query": "case:=format-row | replace_regexp (a, x) at host | replace_regexp (x, z) at host limit 1 | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "zцC"}]
     }
   ],
   "error_cases": [
@@ -4900,6 +4982,76 @@
     {
       "id": "LQL-P29-replace-rejects-trailing-token",
       "query": "* | replace (foo, bar) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-requires-arguments",
+      "query": "* | replace_regexp",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-requires-two-arguments",
+      "query": "* | replace_regexp (foo)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-rejects-three-arguments",
+      "query": "* | replace_regexp (foo, bar, baz)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-rejects-invalid-regexp",
+      "query": "* | replace_regexp (\"foo[\", bar)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-rejects-backreferences",
+      "query": "* | replace_regexp (\"(a)\\1\", bar)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-rejects-lookaround",
+      "query": "* | replace_regexp (\"a(?=b)\", bar)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-rejects-wildcard-field",
+      "query": "* | replace_regexp (foo, bar) at field*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-requires-numeric-limit",
+      "query": "* | replace_regexp (foo, bar) limit N",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-rejects-leading-zero-limit",
+      "query": "* | replace_regexp (foo, bar) limit 01",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P30-replace-regexp-rejects-trailing-token",
+      "query": "* | replace_regexp (foo, bar) trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

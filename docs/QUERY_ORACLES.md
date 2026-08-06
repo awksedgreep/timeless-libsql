@@ -674,3 +674,20 @@ The fixture contains 309 row-query cases, 225 error cases, and 206
 statistics/pipeline cases: 740 cases total, all passing against the immutable
 image.
 The fixture now contains 740 cases.
+
+`LQL-P30` adds fifteen exact pipeline-result cases and ten error cases for
+`replace_regexp`. They pin all non-overlapping and first-`N`/zero-unbounded
+replacement; default-message and exact-field targets; optional matching and
+nonmatching `if (...)`; case-insensitive syntax; dot-newline default and
+inline disablement; numbered, named, full-match, missing, maximal-name, and
+literal-dollar expansion; UTF-8 empty-pattern boundaries; start/end anchors;
+number, boolean, and JSON-array textual projection; and sequential
+composition. Wrong arity, invalid regular expressions, backreferences,
+lookaround, wildcard targets, nonnumeric or leading-zero limits, and trailing
+tokens fail. Source audit is against `pipe_replace_regexp.go`,
+`pipe_replace_regexp_test.go`, `pipe_extract_regexp.go`, and Go's
+`regexp.ExpandString` implementation at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 324
+row-query cases, 235 error cases, and 206 statistics/pipeline cases: 765 cases
+total, all passing against the immutable image.
+The fixture now contains 765 cases.
