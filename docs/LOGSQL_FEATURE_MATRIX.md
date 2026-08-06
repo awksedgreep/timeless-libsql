@@ -141,7 +141,7 @@ extension.
 | `LQL-P35` | `pack_logfmt` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P38` | `unpack_syslog` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P38` | `unpack_syslog` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
@@ -849,6 +849,19 @@ timezone/year rules, current-row mutation, limits, cancellation, and HTTP
 envelopes remain Rust API composition over the same public rows. No extension
 primitive, private table, durable mutation, or storage-contract change is
 required.
+
+Exact-build `QSF-224` measures deterministic 64-row RFC5424 parsing after
+full public materialization at 3.391/3.581/3.802 ms narrow and
+33.887/38.081/38.210 ms wide p50/p95/p99. Identical-output format-plus-copy
+controls measure 2.978/3.439/3.584 and 34.075/38.026/38.209 ms. The
++4.1%/+0.1% p95 and +9.5%/-0.8% request-attributed API mean occur after
+identical public work: one/four candidate blocks, 1,024/8,192 decoded entries,
+128/8,192 returned public rows, and 235,778/1,914,055 payload bytes per query.
+Each response is 64 rows and 1,984 bytes. `QSF-223` separately records that
+decoding all 8,192 formatted rows before a terminal limit correctly exceeds
+the unchanged 100,000-work-item default; the measured representative shape
+limits before expansion without hiding the complete public scan. Bounded
+row-local parsing does not justify storage pushdown.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare

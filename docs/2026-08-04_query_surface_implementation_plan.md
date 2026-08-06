@@ -1124,9 +1124,19 @@ unchanged. Executable `SQL-LOG-054` gives direct SQLite/libSQL users the
 fixed RFC5424 header foundation when structured data is `-`; complete syslog
 and LogsQL semantics remain Rust API composition after the same public scan.
 `QSF-221` records the semantic/storage boundary and `QSF-222` records the
-adjacent query-backed unpack-condition regression. Exact-build performance,
-storage-work, durability, cancellation, and HWM evidence remains the final
-exit item before the row can be marked shipped.
+adjacent query-backed unpack-condition regression. `QSF-223` preserves the
+default-work-limit failure when all 8,192 rows expand before a terminal limit.
+Exact-build `f43af178ba4a7d3208eb2c20d907abd7ae6b3ba5` instead retains the
+complete one-/four-block public scan, limits deterministically to 64 rows, and
+measures RFC5424 parsing at 3.581/38.081 ms narrow/wide p95 versus
+3.439/38.026 ms identical-output controls. `QSF-224` accepts the
++4.1%/+0.1% p95 after byte-identical public storage work. Storage remains
+four raw blocks; all 8,192 entries complete durably; queues and in-flight
+cancellation are zero. The complete root/server, 65-test logs real-extension,
+90-test metrics real-extension, 1,155-case live oracle, 45-section CLI,
+six-section focused correctness, dbhealth, 120-recipe/158-statement SQL,
+32-test documentation-harness, formatting, and warnings-denied lint gates
+close the shipped row.
 
 ### Session 19: experimental and data-model dispositions
 

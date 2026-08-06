@@ -932,6 +932,14 @@ compatibility boundary. Direct SQLite/libSQL users can run executable
 `SQL-LOG-054` for a fixed RFC5424 header with `-` structured data through
 public `logs`; complete syslog parsing does not justify an extension opcode or
 private-table path after the same required public scan.
+Exact-build p50/p95/p99 is 3.391/3.581/3.802 ms narrow and
+33.887/38.081/38.210 ms wide, versus 2.978/3.439/3.584 and
+34.075/38.026/38.209 ms for identical-output format-plus-copy controls.
+`QSF-224` accepts the +4.1%/+0.1% p95 after byte-identical public storage
+work. `QSF-223` retains the default-work-limit failure when expansion is
+placed before the 64-row limit; callers must narrow/limit first or explicitly
+budget more work. Storage remains four raw blocks with no new extension
+primitive.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

@@ -4287,6 +4287,71 @@ transactions, migrations, and public batch/SQL contracts are unchanged. No
 private shadow table, Elixir/BEAM/NIF/process fallback, CI workflow or
 invocation, tag, release, or downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `unpack_syslog`
+
+The checked-in
+[`2026-08-06_session18_lql_p38_unpack_syslog.json`](evidence/2026-08-06_session18_lql_p38_unpack_syslog.json)
+was captured from exact release extension and server build
+`f43af178ba4a7d3208eb2c20d907abd7ae6b3ba5` and has SHA-256
+`e0aa76b28ff5b0769ed46c2cb3a6ed3f344c4c1801f376c44e2a1c8fc42d74f4`.
+Each shape sorts and materializes the full public candidate set, applies a
+deterministic 64-row limit, then formats `range_key` into a no-PRI RFC5424
+header. The candidate decodes that header into `decoded_message`; its control
+copies the original value to the same destination after identical formatting.
+Both return byte-identical responses. This isolates bounded syslog parsing and
+destination construction on the returned rows after identical public storage,
+sort, limit, format, and response work.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `unpack_syslog`, indexed host | 64 | 1,984 | 3.391 | 3.581 | 3.802 | 1 | 1,024 | 235,778 | 128 |
+| `unpack_syslog`, full fixture | 64 | 1,984 | 33.887 | 38.081 | 38.210 | 4 | 8,192 | 1,914,055 | 8,192 |
+| identical-output copy control, indexed host | 64 | 1,984 | 2.978 | 3.439 | 3.584 | 1 | 1,024 | 235,778 | 128 |
+| identical-output copy control, full fixture | 64 | 1,984 | 34.075 | 38.026 | 38.209 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 4.1%/0.1% above its narrow/wide same-run control. Its
+request-attributed API timer averages 2.797/33.909 ms versus
+2.555/34.168 ms, or 9.5% above/0.8% below. Every equal-width pair performs
+byte-identical public storage scans, block decodes, payload reads, row
+materialization, deterministic sorting/limiting, common formatting, and
+response encoding. The opposing wide endpoint and API-mean deltas are
+retained as whole-run variation rather than interpreted as an optimization.
+RFC5424 tokenization, seven decoded string fields, nested path construction,
+and destination writes are bounded Rust API work. `SQL-LOG-054` gives direct
+SQLite/libSQL users the fixed RFC5424-header foundation, so an extension
+parser would not avoid storage reads, decode, allocation, or row crossing.
+
+Two earlier exact-build shapes placed `limit 64` after decoding all 8,192
+rows. Both correctly returned HTTP 422 `max_work_rows` under the unchanged
+100,000-item default: first with twelve PRI-bearing decoded fields per row,
+then with seven no-PRI fields plus shared format work. `QSF-223` preserves that
+important operational boundary. The accepted shape does not raise or
+undercount the limit; it applies the user's limit before expansion while
+retaining the complete one-/four-block public read. Full-batch syslog
+expansion requires a larger configured work budget.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+15.809 ms and the explicit durability barrier took 35.118 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 100,244 KiB, 3,720 KiB above
+LQL-P37 after four additional repeated shapes; metrics HWM was 52,800 KiB,
+3,596 KiB above it. Each maximum is retained as whole-process workload
+variation. Cancellation ended with zero requests in flight; direct evaluator
+and HTTP deadline regressions pin parsing/work/state/result/response bounds,
+rejection, cancellation, and reader reuse.
+
+All 1,155 pinned VictoriaLogs v1.52.0 cases pass live. The final 65-test logs
+real-extension suite, 133 logs library/binary tests, 90-test metrics
+real-extension suite, complete root and server workspaces, 45-section
+CLI/crash/transaction suite, six focused extension correctness sections,
+standalone dbhealth lifecycle gate, 32-test Rust query harness, documentation
+contracts, Clippy with warnings denied, formatting, and all 120 SQL recipes
+(158 statements) pass locally. The extension's authoritative 8,192-entry
+batching, storage formats, compression, indexes, retention, optimize,
+transactions, migrations, and public batch/SQL contracts are unchanged. No
+private shadow table, Elixir/BEAM/NIF/process fallback, CI workflow or
+invocation, tag, release, or downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

@@ -1876,6 +1876,18 @@ timezone/year behavior, current-row mutation, limits, cancellation, and
 envelopes remain Rust API composition. No extension primitive, private table,
 or storage-format change is involved.
 
+Exact-build syslog-unpacking evidence measures 3.391/3.581/3.802 ms narrow
+and 33.887/38.081/38.210 ms wide p50/p95/p99 while returning 64 rows and
+1,984 bytes. Identical-output format-plus-copy controls measure
+2.978/3.439/3.584 and 34.075/38.026/38.209 ms. The +4.1%/+0.1% p95 and
++9.5%/-0.8% internal API mean follow the same one/four candidate blocks,
+1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. The benchmark sorts/materializes those public rows and
+limits to 64 before expansion. `QSF-223` records that expanding all 8,192
+formatted rows correctly exceeds the default work budget; configure more work
+or narrow/limit first. `QSF-224` accepts the bounded returned-row parse above
+the unchanged storage boundary.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level
