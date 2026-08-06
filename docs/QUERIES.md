@@ -959,6 +959,13 @@ sequential destinations, limits, cancellation, and envelopes remain Rust API
 work. No extension primitive, private table, or storage-format change is
 needed.
 
+Exact-build `len` evidence measures 3.785/40.724 ms narrow/wide p95 while
+returning 64 rows, versus 3.620/36.622 ms for byte-identical same-scan
+controls. The +4.6%/+11.2% p95 and -1.0%/+12.6% internal API variation
+follows the same one/four candidate blocks, 1,024/8,192 decoded entries, and
+235,778/1,914,055 payload bytes. `QSF-175` accepts the bounded row-local byte-
+length work above the unchanged public storage boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

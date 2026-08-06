@@ -726,7 +726,11 @@ and executable public `SQL-LOG-037`. Thirteen successful and eight error cases
 pass the complete 711-case pinned VictoriaLogs oracle. Timeless preserves rich
 typed sources while matching upstream's absent object-parent query view.
 `QSF-174` records the semantic boundary. Exact-build performance/HWM evidence
-remains the exit criterion before the row can ship.
+at commit `64ec776668de88fdc3cf8bd6649ba7de2ad47b6e` measures 3.785/40.724 ms
+narrow/wide p95 versus 3.620/36.622 ms for byte-identical same-scan controls.
+`QSF-175` accepts the +4.6%/+11.2% bounded row-transform cost, records
+unchanged four-block storage and the HWM verdict, and closes `LQL-P24`.
+Session 17 continues with `LQL-P28`.
 
 ### Session 18: applicable LogsQL P3
 

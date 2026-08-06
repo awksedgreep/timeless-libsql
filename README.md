@@ -772,6 +772,9 @@ cancellation, and immutable stored rows. Direct SQLite/libSQL users can use
 the parameterized public JSON1 arithmetic and byte-length foundations in
 `SQL-LOG-036` and `SQL-LOG-037`; complete LogsQL parsing and expression
 semantics stay in the Rust logs API rather than the extension.
+Exact-build `len` p95 is 3.785/40.724 ms narrow/wide versus 3.620/36.622 ms
+for byte-identical same-scan controls; the bounded +4.6%/+11.2% variation does
+not justify another storage primitive.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally
