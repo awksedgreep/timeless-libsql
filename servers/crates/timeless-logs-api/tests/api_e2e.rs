@@ -10587,6 +10587,126 @@ async fn session_seventeen_quantile_state_is_bounded_and_reader_remains_reusable
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_sum_len_counts_utf8_text_and_reopens() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("sum-len-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let body = [
+        r#"{"_time":1,"_msg":"one","level":"info","stats_group":"s09","text":"é","n":12,"flag":true,"nested":{"leaf":"λ"}}"#,
+        r#"{"_time":2,"_msg":"two","level":"info","stats_group":"s09","text":"","n":-3,"flag":false,"nested":null}"#,
+        r#"{"_time":3,"_msg":"three","level":"info","stats_group":"s09","text":null}"#,
+        r#"{"_time":4,"_msg":"four","level":"info","stats_group":"s09"}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn assert_stats(app: &axum::Router) {
+        assert_eq!(
+            pipeline_rows(
+                app,
+                r#"stats_group:="s09" | stats sum_len(text) as text_bytes, sum_len(n, flag) as scalar_bytes, sum_len(nested) as object_bytes, sum_len(never_present) as missing_bytes"#,
+            )
+            .await,
+            [serde_json::json!({
+                "text_bytes": 2,
+                "scalar_bytes": 13,
+                "object_bytes": 13,
+                "missing_bytes": 0
+            })]
+        );
+        assert_eq!(
+            pipeline_rows(
+                app,
+                r#"stats_group:="s09" | fields text, n | stats SuM_LeN() as bytes, sum_len(text*) as text_bytes"#,
+            )
+            .await,
+            [serde_json::json!({"bytes": 6, "text_bytes": 2})]
+        );
+    }
+
+    let app = router(storage.clone());
+    assert_stats(&app).await;
+    for malformed in [
+        r#"stats_group:="s09" | stats sum_len"#,
+        r#"stats_group:="s09" | stats sum_len(text n)"#,
+        r#"stats_group:="s09" | stats sum_len(text) limit 2"#,
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(logsql_request(malformed))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "_time:[1,2) | stats sum_len(text, n) as bytes",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_work_rows",
+            "limit": 1
+        })
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"stats_group:="s09" | stats count() as total"#).await,
+        [serde_json::json!({"total": 4})]
+    );
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_stats(&router(reopened.clone())).await;
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

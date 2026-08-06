@@ -4926,6 +4926,12 @@ fn stats(
             StatsKind::Stddev => {
                 population_stddev(rows, &expression.fields, limits.max_state_items, cancelled)?
             }
+            StatsKind::SumLen => Value::from(sum_text_lengths(
+                rows,
+                &expression.fields,
+                limits.max_state_items,
+                cancelled,
+            )?),
             StatsKind::Rate => {
                 let value = rate_window_seconds
                     .filter(|duration| *duration > 0.0)
@@ -5277,6 +5283,29 @@ fn population_stddev(
         return Ok(Value::Null);
     }
     Ok(finite_number((squared_deviations / count as f64).sqrt()))
+}
+
+fn sum_text_lengths(
+    rows: &[Value],
+    fields: &[PipelineField],
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<u64, String> {
+    let mut total = 0u64;
+    let mut work_items = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        for value in selected_values(row, fields) {
+            check_periodically(cancelled, work_items)?;
+            charge_transfer_work(&mut work_items, max_work_items, "sum_len")?;
+            let value_len = u64::try_from(projected_text(value).len())
+                .map_err(|_| "LogsQL sum_len value length overflows uint64".to_string())?;
+            total = total
+                .checked_add(value_len)
+                .ok_or_else(|| "LogsQL sum_len result overflows uint64".to_string())?;
+        }
+    }
+    Ok(total)
 }
 
 fn finite_number(value: f64) -> Value {
@@ -6275,6 +6304,42 @@ mod tests {
                 &cancelled,
             )
             .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn sum_len_counts_projected_utf8_bytes_and_observes_bounds() {
+        let text = PipelineField::Exact {
+            path: vec!["text".into()],
+            name: "text".into(),
+        };
+        let rows = [
+            json!({"text": "é"}),
+            json!({"text": 12}),
+            json!({"text": true}),
+            json!({"text": [1, "λ"]}),
+            json!({"text": null}),
+            json!({}),
+        ];
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            sum_text_lengths(&rows, std::slice::from_ref(&text), rows.len(), &cancelled,).unwrap(),
+            16
+        );
+        assert!(sum_text_lengths(
+            &rows,
+            std::slice::from_ref(&text),
+            rows.len() - 1,
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_work_rows=5"));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            sum_text_lengths(&rows, std::slice::from_ref(&text), rows.len(), &cancelled,)
+                .unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

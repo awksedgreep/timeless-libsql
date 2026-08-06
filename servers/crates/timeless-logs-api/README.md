@@ -127,8 +127,8 @@ the same public decode.
 
 The shipped statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
-`median`, `quantile`, `stddev`, `rate`, and `rate_sum`. Missing, null, and
-empty remain distinct;
+`median`, `quantile`, `stddev`, `sum_len`, `rate`, and `rate_sum`. Missing,
+null, and empty remain distinct;
 `count_empty` deliberately counts all three for compatibility. Exact unique
 counts use complete typed tuples, while `count_uniq_hash` uses a documented
 stable 64-bit FNV-1a key hash and claims cardinality—not VictoriaLogs hash-bit
@@ -150,6 +150,13 @@ selection is JSON null. Exact quantile state and both traversals are bounded
 and cancellable. Timeless fails above its configured exact-state limit rather
 than copying VictoriaLogs' randomized reservoir. Direct users have the finite
 native-number public SQL foundation in `SQL-LOG-044`.
+
+`sum_len(fields...)` sums the textual UTF-8 bytes of exact, prefix, or all
+current fields into one checked native JSON integer. Missing/null values add
+zero, strings add raw bytes, and other retained values add compact JSON bytes.
+Each selection is work-bounded and cancellable. Direct users have the exact-
+metadata-path public SQL foundation in `SQL-LOG-045`; dynamic selection,
+canonical fields, grammar, limits, and envelopes remain API behavior.
 
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.

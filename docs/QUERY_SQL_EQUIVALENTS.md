@@ -152,6 +152,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-042`](#sql-log-042-unpack-selected-rich-fields-from-a-json-object) | `LQL-P36` | current foundation | bounded unpacking of fixed exact paths from one public native-object or JSON-text metadata field into a typed nested JSON object; API owns LogsQL grammar, dynamic selection, current-row mutation/preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-043`](#sql-log-043-top-level-json-array-length) | `LQL-P41` | current foundation | bounded top-level element count for one exact public native-array or JSON-array-text metadata path; API owns LogsQL grammar, current-row mutation, bare-`NaN` compatibility, limits, cancellation, and envelopes |
 | [`SQL-LOG-044`](#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation) | `LQL-S07` | current foundation | bounded upper-step quantile and one-pass population deviation for one exact finite native-number path; API owns textual natural order, rich projection, grammar, state limits, cancellation, and envelopes |
+| [`SQL-LOG-045`](#sql-log-045-summed-utf-8-byte-length-of-one-exact-field) | `LQL-S09` | current foundation | summed UTF-8/compact-JSON byte length for one exact public metadata path; API owns dynamic field selection, canonical fields, checked unsigned overflow, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7388,6 +7389,69 @@ Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regressions:
 `session_seventeen_quantile_and_stddev_match_retained_semantics_and_reopen`
 and `session_seventeen_quantile_state_is_bounded_and_reader_remains_reusable`.
+
+### SQL-LOG-045: summed UTF-8 byte length of one exact field
+
+Bind one exact SQLite JSON path, inclusive native timestamp bounds, and
+positive work/result limits. This read-only statement sums the UTF-8 byte
+length of that public field's retained textual projection:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), measured AS (
+  SELECT CASE
+    WHEN json_type(metadata, :sum_len_source_path) IS NULL THEN 0
+    WHEN json_type(metadata, :sum_len_source_path) = 'null' THEN 0
+    WHEN json_type(metadata, :sum_len_source_path) = 'true' THEN 4
+    WHEN json_type(metadata, :sum_len_source_path) = 'false' THEN 5
+    WHEN json_type(metadata, :sum_len_source_path) = 'text' THEN length(
+      CAST(json_extract(metadata, :sum_len_source_path) AS BLOB)
+    )
+    ELSE length(CAST(json(metadata -> :sum_len_source_path) AS BLOB))
+  END AS byte_length
+  FROM bounded
+)
+SELECT COALESCE(SUM(byte_length), 0) AS sum_len
+FROM measured
+WHERE :max_result_rows > 0
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit.
+`:sum_len_source_path` is one exact SQLite JSON path such as `$.host`,
+`$.nested.count`, or `$.tags`. Missing paths and explicit nulls contribute
+zero. Strings contribute their decoded UTF-8 byte length, booleans contribute
+the lowercase JSON spellings `true` or `false`, and numbers, arrays, and
+objects contribute compact JSON bytes. Casting to `BLOB` before `length()` is
+required because SQLite counts Unicode code points for `TEXT`, while LogsQL
+`sum_len` counts bytes. Empty input returns integer zero. SQLite `SUM` is a
+signed 64-bit integer aggregate and fails on overflow; keep
+`:max_work_entries` and stored value sizes below that bound.
+
+The complete `LQL-S09` API owns case-insensitive `sum_len(fields...)` grammar;
+exact, prefix, and all-current-field selection; canonical `_time`, `_msg`, and
+`level` fields; rich current-row composition; a checked unsigned 64-bit total;
+strict work/result/response limits; cooperative deadline cancellation; and
+HTTP envelopes. Empty parentheses select all current fields. Every selected
+missing or null value contributes zero, while each selected traversal still
+counts against `max_work_rows`. Timeless returns a native JSON integer under
+its retained typed-statistics policy; VictoriaLogs returns the same value as
+decimal text.
+
+Dynamic prefix/all-field expansion and the canonical fields remain ordinary
+bounded Rust language composition. Every selected row already crosses the
+public `logs` interface, and SQLite JSON1 provides the exact-path reduction
+without a new extension primitive, private shadow-table access, or storage-
+format change.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_sum_len_counts_utf8_text_and_reopens`.
 
 ## Adding the next recipe
 

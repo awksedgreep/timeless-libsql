@@ -738,6 +738,11 @@ limits instead of randomly sampling them. Embedded SQLite/libSQL users can
 run the executable finite-number public-row equivalent in `SQL-LOG-044`;
 mixed textual ordering, grammar, limits, cancellation, and envelopes remain
 Rust logs API behavior.
+`sum_len(fields...)` adds bounded UTF-8/compact-JSON byte lengths across
+exact, prefix, or all current fields and returns a checked native JSON
+integer. Embedded users can execute the single-exact-path public-row
+equivalent in `SQL-LOG-045`; dynamic selection and API semantics remain in
+the Rust logs server.
 The bounded `first` pipeline selects an optional positive number of rows by
 exact fields with per-field direction, optional partitioning, and an optional
 one-based string rank. Its coercion chain covers exact signed/unsigned

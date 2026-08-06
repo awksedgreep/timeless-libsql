@@ -63,6 +63,7 @@ pub(crate) enum StatsKind {
     Median,
     Quantile,
     Stddev,
+    SumLen,
     Rate,
     RateSum,
 }
@@ -316,6 +317,7 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         "median" => StatsKind::Median,
         "quantile" => StatsKind::Quantile,
         "stddev" => StatsKind::Stddev,
+        "sum_len" => StatsKind::SumLen,
         "rate" => StatsKind::Rate,
         "rate_sum" => StatsKind::RateSum,
         _ => {
@@ -9737,6 +9739,8 @@ mod tests {
             r#"* | stats sum(n) as sum, avg(n) as avg, min(n) as min, max(n) as max, median(n) as median"#,
             r#"* | stats quantile(0.5, n) as p50, stddev(n) as sigma"#,
             r#"* | fields n | stats QuAnTiLe(1) as maximum, StDdEv(*) as sigma"#,
+            r#"* | stats SuM_LeN(text, nested*) as bytes"#,
+            r#"* | fields text, n | stats sum_len() as bytes"#,
             r#"_time:1h | stats rate() as rate, rate_sum(n) as rate_sum"#,
         ] {
             let plan = parse_at(query, TimestampUnit::Microseconds, 1_800_000_000_000_000);
@@ -9760,6 +9764,9 @@ mod tests {
             "* | stats quantile(1.1, n)",
             "* | stats quantile(0.5, n) limit 2",
             "* | stats stddev",
+            "* | stats sum_len",
+            "* | stats sum_len(text n)",
+            "* | stats sum_len(text) limit 2",
             "* | stats sum(n) as value, avg(n) as value",
         ] {
             assert!(

@@ -2156,6 +2156,31 @@
       }]
     },
     {
+      "id": "LQL-S09-sum-len-counts-textual-byte-lengths",
+      "query": "state_group:=\"state\" | stats sum_len(probe) as bytes",
+      "expected_rows": [{"bytes": "11"}]
+    },
+    {
+      "id": "LQL-S09-sum-len-counts-numeric-spellings",
+      "query": "numeric_group:=\"numeric\" | stats sum_len(n) as bytes",
+      "expected_rows": [{"bytes": "26"}]
+    },
+    {
+      "id": "LQL-S09-sum-len-counts-utf8-bytes",
+      "query": "case:=\"quote-hex-unicode\" | stats sum_len(_msg) as bytes",
+      "expected_rows": [{"bytes": "4"}]
+    },
+    {
+      "id": "LQL-S09-sum-len-defaults-to-current-fields-and-is-case-insensitive",
+      "query": "state_group:=\"state\" | fields probe | stats SuM_LeN() as bytes",
+      "expected_rows": [{"bytes": "11"}]
+    },
+    {
+      "id": "LQL-S09-sum-len-supports-prefix-fields",
+      "query": "numeric_group:=\"numeric\" | stats sum_len(first_*) as bytes",
+      "expected_rows": [{"bytes": "9"}]
+    },
+    {
       "id": "LQL-P07-delete-exact-list",
       "query": "delete_group:=\"delete\" | delete drop_exact, drop_prefix_a | fields case, keep, drop_exact, drop_prefix_a, drop_prefix_b",
       "expected_rows": [{"case": "delete-row", "keep": "kept", "drop_prefix_b": "two"}]
@@ -5809,6 +5834,41 @@
     {
       "id": "LQL-S07-stddev-requires-parentheses",
       "query": "* | stats stddev",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S09-sum-len-requires-parentheses",
+      "query": "* | stats sum_len",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S09-sum-len-requires-commas",
+      "query": "* | stats sum_len(a b)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S09-sum-len-rejects-leading-empty-field",
+      "query": "* | stats sum_len(,a)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S09-sum-len-rejects-interior-wildcard",
+      "query": "* | stats sum_len(a*b)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S09-sum-len-rejects-trailing-token",
+      "query": "* | stats sum_len(a) as bytes tail",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -407,6 +407,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "unpack_path_5" => Value::Text("$.missing".to_owned()),
         "json_array_source_path" => Value::Text("$.tags".to_owned()),
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
+        "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1705,6 +1706,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let unpack_json_rows = recipe_values("SQL-LOG-042", 0)?;
     let json_array_len_rows = recipe_values("SQL-LOG-043", 0)?;
     let quantile_stddev_rows = recipe_values("SQL-LOG-044", 0)?;
+    let sum_len_rows = recipe_values("SQL-LOG-045", 0)?;
     if [
         bounded,
         substring,
@@ -2311,6 +2313,48 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if source_after_statistics != source_packed_fields {
         bail!("SQL-LOG-044 mutated its public source: {source_after_statistics:?}");
+    }
+    if sum_len_rows != [vec![Value::Integer(3)]] {
+        bail!("SQL-LOG-045 aggregate byte length changed: {sum_len_rows:?}");
+    }
+    let sum_len_sql = recipe_sql("SQL-LOG-045", 0)?;
+    let measured_sum_len = |source_path: &str| -> Result<i64> {
+        let mut statement = connection.prepare(&sum_len_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-045 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "sum_len_source_path" => Value::Text(source_path.to_owned()),
+                _ => parameter("SQL-LOG-045", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let mut rows = statement.raw_query();
+        let value = rows
+            .next()?
+            .context("SQL-LOG-045 returned no aggregate row")?
+            .get(0)?;
+        Ok(value)
+    };
+    for (path, expected) in [
+        ("$.host", 10),
+        ("$.nested.ok", 8),
+        ("$.nested.none", 0),
+        ("$.missing", 0),
+    ] {
+        let actual = measured_sum_len(path)?;
+        if actual != expected {
+            bail!("SQL-LOG-045 path {path:?} changed: {actual}");
+        }
+    }
+    let source_after_sum_len = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_after_sum_len != source_packed_fields {
+        bail!("SQL-LOG-045 mutated its public source: {source_after_sum_len:?}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3537,13 +3581,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 110);
+        assert_eq!(recipes.len(), 111);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            140
+            141
         );
         assert_eq!(
             recipes
@@ -3551,7 +3595,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            146
+            147
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

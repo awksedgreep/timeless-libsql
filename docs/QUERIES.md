@@ -1484,6 +1484,40 @@ materializes the same 128/8,192 public rows. `QSF-193` therefore retains the
 bounded API implementation and the complete measured tails without adding a
 storage primitive.
 
+## LogsQL summed textual byte length
+
+The bounded `stats` pipeline supports `sum_len(fields...)`:
+
+```text
+* | stats sum_len(_msg) as message_bytes
+* | stats sum_len(context*) as context_bytes
+* | fields _msg, service | stats sum_len() as selected_bytes
+```
+
+Function names are case-insensitive. Fields may be exact names or suffix-
+prefix selectors such as `context*`; empty parentheses select every field in
+the current projected row. Each selected value contributes the byte length of
+its textual projection: missing and JSON null contribute zero, strings use
+their raw UTF-8 bytes, and numbers, booleans, arrays, and objects use compact
+JSON text. Thus `"é"` contributes two, not one. Timeless returns a native JSON
+integer; the pinned VictoriaLogs endpoint returns the same unsigned value as
+decimal text.
+
+Every selected traversal counts against `max_work_rows`, including a missing
+or null selection that contributes zero. The aggregate keeps one checked
+`u64`; overflow, limits, deadlines, and cancellation fail explicitly and
+leave the SQLite reader reusable. Stored log rows remain immutable across
+flush, optimize, shutdown, and reopen.
+
+Executable
+[`SQL-LOG-045`](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)
+uses only public `logs`, JSON1, `length(CAST(... AS BLOB))`, and `SUM` for one
+exact metadata path. Dynamic field expansion, canonical `_time`, `_msg`, and
+`level`, grammar, checked unsigned overflow, limits, cancellation, and HTTP
+envelopes remain bounded Rust API composition. The required public scan
+already crosses each selected row, so no extension primitive or private
+storage access is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

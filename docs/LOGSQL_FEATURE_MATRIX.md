@@ -666,7 +666,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S06` | `min` / `max` / `median` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `ROWS`, `SQL` | `API` | P1 |
 | `LQL-S07` | `quantile` / `stddev` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S08` | `rate` / `rate_sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
-| `LQL-S09` | `sum_len` | missing | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | in progress | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S10` | `any` / `field_min` / `field_max` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -686,6 +686,16 @@ medians, and rates use finite binary64. `rate` and `rate_sum` divide by the
 explicit final query interval in seconds; without a finite two-sided interval
 they return the undivided count or sum, matching the upstream operator
 contract.
+
+`sum_len(fields...)` sums UTF-8 bytes across exact, prefix, or all-current-
+field selections. Missing and null values contribute zero; strings contribute
+raw UTF-8 bytes; and numbers, booleans, arrays, and objects use compact JSON
+text. Every selected traversal is work-bounded, the checked unsigned total
+fails explicitly on overflow, and cancellation leaves the public reader
+reusable. Timeless intentionally returns a native JSON integer rather than
+VictoriaLogs' decimal string. `SQL-LOG-045` is the executable single-exact-
+metadata-path foundation; dynamic field selection, canonical fields, language
+grammar, limits, cancellation, and HTTP envelopes remain Rust API work.
 
 ## Query options and HTTP behavior
 

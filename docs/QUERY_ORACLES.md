@@ -795,3 +795,17 @@ fails a deterministic exact quantile when its configured state limit is
 exceeded. The fixture now contains 298 row-query cases, 290 error cases, and
 319 statistics/pipeline cases; the fixture now contains 907 cases in total,
 all passing against the immutable image.
+
+`LQL-S09` adds five exact statistics cases and five error cases for
+`sum_len`. They pin textual UTF-8 byte counts, numeric spellings, default
+current-field selection, exact and prefix fields, case-insensitive function
+names, and strict parentheses/comma/wildcard/trailing-token grammar. Source
+audit is against `stats_sum_len.go`, `stats_sum_len_test.go`,
+`stats_parser.go`, and `block_result.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. VictoriaLogs returns a decimal
+string from one unsigned 64-bit aggregate. Timeless keeps the same byte and
+selection semantics but returns a native JSON integer under its retained
+typed-statistics policy; retained arrays and objects use compact JSON rather
+than upstream flattened columns. The fixture now contains 298 row-query
+cases, 295 error cases, and 324 statistics/pipeline cases: 917 cases total,
+all passing against the immutable image. The fixture now contains 917 cases.
