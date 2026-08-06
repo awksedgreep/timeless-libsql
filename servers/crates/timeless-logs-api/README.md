@@ -684,6 +684,36 @@ provides the direct public exact top-level JSON1 foundation and explicitly
 documents nested-parent and destination-conflict responsibilities. No
 extension primitive or private table is used.
 
+LogsQL `format` interpolates current-row values into an exact destination:
+
+```text
+* | format "request from <client_ip>: <_msg>"
+* | format if (level:=error) '<uc:service> <q:_msg>' as summary
+* | format '<duration_seconds:elapsed>' as elapsed_seconds keep_original_fields
+* | format '<urlencode:user>' as encoded_user skip_empty_results
+```
+
+Patterns may be quoted or one unquoted token. HTML entities in literal
+prefixes are decoded. `<field>` uses retained rich paths and textual
+projection; missing/null plus `<_>`, `<*>`, and `<>` produce empty text.
+Wildcard fields are rejected. Options are `uc`, `lc`, `q`, URL encode/decode,
+hex encode/decode, Base64 encode/decode, numeric-hex encode/decode, `time`,
+`duration`, `duration_seconds`, and `ipv4`. Invalid inputs retain their raw
+text under the pinned VictoriaLogs rules. Unix integer, fractional, and
+scientific forms use exact integer inference and nanosecond RFC3339 output.
+
+The destination defaults to `_msg`; `as` accepts one exact field. Optional
+`if (...)` uses the current-row filter language and `if ()` matches all rows.
+`keep_original_fields` retains a nonempty existing destination;
+`skip_empty_results` does so only for an empty formatted result. Timeless
+retains explicit empty strings and source JSON types. Replacing a rich object
+or descending through a scalar destination parent returns HTTP 422
+`field_conflict`. Work, transform expansion, temporary output, results,
+response size, and cancellation are bounded. Executable
+[`SQL-LOG-035`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)
+provides direct users the public exact-field JSON1/`printf` foundation. No
+extension primitive, private table, or durable storage mutation is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

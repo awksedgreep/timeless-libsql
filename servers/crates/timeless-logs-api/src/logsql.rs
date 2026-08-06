@@ -844,6 +844,219 @@ fn parse_rename_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     }))
 }
 
+fn parse_format_pipe(
+    segment: &str,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<PipelineOp, LogsqlError> {
+    let command = segment
+        .get(.."format".len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL format pipe is empty"))?;
+    if !command.eq_ignore_ascii_case("format") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL format pipe, not {command:?}"
+        )));
+    }
+    let mut rest = segment["format".len()..].trim_start();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed("LogsQL format requires a pattern"));
+    }
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_format_condition(rest)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(
+                &expression,
+                None,
+                timestamp_unit,
+                query_now,
+            )?)
+        }
+    } else {
+        None
+    };
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL format requires a pattern after its condition",
+        ));
+    }
+
+    let (pattern, consumed) = if let Some((pattern, consumed)) = parse_quoted_prefix(rest)? {
+        (pattern, consumed)
+    } else {
+        let consumed = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        (rest[..consumed].to_owned(), consumed)
+    };
+    let steps = parse_format_pattern(&pattern)?;
+    rest = rest[consumed..].trim_start();
+
+    let tokens = pipeline_words(rest)?;
+    let mut cursor = 0usize;
+    let mut destination = PipelineField::Exact {
+        path: vec!["_msg".into()],
+        name: "_msg".into(),
+    };
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("as"))
+    {
+        cursor += 1;
+        let field = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL format as requires a destination field")
+        })?;
+        destination = match parse_delete_field(field)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL format destination must be an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+
+    let mut keep_original_fields = false;
+    let mut skip_empty_results = false;
+    if let Some(modifier) = tokens.get(cursor) {
+        if modifier.eq_ignore_ascii_case("keep_original_fields") {
+            keep_original_fields = true;
+            cursor += 1;
+        } else if modifier.eq_ignore_ascii_case("skip_empty_results") {
+            skip_empty_results = true;
+            cursor += 1;
+        }
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL format token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Format(FormatSpec {
+        pattern,
+        steps,
+        destination,
+        keep_original_fields,
+        skip_empty_results,
+        condition,
+    }))
+}
+
+fn starts_format_keyword(value: &str, keyword: &str) -> bool {
+    value
+        .get(..keyword.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+        && value[keyword.len()..]
+            .chars()
+            .next()
+            .is_none_or(|character| character.is_whitespace() || character == '(')
+}
+
+fn take_format_condition(value: &str) -> Result<(&str, &str), LogsqlError> {
+    if !value.starts_with('(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL format if requires a parenthesized filter",
+        ));
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    LogsqlError::malformed("unmatched LogsQL format if closing parenthesis")
+                })?;
+                if depth == 0 {
+                    let expression = value[1..index].trim();
+                    return Ok((expression, &value[index + character.len_utf8()..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(LogsqlError::malformed(
+        "unterminated LogsQL format if filter",
+    ))
+}
+
+fn parse_format_pattern(pattern: &str) -> Result<Vec<FormatStep>, LogsqlError> {
+    let mut steps = Vec::new();
+    let mut remaining = pattern;
+    loop {
+        let Some(open) = remaining.find('<') else {
+            if !remaining.is_empty() {
+                steps.push(FormatStep {
+                    prefix: html_escape::decode_html_entities(remaining).into_owned(),
+                    field: None,
+                });
+            }
+            break;
+        };
+        let prefix = html_escape::decode_html_entities(&remaining[..open]).into_owned();
+        remaining = &remaining[open + 1..];
+        let Some(close) = remaining.find('>') else {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL format pattern {pattern:?} is missing '>'"
+            )));
+        };
+        let mut field = remaining[..close].trim();
+        remaining = &remaining[close + 1..];
+        if matches!(field, "" | "_" | "*") {
+            steps.push(FormatStep {
+                prefix,
+                field: None,
+            });
+            continue;
+        }
+        let mut option = "";
+        if let Some(colon) = field.find(':') {
+            option = field[..colon].trim();
+            field = field[colon + 1..].trim();
+        }
+        if field.ends_with('*') {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL format pattern cannot contain wildcard field {field:?}"
+            )));
+        }
+        if field.is_empty() {
+            steps.push(FormatStep {
+                prefix,
+                field: None,
+            });
+            continue;
+        }
+        let path = field.split('.').map(str::to_owned).collect();
+        steps.push(FormatStep {
+            prefix,
+            field: Some(FormatField {
+                name: field.to_owned(),
+                path,
+                option: option.to_owned(),
+            }),
+        });
+    }
+    Ok(steps)
+}
+
 fn parse_field_pairs(
     tokens: &[String],
     operation: &str,
@@ -1147,6 +1360,10 @@ fn is_copy_pipe(segment: &str) -> bool {
 
 fn is_rename_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "rename") || is_first_last_pipe(segment, "mv")
+}
+
+fn is_format_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "format")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -1609,6 +1826,29 @@ pub(crate) struct RenameSpec {
     pub pairs: Vec<(PipelineField, PipelineField)>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FormatField {
+    pub name: String,
+    pub path: Vec<String>,
+    pub option: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FormatStep {
+    pub prefix: String,
+    pub field: Option<FormatField>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FormatSpec {
+    pub pattern: String,
+    pub steps: Vec<FormatStep>,
+    pub destination: PipelineField,
+    pub keep_original_fields: bool,
+    pub skip_empty_results: bool,
+    pub condition: Option<LogPredicate>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -1638,6 +1878,7 @@ pub(crate) enum PipelineOp {
     Coalesce(CoalesceSpec),
     Copy(CopySpec),
     Rename(RenameSpec),
+    Format(FormatSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2001,6 +2242,10 @@ pub fn parse_at(
             }
             _ if is_rename_pipe(segment) => {
                 pipeline.push(parse_rename_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_format_pipe(segment) => {
+                pipeline.push(parse_format_pipe(segment, timestamp_unit, query_now)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -2920,7 +3165,7 @@ fn parse_victorialogs_uint(value: &str) -> Option<u64> {
     Some(result)
 }
 
-fn parse_victorialogs_human_duration(value: &str) -> Option<i64> {
+pub(crate) fn parse_victorialogs_human_duration(value: &str) -> Option<i64> {
     parse_victorialogs_human_segments(
         value,
         &[
@@ -7041,6 +7286,39 @@ mod tests {
             "* | rename source as destination trailing",
             "* | rename source * as destination",
             "* | rename source as destination *",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_format_grammar_is_complete_and_strict() {
+        for query in [
+            r#"* | format "request from <ip>:<port>""#,
+            r#"* | FORMAT IF (ip:* and host:*) "<uc:host> <q:_msg>" AS result"#,
+            r#"* | format if () "always" as result"#,
+            r#"* | format '<duration_seconds:elapsed>' as seconds keep_original_fields"#,
+            r#"* | format '<urlencode:user>' as encoded skip_empty_results"#,
+            r#"* | format "" as empty"#,
+            "* | format literal as result",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | format",
+            "* | format if",
+            "* | format if (ip:*)",
+            r#"* | format "unterminated"#,
+            r#"* | format "<unterminated""#,
+            r#"* | format "<field*>""#,
+            r#"* | format "value" as"#,
+            r#"* | format "value" as result*"#,
+            r#"* | format "value" keep_original_fields skip_empty_results"#,
+            r#"* | format "value" trailing"#,
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

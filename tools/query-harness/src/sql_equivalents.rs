@@ -378,6 +378,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "copy_destination_path" => Value::Text("$.copied".to_owned()),
         "rename_source_path" => Value::Text("$.duration_ms".to_owned()),
         "rename_destination_path" => Value::Text("$.moved".to_owned()),
+        "format_source_path_1" => Value::Text("$.host".to_owned()),
+        "format_source_path_2" => Value::Text("$.duration_ms".to_owned()),
+        "format_pattern" => Value::Text("host=%s duration_ms=%s".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1666,6 +1669,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let coalesce_rows = recipe_values("SQL-LOG-032", 0)?;
     let copy_rows = recipe_values("SQL-LOG-033", 0)?;
     let rename_rows = recipe_values("SQL-LOG-034", 0)?;
+    let format_rows = recipe_values("SQL-LOG-035", 0)?;
     if [
         bounded,
         substring,
@@ -1964,6 +1968,24 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             bail!("SQL-LOG-034 exact typed move or source removal changed: {metadata}");
         }
     }
+    if format_rows
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text("error".into()),
+                Value::Text("request timeout".into()),
+                Value::Text("host=web-1 duration_ms=12".into()),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text("info".into()),
+                Value::Text("request ok".into()),
+                Value::Text("host=web-2 duration_ms=4".into()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-035 format result changed: {format_rows:?}");
+    }
     let coalesce_sql = recipe_sql("SQL-LOG-032", 0)?;
     let coalesced = |source_path_1: &str,
                      source_path_2: &str,
@@ -2148,6 +2170,44 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
                 .is_some_and(serde_json::Value::is_number)
     }) {
         bail!("SQL-LOG-034 destination overwrite changed: {overwritten:?}");
+    }
+    let format_sql = recipe_sql("SQL-LOG-035", 0)?;
+    let formatted =
+        |source_path_1: &str, source_path_2: &str, pattern: &str| -> Result<Vec<String>> {
+            let mut statement = connection.prepare(&format_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-035 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "format_source_path_1" => Value::Text(source_path_1.to_owned()),
+                    "format_source_path_2" => Value::Text(source_path_2.to_owned()),
+                    "format_pattern" => Value::Text(pattern.to_owned()),
+                    _ => parameter("SQL-LOG-035", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            statement
+                .raw_query()
+                .mapped(|row| row.get::<_, String>(3))
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        };
+    if formatted("$.nested.ok", "$.nested.count", "%s|%s")? != ["true|2", "true|2"] {
+        bail!("SQL-LOG-035 boolean/numeric textual projection changed");
+    }
+    if formatted("$.absent", "$.nested.empty", "<%s>|<%s>")? != ["<>|<>", "<>|<>"] {
+        bail!("SQL-LOG-035 missing/null/empty projection changed");
+    }
+    let arrays = formatted("$.tags", "$.host", "%s|%s")?;
+    if arrays.len() != 2
+        || !arrays[0].starts_with(r#"["prod","",123,true,false,null,"#)
+        || !arrays[0].ends_with("|web-1")
+        || !arrays[1].starts_with(r#"["dev",1.5,-2,"#)
+        || !arrays[1].ends_with("|web-2")
+    {
+        bail!("SQL-LOG-035 array/string textual projection changed: {arrays:?}");
     }
     let facets_sql = recipe_sql("SQL-LOG-031", 0)?;
     let facet_values = |max_values_per_field: i64,
@@ -3110,13 +3170,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 100);
+        assert_eq!(recipes.len(), 101);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            130
+            131
         );
         assert_eq!(
             recipes
@@ -3124,7 +3184,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            136
+            137
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -815,6 +815,53 @@ shows the public JSON1 foundation for one exact top-level move. The Rust API
 owns nested-parent pruning, wildcard and sequential composition, strict
 errors, and hard limits; no extension primitive or private table is used.
 
+## LogsQL `format` over rich current rows
+
+`format` interpolates current-row fields into a textual result:
+
+```text
+* | format "request from <client_ip>: <_msg>"
+* | format if (level:=error) '<uc:service> <q:_msg>' as summary
+* | format '<duration_seconds:elapsed>' as elapsed_seconds keep_original_fields
+* | format '<urlencode:user>' as encoded_user skip_empty_results
+```
+
+The pattern may be quoted or a single unquoted token. Literal prefixes decode
+HTML entities. `<field>` uses recursively retained rich paths and textual
+projection: strings remain unquoted, numbers and booleans use JSON spelling,
+arrays use compact JSON, and missing/null values are empty. `<_>`, `<*>`, and
+`<>` are explicit empty placeholders; wildcard field references are rejected.
+An unknown option is a plain interpolation for VictoriaLogs compatibility.
+
+The supported options are `uc`, `lc`, `q`, `urlencode`, `urldecode`,
+`hexencode`, `hexdecode`, `base64encode`, `base64decode`, `hexnumencode`,
+`hexnumdecode`, `time`, `duration`, `duration_seconds`, and `ipv4`. Invalid
+codec inputs retain their source text, except `hexdecode` preserves invalid
+byte pairs while decoding valid pairs exactly as the pinned processor does.
+`uc`/`lc` use simple one-codepoint Unicode mappings. `time` accepts the exact
+VictoriaLogs signed integer, fractional, and scientific Unix s/ms/us/ns
+heuristic and emits trimmed nanosecond RFC3339 UTC. `duration` accepts signed
+nanoseconds; `duration_seconds` accepts the established human-duration
+grammar.
+
+The destination is `_msg` unless `as exact_field` is present. `if (...)`
+formats only matching rows; `if ()` matches every row. A nonempty existing
+destination is retained by `keep_original_fields`, and by
+`skip_empty_results` only when the new result is empty. Timeless preserves an
+explicit empty destination in rich JSON, whereas VictoriaLogs stream JSON
+omits empty-valued columns. Existing scalar destinations are overwritten. A
+destination that would replace a retained object or descend through a scalar
+fails with HTTP 422 reason `field_conflict` and leaves durable storage
+unchanged.
+
+Pattern/source traversal, transform expansion, temporary output, result rows,
+response bytes, and cancellation use the hard request limits. Executable
+[`SQL-LOG-035`](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)
+shows a public JSON1/`printf` equivalent for two exact metadata paths. The
+Rust API owns LogsQL syntax, arbitrary placeholders and codecs, conditions,
+destination preservation, errors, and limits; no extension primitive or
+private table is used.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

@@ -2688,6 +2688,279 @@ async fn session_seventeen_rename_is_typed_sequential_bounded_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_format_is_complete_bounded_rich_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("format-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let entries = [
+        LogEntry {
+            ts: 1_800_000_000_000_001,
+            level: 1,
+            severity: "info".into(),
+            message: "format rich".into(),
+            metadata_json: serde_json::json!({
+                "case":"format-rich",
+                "format_group":"format",
+                "host":"aцC",
+                "lower":"aBП",
+                "unicode_edge":"ßİ",
+                "url":"a b+ц",
+                "encoded_url":"a+b%2B%D1%86",
+                "hex":"D099D0A6D0A3D09A",
+                "b64":"YdGGQw==",
+                "duration":"1h5m35s",
+                "duration_ns":"210123456789",
+                "duration_min":"-9223372036854775808",
+                "unix_seconds_fraction":"1717328141.12",
+                "unix_millis":"1717328141123",
+                "unix_micros":"1717328141123456",
+                "unix_ns":"1717328141123456789",
+                "unix_scientific":"1.717328141123456789e18",
+                "unix_plus":"+1717328141",
+                "unix_negative":"-1717328141.123",
+                "number":"1234",
+                "hex_number":"00000000000004D2",
+                "ipv4":"1234567890",
+                "probe":2,
+                "flag":false,
+                "nested":{"a":"one","b":[1,"x"]},
+                "null_value":null,
+                "empty_value":"",
+                "result":"original"
+            })
+            .to_string(),
+        },
+        LogEntry {
+            ts: 1_800_000_000_000_002,
+            level: 1,
+            severity: "info".into(),
+            message: "format missing".into(),
+            metadata_json: serde_json::json!({
+                "case":"format-missing",
+                "format_group":"format"
+            })
+            .to_string(),
+        },
+    ];
+    storage.ingest(entries.into()).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-rich" | format '&lt;<uc:host>&gt;|<lc:lower>|<q:_msg>|<urlencode:url>|<urldecode:encoded_url>|<hexdecode:hex>|<base64decode:b64>|<duration_seconds:duration>|<duration:duration_ns>|<time:unix_ns>|<hexnumencode:number>|<hexnumdecode:hex_number>|<ipv4:ipv4>|<probe>|<flag>|<nested.b>|<null_value><_><*><>' as rendered | fields case, rendered"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"format-rich",
+            "rendered":"<AЦC>|abп|\"format rich\"|a+b%2B%D1%86|a b+ц|ЙЦУК|aцC|3935|3m30.123456789s|2024-06-02T11:35:41.123456789Z|00000000000004D2|1234|73.150.2.210|2|false|[1,\"x\"]|"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-rich" | format '<time:unix_seconds_fraction>|<time:unix_millis>|<time:unix_micros>|<time:unix_scientific>|<time:unix_plus>|<time:unix_negative>|<uc:unicode_edge>|<lc:unicode_edge>|<duration:duration_min>' as rendered | fields case, rendered"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"format-rich",
+            "rendered":"2024-06-02T11:35:41.12Z|2024-06-02T11:35:41.123Z|2024-06-02T11:35:41.123456Z|2024-06-02T11:35:41.123456789Z|2024-06-02T11:35:41Z|1915-08-01T12:24:18.877Z|ßİ|ßi|-"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"format_group:="format" | format if (host:*) 'matched <host>' as result | fields case, result"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"format-rich","result":"matched aцC"}),
+            serde_json::json!({"case":"format-missing"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-rich" | format 'replacement' as result keep_original_fields | fields case, result"#,
+        )
+        .await,
+        [serde_json::json!({"case":"format-rich","result":"original"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-missing" | format 'replacement' as result keep_original_fields | fields case, result"#,
+        )
+        .await,
+        [serde_json::json!({"case":"format-missing","result":"replacement"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-rich" | format '<missing>' as result skip_empty_results | fields case, result"#,
+        )
+        .await,
+        [serde_json::json!({"case":"format-rich","result":"original"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-missing" | format '<missing>' as result | fields case, result"#,
+        )
+        .await,
+        [serde_json::json!({"case":"format-missing","result":""})],
+        "Timeless keeps an explicit empty formatted destination distinct from a missing rich field"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-rich" | format '<probe>' as probe keep_original_fields | fields case, probe"#,
+        )
+        .await,
+        [serde_json::json!({"case":"format-rich","probe":2})],
+        "preservation modes retain the original rich type"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-rich" | format if () 'always' as rendered | fields case, rendered"#,
+        )
+        .await,
+        [serde_json::json!({"case":"format-rich","rendered":"always"})]
+    );
+
+    for malformed in [
+        "* | format",
+        "* | format if",
+        "* | format if (host:*)",
+        r#"* | format "<unterminated""#,
+        r#"* | format "<field*>""#,
+        "* | format value as",
+        "* | format value as result*",
+        "* | format value keep_original_fields skip_empty_results",
+        "* | format value trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="format-rich" | format 'replacement' as nested"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["error"], "query_execution");
+    assert_eq!(conflict["reason"], "field_conflict");
+    assert!(conflict["message"]
+        .as_str()
+        .unwrap()
+        .contains("LogsQL format destination conflict"));
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"format_group:="format" | format '<case>' as rendered | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="format-rich" | format '<urlencode:url><urlencode:url><urlencode:url>' as rendered"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="format-rich" | format '<host><lower><url>' as rendered"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{query}: {body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="format-rich" | fields case, probe, flag, nested, null_value, empty_value, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"format-rich",
+            "probe":2,
+            "flag":false,
+            "nested":{"a":"one","b":[1,"x"]},
+            "null_value":null,
+            "empty_value":"",
+            "result":"original"
+        })],
+        "format must not mutate stored rich source fields and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="format-rich" | FORMAT '<uc:host>|<nested.b>' AS rendered | fields case, rendered"#,
+        )
+        .await,
+        [serde_json::json!({"case":"format-rich","rendered":"AЦC|[1,\"x\"]"})]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -8053,12 +8326,45 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_rename);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_rename_cancel = default_app
+        .clone()
         .oneshot(logsql_request(
             "level:error | rename _msg as selected | fields selected | limit 1",
         ))
         .await
         .unwrap();
     assert_eq!(reused_after_rename_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_format = storage.stats().await.unwrap().api_query_cancelled;
+    let format_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | format '<urlencode:_msg><hexencode:_msg>' as selected | fields selected | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(format_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_format && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_format);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_format_cancel = default_app
+        .oneshot(logsql_request(
+            "level:error | format '<_msg>' as selected | fields selected | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_format_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

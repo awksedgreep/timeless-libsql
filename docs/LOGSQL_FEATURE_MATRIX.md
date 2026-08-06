@@ -125,7 +125,7 @@ extension.
 | `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P22` | `format` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P22` | `format` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
@@ -329,6 +329,29 @@ contract change. Exact-build evidence records 3.770/43.696 ms narrow/wide p95
 versus 3.553/36.673 ms for byte-identical same-scan controls; `QSF-169`
 accepts the +6.1%/+19.1% bounded move/prune/rebuild cost above the unchanged
 public storage boundary.
+
+`LQL-P22` interpolates quoted or unquoted patterns over the current rich row.
+The destination defaults to `_msg`; `as` accepts one exact field. Optional
+`if (...)` evaluates the existing filter language, including an empty
+match-all condition. Literal prefixes decode HTML entities. `<field>` uses
+the established textual projection; `<_>`, `<*>`, and `<>` are empty
+placeholders, and wildcard field references fail explicitly. The `uc`, `lc`,
+`q`, URL, hex, Base64, numeric-hex, `time`, `duration`, `duration_seconds`,
+and `ipv4` options match the pinned VictoriaLogs processor, including raw
+fallbacks, simple Unicode case mapping, exact integer/scientific timestamp
+inference, and nanosecond RFC3339 output.
+
+`keep_original_fields` retains a nonempty destination; `skip_empty_results`
+does so only when the formatted result is empty. Timeless retains explicit
+empty strings and rich source types even where VictoriaLogs stream JSON omits
+empty columns. A destination that would replace a retained object or descend
+through a scalar fails with HTTP 422 `field_conflict`. Pattern traversal,
+source-value projection, transform expansion, output, results, response bytes,
+and cancellation are bounded. Executable `SQL-LOG-035` provides ordinary
+JSON1/`printf` interpolation for exact metadata paths. Language syntax,
+arbitrary patterns, codecs, conditional composition, destination mutation,
+limits, and HTTP envelopes remain in the Rust API; no extension primitive,
+private table, or storage-contract change is required.
 
 ## Statistics functions
 

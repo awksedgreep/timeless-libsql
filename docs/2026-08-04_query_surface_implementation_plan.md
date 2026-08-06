@@ -681,6 +681,19 @@ same-scan controls. `QSF-169` accepts the +6.1%/+19.1% bounded
 move/prune/rebuild cost, records unchanged four-block storage and the HWM
 verdict, and closes the row. Session 17 continues with `LQL-P22`.
 
+`LQL-P22` now has strict case-insensitive `format` grammar, quoted/unquoted
+patterns, optional and empty `if (...)`, default/exact destinations,
+HTML-decoded literals, exact/empty/missing/rich placeholders, all applicable
+pinned transformations and raw fallbacks, preservation modifiers, exact
+checked-decimal Unix-time inference, hard work/state/result/response limits,
+cancellation, rich-object conflict errors, optimize/reopen coverage, and
+executable public `SQL-LOG-035`. Twenty-four successful and nine error cases
+pass the complete 649-case pinned VictoriaLogs oracle. Timeless preserves
+typed rich inputs and explicit empty destinations where the flattened
+upstream stream response omits them. `QSF-170` records the semantic boundary
+and the corrected scientific-time/HTTP-envelope regressions. Exact-build
+performance and HWM remain to be recorded in `QSF-171` before the row closes.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

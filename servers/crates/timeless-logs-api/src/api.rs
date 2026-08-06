@@ -459,6 +459,7 @@ fn query_execution_error(error: String) -> Response<Body> {
     if error.starts_with("LogsQL coalesce destination conflict:")
         || error.starts_with("LogsQL copy destination conflict:")
         || error.starts_with("LogsQL rename destination conflict:")
+        || error.starts_with("LogsQL format destination conflict:")
     {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,

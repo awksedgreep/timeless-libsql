@@ -135,6 +135,7 @@
     {"case": "week-fri", "_msg": "week Friday", "week_group": "week", "utc_weekday": "Fri", "utc_time_of_day": "12:00:00.000000"},
     {"case": "week-sat", "_msg": "week Saturday", "week_group": "week", "utc_weekday": "Sat", "utc_time_of_day": "12:00:00.000000"},
     {"case": "comment-hash", "_msg": "hash#inside", "comment_group": "comments", "hash#field": "hash#value"},
+    {"case": "format-row", "_msg": "hello \"world\"\nnext", "format_group": "format", "host": "aцC", "lower": "aBП", "unicode_edge": "ßİ", "url": "a b+ц", "encoded_url": "a+b%2B%D1%86", "hex": "D099D0A6D0A3D09A", "invalid_hex": "qwert", "b64": "YdGGQw==", "invalid_b64": "al", "duration": "1h5m35s", "duration_ns": "210123456789", "duration_min": "-9223372036854775808", "unix_seconds_fraction": "1717328141.12", "unix_millis": "1717328141123", "unix_micros": "1717328141123456", "unix_ns": "1717328141123456789", "unix_scientific": "1.717328141123456789e18", "unix_plus": "+1717328141", "unix_negative": "-1717328141.123", "number": "1234", "hex_number": "00000000000004D2", "ipv4": "1234567890", "result": "original"},
     {"case": "delete-row", "_msg": "delete message", "delete_group": "delete", "level": "warning", "keep": "kept", "drop_exact": "gone", "drop_prefix_a": "one", "drop_prefix_b": "two", "Drop_prefix_caps": "caps", "delete,weird": "comma", "delete|pipe": "pipe", "drop,prefix.one": "quoted-prefix", "star*literal": "literal-star", "nested": {"drop": "nested-gone", "keep": "nested-kept"}, "array": ["x", 1], "null_value": null, "empty_value": ""}
   ],
   "query_cases": [
@@ -1154,7 +1155,7 @@
         "string-range-numeric", "string-range-boolean", "string-range-array",
         "string-range-object", "string-range-nested", "string-range-service",
         "string-range-message",
-        "page-0", "page-1", "page-2", "page-3", "delete-row", "comment-hash",
+        "page-0", "page-1", "page-2", "page-3", "delete-row", "comment-hash", "format-row",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
         "word-unicode-boundary", "word-unicode", "word-unicode-case"
@@ -2213,7 +2214,7 @@
     {
       "id": "LQL-P12-query-stats-full-fixture-cardinality",
       "query": "* | query_stats | keep RowsFound",
-      "expected_rows": [{"RowsFound": "135"}]
+      "expected_rows": [{"RowsFound": "136"}]
     },
     {
       "id": "LQL-P12-query-stats-composes-after-limit",
@@ -2917,6 +2918,126 @@
       "id": "LQL-P21-rename-exact-to-wildcard-keeps-literal-destination",
       "query": "case:=state-string | rename probe as selected* | fields case, probe, \"selected*\"",
       "expected_rows": [{"case": "state-string", "selected*": "value"}]
+    },
+    {
+      "id": "LQL-P22-format-default-message",
+      "query": "case:=format-row | format \"host=<host>\" | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "host=aцC"}]
+    },
+    {
+      "id": "LQL-P22-format-explicit-destination",
+      "query": "case:=format-row | format 'request from <host>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "request from aцC"}]
+    },
+    {
+      "id": "LQL-P22-format-case-and-json-quote",
+      "query": "case:=format-row | format '<uc:host>|<lc:lower>|<q:_msg>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "AЦC|abп|\"hello \\\"world\\\"\\nnext\""}]
+    },
+    {
+      "id": "LQL-P22-format-url-codecs",
+      "query": "case:=format-row | format '<urlencode:url>|<urldecode:encoded_url>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "a+b%2B%D1%86|a b+ц"}]
+    },
+    {
+      "id": "LQL-P22-format-hex-and-base64-codecs",
+      "query": "case:=format-row | format '<hexdecode:hex>|<hexencode:host>|<base64decode:b64>|<base64encode:host>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "ЙЦУК|61D18643|aцC|YdGGQw=="}]
+    },
+    {
+      "id": "LQL-P22-format-numeric-codecs",
+      "query": "case:=format-row | format '<hexnumencode:number>|<hexnumdecode:hex_number>|<ipv4:ipv4>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "00000000000004D2|1234|73.150.2.210"}]
+    },
+    {
+      "id": "LQL-P22-format-time-and-duration-codecs",
+      "query": "case:=format-row | format '<time:unix_ns>|<duration:duration_ns>|<duration_seconds:duration>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "2024-06-02T11:35:41.123456789Z|3m30.123456789s|3935"}]
+    },
+    {
+      "id": "LQL-P22-format-time-exact-number-forms",
+      "query": "case:=format-row | format '<time:unix_seconds_fraction>|<time:unix_millis>|<time:unix_micros>|<time:unix_scientific>|<time:unix_plus>|<time:unix_negative>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "2024-06-02T11:35:41.12Z|2024-06-02T11:35:41.123Z|2024-06-02T11:35:41.123456Z|2024-06-02T11:35:41.123456789Z|2024-06-02T11:35:41Z|1915-08-01T12:24:18.877Z"}]
+    },
+    {
+      "id": "LQL-P22-format-simple-unicode-case-mapping",
+      "query": "case:=format-row | format '<uc:unicode_edge>|<lc:unicode_edge>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "ßİ|ßi"}]
+    },
+    {
+      "id": "LQL-P22-format-duration-min-int64",
+      "query": "case:=format-row | format '<duration:duration_min>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "-"}]
+    },
+    {
+      "id": "LQL-P22-format-invalid-codecs-fall-back",
+      "query": "case:=format-row | format '<hexdecode:invalid_hex>|<base64decode:invalid_b64>|<time:host>|<duration:host>|<ipv4:host>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "qwert|al|aцC|aцC|aцC"}]
+    },
+    {
+      "id": "LQL-P22-format-html-and-empty-placeholders",
+      "query": "case:=format-row | format '&lt;<host>&amp;&gt;<_><*><>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "<aцC&>"}]
+    },
+    {
+      "id": "LQL-P22-format-unknown-option-is-plain",
+      "query": "case:=format-row | format '<unknown:host>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "aцC"}]
+    },
+    {
+      "id": "LQL-P22-format-missing-fields-are-empty",
+      "query": "case:=format-row | format 'a=<missing>,b=<host>,c=<absent>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "format-row", "rendered": "a=,b=aцC,c="}]
+    },
+    {
+      "id": "LQL-P22-format-flattened-nested-field",
+      "query": "case:=delete-row | format '<nested.drop>|<array>|<null_value>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "delete-row", "rendered": "nested-gone|[\"x\",1]|"}]
+    },
+    {
+      "id": "LQL-P22-format-typed-number-text",
+      "query": "case:=state-zero | format '<probe>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "state-zero", "rendered": "0"}]
+    },
+    {
+      "id": "LQL-P22-format-typed-boolean-text",
+      "query": "case:=state-false | format '<probe>' as rendered | fields case, rendered",
+      "expected_rows": [{"case": "state-false", "rendered": "false"}]
+    },
+    {
+      "id": "LQL-P22-format-keep-original-nonempty",
+      "query": "case:=format-row | format 'replacement' as result keep_original_fields | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P22-format-keep-original-missing",
+      "query": "case:=state-missing | format 'replacement' as result keep_original_fields | fields case, result",
+      "expected_rows": [{"case": "state-missing", "result": "replacement"}]
+    },
+    {
+      "id": "LQL-P22-format-skip-empty-preserves-nonempty",
+      "query": "case:=format-row | format '<missing>' as result skip_empty_results | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P22-format-empty-overwrites-without-skip",
+      "query": "case:=format-row | format '<missing>' as result | fields case, result",
+      "expected_rows": [{"case": "format-row"}]
+    },
+    {
+      "id": "LQL-P22-format-conditional-match",
+      "query": "case:=format-row | format if (host:*) 'matched <host>' as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "matched aцC"}]
+    },
+    {
+      "id": "LQL-P22-format-conditional-miss-preserves-destination",
+      "query": "case:=format-row | format if (missing:*) 'replacement' as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P22-format-empty-condition-matches",
+      "query": "case:=format-row | format if () 'replacement' as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "replacement"}]
     }
   ],
   "error_cases": [
@@ -4162,6 +4283,69 @@
     {
       "id": "LQL-P21-rename-rejects-separated-destination-wildcard",
       "query": "* | rename source as destination *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-requires-pattern",
+      "query": "* | format",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-if-requires-filter",
+      "query": "* | format if",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-condition-requires-pattern",
+      "query": "* | format if (host:*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-rejects-unterminated-pattern-field",
+      "query": "* | format \"<unterminated\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-rejects-wildcard-pattern-field",
+      "query": "* | format \"<field*>\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-requires-destination-after-as",
+      "query": "* | format value as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-rejects-wildcard-destination",
+      "query": "* | format value as result*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-rejects-conflicting-modifiers",
+      "query": "* | format value keep_original_fields skip_empty_results",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P22-format-rejects-trailing-token",
+      "query": "* | format value trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

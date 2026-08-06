@@ -142,6 +142,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-032`](#sql-log-032-first-nonempty-textual-log-field) | `LQL-P19` | current foundation | bounded first-nonempty textual selection across three exact public metadata paths with a default; API owns exact/all/prefix current-row expansion, destination mutation, conflicts, limits, cancellation, and envelopes |
 | [`SQL-LOG-033`](#sql-log-033-copy-one-exact-retained-metadata-field) | `LQL-P20` | current foundation | typed copy of one exact retained metadata path to one exact top-level destination with missing/object-parent compatibility behavior; API owns pair grammar, flattened prefixes, sequential composition, nested destination conflicts, limits, cancellation, and envelopes |
 | [`SQL-LOG-034`](#sql-log-034-rename-one-exact-top-level-retained-metadata-field) | `LQL-P21` | current foundation | typed move of one exact top-level retained metadata field to one exact top-level destination, including source removal and missing/object-parent compatibility behavior; API owns flattened prefixes, sequential composition, nested-parent pruning/conflicts, limits, cancellation, and envelopes |
+| [`SQL-LOG-035`](#sql-log-035-format-two-exact-retained-metadata-fields) | `LQL-P22` | current foundation | bounded `printf` interpolation of two exact public metadata paths with explicit rich-value textual projection; API owns LogsQL patterns, codecs, conditions, destination mutation/preservation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6506,6 +6507,88 @@ primitive or private shadow-table access is justified.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_rename_is_typed_sequential_bounded_and_durable`.
+
+### SQL-LOG-035: format two exact retained metadata fields
+
+Bind two exact SQLite JSON paths, a SQLite `printf` pattern containing two
+`%s` placeholders, native timestamp bounds, and positive work/result limits.
+This ordinary statement formats values read through the public log table:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), textual AS (
+  SELECT
+    ts,
+    level,
+    message,
+    CASE
+      WHEN json_type(metadata, :format_source_path_1) IS NULL
+        OR json_type(metadata, :format_source_path_1) = 'null' THEN ''
+      WHEN json_type(metadata, :format_source_path_1) = 'true' THEN 'true'
+      WHEN json_type(metadata, :format_source_path_1) = 'false' THEN 'false'
+      WHEN json_type(metadata, :format_source_path_1) = 'text'
+        THEN json_extract(metadata, :format_source_path_1)
+      ELSE json(metadata -> :format_source_path_1)
+    END AS first_value,
+    CASE
+      WHEN json_type(metadata, :format_source_path_2) IS NULL
+        OR json_type(metadata, :format_source_path_2) = 'null' THEN ''
+      WHEN json_type(metadata, :format_source_path_2) = 'true' THEN 'true'
+      WHEN json_type(metadata, :format_source_path_2) = 'false' THEN 'false'
+      WHEN json_type(metadata, :format_source_path_2) = 'text'
+        THEN json_extract(metadata, :format_source_path_2)
+      ELSE json(metadata -> :format_source_path_2)
+    END AS second_value
+  FROM bounded
+), formatted AS (
+  SELECT
+    ts,
+    level,
+    message,
+    printf(:format_pattern, first_value, second_value) AS formatted_value
+  FROM textual
+)
+SELECT ts, level, message, formatted_value
+FROM formatted
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, formatted_value
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` are inclusive native table timestamp units. For a
+microsecond table, bind microseconds. `:format_source_path_1` and
+`:format_source_path_2` are exact SQLite JSON paths such as `$.host` and
+`$.duration_ms`; `:format_pattern` is SQLite syntax such as
+`host=%s duration_ms=%s`, not LogsQL placeholder syntax. Missing and explicit
+null project to empty text, strings lose their JSON quotes, booleans use
+lowercase JSON spelling, and numbers, arrays, and scalar JSON values use
+SQLite's canonical JSON text. Retained object parents are available to direct
+SQL even though VictoriaLogs exposes only flattened leaves. Results are
+deterministic in ascending `ts`, `level`, `message`, and formatted-value order.
+
+The complete `LQL-P22` API additionally owns case-insensitive `format`, its
+optional `if (...)`, quoted/unquoted patterns, arbitrary `<field>`
+interpolation, HTML-decoded literal prefixes, default `_msg` or exact `as`
+destination, `keep_original_fields`, `skip_empty_results`, and the `uc`, `lc`,
+`q`, URL, hex, Base64, numeric-hex, `time`, `duration`, `duration_seconds`, and
+`ipv4` transformations. It evaluates over recursively retained rich current
+rows, enforces work/state/result/response limits and cancellation, reports
+field conflicts, and shapes HTTP errors. Compose additional `CASE` values and
+`printf` placeholders in ordinary SQL when that is clearer than using the
+language API.
+
+Every selected value already crosses the bounded public log-row interface.
+SQLite JSON1 and `printf` perform the direct operation without a new extension
+primitive, private shadow-table access, or storage-format change.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_format_is_complete_bounded_rich_and_durable`.
 
 ## Adding the next recipe
 

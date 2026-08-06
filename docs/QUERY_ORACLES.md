@@ -588,3 +588,23 @@ commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 The fixture contains 296 row-query cases, 178 error cases, and 142
 statistics/pipeline cases: 616 cases total.
 The fixture now contains 616 cases.
+
+`LQL-P22` adds twenty-four successful pipeline cases and nine error cases for
+default and exact destinations; quoted/unquoted patterns; optional and empty
+`if (...)`; HTML-decoded literal prefixes; empty, exact, missing, flattened,
+numeric, boolean, array, and null placeholders; simple Unicode case mapping;
+JSON quoting; URL, hex, Base64, numeric-hex, IPv4, human-duration,
+nanosecond-duration, and Unix-time transforms; invalid-codec fallback;
+unknown-option passthrough; keep/skip behavior; exact integer, fractional,
+scientific, signed, millisecond, microsecond, and nanosecond timestamp forms;
+the pinned minimum-int64 duration edge; and strict pattern, wildcard,
+destination, modifier, condition, and tail errors. Source audit is against
+`pipe_format.go`, `pipe_format_test.go`, `pattern.go`, `values_encoder.go`,
+and vendored `timeutil/time.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. Timeless preserves explicit
+empty rich fields where VictoriaLogs stream JSON omits empty-valued columns;
+the matrix and `QSF-170` record that intentional retained-model distinction.
+The fixture contains 296 row-query cases, 187 error cases, and 166
+statistics/pipeline cases: 649 cases total, all passing against the immutable
+image.
+The fixture now contains 649 cases.

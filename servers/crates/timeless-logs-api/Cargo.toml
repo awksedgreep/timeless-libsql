@@ -7,8 +7,10 @@ publish = false
 
 [dependencies]
 axum = "0.8"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
+html-escape = "0.2"
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-gencat"] }
 rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "load_extension"] }
 serde = { version = "1", features = ["derive"] }

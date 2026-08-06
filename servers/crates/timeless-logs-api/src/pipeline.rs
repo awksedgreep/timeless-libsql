@@ -9,16 +9,19 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Instant;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    CoalesceSpec, CopySpec, FacetsSpec, FirstSpec, PipelineField, PipelineOp, RenameSpec,
-    StatsExpression, StatsKind, TopSpec, UniqSpec,
+    parse_victorialogs_human_duration, CoalesceSpec, CopySpec, FacetsSpec, FirstSpec, FormatSpec,
+    PipelineField, PipelineOp, RenameSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -189,6 +192,13 @@ pub(crate) fn execute(
             PipelineOp::Rename(spec) => {
                 rename_fields(rows, spec, execution.limits, execution.cancelled)?
             }
+            PipelineOp::Format(spec) => format_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -1251,6 +1261,459 @@ fn rename_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn format_fields(
+    rows: Vec<Value>,
+    spec: &FormatSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL format destination is not exact".into());
+    };
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let formatted = format_row(&row, spec, limits, cancelled)?;
+            let original = coalesce_exact_value(&row, destination_path);
+            let preserve_original = (spec.keep_original_fields
+                || (spec.skip_empty_results && formatted.is_empty()))
+                && original.is_some_and(|value| !projected_text(Some(value)).is_empty());
+            if preserve_original {
+                return Ok(row);
+            }
+
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL format input row is not a JSON object".to_string())?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL format destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(formatted))
+                .map_err(|error| format!("LogsQL format destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn format_row(
+    row: &Value,
+    spec: &FormatSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut state_bytes = size_of::<String>()
+        .checked_add(spec.pattern.len())
+        .ok_or_else(|| "LogsQL format state size overflow".to_string())?;
+    ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "format")?;
+    let mut work_items = 0usize;
+    for step in &spec.steps {
+        charge_transfer_work(&mut work_items, limits.max_state_items, "format")?;
+        check_periodically(cancelled, work_items)?;
+        append_format_output(
+            &mut output,
+            &step.prefix,
+            &mut state_bytes,
+            limits.max_state_bytes,
+        )?;
+        let Some(field) = &step.field else {
+            continue;
+        };
+        let value = field_value(row, &field.path);
+        if let Some(value) = value {
+            charge_transfer_value(
+                value,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                &mut work_items,
+                limits.max_state_items,
+                "format",
+            )?;
+        }
+        let text = projected_text(value);
+        ensure_format_expansion(
+            output.len(),
+            text.len(),
+            format_expansion_factor(&field.option),
+            limits.max_state_bytes,
+        )?;
+        let transformed = format_field_value(text.as_ref(), &field.option);
+        append_format_output(
+            &mut output,
+            transformed.as_ref(),
+            &mut state_bytes,
+            limits.max_state_bytes,
+        )?;
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+fn append_format_output(
+    output: &mut String,
+    value: &str,
+    state_bytes: &mut usize,
+    limit: usize,
+) -> Result<(), String> {
+    *state_bytes = state_bytes
+        .checked_add(value.len())
+        .ok_or_else(|| "LogsQL format state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limit, "format")?;
+    output.push_str(value);
+    Ok(())
+}
+
+fn ensure_format_expansion(
+    output_len: usize,
+    input_len: usize,
+    factor: usize,
+    limit: usize,
+) -> Result<(), String> {
+    let maximum = input_len
+        .checked_mul(factor)
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL format state size overflow".to_string())?;
+    ensure_first_state_bytes(maximum, limit, "format")
+}
+
+fn format_expansion_factor(option: &str) -> usize {
+    match option {
+        "q" => 6,
+        "urlencode" | "uc" | "lc" => 3,
+        "hexencode" | "base64encode" => 2,
+        _ => 1,
+    }
+}
+
+fn format_field_value<'a>(value: &'a str, option: &str) -> Cow<'a, str> {
+    match option {
+        "base64decode" => BASE64_STANDARD
+            .decode(value)
+            .ok()
+            .map(|decoded| String::from_utf8_lossy(&decoded).into_owned())
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(value)),
+        "base64encode" => Cow::Owned(BASE64_STANDARD.encode(value)),
+        "duration" => value
+            .parse::<i64>()
+            .ok()
+            .map(format_duration_nanos)
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(value)),
+        "duration_seconds" => parse_victorialogs_human_duration(value)
+            .map(|nanoseconds| (nanoseconds as f64 / 1_000_000_000.0).to_string())
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(value)),
+        "hexdecode" => Cow::Owned(format_hex_decode(value)),
+        "hexencode" => Cow::Owned(format_hex_encode(value)),
+        "hexnumdecode" => format_hex_number_decode(value)
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(value)),
+        "hexnumencode" => value
+            .parse::<u64>()
+            .ok()
+            .map(|number| format!("{number:016X}"))
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(value)),
+        "ipv4" => value
+            .parse::<u64>()
+            .ok()
+            .and_then(|number| u32::try_from(number).ok())
+            .map(Ipv4Addr::from)
+            .map(|address| address.to_string())
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(value)),
+        "lc" => Cow::Owned(format_simple_lowercase(value)),
+        "time" => format_unix_timestamp(value)
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(value)),
+        "q" => Cow::Owned(serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())),
+        "uc" => Cow::Owned(format_simple_uppercase(value)),
+        "urldecode" => Cow::Owned(format_url_decode(value)),
+        "urlencode" => Cow::Owned(format_url_encode(value)),
+        _ => Cow::Borrowed(value),
+    }
+}
+
+fn format_simple_uppercase(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        let mut mapped = character.to_uppercase();
+        let first = mapped.next().unwrap_or(character);
+        if mapped.next().is_none() {
+            output.push(first);
+        } else {
+            // Go's unicode.ToUpper performs one-rune simple case mapping.
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn format_simple_lowercase(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        let mut mapped = character.to_lowercase();
+        let first = mapped.next().unwrap_or(character);
+        output.push(first);
+    }
+    output
+}
+
+fn format_url_encode(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_') {
+            output.push(char::from(byte));
+        } else if byte == b' ' {
+            output.push('+');
+        } else {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            output.push('%');
+            output.push(char::from(HEX[usize::from(byte >> 4)]));
+            output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    output
+}
+
+fn format_url_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                output.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let decoded = format_hex_digit(bytes[index + 1])
+                    .zip(format_hex_digit(bytes[index + 2]))
+                    .map(|(high, low)| (high << 4) | low);
+                if let Some(decoded) = decoded {
+                    output.push(decoded);
+                    index += 3;
+                } else {
+                    output.push(b'%');
+                    index += 1;
+                }
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn format_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn format_hex_encode(value: &str) -> String {
+    let mut output = String::with_capacity(value.len().saturating_mul(2));
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in value.bytes() {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn format_hex_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index + 1 < bytes.len() {
+        match (
+            format_hex_digit(bytes[index]),
+            format_hex_digit(bytes[index + 1]),
+        ) {
+            (Some(high), Some(low)) => output.push((high << 4) | low),
+            _ => output.extend_from_slice(&bytes[index..index + 2]),
+        }
+        index += 2;
+    }
+    if index < bytes.len() {
+        output.push(bytes[index]);
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn format_hex_number_decode(value: &str) -> Option<String> {
+    if value.len() > 16 {
+        return None;
+    }
+    let number = if value.is_empty() {
+        0
+    } else {
+        u64::from_str_radix(value, 16).ok()?
+    };
+    Some(number.to_string())
+}
+
+fn format_duration_nanos(nanoseconds: i64) -> String {
+    if nanoseconds == 0 {
+        return "0".into();
+    }
+    // VictoriaLogs v1.52.0 negates an int64 before formatting. Go's signed
+    // wrap leaves MinInt64 negative, so the pinned result for that one value
+    // is just the emitted sign.
+    if nanoseconds == i64::MIN {
+        return "-".into();
+    }
+    const NS_SECOND: u64 = 1_000_000_000;
+    const NS_MILLISECOND: u64 = 1_000_000;
+    const NS_MICROSECOND: u64 = 1_000;
+    const NS_MINUTE: u64 = 60 * NS_SECOND;
+    const NS_HOUR: u64 = 60 * NS_MINUTE;
+    const NS_DAY: u64 = 24 * NS_HOUR;
+    const NS_WEEK: u64 = 7 * NS_DAY;
+
+    let mut remaining = nanoseconds.unsigned_abs();
+    let format_fractional_seconds = remaining >= NS_SECOND;
+    let mut output = String::new();
+    if nanoseconds < 0 {
+        output.push('-');
+    }
+    for (unit, suffix) in [
+        (NS_WEEK, "w"),
+        (NS_DAY, "d"),
+        (NS_HOUR, "h"),
+        (NS_MINUTE, "m"),
+    ] {
+        if remaining >= unit {
+            let count = remaining / unit;
+            remaining -= count * unit;
+            output.push_str(&count.to_string());
+            output.push_str(suffix);
+        }
+    }
+    if remaining >= NS_SECOND {
+        if format_fractional_seconds {
+            output.push_str(&(remaining as f64 / NS_SECOND as f64).to_string());
+            output.push('s');
+            return output;
+        }
+        let count = remaining / NS_SECOND;
+        remaining -= count * NS_SECOND;
+        output.push_str(&count.to_string());
+        output.push('s');
+    }
+    for (unit, suffix) in [(NS_MILLISECOND, "ms"), (NS_MICROSECOND, "µs"), (1, "ns")] {
+        if remaining >= unit {
+            let count = remaining / unit;
+            remaining -= count * unit;
+            output.push_str(&count.to_string());
+            output.push_str(suffix);
+        }
+    }
+    output
+}
+
+fn format_unix_timestamp(value: &str) -> Option<String> {
+    let nanoseconds = parse_unix_timestamp_nanos(value)?;
+    let seconds = nanoseconds.div_euclid(1_000_000_000);
+    let subsecond = nanoseconds.rem_euclid(1_000_000_000) as u32;
+    let timestamp = DateTime::<Utc>::from_timestamp(seconds, subsecond)?;
+    let mut rendered = timestamp.format("%Y-%m-%dT%H:%M:%S").to_string();
+    if subsecond != 0 {
+        let fraction = format!("{subsecond:09}");
+        rendered.push('.');
+        rendered.push_str(fraction.trim_end_matches('0'));
+    }
+    rendered.push('Z');
+    Some(rendered)
+}
+
+fn parse_unix_timestamp_nanos(value: &str) -> Option<i64> {
+    if let Some(exponent_index) = value.find('e').or_else(|| value.find('E')) {
+        let decimal_exponent = value[exponent_index + 1..].parse::<i64>().ok()?;
+        let number = parse_scientific_unix_timestamp(&value[..exponent_index], decimal_exponent)?;
+        return Some(scale_unix_timestamp_nanos(number));
+    }
+
+    let Some(dot_index) = value.find('.') else {
+        return value.parse::<i64>().ok().map(scale_unix_timestamp_nanos);
+    };
+    let fraction = &value[dot_index + 1..];
+    let mut number = parse_fractional_unix_timestamp(&value[..dot_index], fraction)?;
+    let mut decimal_exponent = fraction.len();
+    while !decimal_exponent.is_multiple_of(3) {
+        number = number.checked_mul(10)?;
+        decimal_exponent += 1;
+    }
+    Some(scale_unix_timestamp_nanos(number))
+}
+
+fn parse_scientific_unix_timestamp(value: &str, decimal_exponent: i64) -> Option<i64> {
+    let Some(dot_index) = value.find('.') else {
+        return multiply_decimal_exponent(value.parse::<i64>().ok()?, decimal_exponent);
+    };
+    let fraction = &value[dot_index + 1..];
+    if decimal_exponent < i64::try_from(fraction.len()).ok()? {
+        return None;
+    }
+    let number = parse_fractional_unix_timestamp(&value[..dot_index], fraction)?;
+    multiply_decimal_exponent(
+        number,
+        decimal_exponent - i64::try_from(fraction.len()).ok()?,
+    )
+}
+
+fn parse_fractional_unix_timestamp(integer: &str, fraction: &str) -> Option<i64> {
+    let integer = integer.parse::<i64>().ok()?;
+    let fraction_value = fraction.parse::<i64>().ok()?;
+    let number = multiply_decimal_exponent(integer, i64::try_from(fraction.len()).ok()?)?;
+    if number >= 0 {
+        number.checked_add(fraction_value)
+    } else {
+        number.checked_sub(fraction_value)
+    }
+}
+
+fn multiply_decimal_exponent(number: i64, decimal_exponent: i64) -> Option<i64> {
+    let exponent = u32::try_from(decimal_exponent).ok()?;
+    if exponent > 18 {
+        return None;
+    }
+    number.checked_mul(10_i64.checked_pow(exponent)?)
+}
+
+fn scale_unix_timestamp_nanos(number: i64) -> i64 {
+    if (i64::MIN / 1_000_000_000..=i64::MAX / 1_000_000_000).contains(&number) {
+        number * 1_000_000_000
+    } else if (i64::MIN / 1_000_000..=i64::MAX / 1_000_000).contains(&number) {
+        number * 1_000_000
+    } else if (i64::MIN / 1_000..=i64::MAX / 1_000).contains(&number) {
+        number * 1_000
+    } else {
+        number
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4113,6 +4576,178 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             rename_fields(rows, &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn format_interpolates_transforms_preserves_rows_and_bounds_temporary_state() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Format(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected format plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "host": "aцC",
+            "lower": "aBП",
+            "quoted": "a\n\"b",
+            "url": "a b+ц",
+            "encoded_url": "a+b%2B%D1%86",
+            "hex": "D099D0A6D0A3D09A",
+            "b64": "YdGGQw==",
+            "duration": "1h5m35s",
+            "duration_ns": "210123456789",
+            "unix_ns": "1717328141123456789",
+            "number": "1234",
+            "hex_number": "00000000000004D2",
+            "ipv4": "1234567890",
+            "n": 2,
+            "flag": false,
+            "array": [1, "x"]
+        });
+        let spec = parse_spec(
+            r#"* | format '&lt;<uc:host>&gt; <lc:lower> <q:quoted> <urlencode:url> <urldecode:encoded_url> <hexdecode:hex> <base64decode:b64> <duration_seconds:duration> <duration:duration_ns> <time:unix_ns> <hexnumencode:number> <hexnumdecode:hex_number> <ipv4:ipv4> n=<n> flag=<flag> array=<array> <unknown:host><_><*><>' as result"#,
+        );
+        let formatted = format_fields(
+            vec![row.clone()],
+            &spec,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            formatted[0]["result"],
+            "<AЦC> abп \"a\\n\\\"b\" a+b%2B%D1%86 a b+ц ЙЦУК aцC 3935 3m30.123456789s 2024-06-02T11:35:41.123456789Z 00000000000004D2 1234 73.150.2.210 n=2 flag=false array=[1,\"x\"] aцC"
+        );
+        assert_eq!(formatted[0]["n"], 2);
+        assert_eq!(formatted[0]["flag"], false);
+        assert_eq!(formatted[0]["array"], json!([1, "x"]));
+
+        for (value, expected) in [
+            ("1717328141.12", "2024-06-02T11:35:41.12Z"),
+            ("1717328141123", "2024-06-02T11:35:41.123Z"),
+            ("1717328141123456", "2024-06-02T11:35:41.123456Z"),
+            ("1.717328141123456789e18", "2024-06-02T11:35:41.123456789Z"),
+            ("+1717328141", "2024-06-02T11:35:41Z"),
+            ("-1717328141.123", "1915-08-01T12:24:18.877Z"),
+        ] {
+            assert_eq!(
+                format_unix_timestamp(value).as_deref(),
+                Some(expected),
+                "{value}"
+            );
+        }
+        for value in ["1.23e1", "1e-1", "nan", "1717328141."] {
+            assert_eq!(format_unix_timestamp(value), None, "{value}");
+        }
+        assert_eq!(format_duration_nanos(i64::MIN), "-");
+
+        let conditional = parse_spec(r#"* | format if (enabled:=yes) "new <host>" as result"#);
+        assert_eq!(
+            format_fields(
+                vec![
+                    json!({"enabled":"yes","host":"one","result":"old"}),
+                    json!({"enabled":"no","host":"two","result":"old"}),
+                ],
+                &conditional,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [
+                json!({"enabled":"yes","host":"one","result":"new one"}),
+                json!({"enabled":"no","host":"two","result":"old"}),
+            ]
+        );
+
+        let keep = parse_spec(r#"* | format "new" as result keep_original_fields"#);
+        assert_eq!(
+            format_fields(
+                vec![json!({"result":2}), json!({"other":1})],
+                &keep,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"result":2}), json!({"other":1,"result":"new"})]
+        );
+        let skip = parse_spec(r#"* | format "<missing>" as result skip_empty_results"#);
+        assert_eq!(
+            format_fields(
+                vec![json!({"result":"old"}), json!({"other":1})],
+                &skip,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"result":"old"}), json!({"other":1,"result":""})]
+        );
+
+        let state_error = format_fields(
+            vec![row.clone()],
+            &spec,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL format"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+        let work_error = format_fields(
+            vec![row.clone()],
+            &spec,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let conflict = parse_spec(r#"* | format "new" as nested"#);
+        let conflict_error = format_fields(
+            vec![json!({"nested":{"leaf":"keep"}})],
+            &conflict,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL format destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            format_fields(
+                vec![row],
+                &spec,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }
