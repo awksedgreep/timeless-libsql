@@ -4893,3 +4893,56 @@ authoritative 8,192-entry batching, storage formats, compression, indexes,
 retention, optimize, transactions, migrations, and public batch/SQL contracts
 are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
 workflow, tag, release, or downstream repository was used or modified.
+
+## Session 17 LogsQL P2: typed `unpack_json`
+
+The checked-in
+[`2026-08-06_session17_lql_p36_unpack_json.json`](evidence/2026-08-06_session17_lql_p36_unpack_json.json)
+was captured from exact release extension and server build
+`035c76baf3b684e29714bd1a2b8f955864fa752a` and has SHA-256
+`540bb59a867d7b9c980084e7e61e3d616b386a02ca1c34b14017721be47370d4`.
+The narrow shape scans one indexed host, packs `range_key` as a JSON object,
+unpacks its exact key into `decoded_range_key`, and returns 64 rows. The wide
+shape performs the same transform across all 8,192 entries before its 64-row
+limit. Same-run controls perform the same pack, copy its typed source value to
+the same destination, and return byte-identical responses.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `unpack_json`, indexed host | 64 | 2,112 | 2.933 | 3.151 | 3.256 | 1 | 1,024 | 235,778 | 128 |
+| `unpack_json`, full fixture | 64 | 2,112 | 36.963 | 40.062 | 65.292 | 4 | 8,192 | 1,914,055 | 8,192 |
+| pack-plus-copy control, indexed host | 64 | 2,112 | 2.962 | 3.763 | 4.407 | 1 | 1,024 | 235,778 | 128 |
+| pack-plus-copy control, full fixture | 64 | 2,112 | 36.314 | 38.694 | 41.375 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 16.3% below/3.5% above its narrow/wide same-run control.
+Its internal API timer averages 2.502/37.005 ms versus 2.516/35.815 ms, or
+0.5% below/3.3% above. Every equal-width pair performs byte-identical public
+storage scans, block decodes, payload reads, row materialization, and response
+encoding. Source snapshotting, JSON validation and parsing, native type
+preservation, recursive selection and nesting reconstruction, exact
+missing-field synthesis, destination writes, limits, cancellation, and errors
+remain bounded Rust API work. `SQL-LOG-042` already gives direct SQLite/libSQL
+users public JSON1 composition for bounded fixed paths, so a new extension
+primitive would not avoid storage reads, decode, allocation, or row crossing.
+The 65.292 ms wide p99 is retained honestly.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+16.278 ms and the explicit durability barrier took 40.251 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 93,280 KiB, 364 KiB below
+LQL-P34; metrics HWM was 50,944 KiB, 1,000 KiB above it. Each maximum spans
+the enlarged complete workload and is retained as whole-process variation.
+Cancellation ended with zero requests in flight; direct evaluator and HTTP
+deadline regressions pin nesting/work/state/result/response bounds, rejection,
+cancellation, and reader reuse.
+
+All 875 pinned VictoriaLogs v1.52.0 cases pass live. The final 48-test logs
+real-extension suite, 102 logs library tests, 90-test metrics real-extension
+suite, complete 45-section CLI/crash/transaction suite, standalone dbhealth
+lifecycle gate, 31-test Rust query harness, documentation contracts, Clippy
+with warnings denied, formatting, and all 108 SQL recipes (144 statements)
+pass locally. The extension's authoritative 8,192-entry batching, storage
+formats, compression, indexes, retention, optimize, transactions, migrations,
+and public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.

@@ -139,7 +139,7 @@ extension.
 | `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
@@ -602,6 +602,15 @@ conditions, recursive prefix/all selection, current-row mutation,
 preservation modes, limits, cancellation, and HTTP envelopes remain bounded
 Rust API composition over public rows. No extension primitive, private table,
 durable mutation, or storage-contract change is required.
+
+Exact-build evidence records 3.151/40.062 ms narrow/wide p95 versus
+3.763/38.694 ms for equal-output pack-plus-copy controls. The -16.3%/+3.5%
+p95 and -0.5%/+3.3% internal API variation follows exactly the same one/four
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. All four responses are 2,112 bytes. The wide
+`unpack_json` p99 is retained honestly at 65.292 ms. `QSF-189` accepts the
+bounded rich parse/select/write cost above the unchanged public storage
+boundary.
 
 ## Statistics functions
 

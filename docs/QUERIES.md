@@ -1359,6 +1359,16 @@ language errors, limits, cancellation, and envelopes remain Rust API
 composition. No extension primitive, private table, or storage-format change
 is involved.
 
+Exact-build typed-unpacking evidence measures 2.933/3.151/3.256 ms narrow and
+36.963/40.062/65.292 ms wide p50/p95/p99 while returning 64 rows and 2,112
+response bytes. Equal-output pack-plus-copy controls measure
+2.962/3.763/4.407 and 36.314/38.694/41.375 ms. The -16.3%/+3.5% p95 and
+-0.5%/+3.3% internal API variation follows the same one/four candidate
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. `QSF-189` accepts the bounded parse/select/write cost
+above the unchanged public storage boundary and retains the wide p99 without
+hiding it.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the
