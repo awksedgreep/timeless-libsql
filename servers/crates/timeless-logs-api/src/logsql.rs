@@ -515,6 +515,161 @@ fn parse_top_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     }))
 }
 
+fn parse_uniq_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "uniq")?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL uniq pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("uniq") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL uniq pipe, not {command:?}"
+        )));
+    }
+
+    let mut cursor = 1usize;
+    let explicit_by = tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("by"));
+    if explicit_by {
+        cursor += 1;
+    }
+    let by_fields = parse_uniq_fields(&tokens, &mut cursor)?;
+    if by_fields.is_empty() {
+        return Err(LogsqlError::malformed(if explicit_by {
+            "LogsQL uniq requires fields after by"
+        } else {
+            "LogsQL uniq requires at least one exact field"
+        }));
+    }
+
+    let mut filter = None;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("filter"))
+    {
+        cursor += 1;
+        let value = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL uniq filter requires a substring"))?;
+        if matches!(value.as_str(), "," | "(" | ")") {
+            return Err(LogsqlError::malformed(
+                "LogsQL uniq filter requires a substring",
+            ));
+        }
+        let value = quoted_value(value)?.unwrap_or_else(|| value.clone());
+        if by_fields.len() != 1 && !value.is_empty() {
+            return Err(LogsqlError::malformed(
+                "LogsQL uniq filter applies only to a single field",
+            ));
+        }
+        filter = Some(value);
+        cursor += 1;
+    }
+
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("with"))
+    {
+        cursor += 1;
+        if tokens
+            .get(cursor)
+            .is_none_or(|token| !token.eq_ignore_ascii_case("hits"))
+        {
+            return Err(LogsqlError::malformed("LogsQL uniq with requires hits"));
+        }
+    }
+    let hits_field = if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("hits"))
+    {
+        cursor += 1;
+        Some(unique_top_result_name("hits".into(), &by_fields))
+    } else {
+        None
+    };
+
+    let mut limit = None;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("limit"))
+    {
+        cursor += 1;
+        let value = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL uniq limit requires a value"))?;
+        limit = Some(parse_pipeline_usize("uniq limit", value)?);
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL uniq token {token:?}"
+        )));
+    }
+    Ok(PipelineOp::Uniq(UniqSpec {
+        by_fields,
+        filter,
+        hits_field,
+        limit,
+    }))
+}
+
+fn parse_uniq_fields(
+    tokens: &[String],
+    cursor: &mut usize,
+) -> Result<Vec<PipelineField>, LogsqlError> {
+    if tokens.get(*cursor).is_some_and(|token| token == "(") {
+        return parse_first_fields(tokens, cursor, "by", "uniq");
+    }
+    let mut fields = Vec::new();
+    while let Some(token) = tokens.get(*cursor) {
+        if token.eq_ignore_ascii_case("filter")
+            || token.eq_ignore_ascii_case("with")
+            || token.eq_ignore_ascii_case("hits")
+            || token.eq_ignore_ascii_case("limit")
+        {
+            break;
+        }
+        if matches!(token.as_str(), "," | "(" | ")") {
+            return Err(LogsqlError::malformed(
+                "LogsQL uniq requires a field after each comma",
+            ));
+        }
+        fields.push(parse_first_exact_field(token, "by", "uniq")?);
+        *cursor += 1;
+        match tokens.get(*cursor).map(String::as_str) {
+            Some(",") => {
+                *cursor += 1;
+                if tokens.get(*cursor).is_none_or(|token| {
+                    token == ","
+                        || token.eq_ignore_ascii_case("filter")
+                        || token.eq_ignore_ascii_case("with")
+                        || token.eq_ignore_ascii_case("hits")
+                        || token.eq_ignore_ascii_case("limit")
+                }) {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL uniq requires a field after each comma",
+                    ));
+                }
+            }
+            Some(token)
+                if token.eq_ignore_ascii_case("filter")
+                    || token.eq_ignore_ascii_case("with")
+                    || token.eq_ignore_ascii_case("hits")
+                    || token.eq_ignore_ascii_case("limit") =>
+            {
+                break;
+            }
+            Some(token) => {
+                return Err(LogsqlError::malformed(format!(
+                    "unexpected LogsQL uniq field token {token:?}; expected ','"
+                )))
+            }
+            None => break,
+        }
+    }
+    Ok(fields)
+}
+
 fn parse_top_fields(
     tokens: &[String],
     cursor: &mut usize,
@@ -682,6 +837,10 @@ fn is_last_pipe(segment: &str) -> bool {
 
 fn is_top_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "top")
+}
+
+fn is_uniq_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "uniq")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -1109,6 +1268,16 @@ pub(crate) struct TopSpec {
     pub rank_field: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UniqSpec {
+    pub by_fields: Vec<PipelineField>,
+    pub filter: Option<String>,
+    pub hits_field: Option<String>,
+    /// Zero and absence both mean unbounded at the language layer. The hard
+    /// API result/state limits still apply.
+    pub limit: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -1133,6 +1302,7 @@ pub(crate) enum PipelineOp {
     First(FirstSpec),
     Last(FirstSpec),
     Top(TopSpec),
+    Uniq(UniqSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1478,6 +1648,10 @@ pub fn parse_at(
                 pipeline.push(parse_top_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
+            _ if is_uniq_pipe(segment) => {
+                pipeline.push(parse_uniq_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
             _ => {
                 return Err(LogsqlError::unsupported(format!(
@@ -1507,6 +1681,7 @@ pub fn parse_at(
                 | PipelineOp::First(_)
                 | PipelineOp::Last(_)
                 | PipelineOp::Top(_)
+                | PipelineOp::Uniq(_)
         )
     });
     let implicit_result_limit =
@@ -6237,6 +6412,71 @@ mod tests {
             "* | top by (case) hits",
             "* | top by (case) rank as",
             "* | top by (case) trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_uniq_grammar_is_complete_and_strict() {
+        for query in [
+            "* | uniq by (service)",
+            "* | UNIQ BY (service, level) WITH HITS LIMIT 10",
+            "* | uniq service",
+            "* | uniq service, level hits",
+            "* | uniq (service) filter web with hits limit 2",
+            r#"* | uniq by ("field name") filter "two words" hits"#,
+            "* | uniq by (service, level) filter \"\"",
+            "* | fields service, level | uniq service hits | keep service, hits",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+        }
+
+        let plan = parse_at(
+            "* | uniq by (service, level) with hits limit 2",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::Uniq(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected uniq plan: {plan:?}");
+        };
+        assert_eq!(spec.by_fields.len(), 2);
+        assert_eq!(spec.filter, None);
+        assert_eq!(spec.hits_field.as_deref(), Some("hits"));
+        assert_eq!(spec.limit, Some(2));
+
+        let collision = parse_at(
+            "* | uniq by (hits) hits limit 0",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::Uniq(spec)] = collision.pipeline.as_slice() else {
+            panic!("unexpected collision plan: {collision:?}");
+        };
+        assert_eq!(spec.hits_field.as_deref(), Some("hitss"));
+        assert_eq!(spec.limit, Some(0));
+
+        for malformed in [
+            "* | uniq",
+            "* | uniq hits",
+            "* | uniq by",
+            "* | uniq by ()",
+            "* | uniq by (case*)",
+            "* | uniq case level",
+            "* | uniq case,",
+            "* | uniq by (case) filter",
+            "* | uniq by (case, level) filter x",
+            "* | uniq by (case) with",
+            "* | uniq by (case) limit",
+            "* | uniq by (case) limit -1",
+            "* | uniq by (case) limit nope",
+            "* | uniq by (case) with hits trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

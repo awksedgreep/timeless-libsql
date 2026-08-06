@@ -2439,6 +2439,117 @@
       "id": "LQL-P15-top-empty-input",
       "query": "case:=top-missing | top 3 by (case)",
       "expected_rows": []
+    },
+    {
+      "id": "LQL-P16-uniq-parenthesized-field-with-hits",
+      "query": "numeric_group:=numeric | uniq by (first_partition) with hits",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"first_partition": "a", "hits": "5"},
+        {"first_partition": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-bare-field-and-hits-short-form",
+      "query": "numeric_group:=numeric | uniq first_partition hits",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"first_partition": "a", "hits": "5"},
+        {"first_partition": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-parentheses-without-by",
+      "query": "numeric_group:=numeric | uniq (first_partition)",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"first_partition": "a"},
+        {"first_partition": "b"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-bare-multiple-fields",
+      "query": "numeric_group:=numeric | uniq numeric_group, first_partition with hits",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"numeric_group": "numeric", "first_partition": "a", "hits": "5"},
+        {"numeric_group": "numeric", "first_partition": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-textual-values-and-empty-coalescing",
+      "query": "numeric_group:=numeric | uniq by (n) hits",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"hits": "2"},
+        {"n": "-2", "hits": "1"},
+        {"n": "0", "hits": "1"},
+        {"n": "2", "hits": "1"},
+        {"n": "2.5", "hits": "1"},
+        {"n": "3", "hits": "1"},
+        {"n": "10", "hits": "1"},
+        {"n": "9007199254740993", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-filter-is-case-sensitive-substring",
+      "query": "numeric_group:=numeric | uniq by (n) filter 2 with hits",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"n": "-2", "hits": "1"},
+        {"n": "2", "hits": "1"},
+        {"n": "2.5", "hits": "1"},
+        {"n": "9007199254740993", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-filter-preserves-case",
+      "query": "numeric_group:=numeric | uniq by (first_partition) filter A with hits",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P16-uniq-hits-name-avoids-selected-field",
+      "query": "numeric_group:=numeric | uniq by (hits) hits",
+      "expected_rows": [{"hitss": "9"}]
+    },
+    {
+      "id": "LQL-P16-uniq-composes-after-filter",
+      "query": "numeric_group:=numeric | filter first_partition:=a | uniq by (first_partition) hits",
+      "expected_rows": [{"first_partition": "a", "hits": "5"}]
+    },
+    {
+      "id": "LQL-P16-uniq-composes-before-projection",
+      "query": "numeric_group:=numeric | uniq by (first_partition) hits | fields first_partition, hits",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"first_partition": "a", "hits": "5"},
+        {"first_partition": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-command-and-modifiers-are-case-insensitive",
+      "query": "numeric_group:=numeric | UNIQ BY (first_partition) WITH HITS LIMIT 2",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"first_partition": "a", "hits": "5"},
+        {"first_partition": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P16-uniq-zero-limit-is-unbounded",
+      "query": "numeric_group:=numeric | uniq by (n) limit 0 | stats count() as total",
+      "expected_rows": [{"total": "8"}]
+    },
+    {
+      "id": "LQL-P16-uniq-overflow-limit-resets-hits",
+      "query": "numeric_group:=numeric | uniq by (n) with hits limit 2 | stats count() as total, uniq_values(hits) as hit_values",
+      "unordered_json_array_fields": ["hit_values"],
+      "expected_rows": [{"total": "2", "hit_values": "[\"0\"]"}]
+    },
+    {
+      "id": "LQL-P16-uniq-empty-input",
+      "query": "case:=uniq-missing | uniq by (case) with hits",
+      "expected_rows": []
     }
   ],
   "error_cases": [
@@ -3334,6 +3445,90 @@
     {
       "id": "LQL-P15-top-rejects-trailing-token",
       "query": "* | top by (case) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-requires-fields",
+      "query": "* | uniq",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-hits-is-not-a-field",
+      "query": "* | uniq hits",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-requires-by-fields",
+      "query": "* | uniq by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-rejects-empty-fields",
+      "query": "* | uniq by ()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-rejects-wildcard-field",
+      "query": "* | uniq by (case*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-requires-commas",
+      "query": "* | uniq case level",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-requires-filter-value",
+      "query": "* | uniq by (case) filter",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-rejects-filter-for-multiple-fields",
+      "query": "* | uniq by (case, level) filter x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-requires-hits-after-with",
+      "query": "* | uniq by (case) with",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-requires-limit-value",
+      "query": "* | uniq by (case) limit",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-rejects-nonnumeric-limit",
+      "query": "* | uniq by (case) limit nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P16-uniq-rejects-trailing-token",
+      "query": "* | uniq by (case) with hits trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

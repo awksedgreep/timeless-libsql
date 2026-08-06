@@ -358,9 +358,12 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "tie_path" => Value::Text("$.host".to_owned()),
         "partition_path" => Value::Text("$.service".to_owned()),
         "group_path" => Value::Text("$.host".to_owned()),
+        "filter_text" => Value::Text("web".to_owned()),
         "first_count" => Value::Integer(1),
         "last_count" => Value::Integer(1),
         "top_count" => Value::Integer(10),
+        "uniq_limit" => Value::Integer(10),
+        "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
@@ -1643,6 +1646,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let first_rows = recipe_values("SQL-LOG-027", 0)?;
     let last_rows = recipe_values("SQL-LOG-028", 0)?;
     let top_rows = recipe_values("SQL-LOG-029", 0)?;
+    let uniq_rows = recipe_values("SQL-LOG-030", 0)?;
     if [
         bounded,
         substring,
@@ -1879,6 +1883,59 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-029 top frequency result changed: {top_rows:?}");
+    }
+    if uniq_rows
+        != [
+            vec![Value::Text("web-1".into()), Value::Text("1".into())],
+            vec![Value::Text("web-2".into()), Value::Text("1".into())],
+        ]
+    {
+        bail!("SQL-LOG-030 unique result changed: {uniq_rows:?}");
+    }
+    let uniq_sql = recipe_sql("SQL-LOG-030", 0)?;
+    let uniq_values =
+        |path: &str, filter: &str, limit: i64, with_hits: i64| -> Result<Vec<Vec<Value>>> {
+            let mut statement = connection.prepare(&uniq_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-030 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "group_path" => Value::Text(path.to_owned()),
+                    "filter_text" => Value::Text(filter.to_owned()),
+                    "uniq_limit" => Value::Integer(limit),
+                    "with_hits" => Value::Integer(with_hits),
+                    _ => parameter("SQL-LOG-030", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            let columns = statement.column_count();
+            let mut query = statement.raw_query();
+            let mut output = Vec::new();
+            while let Some(row) = query.next()? {
+                output.push(
+                    (0..columns)
+                        .map(|column| row.get(column))
+                        .collect::<rusqlite::Result<Vec<Value>>>()?,
+                );
+            }
+            Ok(output)
+        };
+    if uniq_values("$.host", "web-2", 0, 0)? != [vec![Value::Text("web-2".into()), Value::Null]] {
+        bail!("SQL-LOG-030 filter/without-hits behavior changed");
+    }
+    if uniq_values("$.host", "", 1, 1)?
+        != [vec![Value::Text("web-1".into()), Value::Text("0".into())]]
+    {
+        bail!("SQL-LOG-030 overflow-hit behavior changed");
+    }
+    for path in ["$.nested.none", "$.nested.empty"] {
+        if uniq_values(path, "", 0, 1)?
+            != [vec![Value::Text(String::new()), Value::Text("2".into())]]
+        {
+            bail!("SQL-LOG-030 empty/null/missing behavior changed at {path}");
+        }
     }
     let json_array_sql = recipe_sql("SQL-LOG-017", 0)?;
     let json_array_timestamps = |first: &str, second: &str, path: &str| -> Result<Vec<i64>> {
@@ -2690,13 +2747,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 95);
+        assert_eq!(recipes.len(), 96);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            125
+            126
         );
         assert_eq!(
             recipes
@@ -2704,7 +2761,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            131
+            132
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

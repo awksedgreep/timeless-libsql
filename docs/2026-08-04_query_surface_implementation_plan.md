@@ -584,6 +584,25 @@ lifecycle regression proves create, reopen, manual mode, drop, legacy meta,
 and sqld behavior. No CI or release automation is part of this local gate.
 Session 17 continues with `LQL-P16`.
 
+`LQL-P16` implements VictoriaLogs-compatible `uniq [by] fields`, optional
+single-field `filter substring`, optional `hits`/`with hits`, and optional
+`limit N` as bounded Rust API aggregation over public current-pipeline rows.
+Fourteen successful and twelve error oracle cases pin parenthesized/bare
+one/multi-field grammar, textual rich-value projection, empty-state
+coalescing, case-sensitive filtering, collision-safe string hits, zero and
+positive limits, overflow-hit reset, composition, case-insensitive keywords,
+empty input, and strict tails. Upstream hash-map order and limited subset are
+unspecified; Timeless deliberately selects bytewise structural keys
+deterministically. Executable `SQL-LOG-030` gives direct SQLite/libSQL users
+the matching parameterized single-field grouping/filter/hits foundation.
+Work/group/result/response-state limits, HTTP deadline cancellation, optimize,
+shutdown, reopen, and reader reuse are pinned without a new extension
+primitive or storage-contract change. The first full oracle run exposed an
+over-broad harness comparator edit that accidentally made ordinary row-query
+order significant; the complete corpus rejected it, and a focused Rust test
+now pins separate row-query and statistics ordering contracts. `QSF-160`
+records the semantic boundary. Session 17 continues with `LQL-P18`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

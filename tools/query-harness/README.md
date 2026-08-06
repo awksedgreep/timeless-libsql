@@ -49,7 +49,11 @@ The modules have narrow responsibilities:
   semantic boundary fixtures; and
 - `evidence` owns signal processes, fixture admission and durability barriers,
   query latency/counter/cardinality measurements, cancellation contracts,
-  storage accounting, and RSS HWM capture.
+  storage accounting, and RSS HWM capture; and
+- `gate` replaces language-specific test drivers with Rust binary fixtures,
+  persistent SQLite hosts, packed-frame decoders, focused correctness cases,
+  crash-workload generation, and dbhealth lifecycle checks used by the shell
+  release gate.
 
 Add unit coverage for parser and failure behavior here. Product semantics must
 still be pinned through the real extension and signal-server contract tests;

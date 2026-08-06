@@ -17,7 +17,7 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind, TopSpec,
+    FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -177,6 +177,7 @@ pub(crate) fn execute(
             PipelineOp::First(spec) => first(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Last(spec) => last(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Top(spec) => top(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::Uniq(spec) => uniq(rows, spec, execution.limits, execution.cancelled)?,
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -532,6 +533,108 @@ fn top(
             row.insert(spec.hits_field.clone(), Value::String(hits.to_string()));
             if let Some(rank_field) = &spec.rank_field {
                 row.insert(rank_field.clone(), Value::String((index + 1).to_string()));
+            }
+            Ok(Value::Object(row))
+        })
+        .collect()
+}
+
+fn uniq(
+    rows: Vec<Value>,
+    spec: &UniqSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let language_limit = spec.limit.filter(|limit| *limit > 0);
+    if language_limit.is_some_and(|limit| limit > limits.max_result_rows) {
+        return Err(format!(
+            "LogsQL uniq exceeds max_result_rows={}",
+            limits.max_result_rows
+        ));
+    }
+    if rows.len() > limits.max_state_items {
+        return Err(format!(
+            "LogsQL uniq exceeds max_work_rows={}",
+            limits.max_state_items
+        ));
+    }
+    ensure_active(cancelled)?;
+    let mut state_bytes = size_of::<BTreeMap<Vec<String>, u64>>();
+    let mut groups = BTreeMap::<Vec<String>, u64>::new();
+    for (index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        let mut key = Vec::with_capacity(spec.by_fields.len());
+        for field in &spec.by_fields {
+            let PipelineField::Exact { path, .. } = field else {
+                return Err("LogsQL uniq by field is not exact".into());
+            };
+            key.push(projected_text(field_value(row, path)).into_owned());
+        }
+        if spec
+            .filter
+            .as_deref()
+            .is_some_and(|filter| !filter.is_empty() && !key[0].contains(filter))
+        {
+            continue;
+        }
+        if let Some(hits) = groups.get_mut(&key) {
+            *hits = hits.saturating_add(1);
+            continue;
+        }
+        if groups.len() == limits.max_state_items {
+            return Err(format!(
+                "LogsQL uniq state exceeds max_work_rows={}",
+                limits.max_state_items
+            ));
+        }
+        let key_bytes = key.iter().try_fold(0usize, |total, value| {
+            total
+                .checked_add(value.len())
+                .ok_or_else(|| "LogsQL uniq state size overflow".to_string())
+        })?;
+        state_bytes = state_bytes
+            .checked_add(size_of::<Vec<String>>())
+            .and_then(|bytes| {
+                spec.by_fields
+                    .len()
+                    .checked_mul(size_of::<String>())
+                    .and_then(|strings| bytes.checked_add(strings))
+            })
+            .and_then(|bytes| bytes.checked_add(size_of::<u64>()))
+            .and_then(|bytes| bytes.checked_add(key_bytes))
+            .ok_or_else(|| "LogsQL uniq state size overflow".to_string())?;
+        ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "uniq")?;
+        groups.insert(key, 1);
+    }
+
+    if language_limit.is_none() && groups.len() > limits.max_result_rows {
+        return Err(format!(
+            "LogsQL uniq exceeds max_result_rows={}",
+            limits.max_result_rows
+        ));
+    }
+    let overflow = language_limit.is_some_and(|limit| groups.len() > limit);
+    let take = language_limit.unwrap_or(groups.len());
+    groups
+        .into_iter()
+        .take(take)
+        .enumerate()
+        .map(|(index, (values, hits))| {
+            check_periodically(cancelled, index)?;
+            let mut row = Map::new();
+            for (field, value) in spec.by_fields.iter().zip(values) {
+                let PipelineField::Exact { name, .. } = field else {
+                    return Err("LogsQL uniq by field is not exact".into());
+                };
+                // VictoriaLogs' stream JSON omits empty fields while keeping
+                // missing/null/empty in one textual uniqueness group.
+                if !value.is_empty() {
+                    row.insert(name.clone(), Value::String(value));
+                }
+            }
+            if let Some(hits_field) = &spec.hits_field {
+                let hits = if overflow { 0 } else { hits };
+                row.insert(hits_field.clone(), Value::String(hits.to_string()));
             }
             Ok(Value::Object(row))
         })
@@ -2417,6 +2520,114 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             top(Vec::new(), &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn uniq_groups_textually_filters_resets_overflow_hits_and_bounds_state() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: vec![name.to_owned()],
+            name: name.to_owned(),
+        };
+        let rows = vec![
+            json!({"group":"b","value":2}),
+            json!({"group":"a","value":"2"}),
+            json!({"group":"a","value":null}),
+            json!({"group":"a"}),
+            json!({"group":"b","value":10}),
+            json!({"group":"b","value":10}),
+        ];
+        let spec = UniqSpec {
+            by_fields: vec![exact("group"), exact("value")],
+            filter: None,
+            hits_field: Some("total".into()),
+            limit: None,
+        };
+        let cancelled = AtomicBool::new(false);
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        assert_eq!(
+            uniq(rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [
+                json!({"group":"a","total":"2"}),
+                json!({"group":"a","value":"2","total":"1"}),
+                json!({"group":"b","value":"10","total":"2"}),
+                json!({"group":"b","value":"2","total":"1"}),
+            ]
+        );
+
+        let overflow = uniq(
+            rows.clone(),
+            &UniqSpec {
+                limit: Some(2),
+                ..spec.clone()
+            },
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(overflow.len(), 2);
+        assert!(overflow.iter().all(|row| row["total"] == "0"));
+
+        assert_eq!(
+            uniq(
+                rows.clone(),
+                &UniqSpec {
+                    by_fields: vec![exact("value")],
+                    filter: Some("2".into()),
+                    hits_field: None,
+                    limit: Some(0),
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"value":"2"})]
+        );
+        assert!(uniq(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_items: 3,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_work_rows=3"));
+        assert!(uniq(
+            rows.clone(),
+            &UniqSpec {
+                limit: Some(3),
+                ..spec.clone()
+            },
+            PipelineLimits {
+                max_result_rows: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_result_rows=2"));
+        assert!(uniq(
+            rows,
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_response_bytes=1"));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            uniq(Vec::new(), &spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

@@ -1369,6 +1369,18 @@ fn normalize_unordered_json_array_fields(rows: &[Value], fields: &[String]) -> R
     Ok(rows)
 }
 
+fn comparable_victorialogs_stats_rows(
+    rows: &[Value],
+    unordered_fields: &[String],
+    unordered_rows: bool,
+) -> Result<Vec<Value>> {
+    let mut rows = normalize_unordered_json_array_fields(rows, unordered_fields)?;
+    if unordered_rows {
+        rows.sort_by_key(|row| serde_json::to_string(row).unwrap_or_default());
+    }
+    Ok(rows)
+}
+
 fn victorialogs_stats_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
     let mut failures = 0;
     for case in object_cases(fixture, "stats_cases")? {
@@ -1386,9 +1398,11 @@ fn victorialogs_stats_cases(client: &Client, base: &str, fixture: &Value) -> Res
             .and_then(Value::as_array)
             .context("stats case expected_rows")?;
         let unordered_fields = sorted_strings(case.get("unordered_json_array_fields"))?;
-        let actual_comparable = normalize_unordered_json_array_fields(&actual, &unordered_fields)?;
+        let unordered_rows = case.get("result_order").and_then(Value::as_str) == Some("unordered");
+        let actual_comparable =
+            comparable_victorialogs_stats_rows(&actual, &unordered_fields, unordered_rows)?;
         let expected_comparable =
-            normalize_unordered_json_array_fields(expected, &unordered_fields)?;
+            comparable_victorialogs_stats_rows(expected, &unordered_fields, unordered_rows)?;
         let valid = status == 200
             && content_type.starts_with("application/stream+json")
             && actual_comparable == expected_comparable;
@@ -1813,6 +1827,24 @@ mod tests {
         assert_ne!(
             normalize_unordered_json_array_fields(&left, &fields).unwrap(),
             normalize_unordered_json_array_fields(&wrong_row_order, &fields).unwrap()
+        );
+    }
+
+    #[test]
+    fn victorialogs_stats_rows_are_ordered_unless_the_case_explicitly_opts_out() {
+        let ordered = vec![json!({"group": "a"}), json!({"group": "b"})];
+        let mut reversed = ordered.clone();
+        reversed.reverse();
+
+        assert_ne!(
+            comparable_victorialogs_stats_rows(&ordered, &[], false).unwrap(),
+            comparable_victorialogs_stats_rows(&reversed, &[], false).unwrap(),
+            "statistics rows retain order by default"
+        );
+        assert_eq!(
+            comparable_victorialogs_stats_rows(&ordered, &[], true).unwrap(),
+            comparable_victorialogs_stats_rows(&reversed, &[], true).unwrap(),
+            "only an explicit unordered result contract ignores row order"
         );
     }
 

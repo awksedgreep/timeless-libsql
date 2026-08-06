@@ -137,6 +137,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-027`](#sql-log-027-first-numeric-rows-per-partition) | `LQL-P13` | current foundation | bounded numeric top-k per textual partition through a window rank; API owns LogsQL natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-028`](#sql-log-028-last-numeric-rows-per-partition) | `LQL-P14` | current foundation | bounded reverse numeric top-k per textual partition through a window rank; API owns LogsQL direction inversion, natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-029`](#sql-log-029-top-values-by-hit-count) | `LQL-P15` | current foundation | bounded frequency groups and deterministic string hits/rank over one public JSON path; API owns multi-field/current-row grammar, collision naming, limits, cancellation, and envelopes |
+| [`SQL-LOG-030`](#sql-log-030-unique-textual-values) | `LQL-P16` | current foundation | bounded unique textual groups, optional case-sensitive filtering, deterministic limiting, and optional hits over one public JSON path; API owns multi-field/current-row grammar, omitted empty fields, collision naming, strict limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6010,6 +6011,96 @@ tables nor a new extension primitive would avoid storage work.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_top_counts_textual_groups_with_bounds_and_durability`.
+
+### SQL-LOG-030: unique textual values
+
+Bind `:group_path` as a SQLite JSON path and use the table's native timestamp
+unit. `:filter_text` is an optional case-sensitive substring, `:uniq_limit = 0`
+means no operator-specific limit, and `:with_hits` selects whether the hits
+column is populated. This statement groups one retained public field using the
+LogsQL textual projection and returns a deterministic bytewise subset:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT
+    CASE
+      WHEN json_type(metadata, :group_path) IS NULL
+        OR json_type(metadata, :group_path) = 'null' THEN ''
+      WHEN json_type(metadata, :group_path) = 'true' THEN 'true'
+      WHEN json_type(metadata, :group_path) = 'false' THEN 'false'
+      ELSE CAST(json_extract(metadata, :group_path) AS TEXT)
+    END AS group_value
+  FROM bounded
+), grouped AS (
+  SELECT group_value, count(*) AS hits
+  FROM projected
+  WHERE :filter_text = '' OR instr(group_value, :filter_text) > 0
+  GROUP BY group_value
+), ranked AS (
+  SELECT
+    group_value,
+    hits,
+    count(*) OVER () AS group_count,
+    row_number() OVER (ORDER BY group_value ASC) AS position
+  FROM grouped
+)
+SELECT
+  group_value,
+  CASE
+    WHEN :with_hits = 0 THEN NULL
+    WHEN :uniq_limit > 0 AND group_count > :uniq_limit THEN '0'
+    ELSE CAST(hits AS TEXT)
+  END AS hits
+FROM ranked
+WHERE :uniq_limit >= 0
+  AND :max_result_rows > 0
+  AND (
+    (:uniq_limit = 0 AND group_count <= :max_result_rows)
+    OR (
+      :uniq_limit > 0
+      AND :uniq_limit <= :max_result_rows
+      AND position <= :uniq_limit
+    )
+  )
+ORDER BY position
+LIMIT :max_result_rows;
+```
+
+Missing, JSON null, and the empty string share the empty-text group. Strings
+remain unquoted; numbers use their retained SQLite textual representation;
+booleans are `true`/`false`; and retained arrays/objects use JSON text.
+`instr` is a bytewise, case-sensitive substring test. The statement retains an
+explicit empty `group_value` column and returns SQL `NULL` when
+`:with_hits = 0`; the Rust API omits both fields from the stream JSON object.
+
+`:uniq_limit` must be nonnegative; `:with_hits` must be zero or one; and
+`:max_work_entries` and `:max_result_rows` must be positive. A positive unique
+limit larger than `:max_result_rows`, or an unbounded result whose cardinality
+exceeds `:max_result_rows`, deliberately returns no rows in direct SQL; the API
+preflights the same conditions and returns its explicit HTTP 422 limit
+envelope. When cardinality exceeds a positive unique limit, returned hits are
+the string `"0"`, matching VictoriaLogs' unknown-hit contract.
+
+VictoriaLogs does not promise which hash-map groups survive a positive limit
+or their output order. Timeless deliberately selects the first N bytewise
+group keys and emits them in that order so direct SQL and API callers receive
+repeatable results. Multi-field `uniq` extends the `projected` and `GROUP BY`
+lists with one column per exact public path. The Rust API owns that grammar,
+current-pipeline-row composition, collision-safe hits naming, omission of
+empty fields, structural multi-field keys, strict errors, state/work/result/
+response limits, cancellation, and HTTP envelopes. The public bounded rows
+already contain every required value, so a new extension primitive would not
+avoid a storage read, decode, or row crossing.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_uniq_is_textual_bounded_and_durable`.
 
 ## Adding the next recipe
 

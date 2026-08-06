@@ -512,3 +512,19 @@ groups, and orders equal counts by encoded key. The fixture now contains 296
 row-query cases, 128 error cases, and 66 statistics/pipeline cases: 490 cases
 total, all passing against the immutable image.
 The fixture now contains 490 cases.
+
+`LQL-P16` adds fourteen successful pipeline cases and twelve error cases for
+parenthesized and bare single/multiple fields; optional `by`; `hits` and
+`with hits`; collision-safe hits naming; textual numeric and empty-state
+projection; case-sensitive substring filtering; zero and bounded limits;
+overflow-hit reset; current-pipeline composition; case-insensitive keywords;
+empty input; and strict field/filter/hits/limit/tail grammar. Unsorted `uniq`
+rows are explicitly compared as an unordered set because the pinned source
+emits hash-map state without an ordering contract. Timeless deliberately emits
+deterministic bytewise key order, while oracle comparison does not invent that
+as an upstream promise. Source audit is against `pipe_uniq.go` and
+`hits_map.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 296
+row-query cases, 140 error cases, and 80 statistics/pipeline cases: 516 cases
+total.
+The fixture now contains 516 cases.

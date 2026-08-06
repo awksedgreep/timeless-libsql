@@ -14,6 +14,41 @@ async fn pipeline_rows(app: &axum::Router, query: &str) -> Vec<serde_json::Value
     ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
 }
 
+fn numeric_pipeline_entries() -> Vec<LogEntry> {
+    [
+        ("numeric-missing", "a", None),
+        ("numeric-null", "a", Some("null")),
+        ("numeric-negative", "b", Some("-2")),
+        ("numeric-zero", "b", Some("0")),
+        ("numeric-two", "a", Some("2")),
+        ("numeric-decimal", "a", Some("2.5")),
+        ("numeric-string", "b", Some(r#""3""#)),
+        ("numeric-ten", "b", Some("10")),
+        ("numeric-huge", "a", Some("9007199254740993")),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (case, partition, n))| {
+        let mut metadata = serde_json::json!({
+            "case": case,
+            "numeric_group": "numeric",
+            "first_partition": partition,
+            "nested": {"case": case},
+        });
+        if let Some(n) = n {
+            metadata["n"] = serde_json::from_str(n).unwrap();
+        }
+        LogEntry {
+            ts: 1_800_000_000_000_000 + index as i64,
+            level: 1,
+            severity: "info".into(),
+            message: case.replace('-', " "),
+            metadata_json: serde_json::to_string(&metadata).unwrap(),
+        }
+    })
+    .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn release_backup_preserves_exact_logs_and_refuses_overwrite() {
@@ -695,39 +730,7 @@ async fn session_seventeen_first_is_typed_partitioned_bounded_and_durable() {
         TimestampUnit::Microseconds,
     )
     .unwrap();
-    let rows = [
-        ("numeric-missing", "a", None),
-        ("numeric-null", "a", Some("null")),
-        ("numeric-negative", "b", Some("-2")),
-        ("numeric-zero", "b", Some("0")),
-        ("numeric-two", "a", Some("2")),
-        ("numeric-decimal", "a", Some("2.5")),
-        ("numeric-string", "b", Some(r#""3""#)),
-        ("numeric-ten", "b", Some("10")),
-        ("numeric-huge", "a", Some("9007199254740993")),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, (case, partition, n))| {
-        let mut metadata = serde_json::json!({
-            "case": case,
-            "numeric_group": "numeric",
-            "first_partition": partition,
-            "nested": {"case": case},
-        });
-        if let Some(n) = n {
-            metadata["n"] = serde_json::from_str(n).unwrap();
-        }
-        LogEntry {
-            ts: 1_800_000_000_000_000 + index as i64,
-            level: 1,
-            severity: "info".into(),
-            message: case.replace('-', " "),
-            metadata_json: serde_json::to_string(&metadata).unwrap(),
-        }
-    })
-    .collect();
-    storage.ingest(rows).await.unwrap();
+    storage.ingest(numeric_pipeline_entries()).await.unwrap();
     storage.flush().await.unwrap();
     let app = router(storage.clone());
 
@@ -1527,6 +1530,190 @@ async fn session_seventeen_top_counts_textual_groups_with_bounds_and_durability(
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(sql_groups, [("a".into(), 5), ("b".into(), 4)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_uniq_is_textual_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("uniq-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage.ingest(numeric_pipeline_entries()).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | uniq by (first_partition) with hits"#,
+        )
+        .await,
+        [
+            serde_json::json!({"first_partition":"a","hits":"5"}),
+            serde_json::json!({"first_partition":"b","hits":"4"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | uniq numeric_group, first_partition hits"#,
+        )
+        .await,
+        [
+            serde_json::json!({"numeric_group":"numeric","first_partition":"a","hits":"5"}),
+            serde_json::json!({"numeric_group":"numeric","first_partition":"b","hits":"4"}),
+        ]
+    );
+    let values = pipeline_rows(&app, r#"numeric_group:="numeric" | uniq by (n) hits"#).await;
+    assert_eq!(values.len(), 8);
+    assert_eq!(
+        values.iter().find(|row| row.get("n").is_none()),
+        Some(&serde_json::json!({"hits":"2"}))
+    );
+    assert!(values.iter().all(|row| row["hits"].is_string()));
+    assert!(values.contains(&serde_json::json!({"n":"9007199254740993","hits":"1"})));
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | uniq by (n) filter 2 with hits"#,
+        )
+        .await,
+        [
+            serde_json::json!({"n":"-2","hits":"1"}),
+            serde_json::json!({"n":"2","hits":"1"}),
+            serde_json::json!({"n":"2.5","hits":"1"}),
+            serde_json::json!({"n":"9007199254740993","hits":"1"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"numeric_group:="numeric" | uniq by (hits) hits"#).await,
+        [serde_json::json!({"hitss":"9"})]
+    );
+    let overflow = pipeline_rows(
+        &app,
+        r#"numeric_group:="numeric" | uniq by (n) with hits limit 2"#,
+    )
+    .await;
+    assert_eq!(overflow.len(), 2);
+    assert!(overflow.iter().all(|row| row["hits"] == "0"));
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | filter first_partition:="a" | uniq by (first_partition) hits"#,
+        )
+        .await,
+        [serde_json::json!({"first_partition":"a","hits":"5"})]
+    );
+    assert!(
+        pipeline_rows(&app, r#"case:="uniq-missing" | uniq by (case) hits"#)
+            .await
+            .is_empty()
+    );
+
+    for malformed in [
+        "* | uniq",
+        "* | uniq hits",
+        "* | uniq by",
+        "* | uniq by ()",
+        "* | uniq by (case*)",
+        "* | uniq case level",
+        "* | uniq by (case) filter",
+        "* | uniq by (case, level) filter x",
+        "* | uniq by (case) with",
+        "* | uniq by (case) limit",
+        "* | uniq by (case) limit nope",
+        "* | uniq by (case) with hits trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 4,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | uniq by (n)"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | uniq by (n) limit 3"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | uniq by (n)"#,
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason);
+    }
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | uniq by (first_partition) hits"#,
+        )
+        .await,
+        [
+            serde_json::json!({"first_partition":"a","hits":"5"}),
+            serde_json::json!({"first_partition":"b","hits":"4"}),
+        ],
+        "the reader remains reusable after uniq limit rejections"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"numeric_group:="numeric" | UNIQ BY (first_partition) WITH HITS LIMIT 2"#,
+        )
+        .await,
+        [
+            serde_json::json!({"first_partition":"a","hits":"5"}),
+            serde_json::json!({"first_partition":"b","hits":"4"}),
+        ]
+    );
+    reopened.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6737,10 +6924,39 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_pipeline_cancel = default_app
+        .clone()
         .oneshot(logsql_request("level:error | stats count() as total"))
         .await
         .unwrap();
     assert_eq!(reused_after_pipeline_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_uniq = storage.stats().await.unwrap().api_query_cancelled;
+    let uniq_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("* | uniq by (_msg) with hits limit 10000"))
+    .await
+    .unwrap();
+    assert_eq!(uniq_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_uniq && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_uniq);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_uniq_cancel = default_app
+        .oneshot(logsql_request("level:error | uniq by (level) with hits"))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_uniq_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

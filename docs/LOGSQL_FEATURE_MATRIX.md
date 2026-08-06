@@ -21,10 +21,10 @@ wildcard selection; relative, bracketed, and comparison time bounds; all eight
 severities; service and arbitrary typed/nested field predicates; message
 filters; logical composition; deterministic time sort, limit, and offset;
 field names/values; typed projection and current-row filters; bounded
-VictoriaLogs-compatible `first`/`last` selection; and the listed count, unique,
-numeric, and rate statistics. The native GET query API may have
-additional parameters, but they do not count as LogsQL support until the
-LogsQL parser and executor accept them.
+VictoriaLogs-compatible `first`/`last`, `top`, and `uniq` selection; and the
+listed count, unique, numeric, and rate statistics. The native GET query API
+may have additional parameters, but they do not count as LogsQL support until
+the LogsQL parser and executor accept them.
 
 ## Legend and foundations
 
@@ -119,7 +119,7 @@ extension.
 | `LQL-P13` | `first` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)) | shipped | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P14` | `last` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)) | shipped | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P15` | `top` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P16` | `uniq` | missing | no | `VALUES`, `SQL` | `API` | P2 |
+| `LQL-P16` | `uniq` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)) | shipped | no | `VALUES`, `SQL` | `API` | P2 |
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P18` | `facets` | missing | no | `VALUES`, `COUNT` | `API` | P2 |
 | `LQL-P19` | `coalesce` | missing | no | `SQL` | `API` | P2 |
@@ -210,6 +210,20 @@ synthesizes `_stream` fields nor recursively flattens objects. `fields`/`keep`
 rebuilds exact dotted paths and supports top-level prefixes and `*`.
 `filter`/`where` applies the typed predicate AST to the current transformed
 row; storage-safe predicates remain in the initial selector.
+
+`LQL-P16` accepts one or more exact fields after optional `by`, in
+parenthesized or bare comma-separated form. Optional `filter substring` is a
+case-sensitive textual filter for the single-field form; `hits` and
+`with hits` add a collision-safe string count; and `limit 0` means unbounded
+within the hard API limits. Missing, null, and empty values share one
+empty-text group whose selected field is omitted from stream JSON. Positive
+limit overflow resets every returned hit to string `"0"`, matching the pinned
+VictoriaLogs contract. Upstream hash-map selection and order are unspecified;
+Timeless deliberately returns the first N bytewise structural keys in stable
+order. Work, unique groups, retained key state, results, response bytes, and
+cancellation are bounded over public rows. Executable `SQL-LOG-030` provides
+the direct SQLite/libSQL single-field foundation; no extension primitive or
+private storage access is used.
 
 ## Statistics functions
 

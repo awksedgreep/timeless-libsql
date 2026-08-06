@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -535,6 +535,32 @@ Executable
 [`SQL-LOG-029`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count)
 provides the public single-field `GROUP BY`/window-rank foundation. No
 extension primitive or private table is used.
+
+LogsQL `uniq` groups one or more exact fields from the current pipeline row
+and emits one textual summary row per unique structural key:
+
+```text
+service:="api" | uniq by (level) with hits
+* | uniq service, level hits limit 20
+```
+
+`by` and parentheses are optional; bare multiple fields remain comma
+separated. `filter substring` is case-sensitive and is valid for one selected
+field. `hits` and `with hits` add a collision-safe string count. `limit 0`
+means no operator-specific limit, while positive-limit overflow resets all
+retained hits to string `"0"` because discarded group counts are unknown.
+Missing, null, and empty values share one empty-text group whose selected
+field is omitted from stream JSON. Selected values remain strings while the
+stored rich source is unchanged.
+
+VictoriaLogs does not promise output order or which hash-map groups survive a
+positive limit. Timeless deliberately returns the first N bytewise structural
+keys in stable order. The complete input, unique groups, retained key state,
+result rows, response bytes, and cancellation use the existing hard query
+limits. Executable
+[`SQL-LOG-030`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)
+provides the public single-field `GROUP BY` foundation and matching
+deterministic policy. No extension primitive or private table is used.
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
