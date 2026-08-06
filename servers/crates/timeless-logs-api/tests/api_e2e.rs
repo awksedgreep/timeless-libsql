@@ -7421,9 +7421,7 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert_eq!(coalesce_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
     for _ in 0..100 {
         let stats = storage.stats().await.unwrap();
-        if stats.api_query_cancelled > cancelled_before_coalesce
-            && stats.api_query_in_flight == 0
-        {
+        if stats.api_query_cancelled > cancelled_before_coalesce && stats.api_query_in_flight == 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;

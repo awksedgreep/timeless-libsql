@@ -122,7 +122,7 @@ extension.
 | `LQL-P16` | `uniq` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)) | shipped | no | `VALUES`, `SQL` | `API` | P2 |
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
-| `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` | missing | no | `SQL` | `API` | P2 |
@@ -265,6 +265,9 @@ and cancellation use existing request limits. Executable `SQL-LOG-032`
 provides the direct exact-field `CASE`/`NULLIF`/`COALESCE` foundation. The
 operation requires no extension primitive, private table, or storage-contract
 change.
+Exact-build evidence records 3.570/39.597 ms narrow/wide p95 versus
+3.329/38.277 ms for byte-identical same-scan controls; `QSF-165` accepts the
++7.2%/+3.4% bounded row-transform cost above the public storage boundary.
 
 ## Statistics functions
 

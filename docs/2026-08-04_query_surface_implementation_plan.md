@@ -627,6 +627,26 @@ same-scan controls. `QSF-163` accepts the -27.4%/+7.2% p95 variation, records
 unchanged four-block storage and the HWM verdict, and closes the row. Session
 17 continues with `LQL-P19`.
 
+`LQL-P19` implements VictoriaLogs-compatible `coalesce` as a bounded Rust API
+row transform over public current-pipeline rows. Eleven successful and eleven
+error oracle cases pin ordered exact/all/prefix expansion, duplicate
+suppression, first-nonempty textual selection, missing/null/empty behavior,
+typed values, recursively flattened objects, atomic arrays, defaults,
+destination replacement, trailing commas, quoting, and strict syntax.
+Timeless deliberately retains an explicit empty destination and rejects a
+nested destination beneath an existing scalar with actionable HTTP 422
+`field_conflict`, preserving richer stored rows. Executable `SQL-LOG-032`
+gives direct SQLite/libSQL users the exact-field `CASE`/`NULLIF`/`COALESCE`
+foundation. Work/path/state/result/response limits, HTTP deadline
+cancellation, optimize, shutdown, reopen, and reader reuse are pinned without
+an extension primitive or storage-contract change. `QSF-164` records the
+semantic boundary and corrected pre-existing HTTP/test-diagnostic gap.
+Exact-build commit `1b36c239a58d96d7ce8348064dfe03d2ac58c470`
+measures `coalesce` at 3.570/39.597 ms narrow/wide p95 versus 3.329/38.277
+ms for byte-identical same-scan controls. `QSF-165` accepts the +7.2%/+3.4%
+p95 row-transform cost, records unchanged four-block storage and the HWM
+verdict, and closes the row. Session 17 continues with `LQL-P20`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,
