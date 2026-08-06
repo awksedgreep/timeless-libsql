@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::net::IpAddr;
 use std::sync::OnceLock;
@@ -43,12 +44,17 @@ pub struct LogsqlPlan {
 
 const MAX_QUERY_BACKED_LIST_DEPTH: usize = 8;
 const MAX_QUERY_BACKED_LISTS: usize = 32;
+const MAX_COMMON_CASE_UPPERCASE: usize = 10;
+const MAX_COMMON_CASE_VALUES: usize = 8_192;
+const MAX_COMMON_CASE_STATE_BYTES: usize = 4 * 1024 * 1024;
 
 struct ParseContext {
     timestamp_unit: TimestampUnit,
     query_now: i64,
     query_backed_depth: usize,
     query_backed_lists: usize,
+    common_case_values: usize,
+    common_case_state_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3837,6 +3843,8 @@ pub fn parse_at(
         query_now,
         query_backed_depth: 0,
         query_backed_lists: 0,
+        common_case_values: 0,
+        common_case_state_bytes: 0,
     };
     parse_with_context(query, &mut context)
 }
@@ -3933,6 +3941,12 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
                     }
                     if let Some(exact) = parse_exact_filter(&token)? {
                         append_predicate(&mut spec, exact.predicate(LogField::Message));
+                        continue;
+                    }
+                    if let Some(predicate) =
+                        parse_common_case_filter(&token, LogField::Message, context)?
+                    {
+                        append_predicate(&mut spec, predicate);
                         continue;
                     }
                     if let Some(exact) = parse_multi_exact_filter(&token, context)? {
@@ -4509,6 +4523,205 @@ fn finalize_query_backed_list(
     // HTTP default of 100 rows is a response convenience, not query syntax.
     query.implicit_result_limit = None;
     Ok(output_path)
+}
+
+fn parse_common_case_filter(
+    token: &str,
+    field: LogField,
+    context: &mut ParseContext,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    for (function, contains) in [
+        ("equals_common_case", false),
+        ("contains_common_case", true),
+    ] {
+        if token.eq_ignore_ascii_case(function) {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function} filter requires parentheses"
+            )));
+        }
+        let Some(open) = token.find('(') else {
+            continue;
+        };
+        if !token[..open].eq_ignore_ascii_case(function) {
+            continue;
+        }
+        let inner = token[open..]
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+            .ok_or_else(|| {
+                LogsqlError::malformed(format!("unterminated LogsQL {function}() filter"))
+            })?;
+        let phrases = parse_common_case_arguments(inner, function)?;
+        let values = common_case_values(&phrases, context)?;
+        return Ok(Some(if contains {
+            if values.iter().any(String::is_empty) {
+                LogPredicate::True
+            } else if values.is_empty() {
+                LogPredicate::Or(Vec::new())
+            } else {
+                LogPredicate::TextualContainsAny { field, values }
+            }
+        } else {
+            LogPredicate::TextualIn { field, values }
+        }));
+    }
+    Ok(None)
+}
+
+fn parse_common_case_arguments(inner: &str, function: &str) -> Result<Vec<String>, LogsqlError> {
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    if contains_top_level(inner, '|')? {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {function}() accepts only static phrases"
+        )));
+    }
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    if inner.is_empty() {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {function}() cannot start with an empty phrase"
+        )));
+    }
+
+    let mut phrases = Vec::new();
+    for argument in split_top_level(inner, ',')? {
+        let argument = argument.trim();
+        let phrase = if let Some(value) = quoted_value(argument)? {
+            value
+        } else {
+            if argument.is_empty()
+                || argument == "*"
+                || argument.chars().any(|character| {
+                    character.is_whitespace() || matches!(character, '(' | ')' | '|')
+                })
+            {
+                return Err(LogsqlError::malformed(format!(
+                    "invalid LogsQL {function}() phrase {argument:?}"
+                )));
+            }
+            argument.to_owned()
+        };
+        phrases.push(phrase);
+    }
+    Ok(phrases)
+}
+
+fn common_case_values(
+    phrases: &[String],
+    context: &mut ParseContext,
+) -> Result<Vec<String>, LogsqlError> {
+    let mut values = BTreeSet::new();
+    let mut state_bytes = 0usize;
+    for phrase in phrases {
+        for value in common_case_phrase_variants(phrase)? {
+            if values.contains(&value) {
+                continue;
+            }
+            let total_values = context
+                .common_case_values
+                .checked_add(values.len())
+                .and_then(|values| values.checked_add(1))
+                .ok_or_else(|| LogsqlError::malformed("LogsQL common-case value count overflow"))?;
+            if total_values > MAX_COMMON_CASE_VALUES {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL common-case expansion exceeds {MAX_COMMON_CASE_VALUES} values"
+                )));
+            }
+            let value_bytes = value.len().checked_add(64).ok_or_else(|| {
+                LogsqlError::malformed("LogsQL common-case state size overflow")
+            })?;
+            let next_state_bytes = state_bytes.checked_add(value_bytes).ok_or_else(|| {
+                LogsqlError::malformed("LogsQL common-case state size overflow")
+            })?;
+            let total_bytes = context
+                .common_case_state_bytes
+                .checked_add(next_state_bytes)
+                .ok_or_else(|| {
+                    LogsqlError::malformed("LogsQL common-case state size overflow")
+                })?;
+            if total_bytes > MAX_COMMON_CASE_STATE_BYTES {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL common-case expansion exceeds {MAX_COMMON_CASE_STATE_BYTES} state bytes"
+                )));
+            }
+            state_bytes = next_state_bytes;
+            values.insert(value);
+        }
+    }
+    context.common_case_values += values.len();
+    context.common_case_state_bytes += state_bytes;
+    Ok(values.into_iter().collect())
+}
+
+fn common_case_phrase_variants(phrase: &str) -> Result<Vec<String>, LogsqlError> {
+    let mut uppercase = 0usize;
+    let mut whole_uppercase_bytes = 0usize;
+    let mut combination_bytes = 0usize;
+    for character in phrase.chars() {
+        let is_uppercase = common_case_uppercase(character);
+        uppercase += usize::from(is_uppercase);
+        if uppercase > MAX_COMMON_CASE_UPPERCASE {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL common-case phrase {phrase:?} contains more than {MAX_COMMON_CASE_UPPERCASE} uppercase letters"
+            )));
+        }
+        whole_uppercase_bytes = whole_uppercase_bytes
+            .checked_add(crate::pipeline::simple_uppercase_char(character).len_utf8())
+            .ok_or_else(|| LogsqlError::malformed("LogsQL common-case state size overflow"))?;
+        combination_bytes = combination_bytes
+            .checked_add(if is_uppercase {
+                character
+                    .len_utf8()
+                    .max(crate::pipeline::simple_lowercase_char(character).len_utf8())
+            } else {
+                character.len_utf8()
+            })
+            .ok_or_else(|| LogsqlError::malformed("LogsQL common-case state size overflow"))?;
+    }
+    let combinations = 1usize << uppercase;
+    let maximum_phrase_state = combination_bytes
+        .checked_add(64)
+        .and_then(|bytes| bytes.checked_mul(combinations))
+        .and_then(|bytes| bytes.checked_add(whole_uppercase_bytes))
+        .and_then(|bytes| bytes.checked_add(64))
+        .ok_or_else(|| LogsqlError::malformed("LogsQL common-case state size overflow"))?;
+    if maximum_phrase_state > MAX_COMMON_CASE_STATE_BYTES {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL common-case expansion exceeds {MAX_COMMON_CASE_STATE_BYTES} state bytes"
+        )));
+    }
+
+    let mut values = BTreeSet::new();
+    values.insert(crate::pipeline::format_simple_uppercase(phrase));
+    for mask in 0..combinations {
+        let mut value = String::with_capacity(phrase.len());
+        let mut uppercase_index = 0usize;
+        for character in phrase.chars() {
+            if common_case_uppercase(character) {
+                if mask & (1usize << uppercase_index) != 0 {
+                    value.push(crate::pipeline::simple_lowercase_char(character));
+                } else {
+                    value.push(character);
+                }
+                uppercase_index += 1;
+            } else {
+                value.push(character);
+            }
+        }
+        values.insert(value);
+    }
+    Ok(values.into_iter().collect())
+}
+
+fn common_case_uppercase(character: char) -> bool {
+    static UPPERCASE: OnceLock<Regex> = OnceLock::new();
+    let uppercase = UPPERCASE.get_or_init(|| {
+        Regex::new(r"^\p{Lu}$").expect("Unicode uppercase-letter regex is a build-time constant")
+    });
+    let mut encoded = [0u8; 4];
+    uppercase.is_match(character.encode_utf8(&mut encoded))
 }
 
 fn parse_contains_filter(
@@ -6365,6 +6578,9 @@ fn compile_field_filter(
     if let Some(exact) = parse_exact_filter(value)? {
         return Ok(exact.predicate(field.clone()));
     }
+    if let Some(predicate) = parse_common_case_filter(value, field.clone(), context)? {
+        return Ok(predicate);
+    }
     if let Some(exact) = parse_multi_exact_filter(value, context)? {
         return Ok(exact.predicate(field.clone()));
     }
@@ -6460,6 +6676,9 @@ fn compile_unqualified_filter(
     }
     if let Some(exact) = parse_exact_filter(atom)? {
         return Ok(exact.predicate(field.clone()));
+    }
+    if let Some(predicate) = parse_common_case_filter(atom, field.clone(), context)? {
+        return Ok(predicate);
     }
     if let Some(exact) = parse_multi_exact_filter(atom, context)? {
         return Ok(exact.predicate(field.clone()));
@@ -7060,6 +7279,8 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
                 "in",
                 "contains_all",
                 "contains_any",
+                "equals_common_case",
+                "contains_common_case",
                 "seq",
                 "json_array_contains_any",
                 "ipv4_range",
@@ -7113,6 +7334,9 @@ fn apply_metadata_filter(
         }
     } else if let Some(exact) = parse_exact_filter(value)? {
         append_predicate(spec, exact.predicate(log_field(&path)));
+        return Ok(());
+    } else if let Some(predicate) = parse_common_case_filter(value, log_field(&path), context)? {
+        append_predicate(spec, predicate);
         return Ok(());
     } else if let Some(exact) = parse_multi_exact_filter(value, context)? {
         append_predicate(spec, exact.predicate(log_field(&path)));
@@ -8486,6 +8710,101 @@ mod tests {
         .unwrap_err();
         assert!(
             error.message.contains("more than 32 query-backed lists"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn session_eighteen_common_case_grammar_and_unicode_expansion_are_exact() {
+        assert_eq!(common_case_phrase_variants("foo").unwrap(), ["FOO", "foo"]);
+        assert_eq!(
+            common_case_phrase_variants("FooBar").unwrap(),
+            ["FOOBAR", "FooBar", "Foobar", "fooBar", "foobar"]
+        );
+        assert_eq!(
+            common_case_phrase_variants("FOO").unwrap(),
+            ["FOO", "FOo", "FoO", "Foo", "fOO", "fOo", "foO", "foo"]
+        );
+        assert_eq!(
+            common_case_phrase_variants("İx").unwrap(),
+            ["ix", "İX", "İx"]
+        );
+        assert_eq!(common_case_phrase_variants("ǅx").unwrap(), ["ǄX", "ǅx"]);
+
+        for query in [
+            "equals_common_case(Error)",
+            "case:equals_common_case(Error, error,)",
+            r#"case:equals_common_case("Error,Retry")"#,
+            r#"case:equals_common_case("*")"#,
+            "case:equals_common_case()",
+            "contains_common_case(Error)",
+            r#"case:contains_common_case("")"#,
+            "case:CoNtAiNs_CoMmOn_CaSe(Error)",
+            "case:equals_common_case(Error) AND NOT case:equals_common_case(error)",
+            "* | filter case:contains_common_case(Error)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            assert!(plan.spec.metadata_exact.is_empty(), "{query}: {plan:?}");
+            assert!(
+                plan.spec.predicate.is_some() || !plan.pipeline.is_empty(),
+                "{query}: {plan:?}"
+            );
+        }
+
+        for malformed in [
+            "equals_common_case",
+            "equals_common_case(",
+            "equals_common_case(,Error)",
+            "equals_common_case(Error Other)",
+            "equals_common_case(*)",
+            "contains_common_case(Error | fields case)",
+            "contains_common_case(Error,,Retry)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+
+        let error = parse_at(
+            "equals_common_case(ABCDEFGHIJK)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("more than 10 uppercase"),
+            "{error:?}"
+        );
+
+        let eight_phrases = (0..8)
+            .map(|suffix| format!("ABCDEFGHIJ{suffix}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        parse_at(
+            &format!("equals_common_case({eight_phrases})"),
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let error = parse_at(
+            &format!("equals_common_case({eight_phrases},ABCDEFGHIJ8)"),
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("exceeds 8192 values"), "{error:?}");
+
+        let mut context = ParseContext {
+            timestamp_unit: TimestampUnit::Microseconds,
+            query_now: 0,
+            query_backed_depth: 0,
+            query_backed_lists: 0,
+            common_case_values: 0,
+            common_case_state_bytes: 0,
+        };
+        let oversized_phrase = "a".repeat(MAX_COMMON_CASE_STATE_BYTES / 2 + 1);
+        let error = common_case_values(&[oversized_phrase], &mut context).unwrap_err();
+        assert!(
+            error.message.contains("exceeds 4194304 state bytes"),
             "{error:?}"
         );
     }

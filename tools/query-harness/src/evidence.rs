@@ -1364,6 +1364,7 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         let host_attempt_zero_matches = (0..entries)
             .filter(|index| index % 64 == 0 && index % 5 == 0)
             .count();
+        let service_api_matches = entries.div_ceil(4);
         for (key, name, expression, expected, expected_total) in [
             (
                 "narrow",
@@ -1580,6 +1581,62 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "logs-query-backed-in-wide",
                 "context.attempt:in(host:=\"h00\" AND context.attempt:=0 | fields context.attempt) | sort by (_time) asc | limit 10000",
                 attempt_zero_matches,
+                None,
+            ),
+            (
+                "equals_common_case_control_narrow",
+                "logs-equals-common-case-control-narrow",
+                "host:=\"h00\" AND service:in(api, Api, API) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "equals_common_case_narrow",
+                "logs-equals-common-case-narrow",
+                "host:=\"h00\" AND service:equals_common_case(Api) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "equals_common_case_control_wide",
+                "logs-equals-common-case-control-wide",
+                "service:in(api, Api, API) | sort by (_time) asc | limit 10000",
+                service_api_matches,
+                None,
+            ),
+            (
+                "equals_common_case_wide",
+                "logs-equals-common-case-wide",
+                "service:equals_common_case(Api) | sort by (_time) asc | limit 10000",
+                service_api_matches,
+                None,
+            ),
+            (
+                "contains_common_case_control_narrow",
+                "logs-contains-common-case-control-narrow",
+                "host:=\"h00\" AND contains_any(query, Query, QUERY) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "contains_common_case_narrow",
+                "logs-contains-common-case-narrow",
+                "host:=\"h00\" AND contains_common_case(Query) | sort by (_time) asc | limit 10000",
+                host_matches,
+                None,
+            ),
+            (
+                "contains_common_case_control_wide",
+                "logs-contains-common-case-control-wide",
+                "contains_any(query, Query, QUERY) | sort by (_time) asc | limit 10000",
+                entries,
+                None,
+            ),
+            (
+                "contains_common_case_wide",
+                "logs-contains-common-case-wide",
+                "contains_common_case(Query) | sort by (_time) asc | limit 10000",
+                entries,
                 None,
             ),
             (

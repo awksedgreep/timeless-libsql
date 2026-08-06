@@ -12434,6 +12434,399 @@ async fn session_eighteen_query_backed_lists_are_rich_cumulative_cached_and_reop
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_common_case_filters_are_unicode_rich_bounded_and_reopenable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("common-case-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut body = String::new();
+    let severities = [
+        "debug",
+        "info",
+        "notice",
+        "warning",
+        "error",
+        "critical",
+        "alert",
+        "emergency",
+    ];
+    for index in 0..8_192_u64 {
+        let mut row = serde_json::json!({
+            "_time": 1_814_000_000_000_000_i64 + index as i64,
+            "_msg": format!("RequestEvent filler {index}"),
+            "level": severities[index as usize % severities.len()],
+            "case": format!("filler-{index}"),
+            "common_group": "filler",
+        });
+        if index > 24 {
+            body.push_str(&row.to_string());
+            body.push('\n');
+            continue;
+        }
+        let (case, value) = match index {
+            0 => ("original", Some(serde_json::json!("VictoriaMetrics"))),
+            1 => ("lower", Some(serde_json::json!("victoriametrics"))),
+            2 => ("upper", Some(serde_json::json!("VICTORIAMETRICS"))),
+            3 => ("lower-first", Some(serde_json::json!("victoriaMetrics"))),
+            4 => ("lower-second", Some(serde_json::json!("Victoriametrics"))),
+            5 => ("invalid-mixed", Some(serde_json::json!("VIctoriaMetrics"))),
+            6 => (
+                "boundary",
+                Some(serde_json::json!("before victoriaMetrics after")),
+            ),
+            7 => (
+                "attached",
+                Some(serde_json::json!("beforevictoriaMetricsafter")),
+            ),
+            8 => ("punctuation", Some(serde_json::json!("(VictoriaMetrics)!"))),
+            9 => ("dot-original", Some(serde_json::json!("İx"))),
+            10 => ("dot-lower", Some(serde_json::json!("ix"))),
+            11 => ("dot-upper", Some(serde_json::json!("İX"))),
+            12 => ("dot-decomposed", Some(serde_json::json!("i̇x"))),
+            13 => ("title-original", Some(serde_json::json!("ǅx"))),
+            14 => ("title-upper", Some(serde_json::json!("ǄX"))),
+            15 => ("title-lower", Some(serde_json::json!("ǆx"))),
+            16 => ("literal-star", Some(serde_json::json!("*"))),
+            17 => ("quoted-comma", Some(serde_json::json!("Error,Retry"))),
+            18 => ("state-missing", None),
+            19 => ("state-null", Some(serde_json::Value::Null)),
+            20 => ("state-empty", Some(serde_json::json!(""))),
+            21 => ("rich-number", Some(serde_json::json!(2.5))),
+            22 => {
+                row["common_object"] = serde_json::json!({"stage": "VictoriaMetrics"});
+                row["common_array"] = serde_json::json!(["VictoriaMetrics", 2.5, true]);
+                ("rich-nested", Some(serde_json::json!("not-common")))
+            }
+            23 => {
+                row["common_extra"] = serde_json::json!("VictoriaMetrics");
+                ("prefix-only", Some(serde_json::json!("not-common")))
+            }
+            24 => {
+                row["_msg"] = serde_json::json!("MessageCase");
+                ("message-exact", Some(serde_json::json!("not-common")))
+            }
+            _ => unreachable!("indices above 24 continue before special-row selection"),
+        };
+        row["case"] = serde_json::json!(case);
+        row["common_group"] = serde_json::json!(if index <= 17 {
+            "common"
+        } else if index <= 20 {
+            "state"
+        } else {
+            "rich"
+        });
+        if let Some(value) = value {
+            row["common_value"] = value;
+        }
+        body.push_str(&row.to_string());
+        body.push('\n');
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn cases(app: &axum::Router, query: &str) -> Vec<String> {
+        let mut cases = pipeline_rows(app, &format!("{query} | fields case | limit 10000"))
+            .await
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cases.sort();
+        cases
+    }
+
+    let exact = ["lower", "lower-first", "lower-second", "original", "upper"];
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_group:="common" common_value:equals_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        exact
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_group:="common" common_value:contains_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        [
+            "boundary",
+            "lower",
+            "lower-first",
+            "lower-second",
+            "original",
+            "punctuation",
+            "upper",
+        ]
+    );
+    assert_eq!(
+        cases(&app, r#"common_value:equals_common_case(İx)"#).await,
+        ["dot-lower", "dot-original", "dot-upper"]
+    );
+    assert_eq!(
+        cases(&app, r#"common_value:equals_common_case(ǅx)"#).await,
+        ["title-original", "title-upper"]
+    );
+    assert_eq!(
+        cases(&app, r#"common_value:equals_common_case("*")"#).await,
+        ["literal-star"]
+    );
+    assert_eq!(
+        cases(&app, r#"common_value:equals_common_case("Error,Retry")"#,).await,
+        ["quoted-comma"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_group:="state" common_value:equals_common_case("")"#,
+        )
+        .await,
+        ["state-empty", "state-missing", "state-null"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_group:="state" common_value:contains_common_case("")"#,
+        )
+        .await,
+        ["state-empty", "state-missing", "state-null"]
+    );
+    assert_eq!(
+        cases(&app, r#"common_value:equals_common_case("2.5")"#).await,
+        ["rich-number"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_object.stage:equals_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        ["rich-nested"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_array:contains_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        ["rich-nested"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"case:="prefix-only" AND common*:equals_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        ["prefix-only"]
+    );
+    assert_eq!(
+        cases(&app, "equals_common_case(MessageCase)").await,
+        ["message-exact"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"* | copy common_value as current | filter current:contains_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        [
+            "boundary",
+            "lower",
+            "lower-first",
+            "lower-second",
+            "original",
+            "punctuation",
+            "upper",
+        ]
+    );
+
+    for malformed in [
+        "equals_common_case",
+        "equals_common_case(*)",
+        "equals_common_case(,Error)",
+        "contains_common_case(Error,,Retry)",
+        "equals_common_case(ABCDEFGHIJK)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let expansion_limited = app
+        .clone()
+        .oneshot(logsql_request(
+            "equals_common_case(ABCDEFGHIJ0,ABCDEFGHIJ1,ABCDEFGHIJ2,ABCDEFGHIJ3,ABCDEFGHIJ4,ABCDEFGHIJ5,ABCDEFGHIJ6,ABCDEFGHIJ7,ABCDEFGHIJ8)",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(expansion_limited.status(), StatusCode::BAD_REQUEST);
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "contains_common_case(RequestEventAbsent) | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(work_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+
+    let result_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"common_value:equals_common_case(VictoriaMetrics) | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(result_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(result_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_result_rows"
+    );
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            max_response_bytes: 80,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"common_value:equals_common_case(VictoriaMetrics) | fields case | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_response_bytes"
+    );
+
+    let cancelled_before = storage.stats().await.unwrap().api_query_cancelled;
+    let timed_out = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "contains_common_case(RequestEventAbsent) | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(timed_out.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before);
+    assert_eq!(stats.api_query_in_flight, 0);
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_group:="common" common_value:equals_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        exact
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    assert_eq!(
+        cases(
+            &app,
+            r#"common_group:="common" common_value:equals_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        exact
+    );
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        cases(
+            &reopened_app,
+            r#"common_group:="common" common_value:equals_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        exact
+    );
+    assert_eq!(
+        cases(
+            &reopened_app,
+            r#"common_object.stage:equals_common_case(VictoriaMetrics)"#,
+        )
+        .await,
+        ["rich-nested"]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 fn make_evidence_rich_lines(count: usize) -> String {
     const BASE_TS: i64 = 1_800_000_000_000_000;
     const SEVERITIES: [&str; 8] = [

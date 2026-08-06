@@ -136,7 +136,25 @@
     {"case": "week-sat", "_msg": "week Saturday", "week_group": "week", "utc_weekday": "Sat", "utc_time_of_day": "12:00:00.000000"},
     {"case": "comment-hash", "_msg": "hash#inside", "comment_group": "comments", "hash#field": "hash#value"},
     {"case": "format-row", "_msg": "hello \"world\"\nnext", "format_group": "format", "host": "aцC", "lower": "aBП", "unicode_edge": "ßİ", "url": "a b+ц", "encoded_url": "a+b%2B%D1%86", "hex": "D099D0A6D0A3D09A", "invalid_hex": "qwert", "b64": "YdGGQw==", "invalid_b64": "al", "duration": "1h5m35s", "duration_ns": "210123456789", "duration_min": "-9223372036854775808", "unix_seconds_fraction": "1717328141.12", "unix_millis": "1717328141123", "unix_micros": "1717328141123456", "unix_ns": "1717328141123456789", "unix_scientific": "1.717328141123456789e18", "unix_plus": "+1717328141", "unix_negative": "-1717328141.123", "number": "1234", "hex_number": "00000000000004D2", "ipv4": "1234567890", "result": "original", "math_a": "2", "math_b": "3", "math_bad": "nope", "math_empty": "", "math_null": null, "math_duration": "10m5s", "math_bytes": "1.5KiB", "math_timestamp": "2024-05-30T01:02:03Z", "math_ipv4": "123.45.67.89", "math abs": "7", "math left field": "2", "math_nested": {"value": "4"}, "math_array": [1, 2]},
-    {"case": "delete-row", "_msg": "delete message", "delete_group": "delete", "level": "warning", "keep": "kept", "drop_exact": "gone", "drop_prefix_a": "one", "drop_prefix_b": "two", "Drop_prefix_caps": "caps", "delete,weird": "comma", "delete|pipe": "pipe", "drop,prefix.one": "quoted-prefix", "star*literal": "literal-star", "nested": {"drop": "nested-gone", "keep": "nested-kept"}, "array": ["x", 1], "null_value": null, "empty_value": ""}
+    {"case": "delete-row", "_msg": "delete message", "delete_group": "delete", "level": "warning", "keep": "kept", "drop_exact": "gone", "drop_prefix_a": "one", "drop_prefix_b": "two", "Drop_prefix_caps": "caps", "delete,weird": "comma", "delete|pipe": "pipe", "drop,prefix.one": "quoted-prefix", "star*literal": "literal-star", "nested": {"drop": "nested-gone", "keep": "nested-kept"}, "array": ["x", 1], "null_value": null, "empty_value": ""},
+    {"case": "common-original", "_msg": "common original", "common_group": "common", "common_value": "VictoriaMetrics"},
+    {"case": "common-lower", "_msg": "common lower", "common_group": "common", "common_value": "victoriametrics"},
+    {"case": "common-upper", "_msg": "common upper", "common_group": "common", "common_value": "VICTORIAMETRICS"},
+    {"case": "common-lower-first", "_msg": "common lower first", "common_group": "common", "common_value": "victoriaMetrics"},
+    {"case": "common-lower-second", "_msg": "common lower second", "common_group": "common", "common_value": "Victoriametrics"},
+    {"case": "common-invalid-mixed", "_msg": "common invalid mixed", "common_group": "common", "common_value": "VIctoriaMetrics"},
+    {"case": "common-boundary", "_msg": "common boundary", "common_group": "common", "common_value": "before victoriaMetrics after"},
+    {"case": "common-attached", "_msg": "common attached", "common_group": "common", "common_value": "beforevictoriaMetricsafter"},
+    {"case": "common-punctuation", "_msg": "common punctuation", "common_group": "common", "common_value": "(VictoriaMetrics)!"},
+    {"case": "common-dot-original", "_msg": "common dotted original", "common_group": "common", "common_value": "İx"},
+    {"case": "common-dot-lower", "_msg": "common dotted lower", "common_group": "common", "common_value": "ix"},
+    {"case": "common-dot-upper", "_msg": "common dotted upper", "common_group": "common", "common_value": "İX"},
+    {"case": "common-dot-decomposed", "_msg": "common dotted decomposed", "common_group": "common", "common_value": "i̇x"},
+    {"case": "common-title-original", "_msg": "common title original", "common_group": "common", "common_value": "ǅx"},
+    {"case": "common-title-upper", "_msg": "common title upper", "common_group": "common", "common_value": "ǄX"},
+    {"case": "common-title-lower", "_msg": "common title lower", "common_group": "common", "common_value": "ǆx"},
+    {"case": "common-star", "_msg": "common star", "common_group": "common", "common_value": "*"},
+    {"case": "common-comma", "_msg": "common comma", "common_group": "common", "common_value": "Error,Retry"}
   ],
   "query_cases": [
     {
@@ -1246,6 +1264,10 @@
         "string-range-object", "string-range-nested", "string-range-service",
         "string-range-message",
         "page-0", "page-1", "page-2", "page-3", "delete-row", "comment-hash", "format-row",
+        "common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second",
+        "common-invalid-mixed", "common-boundary", "common-attached", "common-punctuation",
+        "common-dot-original", "common-dot-lower", "common-dot-upper", "common-dot-decomposed",
+        "common-title-original", "common-title-upper", "common-title-lower", "common-star", "common-comma",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
         "word-unicode-boundary", "word-unicode", "word-unicode-case"
@@ -2190,6 +2212,90 @@
       "query": "case:in(alpha | sort by (_time) asc | limit 1 | fields case)",
       "status": 200,
       "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F41-equals-common-case-expands-only-uppercase-positions",
+      "query": "common_group:=common common_value:equals_common_case(VictoriaMetrics)",
+      "status": 200,
+      "expected_cases": ["common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second"]
+    },
+    {
+      "id": "LQL-F41-contains-common-case-preserves-phrase-boundaries",
+      "query": "common_group:=common common_value:contains_common_case(VictoriaMetrics)",
+      "status": 200,
+      "expected_cases": ["common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second", "common-boundary", "common-punctuation"]
+    },
+    {
+      "id": "LQL-F41-turkish-uppercase-i-uses-go-simple-case-mapping",
+      "query": "common_group:=common common_value:equals_common_case(İx)",
+      "status": 200,
+      "expected_cases": ["common-dot-original", "common-dot-lower", "common-dot-upper"]
+    },
+    {
+      "id": "LQL-F41-titlecase-rune-is-not-an-uppercase-toggle",
+      "query": "common_group:=common common_value:equals_common_case(ǅx)",
+      "status": 200,
+      "expected_cases": ["common-title-original", "common-title-upper"]
+    },
+    {
+      "id": "LQL-F41-equals-empty-list-matches-nothing",
+      "query": "common_group:=common common_value:equals_common_case()",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F41-contains-empty-list-matches-nothing",
+      "query": "common_group:=common common_value:contains_common_case()",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F41-equals-empty-phrase-uses-empty-text-projection",
+      "query": "state_group:=state probe:equals_common_case(\"\")",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty"]
+    },
+    {
+      "id": "LQL-F41-contains-empty-phrase-is-match-all",
+      "query": "state_group:=state probe:contains_common_case(\"\")",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F41-wildcard-argument-is-literal",
+      "query": "common_group:=common common_value:equals_common_case(\"*\")",
+      "status": 200,
+      "expected_cases": ["common-star"]
+    },
+    {
+      "id": "LQL-F41-multiple-phrases-deduplicate-and-allow-trailing-comma",
+      "query": "common_group:=common common_value:equals_common_case(VictoriaMetrics,VictoriaMetrics,İx,)",
+      "status": 200,
+      "expected_cases": ["common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second", "common-dot-original", "common-dot-lower", "common-dot-upper"]
+    },
+    {
+      "id": "LQL-F41-quoted-comma-is-one-phrase",
+      "query": "common_group:=common common_value:equals_common_case(\"Error,Retry\")",
+      "status": 200,
+      "expected_cases": ["common-comma"]
+    },
+    {
+      "id": "LQL-F41-logical-composition",
+      "query": "common_group:=common AND (common_value:equals_common_case(VictoriaMetrics) OR common_value:equals_common_case(İx))",
+      "status": 200,
+      "expected_cases": ["common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second", "common-dot-original", "common-dot-lower", "common-dot-upper"]
+    },
+    {
+      "id": "LQL-F41-current-row-filter-pipeline",
+      "query": "common_group:=common | filter common_value:contains_common_case(VictoriaMetrics)",
+      "status": 200,
+      "expected_cases": ["common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second", "common-boundary", "common-punctuation"]
+    },
+    {
+      "id": "LQL-F41-function-name-is-case-insensitive",
+      "query": "common_group:=common common_value:EqUaLs_CoMmOn_CaSe(VictoriaMetrics)",
+      "status": 200,
+      "expected_cases": ["common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second"]
     }
   ],
   "stats_cases": [
@@ -2512,7 +2618,7 @@
     {
       "id": "LQL-P12-query-stats-full-fixture-cardinality",
       "query": "* | query_stats | keep RowsFound",
-      "expected_rows": [{"RowsFound": "136"}]
+      "expected_rows": [{"RowsFound": "154"}]
     },
     {
       "id": "LQL-P12-query-stats-composes-after-limit",
@@ -6336,6 +6442,62 @@
     {
       "id": "LQL-P41-json-array-len-rejects-trailing-token",
       "query": "* | json_array_len(source) result trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-equals-common-case-requires-parentheses",
+      "query": "equals_common_case",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-equals-common-case-requires-closing-parenthesis",
+      "query": "equals_common_case(",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-equals-common-case-rejects-leading-comma",
+      "query": "equals_common_case(,Error)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-equals-common-case-requires-comma-separator",
+      "query": "equals_common_case(Error Retry)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-contains-common-case-rejects-query-pipeline",
+      "query": "contains_common_case(Error | fields case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-contains-common-case-rejects-double-comma",
+      "query": "contains_common_case(Error,,Retry)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-common-case-rejects-eleven-uppercase-runes",
+      "query": "equals_common_case(ABCDEFGHIJK)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F41-common-case-rejects-unquoted-wildcard",
+      "query": "equals_common_case(*)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

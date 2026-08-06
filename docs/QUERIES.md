@@ -263,6 +263,35 @@ remain literal, function names are case-insensitive, and a non-empty list does
 not match a missing field. For example, `contains_any(error, "login failed")`
 matches either phrase; it does not require both.
 
+`equals_common_case(v1, ..., vN)` and
+`contains_common_case(v1, ..., vN)` reproduce VictoriaLogs' common-case
+shortcut; they are not aliases for `i(...)`. Each input phrase contributes its
+whole-string Go-simple uppercase form plus every combination where each input
+rune in Unicode category `Lu` independently remains unchanged or uses its
+Go-simple lowercase mapping. For example,
+`equals_common_case(VictoriaMetrics)` is equivalent to exact membership in
+`VictoriaMetrics`, `victoriaMetrics`, `Victoriametrics`, `victoriametrics`,
+and `VICTORIAMETRICS`. Other mixed-case spellings do not match. No Unicode
+normalization is performed; titlecase `ǅ` is not an uppercase toggle, while
+the whole-uppercase candidate for `ǅx` is `ǄX`.
+
+The `equals` form applies full-value membership to the established rich
+textual projection. The `contains` form applies the same generated candidates
+with case-sensitive Unicode letter/digit/underscore phrase boundaries. Empty
+lists are false. `equals_common_case("")` matches missing, null, and empty
+textual projections; `contains_common_case("")` is a field-independent true
+predicate. One trailing comma is accepted, function names are case-
+insensitive, quoted `"*"` is literal, and an unquoted wildcard or malformed
+separator fails explicitly.
+
+VictoriaLogs rejects an input phrase with more than ten uppercase-letter
+runes. Timeless preserves that limit and additionally bounds cumulative
+request expansion to 8,192 distinct values and 4 MiB of parser state. Values
+are sorted and deduplicated before existing exact/phrase predicates evaluate
+public rows. Unqualified calls inspect `_msg`; arbitrary fields, field-prefix
+groups, logical expressions, and current-row `filter`/`where` pipelines are
+supported. The expansion changes neither retained rich values nor storage.
+
 `seq(v1, ..., vN)` requires the non-empty phrases to appear in the selected
 field in the declared order. Each phrase uses the same case-sensitive Unicode
 letter/digit/underscore boundaries, and the next search begins only after the
@@ -336,7 +365,8 @@ constructs do not require a private table or new extension primitive.
 `SQL-LOG-048` shows the bounded two-public-scan foundation for query-backed
 exact membership, including cumulative work-budget guidance.
 
-There is intentionally no `contains_all`, `contains_any`, or `seq` SQL recipe.
+There is intentionally no `contains_all`, `contains_any`, `seq`, or complete
+common-case SQL recipe.
 Portable SQLite `LIKE`, `GLOB`, and `instr` cannot reproduce the required
 Unicode-category word boundaries; `seq` additionally requires ordered,
 non-overlapping phrase searches. Adding a storage primitive would not avoid

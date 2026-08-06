@@ -874,3 +874,21 @@ JSON rather than flattened string columns, but uses the established compact
 textual projection only while materializing query values. The fixture now
 contains 327 row-query cases, 319 error cases, and 335 statistics/pipeline
 cases: 981 cases total, all passing against the immutable image. The fixture now contains 981 cases.
+
+`LQL-F41` adds fourteen row-query cases and eight error cases for
+`equals_common_case(...)` and `contains_common_case(...)`. They pin
+whole-string Go-simple uppercase expansion, every independent lowercase
+combination of input Unicode `Lu` runes, deduplication, the ten-uppercase-rune
+limit, exact versus phrase-boundary matching, Turkish uppercase-I, titlecase
+and normalization edges, empty-list and empty-phrase behavior, trailing
+commas, quoted commas and stars, logical/current-row composition,
+case-insensitive function names, and strict separators/wildcards. The first
+live run corrected an inferred wildcard rule: unlike `in` and `contains_any`,
+these functions use `parseArgsInParens`, so an unquoted `*` is invalid and a
+quoted `"*"` is literal. Source audit covers
+`filter_equals_common_case.go`, `filter_contains_common_case.go`,
+`filter_phrase.go`, `filter_contains_any.go`, `parser.go`, and their tests at
+immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 341
+row-query cases, 327 error cases, and 335 statistics/pipeline cases: 1,003
+cases total, all passing against the immutable image. The fixture now contains 1003 cases.

@@ -687,6 +687,8 @@ plus ordered non-overlapping `seq(...)` phrase matching with the same Unicode
 boundaries and strict static-list grammar, plus query-backed `in`,
 `contains_any`, and `contains_all` with exact one-field output, request-local
 caching, nested composition, and cumulative work/state/deadline bounds,
+plus bounded `equals_common_case(...)` and `contains_common_case(...)` using
+the pinned Go-simple Unicode expansion rather than general case folding,
 plus lower-inclusive/upper-exclusive bytewise `string_range(...)` filtering
 over the same non-mutating rich projection, plus inclusive Unicode-codepoint
 `len_range(...)` filtering with VictoriaLogs-compatible unsigned bound
@@ -838,9 +840,10 @@ bytewise ordering fallback in `SQL-LOG-021`, including the
 literal public-row prefix-selected field-set foundation in `SQL-LOG-022`, and
 the bounded two-scan query-backed membership foundation in `SQL-LOG-048`, and
 the existing public posting index for declared string-only keys. `contains_all`,
-`contains_any`, and ordered `seq` remain honest API-only rows: portable SQLite
-does not supply their Unicode phrase-boundary predicate, and `seq` also needs
-ordered non-overlapping search state. JSON-array membership needs no new
+`contains_any`, ordered `seq`, and the complete common-case filters remain
+honest API-only rows: portable SQLite does not supply their Unicode phrase-
+boundary predicate or Go-simple case expansion, and `seq` also needs ordered
+non-overlapping search state. JSON-array membership needs no new
 extension primitive because bounded public rows plus `json_each` expose the
 exact retained-type operation. The
 extension exposes general SQLite/libSQL primitives and

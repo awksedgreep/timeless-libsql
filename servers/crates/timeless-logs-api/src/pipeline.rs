@@ -3858,27 +3858,33 @@ fn format_field_value<'a>(value: &'a str, option: &str) -> Cow<'a, str> {
     }
 }
 
-fn format_simple_uppercase(value: &str) -> String {
+pub(crate) fn format_simple_uppercase(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for character in value.chars() {
-        let mut mapped = character.to_uppercase();
-        let first = mapped.next().unwrap_or(character);
-        if mapped.next().is_none() {
-            output.push(first);
-        } else {
-            // Go's unicode.ToUpper performs one-rune simple case mapping.
-            output.push(character);
-        }
+        output.push(simple_uppercase_char(character));
     }
     output
+}
+
+pub(crate) fn simple_uppercase_char(character: char) -> char {
+    let mut mapped = character.to_uppercase();
+    let first = mapped.next().unwrap_or(character);
+    if mapped.next().is_none() {
+        first
+    } else {
+        // Go's unicode.ToUpper performs one-rune simple case mapping.
+        character
+    }
+}
+
+pub(crate) fn simple_lowercase_char(character: char) -> char {
+    character.to_lowercase().next().unwrap_or(character)
 }
 
 fn format_simple_lowercase(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for character in value.chars() {
-        let mut mapped = character.to_lowercase();
-        let first = mapped.next().unwrap_or(character);
-        output.push(first);
+        output.push(simple_lowercase_char(character));
     }
     output
 }

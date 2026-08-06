@@ -176,6 +176,17 @@ users may deliberately write such a byte-substring chain when that weaker
 contract is wanted, but it is not an honest LogsQL equivalent. The matrix
 therefore keeps this row `ROWS`/`API`, not `SQL` or `EXT`.
 
+`LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
+known phrase in their application and bind the resulting strings to an `IN`
+predicate for `equals_common_case`, but core SQLite `upper()`/`lower()` do not
+implement VictoriaLogs' Go-simple Unicode mapping. The
+`contains_common_case` half also requires the same Unicode-category phrase
+boundaries as `contains_any`; `LIKE`, `GLOB`, and `instr()` are not equivalent.
+Because those operations happen after a required public-row decode, moving
+them into an extension primitive would not avoid storage reads, decode,
+allocation, copies, or row crossing. The row remains `ROWS`/`API`, not `SQL`
+or `EXT`.
+
 ## Setup and parameter conventions
 
 Examples assume the extension has been loaded and these tables exist:

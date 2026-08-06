@@ -53,7 +53,8 @@ full-message exact, start-anchored exact-prefix, and static
 `contains_all(v1, ..., vN)` and `contains_any(v1, ..., vN)` with VictoriaLogs
 phrase boundaries; query-backed `in`, `contains_any`, and `contains_all`
 using one exact `fields`/`keep` or `uniq` output; ordered non-overlapping
-`seq(v1, ..., vN)` matching with
+`seq(v1, ..., vN)` matching and bounded `equals_common_case(...)` /
+`contains_common_case(...)` expansion with
 the same Unicode boundaries; retained-array primitive membership through
 `json_array_contains_any(v1, ..., vN)`; inclusive one-address, CIDR, or
 two-address `ipv4_range(...)` filtering over exact retained strings;
@@ -429,6 +430,27 @@ inspecting the field. Both preserve case, Unicode word boundaries, compact
 rich-value projection, aliases, and logical/pipeline composition. Query-backed
 lists use the same predicates under `LQL-F38`.
 `SQL-LOG-016` shows the direct SQL equivalent: omit the field predicate.
+
+`equals_common_case(v1, ..., vN)` and `contains_common_case(v1, ..., vN)`
+implement VictoriaLogs' deliberately narrower common-case expansion. For each
+phrase, the API includes the whole-string Go-simple uppercase form and every
+combination in which each Unicode uppercase-letter (`Lu`) rune independently
+stays uppercase or uses its Go-simple lowercase mapping. It does not perform
+general case-insensitive matching or Unicode normalization. Exact common-case
+matching uses full textual equality; contains common-case uses the established
+Unicode letter/digit/underscore phrase boundaries. Empty lists are false; an
+empty exact phrase selects empty textual projections, while an empty contains
+phrase is field-independent true. A trailing comma is accepted, a quoted
+`"*"` is literal, and an unquoted wildcard is invalid.
+
+One phrase may contain at most ten uppercase-letter runes, and one request may
+expand at most 8,192 distinct values and 4 MiB of parser state. Expansion is
+sorted, deduplicated, request-owned, and composed into existing exact/phrase
+predicates over public rows. The extension and stored data are unchanged.
+Direct SQL users may pre-expand a fixed phrase and use parameterized `IN` for
+the exact half, but core SQLite has no portable Go-simple Unicode case mapper
+or exact VictoriaLogs phrase-boundary predicate, so no complete SQL recipe or
+extension primitive is claimed.
 
 Query-backed `in`, `contains_any`, and `contains_all` parse the nested source
 as a complete LogsQL plan with the same request clock. The source must end in
