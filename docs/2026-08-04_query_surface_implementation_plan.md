@@ -709,8 +709,11 @@ executable public `SQL-LOG-036`. Twenty-two successful and nineteen error
 cases pass the complete 690-case pinned VictoriaLogs oracle. Timeless retains
 typed rich sources and treats nonnumeric retained values as NaN rather than
 flattening or mutating storage. `QSF-172` records the semantic boundary and
-the corrected unsigned-cast/HTTP-envelope regressions. Exact-build evidence
-and `QSF-173` remain the exit criterion before the row and Session 17 close.
+the corrected unsigned-cast/HTTP-envelope/AST-stack regressions. Exact-build
+commit `84c1a77352aa33fc32139efe8c814e9dcadcff3c` measures 3.357/39.127 ms
+narrow/wide p95 versus 3.292/37.655 ms for byte-identical same-scan controls.
+`QSF-173` accepts the +2.0%/+3.9% bounded expression cost, records unchanged
+four-block storage and the HWM verdict, and closes `LQL-P23` and Session 17.
 
 ### Session 18: applicable LogsQL P3
 

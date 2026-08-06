@@ -912,6 +912,13 @@ the complete LogsQL grammar, coercion chain, functions, sequential mutation,
 and error envelopes remain Rust API behavior. No extension primitive or
 private table is used.
 
+Exact-build math evidence measures 3.357/39.127 ms narrow/wide p95 while
+returning 64 rows, versus 3.292/37.655 ms for byte-identical same-scan
+controls. The +2.0%/+3.9% p95 and +2.4%/+9.6% internal API cost follows the
+same one/four candidate blocks, 1,024/8,192 decoded entries, and
+235,778/1,914,055 payload bytes. `QSF-173` accepts this bounded expression
+cost above the unchanged public storage boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

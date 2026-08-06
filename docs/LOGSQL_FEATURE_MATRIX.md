@@ -126,7 +126,7 @@ extension.
 | `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P23` | `math` / `eval` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P23` | `math` / `eval` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P26` | `collapse_nums` | missing | no | `SQL` | `API` | P3 |
@@ -391,6 +391,9 @@ Grammar, sequential composition, functions, coercions, destinations, limits,
 and HTTP envelopes remain Rust API work. The complete 690-case pinned oracle
 and `QSF-172` record the language and retained-model boundary; no extension
 primitive, private table, or storage-contract change is required.
+Exact-build evidence records 3.357/39.127 ms narrow/wide p95 versus
+3.292/37.655 ms for byte-identical same-scan controls; `QSF-173` accepts the
++2.0%/+3.9% bounded expression cost.
 
 ## Statistics functions
 
