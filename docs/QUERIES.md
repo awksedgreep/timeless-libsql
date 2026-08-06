@@ -288,7 +288,8 @@ also sequence-match an explicitly selected parent object's compact projection.
 list from a complete bounded LogsQL subquery. The subquery must end in exactly
 one exact `fields`/`keep` field or one-field `uniq`; a final `fields` is
 automatically deduplicated, and the ordinary implicit 100-row response limit
-does not truncate the list. Missing and null output project to empty text;
+does not truncate the list. Nested selected fields use the canonical flattened
+pipeline output name when their distinct values are materialized. Missing and null output project to empty text;
 strings keep their bytes; numbers, booleans, arrays, and objects use the same
 compact textual projection as static filters without changing retained data.
 Empty query results make `in` and `contains_any` false and `contains_all`

@@ -434,7 +434,8 @@ Query-backed `in`, `contains_any`, and `contains_all` parse the nested source
 as a complete LogsQL plan with the same request clock. The source must end in
 one exact `fields`/`keep` field or one-field `uniq`; `fields` output is
 deduplicated automatically and is not truncated by the ordinary implicit
-100-row response limit. Missing/null output becomes empty text, while every
+100-row response limit. Nested fields are read back through the canonical
+flattened `uniq` result name. Missing/null output becomes empty text, while every
 rich value uses the established compact projection without storage mutation.
 An empty source makes `in`/`contains_any` false and `contains_all` true.
 Equivalent sources run once per request; nesting is capped at eight levels and

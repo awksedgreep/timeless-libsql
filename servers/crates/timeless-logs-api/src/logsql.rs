@@ -4489,10 +4489,14 @@ fn finalize_query_backed_list(
             )))
         }
     };
-    let PipelineField::Exact { path, .. } = &field else {
+    let PipelineField::Exact { name, .. } = &field else {
         unreachable!("query-backed list output was checked as exact")
     };
-    let output_path = path.clone();
+    // `uniq` emits its selected field under the field's canonical flattened
+    // response name. This is also true for the `uniq` appended after
+    // `fields`, so a nested source such as `context.attempt` must be read from
+    // that top-level result key rather than traversed as retained JSON again.
+    let output_path = vec![name.clone()];
     if append_uniq {
         query.pipeline.push(PipelineOp::Uniq(UniqSpec {
             by_fields: vec![field],

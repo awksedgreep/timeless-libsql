@@ -12109,6 +12109,7 @@ async fn session_eighteen_query_backed_lists_are_rich_cumulative_cached_and_reop
                 row["case"] = serde_json::json!("source-rich");
                 row["role"] = serde_json::json!("rich-dictionary");
                 row["lookup_value"] = serde_json::json!(2.5);
+                row["nested"] = serde_json::json!({"lookup": 2.5});
                 row["_msg"] = serde_json::json!("dictionary rich");
             }
             3 => {
@@ -12202,6 +12203,22 @@ async fn session_eighteen_query_backed_lists_are_rich_cumulative_cached_and_reop
         cases(
             &app,
             r#"n:in(role:="rich-dictionary" | fields lookup_value)"#
+        )
+        .await,
+        ["target-rich"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"n:in(role:="rich-dictionary" | fields nested.lookup)"#
+        )
+        .await,
+        ["target-rich"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"n:in(role:="rich-dictionary" | uniq nested.lookup)"#
         )
         .await,
         ["target-rich"]
