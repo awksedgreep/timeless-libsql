@@ -1527,6 +1527,48 @@ decodes the same 1,024/8,192 entries, transfers the same
 128/8,192 public rows. `QSF-195` retains this bounded API reduction without a
 storage primitive.
 
+## LogsQL deterministic any and companion-field extrema
+
+The bounded `stats` pipeline supports one-value selection and extrema that
+return a field from the selected row:
+
+```text
+* | stats any(service) as one_service
+* | stats field_min(duration_ms, payload) as fastest_payload
+* | stats field_max(duration_ms, payload) as slowest_payload
+```
+
+Function names are case-insensitive. `any` requires exactly one exact field,
+skips missing, JSON null, and empty strings, and returns the first qualifying
+value in current-pipeline order. Zero, false, arrays, and objects qualify and
+retain their native JSON type. VictoriaLogs promises an arbitrary value and
+its answer may change with physical encoding; Timeless deliberately provides
+the stronger deterministic result.
+
+`field_min(source,result)` and `field_max(source,result)` require two exact
+fields. Rows with an empty source are skipped. The source uses VictoriaLogs'
+signed integer, unsigned integer, RFC3339 timestamp, general math-number, and
+natural UTF-8 comparison chain. Equal source values keep the first current
+row. The companion result retains its native JSON type. A missing companion is
+the explicit empty string, while JSON null, an empty string, arrays, and
+objects remain distinct. An empty candidate set produces an empty string.
+
+Every visited candidate counts against `max_work_rows`; retained comparison
+keys and rich companion values count against `max_response_bytes`, including
+their bounded nested traversal. Deadlines and cancellation fail explicitly
+and leave the SQLite reader reusable. The functions do not mutate durable
+source rows and preserve their results across flush, optimize, shutdown, and
+reopen.
+
+Executable
+[`SQL-LOG-046`](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)
+uses only public `logs`, JSON1, explicit ordering, and window functions for a
+deterministic exact-path `any` and finite-native-number extrema. Core SQLite
+does not implement the complete LogsQL textual comparator, canonical fields,
+or the API's retained rich policy, so those remain bounded Rust composition.
+The required public scan already materializes every candidate row; no private
+table or language-specific extension primitive is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

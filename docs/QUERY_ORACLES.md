@@ -809,3 +809,22 @@ typed-statistics policy; retained arrays and objects use compact JSON rather
 than upstream flattened columns. The fixture now contains 298 row-query
 cases, 295 error cases, and 324 statistics/pipeline cases: 917 cases total,
 all passing against the immutable image. The fixture now contains 917 cases.
+
+`LQL-S10` adds five exact statistics cases and six error cases for `any`,
+`field_min`, and `field_max`. They pin one-field/two-field arity,
+case-insensitive function names, nonempty selection, companion-field lookup,
+signed/unsigned/math/natural comparison of numeric text, and strict missing-
+parenthesis/arity grammar. Source audit is against `stats_any.go`,
+`stats_field_min.go`, `stats_field_max.go`, their tests, `stats_parser.go`, and
+the shared string comparator at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. VictoriaLogs deliberately returns
+an arbitrary nonempty `any` value; the same multi-value fixture selected
+different values after physical re-encoding during the live audit. The pinned
+case therefore proves selection only when one nonempty candidate exists.
+Timeless explicitly strengthens that contract to the first nonempty value in
+deterministic current-pipeline order. VictoriaLogs flattens the selected
+companion to text; Timeless retains strings, numbers, booleans, arrays,
+objects, null, empty, and missing states, with a missing companion represented
+by the stable empty string. The fixture now contains 298 row-query cases, 301
+error cases, and 329 statistics/pipeline cases: 928 cases total, all passing
+against the immutable image. The fixture now contains 928 cases.

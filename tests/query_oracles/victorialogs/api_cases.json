@@ -2181,6 +2181,31 @@
       "expected_rows": [{"bytes": "9"}]
     },
     {
+      "id": "LQL-S10-any-selects-a-nonempty-value",
+      "query": "case:=\"state-string\" | stats any(probe) as selected",
+      "expected_rows": [{"selected": "value"}]
+    },
+    {
+      "id": "LQL-S10-any-is-case-insensitive",
+      "query": "case:=\"numeric-negative\" | stats AnY(n) as selected",
+      "expected_rows": [{"selected": "-2"}]
+    },
+    {
+      "id": "LQL-S10-field-min-selects-a-companion-field",
+      "query": "case:in(numeric-two,numeric-ten) | stats field_min(n, case) as selected",
+      "expected_rows": [{"selected": "numeric-two"}]
+    },
+    {
+      "id": "LQL-S10-field-max-selects-a-companion-field",
+      "query": "case:in(numeric-two,numeric-ten) | stats field_max(n, case) as selected",
+      "expected_rows": [{"selected": "numeric-ten"}]
+    },
+    {
+      "id": "LQL-S10-field-extrema-function-names-are-case-insensitive",
+      "query": "case:in(numeric-two,numeric-ten) | stats FiElD_MiN(n, _msg) as minimum, FiElD_MaX(n, first_partition) as maximum",
+      "expected_rows": [{"minimum": "numeric two", "maximum": "b"}]
+    },
+    {
       "id": "LQL-P07-delete-exact-list",
       "query": "delete_group:=\"delete\" | delete drop_exact, drop_prefix_a | fields case, keep, drop_exact, drop_prefix_a, drop_prefix_b",
       "expected_rows": [{"case": "delete-row", "keep": "kept", "drop_prefix_b": "two"}]
@@ -5869,6 +5894,48 @@
     {
       "id": "LQL-S09-sum-len-rejects-trailing-token",
       "query": "* | stats sum_len(a) as bytes tail",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S10-any-requires-parentheses",
+      "query": "* | stats any",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S10-any-requires-one-field",
+      "query": "* | stats any()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S10-any-rejects-two-fields",
+      "query": "* | stats any(x, y)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S10-field-min-requires-two-fields",
+      "query": "* | stats field_min(x)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S10-field-min-rejects-three-fields",
+      "query": "* | stats field_min(x, y, z)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S10-field-max-requires-two-fields",
+      "query": "* | stats field_max(x)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

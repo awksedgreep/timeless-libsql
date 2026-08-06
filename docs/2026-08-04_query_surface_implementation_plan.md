@@ -897,6 +897,19 @@ block storage and the HWM verdict, and closes `LQL-S09`. Session 17 continues
 with `LQL-S10`; its remaining declared P2 rows must not be skipped before
 Session 18 begins.
 
+`LQL-S10` now has strict case-insensitive `any`, `field_min`, and `field_max`
+grammar; deterministic first-nonempty selection; the complete VictoriaLogs
+text comparator for companion extrema; first-tie behavior; native rich result
+fidelity; explicit missing/null/empty handling; bounded traversal and retained
+state; cancellation; immutable source rows; and optimize/reopen durability.
+Five exact statistics cases and six errors pass the complete 928-case pinned
+VictoriaLogs oracle. The upstream `any` result is physically arbitrary, so
+the oracle pins selection only for a single candidate and Timeless documents
+its deterministic strengthening. Executable `SQL-LOG-046` gives direct users
+deterministic exact-path and finite-number foundations. Exact-build benchmark,
+HWM, storage, and final row disposition remain the exit work before Session 17
+may continue to `LQL-S11`.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

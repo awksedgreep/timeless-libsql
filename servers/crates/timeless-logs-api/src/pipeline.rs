@@ -4932,6 +4932,13 @@ fn stats(
                 limits.max_state_items,
                 cancelled,
             )?),
+            StatsKind::Any => any_value(rows, &expression.fields, limits, cancelled)?,
+            StatsKind::FieldMin => {
+                field_extreme(rows, &expression.fields, false, limits, cancelled)?
+            }
+            StatsKind::FieldMax => {
+                field_extreme(rows, &expression.fields, true, limits, cancelled)?
+            }
             StatsKind::Rate => {
                 let value = rate_window_seconds
                     .filter(|duration| *duration > 0.0)
@@ -5306,6 +5313,115 @@ fn sum_text_lengths(
         }
     }
     Ok(total)
+}
+
+fn any_value(
+    rows: &[Value],
+    fields: &[PipelineField],
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    let field = fields
+        .first()
+        .ok_or_else(|| "LogsQL any plan is missing its field".to_string())?;
+    let mut work_items = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "any")?;
+        let value = exact_stats_field_value(row, field)?;
+        if projected_text(value).is_empty() {
+            continue;
+        }
+        let selected = value
+            .cloned()
+            .unwrap_or_else(|| Value::String(String::new()));
+        let mut state_bytes = 0usize;
+        charge_transfer_value(
+            &selected,
+            &mut state_bytes,
+            limits.max_state_bytes,
+            cancelled,
+            &mut work_items,
+            limits.max_state_items,
+            "any",
+        )?;
+        ensure_active(cancelled)?;
+        return Ok(selected);
+    }
+    Ok(Value::String(String::new()))
+}
+
+fn field_extreme(
+    rows: &[Value],
+    fields: &[PipelineField],
+    maximum: bool,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    let operation = if maximum { "field_max" } else { "field_min" };
+    let source_field = fields
+        .first()
+        .ok_or_else(|| format!("LogsQL {operation} plan is missing its comparison field"))?;
+    let result_field = fields
+        .get(1)
+        .ok_or_else(|| format!("LogsQL {operation} plan is missing its result field"))?;
+    let mut selected_key: Option<String> = None;
+    let mut selected_value: Option<Value> = None;
+    let mut work_items = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, operation)?;
+        let source = projected_text(exact_stats_field_value(row, source_field)?);
+        if source.is_empty() {
+            continue;
+        }
+        let replace = selected_key.as_ref().is_none_or(|current| {
+            let ordering = logsql_sort_comparison(source.as_ref(), current);
+            if maximum {
+                ordering == Ordering::Greater
+            } else {
+                ordering == Ordering::Less
+            }
+        });
+        if !replace {
+            continue;
+        }
+
+        let candidate_key = source.into_owned();
+        let candidate_value = exact_stats_field_value(row, result_field)?
+            .cloned()
+            .unwrap_or_else(|| Value::String(String::new()));
+        let mut candidate_state_bytes = 0usize;
+        charge_transfer_string(
+            &candidate_key,
+            &mut candidate_state_bytes,
+            limits.max_state_bytes,
+            operation,
+        )?;
+        charge_transfer_value(
+            &candidate_value,
+            &mut candidate_state_bytes,
+            limits.max_state_bytes,
+            cancelled,
+            &mut work_items,
+            limits.max_state_items,
+            operation,
+        )?;
+        selected_key = Some(candidate_key);
+        selected_value = Some(candidate_value);
+    }
+    ensure_active(cancelled)?;
+    Ok(selected_value.unwrap_or_else(|| Value::String(String::new())))
+}
+
+fn exact_stats_field_value<'a>(
+    row: &'a Value,
+    field: &PipelineField,
+) -> Result<Option<&'a Value>, String> {
+    let PipelineField::Exact { path, .. } = field else {
+        return Err("LogsQL stats plan requires an exact field".to_string());
+    };
+    Ok(field_value(row, path))
 }
 
 fn finite_number(value: f64) -> Value {
@@ -6340,6 +6456,84 @@ mod tests {
         assert_eq!(
             sum_text_lengths(&rows, std::slice::from_ref(&text), rows.len(), &cancelled,)
                 .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn any_and_field_extrema_are_deterministic_rich_and_bounded() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: vec![name.into()],
+            name: name.into(),
+        };
+        let rows = [
+            json!({"key": null, "any": null, "payload": "null"}),
+            json!({"key": "", "any": "", "payload": "empty"}),
+            json!({"key": 10, "any": false, "payload": {"rank": "ten"}}),
+            json!({"key": 2, "any": "later", "payload": [1, "λ"]}),
+            json!({"key": 2, "any": true, "payload": "tie-later"}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 4096,
+        };
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            any_value(&rows, &[exact("any")], limits, &cancelled).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            field_extreme(
+                &rows,
+                &[exact("key"), exact("payload")],
+                false,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            json!([1, "λ"])
+        );
+        assert_eq!(
+            field_extreme(
+                &rows,
+                &[exact("key"), exact("payload")],
+                true,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            json!({"rank": "ten"})
+        );
+        assert_eq!(
+            any_value(&rows, &[exact("missing")], limits, &cancelled).unwrap(),
+            Value::String(String::new())
+        );
+
+        let work_limited = PipelineLimits {
+            max_state_items: 1,
+            ..limits
+        };
+        assert!(any_value(&rows, &[exact("any")], work_limited, &cancelled)
+            .unwrap_err()
+            .contains("max_work_rows=1"));
+        let state_limited = PipelineLimits {
+            max_state_bytes: 1,
+            ..limits
+        };
+        assert!(field_extreme(
+            &rows,
+            &[exact("key"), exact("payload")],
+            true,
+            state_limited,
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_response_bytes=1"));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            any_value(&rows, &[exact("any")], limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

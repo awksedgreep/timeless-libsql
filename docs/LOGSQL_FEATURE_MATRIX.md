@@ -667,7 +667,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S07` | `quantile` / `stddev` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S08` | `rate` / `rate_sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
 | `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | shipped | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-S10` | `any` / `field_min` / `field_max` | missing | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | in progress | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -704,6 +704,23 @@ lower p95 follows exactly the same one/four candidate blocks, 1,024/8,192
 decoded entries, 235,778/1,914,055 payload bytes, and 128/8,192 public rows.
 `QSF-195` accepts the bounded constant-state Rust reduction above the unchanged
 public storage boundary.
+
+`any(field)` selects the first nonempty value in deterministic current-
+pipeline order and preserves its native JSON type. Missing, null, and empty
+strings do not qualify; zero, false, arrays, and objects do. VictoriaLogs only
+promises an arbitrary nonempty value and its selected value changed with
+physical encoding order during oracle audit, so deterministic selection is an
+explicit Timeless strengthening rather than a false upstream ordering claim.
+`field_min(source,result)` and `field_max(source,result)` compare nonempty
+source values with the VictoriaLogs signed/unsigned/timestamp/math/natural
+text comparator, preserve the first current-row tie, and return the companion
+result with its retained native type. A missing companion becomes the stable
+empty string; explicit null, empty strings, arrays, and objects remain
+distinct. Candidate traversals and retained state are work/byte bounded and
+deadline-cancellable. `SQL-LOG-046` gives direct users deterministic exact-
+path `any` and finite-native-number companion extrema through public `logs`;
+the complete comparator, canonical fields, rich policy, limits, cancellation,
+grammar, and envelopes remain Rust API composition.
 
 ## Query options and HTTP behavior
 

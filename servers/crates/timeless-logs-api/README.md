@@ -125,10 +125,10 @@ blocks, decoded entries, extension payload bytes, and public rows are
 identical. The bounded cost is row mutation and response reconstruction after
 the same public decode.
 
-The shipped statistics are `count`, `count_empty`, `count_uniq`,
+The implemented statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
-`median`, `quantile`, `stddev`, `sum_len`, `rate`, and `rate_sum`. Missing,
-null, and empty remain distinct;
+`median`, `quantile`, `stddev`, `sum_len`, `any`, `field_min`, `field_max`,
+`rate`, and `rate_sum`. Missing, null, and empty remain distinct;
 `count_empty` deliberately counts all three for compatibility. Exact unique
 counts use complete typed tuples, while `count_uniq_hash` uses a documented
 stable 64-bit FNV-1a key hash and claims cardinality—not VictoriaLogs hash-bit
@@ -157,6 +157,19 @@ zero, strings add raw bytes, and other retained values add compact JSON bytes.
 Each selection is work-bounded and cancellable. Direct users have the exact-
 metadata-path public SQL foundation in `SQL-LOG-045`; dynamic selection,
 canonical fields, grammar, limits, and envelopes remain API behavior.
+
+`any(field)` requires one exact field, skips missing/null/empty values, and
+returns the first nonempty value in deterministic current-pipeline order with
+its retained JSON type. This deliberately strengthens VictoriaLogs' arbitrary
+physical-encoding-dependent selection. `field_min(source,result)` and
+`field_max(source,result)` compare nonempty sources through VictoriaLogs'
+signed/unsigned/timestamp/math/natural text order, retain the first tie, and
+return the companion's native rich value. Missing companions and empty input
+produce an empty string; explicit null and empty remain distinct. Candidate
+work and retained rich state are bounded and cancellable. `SQL-LOG-046` gives
+direct users the deterministic exact-path and finite-native-number public SQL
+foundations; complete comparison, canonical fields, grammar, limits, and
+envelopes remain API behavior.
 
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.

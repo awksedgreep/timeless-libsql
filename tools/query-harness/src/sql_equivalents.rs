@@ -408,6 +408,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "json_array_source_path" => Value::Text("$.tags".to_owned()),
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
+        "any_source_path" => Value::Text("$.host".to_owned()),
+        "extreme_source_path" => Value::Text("$.duration_ms".to_owned()),
+        "extreme_result_path" => Value::Text("$.host".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1707,6 +1710,8 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let json_array_len_rows = recipe_values("SQL-LOG-043", 0)?;
     let quantile_stddev_rows = recipe_values("SQL-LOG-044", 0)?;
     let sum_len_rows = recipe_values("SQL-LOG-045", 0)?;
+    let any_rows = recipe_values("SQL-LOG-046", 0)?;
+    let field_extrema_rows = recipe_values("SQL-LOG-046", 1)?;
     if [
         bounded,
         substring,
@@ -2355,6 +2360,101 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if source_after_sum_len != source_packed_fields {
         bail!("SQL-LOG-045 mutated its public source: {source_after_sum_len:?}");
+    }
+    if any_rows
+        != [vec![
+            Value::Text("text".into()),
+            Value::Text(r#""web-1""#.into()),
+        ]]
+    {
+        bail!("SQL-LOG-046 deterministic any changed: {any_rows:?}");
+    }
+    if field_extrema_rows
+        != [vec![
+            Value::Text("text".into()),
+            Value::Text(r#""web-2""#.into()),
+            Value::Text("text".into()),
+            Value::Text(r#""web-1""#.into()),
+        ]]
+    {
+        bail!("SQL-LOG-046 numeric companion extrema changed: {field_extrema_rows:?}");
+    }
+    let any_sql = recipe_sql("SQL-LOG-046", 0)?;
+    let measured_any = |source_path: &str| -> Result<Vec<Vec<Value>>> {
+        let mut statement = connection.prepare(&any_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-046 any parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "any_source_path" => Value::Text(source_path.to_owned()),
+                _ => parameter("SQL-LOG-046", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let columns = statement.column_count();
+        statement
+            .raw_query()
+            .mapped(|row| {
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<Value>>>()
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    if measured_any("$.nested.ok")?
+        != [vec![Value::Text("true".into()), Value::Text("true".into())]]
+        || !measured_any("$.missing")?.is_empty()
+    {
+        bail!("SQL-LOG-046 typed or missing any behavior changed");
+    }
+    let extrema_sql = recipe_sql("SQL-LOG-046", 1)?;
+    let measured_extrema = |source_path: &str, result_path: &str| -> Result<Vec<Vec<Value>>> {
+        let mut statement = connection.prepare(&extrema_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-046 extrema parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "extreme_source_path" => Value::Text(source_path.to_owned()),
+                "extreme_result_path" => Value::Text(result_path.to_owned()),
+                _ => parameter("SQL-LOG-046", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let columns = statement.column_count();
+        statement
+            .raw_query()
+            .mapped(|row| {
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<Value>>>()
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    let rich_extrema = measured_extrema("$.duration_ms", "$.nested")?;
+    let [rich_row] = rich_extrema.as_slice() else {
+        bail!("SQL-LOG-046 rich companion extrema cardinality changed: {rich_extrema:?}");
+    };
+    if rich_row.first() != Some(&Value::Text("object".into()))
+        || rich_row.get(2) != Some(&Value::Text("object".into()))
+        || !matches!(rich_row.get(1), Some(Value::Text(value)) if serde_json::from_str::<serde_json::Value>(value).is_ok())
+        || !matches!(rich_row.get(3), Some(Value::Text(value)) if serde_json::from_str::<serde_json::Value>(value).is_ok())
+        || measured_extrema("$.missing", "$.host")?
+            != [vec![Value::Null, Value::Null, Value::Null, Value::Null]]
+    {
+        bail!("SQL-LOG-046 rich or missing companion behavior changed: {rich_extrema:?}");
+    }
+    let source_after_any_extrema = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_after_any_extrema != source_packed_fields {
+        bail!("SQL-LOG-046 mutated its public source: {source_after_any_extrema:?}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3581,13 +3681,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 111);
+        assert_eq!(recipes.len(), 112);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            141
+            143
         );
         assert_eq!(
             recipes
@@ -3595,7 +3695,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            147
+            149
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

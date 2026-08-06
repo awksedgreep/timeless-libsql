@@ -64,6 +64,9 @@ pub(crate) enum StatsKind {
     Quantile,
     Stddev,
     SumLen,
+    Any,
+    FieldMin,
+    FieldMax,
     Rate,
     RateSum,
 }
@@ -318,6 +321,9 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         "quantile" => StatsKind::Quantile,
         "stddev" => StatsKind::Stddev,
         "sum_len" => StatsKind::SumLen,
+        "any" => StatsKind::Any,
+        "field_min" => StatsKind::FieldMin,
+        "field_max" => StatsKind::FieldMax,
         "rate" => StatsKind::Rate,
         "rate_sum" => StatsKind::RateSum,
         _ => {
@@ -357,6 +363,27 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         .map(|field| parse_pipeline_field(field.trim(), true))
         .collect::<Result<Vec<_>, _>>()?;
     match kind {
+        StatsKind::Any if fields.len() != 1 => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL any requires exactly one field; got {}",
+                fields.len()
+            )))
+        }
+        StatsKind::FieldMin | StatsKind::FieldMax if fields.len() != 2 => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function} requires exactly two fields; got {}",
+                fields.len()
+            )))
+        }
+        StatsKind::Any | StatsKind::FieldMin | StatsKind::FieldMax
+            if fields
+                .iter()
+                .any(|field| !matches!(field, PipelineField::Exact { .. })) =>
+        {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function} requires exact field names"
+            )))
+        }
         StatsKind::Rate if !fields.is_empty() => {
             return Err(LogsqlError::malformed(
                 "LogsQL rate() does not accept fields",
@@ -9741,6 +9768,7 @@ mod tests {
             r#"* | fields n | stats QuAnTiLe(1) as maximum, StDdEv(*) as sigma"#,
             r#"* | stats SuM_LeN(text, nested*) as bytes"#,
             r#"* | fields text, n | stats sum_len() as bytes"#,
+            r#"* | stats AnY(probe) as selected, field_min(rank, payload) as low, field_max(rank, payload) as high"#,
             r#"_time:1h | stats rate() as rate, rate_sum(n) as rate_sum"#,
         ] {
             let plan = parse_at(query, TimestampUnit::Microseconds, 1_800_000_000_000_000);
@@ -9767,6 +9795,12 @@ mod tests {
             "* | stats sum_len",
             "* | stats sum_len(text n)",
             "* | stats sum_len(text) limit 2",
+            "* | stats any()",
+            "* | stats any(left, right)",
+            "* | stats any(prefix*)",
+            "* | stats field_min(left)",
+            "* | stats field_min(left, right, extra)",
+            "* | stats field_max(left*, right)",
             "* | stats sum(n) as value, avg(n) as value",
         ] {
             assert!(

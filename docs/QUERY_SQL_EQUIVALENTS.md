@@ -153,6 +153,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-043`](#sql-log-043-top-level-json-array-length) | `LQL-P41` | current foundation | bounded top-level element count for one exact public native-array or JSON-array-text metadata path; API owns LogsQL grammar, current-row mutation, bare-`NaN` compatibility, limits, cancellation, and envelopes |
 | [`SQL-LOG-044`](#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation) | `LQL-S07` | current foundation | bounded upper-step quantile and one-pass population deviation for one exact finite native-number path; API owns textual natural order, rich projection, grammar, state limits, cancellation, and envelopes |
 | [`SQL-LOG-045`](#sql-log-045-summed-utf-8-byte-length-of-one-exact-field) | `LQL-S09` | current foundation | summed UTF-8/compact-JSON byte length for one exact public metadata path; API owns dynamic field selection, canonical fields, checked unsigned overflow, limits, cancellation, and envelopes |
+| [`SQL-LOG-046`](#sql-log-046-deterministic-any-and-numeric-companion-field-extrema) | `LQL-S10` | current foundation | deterministic first nonempty rich JSON value plus finite native-number companion-field minima/maxima over exact public metadata paths; API owns complete natural ordering, canonical fields, typed results, state limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7452,6 +7453,130 @@ format change.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_sum_len_counts_utf8_text_and_reopens`.
+
+### SQL-LOG-046: deterministic any and numeric companion-field extrema
+
+For deterministic `any`, bind one exact SQLite JSON path, inclusive native
+timestamp bounds, and positive work/result limits. This read-only statement
+returns the first nonempty retained value in explicit public-row order as a
+JSON type plus lossless compact JSON text:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), candidates AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    json_type(metadata, :any_source_path) AS value_type,
+    json(metadata -> :any_source_path) AS value_json,
+    CASE
+      WHEN json_type(metadata, :any_source_path) IS NULL THEN ''
+      WHEN json_type(metadata, :any_source_path) = 'null' THEN ''
+      WHEN json_type(metadata, :any_source_path) = 'text' THEN
+        json_extract(metadata, :any_source_path)
+      WHEN json_type(metadata, :any_source_path) = 'true' THEN 'true'
+      WHEN json_type(metadata, :any_source_path) = 'false' THEN 'false'
+      ELSE json(metadata -> :any_source_path)
+    END AS projected_text
+  FROM bounded
+)
+SELECT value_type, value_json
+FROM candidates
+WHERE projected_text <> ''
+  AND :max_result_rows > 0
+ORDER BY ts, level, message, metadata
+LIMIT MIN(:max_result_rows, 1);
+```
+
+`:any_source_path` is one exact SQLite JSON path such as `$.host` or
+`$.payload`. Missing, explicit null, and empty strings do not qualify; zero,
+false, numbers, arrays, and objects do. `value_type` distinguishes SQLite's
+scalar representations, and `value_json` preserves strings, booleans,
+numbers, arrays, objects, and null without flattening. Direct users may apply
+`json_extract(value_json, '$')` when they specifically want a scalar SQL
+value. Explicit ordering makes this deterministic instead of copying
+VictoriaLogs' encoding-dependent `any` selection.
+
+For `field_min` and `field_max` over a finite native-number comparison field,
+bind exact comparison/result paths and the same bounds. This second statement
+returns the companion result from the minimum and maximum rows:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), candidates AS MATERIALIZED (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CAST(json_extract(metadata, :extreme_source_path) AS REAL) AS source_value,
+    json_type(metadata, :extreme_result_path) AS result_type,
+    json(metadata -> :extreme_result_path) AS result_json
+  FROM bounded
+  WHERE json_type(metadata, :extreme_source_path) IN ('integer', 'real')
+    AND ABS(CAST(json_extract(metadata, :extreme_source_path) AS REAL))
+          <= 1.7976931348623157e308
+), ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      ORDER BY source_value, ts, level, message, metadata
+    ) AS minimum_rank,
+    ROW_NUMBER() OVER (
+      ORDER BY source_value DESC, ts, level, message, metadata
+    ) AS maximum_rank
+  FROM candidates
+)
+SELECT
+  MAX(CASE WHEN minimum_rank = 1 THEN result_type END) AS minimum_type,
+  MAX(CASE WHEN minimum_rank = 1 THEN result_json END) AS minimum_json,
+  MAX(CASE WHEN maximum_rank = 1 THEN result_type END) AS maximum_type,
+  MAX(CASE WHEN maximum_rank = 1 THEN result_json END) AS maximum_json
+FROM ranked
+WHERE :max_result_rows > 0
+LIMIT :max_result_rows;
+```
+
+`:extreme_source_path` is the comparison path and `:extreme_result_path` is
+the companion result path. Only native JSON integers/reals participate in
+this SQL foundation; missing, null, strings, booleans, arrays, objects, and
+nonfinite REAL casts are ignored. Ties select the first explicit public-row
+identity. A missing result has SQL NULL type/JSON columns, while an explicit
+JSON null has `minimum_type`/`maximum_type` equal to `null` and JSON text
+`null`. Empty input returns one all-NULL aggregate row. JSON result text is
+lossless; core SQLite's dynamic scalar types alone cannot distinguish every
+retained JSON state.
+
+The complete `LQL-S10` API owns case-insensitive `any`, `field_min`, and
+`field_max` grammar; exact canonical or nested fields; deterministic current-
+pipeline order for `any`; VictoriaLogs signed/unsigned/timestamp/math/natural
+text ordering for extrema; native rich companion values; stable empty
+results; strict work/state/result/response limits; deadline cancellation; and
+HTTP envelopes. It does not narrow extrema to native numbers or cast integers
+through binary64. These SQL statements are therefore honest public-row
+foundations, not a claim that SQLite's default collation implements the full
+LogsQL comparator.
+
+Every candidate already crosses the bounded public `logs` interface. The
+selection and companion lookup do not avoid a block read, decode, allocation,
+or row crossing when moved into an extension opcode, so no new primitive,
+private shadow-table access, or storage-format change is warranted.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_any_and_field_extrema_preserve_rich_rows_and_reopen`.
 
 ## Adding the next recipe
 

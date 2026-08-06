@@ -743,6 +743,12 @@ exact, prefix, or all current fields and returns a checked native JSON
 integer. Embedded users can execute the single-exact-path public-row
 equivalent in `SQL-LOG-045`; dynamic selection and API semantics remain in
 the Rust logs server.
+`any(field)` adds deterministic first-nonempty selection, while
+`field_min(source,result)` and `field_max(source,result)` use the complete
+LogsQL natural comparator and return a retained rich companion value. Direct
+SQLite/libSQL users have deterministic exact-path and finite-number
+foundations in `SQL-LOG-046`; rich language semantics remain bounded Rust API
+composition over public rows.
 The bounded `first` pipeline selects an optional positive number of rows by
 exact fields with per-field direction, optional partitioning, and an optional
 one-based string rank. Its coercion chain covers exact signed/unsigned
