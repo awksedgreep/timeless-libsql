@@ -4279,6 +4279,58 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, tag, release, or downstream repository was
 used or modified.
 
+## Session 18 LogsQL P3: bounded decolorize
+
+The checked-in
+[`2026-08-06_session18_lql_p27_decolorize.json`](evidence/2026-08-06_session18_lql_p27_decolorize.json)
+was captured from exact release extension and server build
+`6971681946d9e445ebc13eef5fcd9b188e23a8e9` and has SHA-256
+`a0479b12488e8bd917d8f7540247e89d3d6ec678ad943988f7c866605a16c135`.
+The candidate first formats each `range_key` as a realistic SGR-colored
+current-row value, removes both CSI sequences, and emits the original value.
+The control formats the original value directly to the same destination.
+Both return byte-identical rows and perform identical public storage and wire
+work; the measured difference therefore includes both the longer temporary
+colored value and the bounded CSI scanner rather than hiding input
+construction cost.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| format + decolorize, indexed host | 64 | 1,536 | 2.969 | 3.101 | 3.405 | 1 | 1,024 | 235,778 | 128 |
+| format + decolorize, full fixture | 64 | 1,536 | 34.973 | 36.385 | 39.133 | 4 | 8,192 | 1,914,055 | 8,192 |
+| identical-output format control, indexed host | 64 | 1,536 | 3.007 | 3.169 | 3.756 | 1 | 1,024 | 235,778 | 128 |
+| identical-output format control, full fixture | 64 | 1,536 | 33.785 | 34.872 | 35.393 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Decolorize p95 is 2.2% lower/4.3% higher than its narrow/wide control. Its
+request-attributed API timer averages 2.498/34.422 ms versus 2.464/33.193 ms,
+or 1.4%/3.7% higher. Every equal-width pair executes 50 public queries and
+performs identical candidate-block selection, entry decode, payload read,
+row match, row return, result cardinality, and response-byte work. The narrow
+tail is retained as run variation; the wide difference is accepted bounded
+current-row allocation/scanning work after the unavoidable public scan.
+Because the transform cannot reduce a storage read or row crossing,
+executable `SQL-LOG-050` remains the direct SQLite/libSQL foundation and no
+extension primitive is justified.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+12.808 ms and the explicit durability barrier took 39.328 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 97,868 KiB and metrics HWM was
+53,396 KiB across the complete enlarged workload. Cancellation ended with
+zero requests in flight; direct evaluator, direct SQL, and HTTP regressions
+pin grammar, CSI byte classes, incomplete/invalid/non-CSI behavior, rich-value
+fidelity, work/state/result/response bounds, cancellation, optimize, flush,
+shutdown, durability, and reopen.
+
+All 1,069 pinned VictoriaLogs cases pass live. The complete local extension,
+real-extension logs, server workspace, Rust query harness, documentation,
+oracle, 116-recipe/154-statement SQL cookbook, formatting, Clippy,
+CLI/crash/transaction, and dbhealth gates pass. The authoritative 8,192-entry
+batching, storage formats, compression, indexes, retention, optimize,
+transactions, migrations, and public batch/SQL contracts are unchanged. No
+private shadow table, Elixir/BEAM/NIF/process fallback, workflow invocation,
+tag, release, or downstream repository was used or modified.
+
 ## Session 17 LogsQL P2: `quantile` and `stddev`
 
 The checked-in

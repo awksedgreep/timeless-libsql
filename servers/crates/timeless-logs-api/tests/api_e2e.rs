@@ -3988,8 +3988,8 @@ async fn session_eighteen_decolorize_is_exact_rich_bounded_and_durable() {
         TimestampUnit::Microseconds,
     )
     .unwrap();
-    let invalid = format!("a\u{1b}[\u{1}b\u{1b}[abc\u{1b}[");
-    let osc = format!("\u{1b}]0;title\u{7}tail");
+    let invalid = "a\u{1b}[\u{1}b\u{1b}[abc\u{1b}[".to_owned();
+    let osc = "\u{1b}]0;title\u{7}tail".to_owned();
     storage
         .ingest(
             [

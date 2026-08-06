@@ -130,7 +130,7 @@ extension.
 | `LQL-P24` | `len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-037-utf-8-byte-length-of-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` ([evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-hash)) | shipped | no | none | `API` | P3 |
 | `LQL-P26` | `collapse_nums` ([evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-collapse-nums)) | shipped | no | none | `API` | P3 |
-| `LQL-P27` | `decolorize` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-050-strip-csi-color-sequences-from-one-exact-field)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P27` | `decolorize` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-050-strip-csi-color-sequences-from-one-exact-field)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
@@ -479,6 +479,12 @@ limits, cancellation, and envelopes. The complete 1,069-case pinned oracle,
 direct evaluator regression, and real-extension durability regression pin the
 semantic boundary. Every row has already crossed the bounded public `logs`
 surface, so no extension primitive or private-table access is justified.
+Exact-build evidence measures 3.101/36.385 ms narrow/wide p95 versus
+3.169/34.872 ms for identical-output, same-public-work format controls.
+`QSF-214` accepts the -2.2%/+4.3% endpoint-tail variation and +1.4%/+3.7%
+request-attributed API mean as bounded current-row construction/scanning work
+after identical public reads. Storage formats and extension contracts remain
+unchanged.
 
 `LQL-P28` removes every empty field from the current row. Empty means an
 explicit JSON null or a zero-byte string under the pinned VictoriaLogs

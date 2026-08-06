@@ -862,7 +862,9 @@ no-op projections, transformed rows are request-local, and grammar, work,
 state, response, deadline, and cancellation limits are strict. Direct
 SQLite/libSQL users have the byte-exact public-row recursive-CTE foundation in
 `SQL-LOG-050`; complete LogsQL behavior stays in the Rust API, and no private
-table or extension primitive is involved.
+table or extension primitive is involved. Exact-build p95 is 3.101/36.385 ms
+narrow/wide versus 3.169/34.872 ms for identical-output, same-public-work
+controls; the bounded -2.2%/+4.3% variation follows unchanged storage reads.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

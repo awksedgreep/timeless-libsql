@@ -1228,6 +1228,14 @@ already crossed the public storage boundary, adding a language-specific
 extension primitive would not avoid a block read, decode, payload transfer,
 or row crossing.
 
+Exact-build evidence measures 3.101/36.385 ms narrow/wide p95 versus
+3.169/34.872 ms for identical-output format controls. Both pairs return 64
+rows and 1,536 bytes, read one/four blocks, decode 1,024/8,192 entries, and
+transfer 235,778/1,914,055 extension payload bytes per query. The candidate
+also constructs the colored current-row value being stripped. `QSF-214`
+accepts the -2.2%/+4.3% endpoint-tail and +1.4%/+3.7% request-attributed mean
+differences as bounded language-layer work after the unchanged public scan.
+
 ## LogsQL `drop_empty_fields` over current rows
 
 `drop_empty_fields` removes empty fields from each current pipeline row:

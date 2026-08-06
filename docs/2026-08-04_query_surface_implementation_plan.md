@@ -1017,8 +1017,8 @@ verdict without adding an extension primitive. The full 1,055-case oracle,
 documentation contracts, real-extension/API suites, SQL cookbook, local
 formatting, lint, crash/transaction, and lifecycle gates pass.
 
-Session 18's `LQL-P27` implementation is semantically complete as an
-API-owned `decolorize` pipe over the public logs surface. Pinned VictoriaLogs
+Session 18's `LQL-P27` row is closed as an API-owned `decolorize` pipe over
+the public logs surface. Pinned VictoriaLogs
 source and the complete 1,069-case live oracle establish default `_msg`, one
 exact quoted/dotted field, strict grammar, exact CSI parameter/intermediate/
 optional-final byte classes, incomplete-sequence removal, invalid-final
@@ -1027,8 +1027,19 @@ composition. The bounded Rust evaluator changes no durable storage or
 extension contract. Executable `SQL-LOG-050` gives direct SQLite/libSQL users
 the byte-exact recursive-BLOB-CTE foundation over bounded public rows. Focused
 parser, evaluator, and real-extension ingest/flush/optimize/shutdown/reopen
-regressions pass. Exact-build performance/HWM evidence and the complete local
-gate remain before the row closes.
+regressions pass.
+
+Exact-build commit `6971681946d9e445ebc13eef5fcd9b188e23a8e9` measures
+2.969/3.101/3.405 ms narrow and 34.973/36.385/39.133 ms wide p50/p95/p99.
+Identical-output format controls measure 3.007/3.169/3.756 and
+33.785/34.872/35.393 ms. Every pair returns the same 64 rows and 1,536 bytes
+while reading the same one/four candidate blocks, decoding 1,024/8,192
+entries, and transferring 235,778/1,914,055 extension payload bytes per query.
+`QSF-214` accepts the -2.2%/+4.3% p95 variation and +1.4%/+3.7%
+request-attributed mean as bounded current-row construction/scanning work.
+The full 1,069-case oracle, executable SQL, documentation contracts,
+real-extension/API suites, formatting, lint, crash/transaction, and lifecycle
+gates pass.
 
 ### Session 19: experimental and data-model dispositions
 
