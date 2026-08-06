@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F38 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P28 LQL-P29 LQL-P30 LQL-P32 LQL-P33 LQL-P34 LQL-P36 LQL-P41 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F38 LQL-F39 LQL-F40 LQL-F41 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P28 LQL-P29 LQL-P30 LQL-P32 LQL-P33 LQL-P34 LQL-P36 LQL-P41 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -1502,6 +1502,19 @@ blocks, 1,914,055 logical bytes, and 2,022,736 physical bytes; whole-process
 logs HWM is 102,488KiB. `SQL-LOG-048` documents the same two-scan direct SQL
 foundation, and `QSF-203` accepts the inherent composition cost without adding
 a nested extension cursor.
+
+Session 18 common-case exact matching measured 2.935/4.221/4.440ms narrow and
+30.465/31.608/31.980ms wide p50/p95/p99. Equivalent explicit `in` controls
+measured 3.161/3.352/3.417ms and 29.714/33.087/39.691ms. Common-case contains
+measured 2.967/3.181/3.355ms and 36.014/37.574/37.904ms versus explicit
+`contains_any` controls at 2.934/3.555/5.178ms and 35.931/37.140/37.603ms.
+Every pair returns identical cardinality and response bytes and reads the same
+one/four candidate blocks, 1,024/8,192 entries, and 235,778/1,914,055 payload
+bytes. The tail differences are parser/run variation rather than storage
+pushdown. Storage remains four raw blocks, 1,914,055 logical bytes, and
+2,022,736 physical bytes; whole-process logs HWM is 104,780KiB after eight
+additional repeated shapes. `QSF-206` accepts bounded Rust composition and
+rejects an inexact SQL claim or redundant extension primitive.
 
 Session 16 `json_array_contains_any` measured 2.416ms/33.611ms string and
 2.447ms/33.549ms boolean narrow/wide p95 while returning 128/8,192 rows. All
