@@ -1,5 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::io::{self, Write};
+use std::pin::Pin;
 use std::time::Instant;
 
 use axum::body::Body;
@@ -231,6 +233,258 @@ struct QueryForm {
     query: Option<String>,
 }
 
+struct QueryBackedResolution {
+    remaining_work_rows: usize,
+    remaining_state_bytes: usize,
+    values: BTreeMap<String, Vec<String>>,
+    limits: LogsQueryLimits,
+}
+
+type ResolveFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+fn resolve_query_backed_plan<'a>(
+    storage: &'a Storage,
+    plan: &'a mut LogsqlPlan,
+    resolution: &'a mut QueryBackedResolution,
+) -> ResolveFuture<'a> {
+    Box::pin(async move {
+        if let Some(predicate) = &mut plan.spec.predicate {
+            resolve_query_backed_predicate(storage, predicate, resolution).await?;
+        }
+        for operation in &mut plan.pipeline {
+            match operation {
+                crate::logsql::PipelineOp::Filter(predicate) => {
+                    resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                }
+                crate::logsql::PipelineOp::Format(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
+                crate::logsql::PipelineOp::Replace(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
+                crate::logsql::PipelineOp::ReplaceRegexp(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
+                crate::logsql::PipelineOp::Extract(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
+                crate::logsql::PipelineOp::ExtractRegexp(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
+                crate::logsql::PipelineOp::UnpackJson(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if resolution.remaining_work_rows == 0 {
+            return Err(format!(
+                "LogsQL query-backed composition exceeded max_work_rows={}",
+                resolution.limits.max_work_rows
+            ));
+        }
+        plan.spec.max_work_rows = plan.spec.max_work_rows.min(resolution.remaining_work_rows);
+        Ok(())
+    })
+}
+
+fn resolve_query_backed_predicate<'a>(
+    storage: &'a Storage,
+    predicate: &'a mut crate::LogPredicate,
+    resolution: &'a mut QueryBackedResolution,
+) -> ResolveFuture<'a> {
+    Box::pin(async move {
+        match predicate {
+            crate::LogPredicate::And(predicates) | crate::LogPredicate::Or(predicates) => {
+                for predicate in predicates {
+                    resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                }
+            }
+            crate::LogPredicate::Not(predicate) => {
+                resolve_query_backed_predicate(storage, predicate, resolution).await?;
+            }
+            crate::LogPredicate::QueryBackedTextualIn {
+                field,
+                query,
+                output_path,
+                cache_key,
+            } => {
+                let values =
+                    resolve_query_backed_values(storage, query, output_path, cache_key, resolution)
+                        .await?;
+                *predicate = crate::LogPredicate::TextualIn {
+                    field: field.clone(),
+                    values,
+                };
+            }
+            crate::LogPredicate::QueryBackedTextualContainsAll {
+                field,
+                query,
+                output_path,
+                cache_key,
+            } => {
+                let mut values =
+                    resolve_query_backed_values(storage, query, output_path, cache_key, resolution)
+                        .await?;
+                values.retain(|value| !value.is_empty());
+                *predicate = if values.is_empty() {
+                    crate::LogPredicate::True
+                } else {
+                    crate::LogPredicate::TextualContainsAll {
+                        field: field.clone(),
+                        values,
+                    }
+                };
+            }
+            crate::LogPredicate::QueryBackedTextualContainsAny {
+                field,
+                query,
+                output_path,
+                cache_key,
+            } => {
+                let values =
+                    resolve_query_backed_values(storage, query, output_path, cache_key, resolution)
+                        .await?;
+                *predicate = if values.iter().any(String::is_empty) {
+                    crate::LogPredicate::True
+                } else if values.is_empty() {
+                    crate::LogPredicate::Or(Vec::new())
+                } else {
+                    crate::LogPredicate::TextualContainsAny {
+                        field: field.clone(),
+                        values,
+                    }
+                };
+            }
+            _ => {}
+        }
+        Ok(())
+    })
+}
+
+async fn resolve_query_backed_values(
+    storage: &Storage,
+    query: &mut LogsqlPlan,
+    output_path: &[String],
+    cache_key: &str,
+    resolution: &mut QueryBackedResolution,
+) -> Result<Vec<String>, String> {
+    if let Some(values) = resolution.values.get(cache_key) {
+        let state_bytes = query_backed_values_state_bytes(values)?;
+        if state_bytes > resolution.remaining_state_bytes {
+            return Err(format!(
+                "LogsQL query-backed lists exceed max_response_bytes={}",
+                resolution.limits.max_response_bytes
+            ));
+        }
+        resolution.remaining_state_bytes -= state_bytes;
+        return Ok(values.clone());
+    }
+    resolve_query_backed_plan(storage, query, resolution).await?;
+    if query.output != LogsqlOutput::Pipeline {
+        return Err("LogsQL query-backed list did not compile to a row pipeline".into());
+    }
+    let limits = resolution.limits;
+    let rate_window_seconds = rate_window_seconds(&query.spec, storage.timestamp_unit());
+    let (rows, report) = storage
+        .pipeline_with_report(
+            query.spec.clone(),
+            query.pipeline.clone(),
+            None,
+            rate_window_seconds,
+            PipelineLimits {
+                max_result_rows: limits.max_result_rows,
+                max_state_items: resolution.remaining_work_rows,
+                max_state_bytes: limits.max_response_bytes,
+            },
+        )
+        .await?;
+    let physical_work = usize::try_from(report.processed_entries)
+        .unwrap_or(usize::MAX)
+        .max(rows.len());
+    if physical_work > resolution.remaining_work_rows {
+        return Err(format!(
+            "LogsQL query-backed composition exceeded max_work_rows={}",
+            limits.max_work_rows
+        ));
+    }
+    resolution.remaining_work_rows -= physical_work;
+
+    let mut unique = BTreeSet::new();
+    let mut state_bytes = 0usize;
+    for (index, row) in rows.iter().enumerate() {
+        if index % 1_024 == 0 {
+            tokio::task::yield_now().await;
+        }
+        let value = crate::pipeline::projected_text(crate::pipeline::field_value(row, output_path));
+        if unique.contains(value.as_ref()) {
+            continue;
+        }
+        state_bytes = state_bytes
+            .checked_add(value.len())
+            .and_then(|bytes| bytes.checked_add(64))
+            .ok_or_else(|| "LogsQL query-backed list state size overflow".to_string())?;
+        if state_bytes > resolution.remaining_state_bytes {
+            return Err(format!(
+                "LogsQL query-backed lists exceed max_response_bytes={}",
+                limits.max_response_bytes
+            ));
+        }
+        if unique.len() >= limits.max_result_rows {
+            return Err(format!(
+                "LogsQL query-backed list exceeds max_result_rows={}",
+                limits.max_result_rows
+            ));
+        }
+        unique.insert(value.into_owned());
+    }
+    let values = unique.into_iter().collect::<Vec<_>>();
+    // The cache owns one copy and the resolved predicate owns another. Charge
+    // both at the first use, then charge each later predicate copy on a cache
+    // hit. This keeps repeated equivalent subqueries computationally cheap
+    // without allowing their materialized values to evade the request bound.
+    let cache_bytes = cache_key
+        .len()
+        .checked_add(64)
+        .ok_or_else(|| "LogsQL query-backed list state size overflow".to_string())?;
+    let retained_bytes = state_bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(cache_bytes))
+        .ok_or_else(|| "LogsQL query-backed list state size overflow".to_string())?;
+    if retained_bytes > resolution.remaining_state_bytes {
+        return Err(format!(
+            "LogsQL query-backed lists exceed max_response_bytes={}",
+            limits.max_response_bytes
+        ));
+    }
+    resolution.remaining_state_bytes -= retained_bytes;
+    resolution
+        .values
+        .insert(cache_key.to_owned(), values.clone());
+    Ok(values)
+}
+
+fn query_backed_values_state_bytes(values: &[String]) -> Result<usize, String> {
+    values.iter().try_fold(0usize, |bytes, value| {
+        bytes
+            .checked_add(value.len())
+            .and_then(|bytes| bytes.checked_add(64))
+            .ok_or_else(|| "LogsQL query-backed list state size overflow".to_string())
+    })
+}
+
 async fn query_post(
     State(storage): State<Storage>,
     Extension(limits): Extension<LogsQueryLimits>,
@@ -242,6 +496,7 @@ async fn query_post(
             message: "LogsQL query parameter is required".into(),
         });
     };
+    let deadline = tokio::time::Instant::now() + limits.deadline;
     let mut plan = match logsql::parse(query, storage.timestamp_unit()) {
         Ok(parsed) => parsed,
         Err(error) => return logsql_error(error),
@@ -249,27 +504,57 @@ async fn query_post(
     if let Err((reason, limit)) = apply_plan_limits(&mut plan, limits) {
         return query_limit_error(reason, limit);
     }
+    let mut resolution = QueryBackedResolution {
+        remaining_work_rows: limits.max_work_rows,
+        remaining_state_bytes: limits.max_response_bytes,
+        values: BTreeMap::new(),
+        limits,
+    };
+    match tokio::time::timeout_at(
+        deadline,
+        resolve_query_backed_plan(&storage, &mut plan, &mut resolution),
+    )
+    .await
+    {
+        Err(_) => return timeout_error(limits),
+        Ok(Err(error)) => return query_execution_error(error),
+        Ok(Ok(())) => {}
+    }
+    // The plan now owns the bounded static values. Release the request-local
+    // deduplication cache before the outer scan to minimize peak overlap.
+    drop(resolution);
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return timeout_error(limits);
+    }
+    let execution_limits = LogsQueryLimits {
+        deadline: remaining,
+        ..limits
+    };
     if plan.output == LogsqlOutput::Count {
-        match tokio::time::timeout(limits.deadline, storage.count(plan.spec)).await {
-            Err(_) => timeout_error(limits),
+        match tokio::time::timeout(execution_limits.deadline, storage.count(plan.spec)).await {
+            Err(_) => timeout_error(execution_limits),
             Ok(Err(error)) => query_execution_error(error),
             Ok(Ok(total)) => {
-                match bounded_json_line(&json!({"total": total}), limits.max_response_bytes) {
+                match bounded_json_line(
+                    &json!({"total": total}),
+                    execution_limits.max_response_bytes,
+                ) {
                     Ok(body) => {
                         storage.record_query_response_bytes(body.len());
                         ndjson_response(body, 1)
                     }
                     Err(BoundedJsonError::Limit) => {
-                        query_limit_error("max_response_bytes", limits.max_response_bytes)
+                        query_limit_error("max_response_bytes", execution_limits.max_response_bytes)
                     }
                     Err(BoundedJsonError::Encode(error)) => server_error(error),
                 }
             }
         }
     } else if plan.output == LogsqlOutput::Pipeline {
-        pipeline_response(&storage, plan, limits).await
+        pipeline_response(&storage, plan, execution_limits).await
     } else {
-        query_response(&storage, plan.spec, limits).await
+        query_response(&storage, plan.spec, execution_limits).await
     }
 }
 
@@ -586,6 +871,70 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
             }
             plan.spec.max_work_rows = limits.max_work_rows;
         }
+    }
+    if let Some(predicate) = &mut plan.spec.predicate {
+        apply_query_backed_predicate_limits(predicate, limits)?;
+    }
+    for operation in &mut plan.pipeline {
+        match operation {
+            crate::logsql::PipelineOp::Filter(predicate) => {
+                apply_query_backed_predicate_limits(predicate, limits)?;
+            }
+            crate::logsql::PipelineOp::Format(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::Replace(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::ReplaceRegexp(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::Extract(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::ExtractRegexp(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::UnpackJson(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn apply_query_backed_predicate_limits(
+    predicate: &mut crate::LogPredicate,
+    limits: LogsQueryLimits,
+) -> Result<(), QueryLimit> {
+    match predicate {
+        crate::LogPredicate::And(predicates) | crate::LogPredicate::Or(predicates) => {
+            for predicate in predicates {
+                apply_query_backed_predicate_limits(predicate, limits)?;
+            }
+        }
+        crate::LogPredicate::Not(predicate) => {
+            apply_query_backed_predicate_limits(predicate, limits)?;
+        }
+        crate::LogPredicate::QueryBackedTextualIn { query, .. }
+        | crate::LogPredicate::QueryBackedTextualContainsAll { query, .. }
+        | crate::LogPredicate::QueryBackedTextualContainsAny { query, .. } => {
+            apply_plan_limits(query, limits)?;
+        }
+        _ => {}
     }
     Ok(())
 }

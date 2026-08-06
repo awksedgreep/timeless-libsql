@@ -1360,6 +1360,10 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         let host_typed_multi_exact_matches = (0..entries)
             .filter(|index| index % 64 == 0 && matches!(index % 5, 1 | 3))
             .count();
+        let attempt_zero_matches = (0..entries).filter(|index| index % 5 == 0).count();
+        let host_attempt_zero_matches = (0..entries)
+            .filter(|index| index % 64 == 0 && index % 5 == 0)
+            .count();
         for (key, name, expression, expected, expected_total) in [
             (
                 "narrow",
@@ -1548,6 +1552,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 "logs-multi-exact-typed-field-wide",
                 "context.attempt:in(1, 3) | sort by (_time) asc | limit 10000",
                 typed_multi_exact_matches,
+                None,
+            ),
+            (
+                "query_backed_in_control_narrow",
+                "logs-query-backed-in-control-narrow",
+                "host:=\"h00\" AND context.attempt:in(0) | sort by (_time) asc | limit 10000",
+                host_attempt_zero_matches,
+                None,
+            ),
+            (
+                "query_backed_in_narrow",
+                "logs-query-backed-in-narrow",
+                "host:=\"h00\" AND context.attempt:in(host:=\"h00\" AND context.attempt:=0 | fields context.attempt) | sort by (_time) asc | limit 10000",
+                host_attempt_zero_matches,
+                None,
+            ),
+            (
+                "query_backed_in_control_wide",
+                "logs-query-backed-in-control-wide",
+                "context.attempt:in(0) | sort by (_time) asc | limit 10000",
+                attempt_zero_matches,
+                None,
+            ),
+            (
+                "query_backed_in_wide",
+                "logs-query-backed-in-wide",
+                "context.attempt:in(host:=\"h00\" AND context.attempt:=0 | fields context.attempt) | sort by (_time) asc | limit 10000",
+                attempt_zero_matches,
                 None,
             ),
             (

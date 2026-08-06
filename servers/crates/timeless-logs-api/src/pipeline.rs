@@ -4567,7 +4567,7 @@ fn append_all_fields_sort_value(
     Ok(())
 }
 
-fn projected_text(value: Option<&Value>) -> Cow<'_, str> {
+pub(crate) fn projected_text(value: Option<&Value>) -> Cow<'_, str> {
     match value {
         None | Some(Value::Null) => Cow::Borrowed(""),
         Some(Value::String(value)) => Cow::Borrowed(value),
@@ -5636,7 +5636,7 @@ fn selected_values<'a>(row: &'a Value, fields: &[PipelineField]) -> Vec<Option<&
     output
 }
 
-fn field_value<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
+pub(crate) fn field_value<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     let mut current = value;
     for segment in path {
         current = match current {
@@ -5792,6 +5792,11 @@ fn predicate_matches_resolved(
                     .is_ok()
             },
         )),
+        LogPredicate::QueryBackedTextualIn { .. }
+        | LogPredicate::QueryBackedTextualContainsAll { .. }
+        | LogPredicate::QueryBackedTextualContainsAny { .. } => {
+            Err("unresolved LogsQL query-backed list reached pipeline execution".into())
+        }
         LogPredicate::TextualContainsAll { field, values } => {
             let matched = projected_field_matches(row, resolved_field!(field), |text| {
                 values.iter().all(|phrase| phrase_matches(text, phrase))
@@ -6000,8 +6005,11 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::Exact { field, .. }
         | LogPredicate::TextualExact { field, .. }
         | LogPredicate::TextualIn { field, .. }
+        | LogPredicate::QueryBackedTextualIn { field, .. }
         | LogPredicate::TextualContainsAll { field, .. }
+        | LogPredicate::QueryBackedTextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::QueryBackedTextualContainsAny { field, .. }
         | LogPredicate::TextualSequence { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }

@@ -321,7 +321,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "max_lookback" => Value::Integer(0),
         "offset" => Value::Integer(10),
         "max_work_points" => Value::Integer(100_000),
-        "max_work_entries" => Value::Integer(100_000),
+        "max_work_entries" | "subquery_max_work_entries" | "outer_max_work_entries" => {
+            Value::Integer(100_000)
+        }
         "threshold" if identifier == "SQL-MQL-001" => Value::Real(15.0),
         "threshold" => Value::Real(0.0),
         "default_value" if identifier == "SQL-LOG-032" => Value::Text("fallback".to_owned()),
@@ -429,6 +431,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "end_ms" => Value::Integer(2000),
         "step_ms" => Value::Integer(1000),
         "level" => Value::Text("error".to_owned()),
+        "subquery_level" => Value::Text("error".to_owned()),
         "service" => Value::Text("api".to_owned()),
         "limit" => Value::Integer(10),
         "needle" | "message_contains" => Value::Text("timeout".to_owned()),
@@ -446,6 +449,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
             }
             .to_owned(),
         ),
+        "subquery_output_path" | "outer_field_path" => {
+            Value::Text("$.deployment.region".to_owned())
+        }
         "left_path" | "right_path" => Value::Text("$.deployment.region".to_owned()),
         "comparison" => Value::Text("eq".to_owned()),
         "field_prefix" => Value::Text(
@@ -1719,6 +1725,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let field_extrema_rows = recipe_values("SQL-LOG-046", 1)?;
     let row_any_rows = recipe_values("SQL-LOG-047", 0)?;
     let row_extrema_rows = recipe_values("SQL-LOG-047", 1)?;
+    let query_backed_rows = recipe_values("SQL-LOG-048", 0)?;
     if [
         bounded,
         substring,
@@ -1771,6 +1778,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         if timestamps != [Some(Value::Integer(2000)), Some(Value::Integer(1000))] {
             bail!("SQL-LOG-015 statement {} changed: {rows:?}", ordinal + 1);
         }
+    }
+    let query_backed_timestamps = query_backed_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if query_backed_timestamps != [Some(Value::Integer(1000))] {
+        bail!("SQL-LOG-048 query-backed membership changed: {query_backed_rows:?}");
     }
     let field_noop_timestamps = field_noop_rows
         .iter()
@@ -3810,13 +3824,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 113);
+        assert_eq!(recipes.len(), 114);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            145
+            146
         );
         assert_eq!(
             recipes
@@ -3824,7 +3838,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            151
+            152
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

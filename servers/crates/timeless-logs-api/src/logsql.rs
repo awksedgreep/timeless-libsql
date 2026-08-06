@@ -41,6 +41,16 @@ pub struct LogsqlPlan {
     pub(crate) implicit_result_limit: Option<usize>,
 }
 
+const MAX_QUERY_BACKED_LIST_DEPTH: usize = 8;
+const MAX_QUERY_BACKED_LISTS: usize = 32;
+
+struct ParseContext {
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+    query_backed_depth: usize,
+    query_backed_lists: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PipelineField {
     Exact { path: Vec<String>, name: String },
@@ -243,11 +253,7 @@ fn parse_delete_field(value: &str) -> Result<PipelineField, LogsqlError> {
     parse_pipeline_field(value, false)
 }
 
-fn parse_filter_pipe(
-    segment: &str,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
-) -> Result<PipelineOp, LogsqlError> {
+fn parse_filter_pipe(segment: &str, context: &mut ParseContext) -> Result<PipelineOp, LogsqlError> {
     let expression = segment
         .strip_prefix("filter")
         .or_else(|| segment.strip_prefix("where"))
@@ -263,8 +269,7 @@ fn parse_filter_pipe(
     Ok(PipelineOp::Filter(compile_logical_expression(
         &expression,
         None,
-        timestamp_unit,
-        query_now,
+        context,
     )?))
 }
 
@@ -927,11 +932,7 @@ fn parse_rename_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     }))
 }
 
-fn parse_format_pipe(
-    segment: &str,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
-) -> Result<PipelineOp, LogsqlError> {
+fn parse_format_pipe(segment: &str, context: &mut ParseContext) -> Result<PipelineOp, LogsqlError> {
     let command = segment
         .get(.."format".len())
         .ok_or_else(|| LogsqlError::malformed("LogsQL format pipe is empty"))?;
@@ -954,12 +955,7 @@ fn parse_format_pipe(
         } else {
             let tokens = lex_logical_tokens(expression)?;
             let expression = LogicalParser::new(tokens).parse()?;
-            Some(compile_logical_expression(
-                &expression,
-                None,
-                timestamp_unit,
-                query_now,
-            )?)
+            Some(compile_logical_expression(&expression, None, context)?)
         }
     } else {
         None
@@ -1033,8 +1029,7 @@ fn parse_format_pipe(
 
 fn parse_replace_pipe(
     segment: &str,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
+    context: &mut ParseContext,
 ) -> Result<PipelineOp, LogsqlError> {
     let operation = "replace";
     let command = segment
@@ -1071,12 +1066,7 @@ fn parse_replace_pipe(
         } else {
             let tokens = lex_logical_tokens(expression)?;
             let expression = LogicalParser::new(tokens).parse()?;
-            Some(compile_logical_expression(
-                &expression,
-                None,
-                timestamp_unit,
-                query_now,
-            )?)
+            Some(compile_logical_expression(&expression, None, context)?)
         }
     } else {
         None
@@ -1199,8 +1189,7 @@ fn parse_replace_limit(value: &str, operation: &str) -> Result<u64, LogsqlError>
 
 fn parse_replace_regexp_pipe(
     segment: &str,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
+    context: &mut ParseContext,
 ) -> Result<PipelineOp, LogsqlError> {
     let operation = "replace_regexp";
     let command = segment
@@ -1237,12 +1226,7 @@ fn parse_replace_regexp_pipe(
         } else {
             let tokens = lex_logical_tokens(expression)?;
             let expression = LogicalParser::new(tokens).parse()?;
-            Some(compile_logical_expression(
-                &expression,
-                None,
-                timestamp_unit,
-                query_now,
-            )?)
+            Some(compile_logical_expression(&expression, None, context)?)
         }
     } else {
         None
@@ -1327,8 +1311,7 @@ fn parse_replace_regexp_pipe(
 
 fn parse_extract_pipe(
     segment: &str,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
+    context: &mut ParseContext,
 ) -> Result<PipelineOp, LogsqlError> {
     let operation = "extract";
     let command = segment
@@ -1363,12 +1346,7 @@ fn parse_extract_pipe(
         } else {
             let tokens = lex_logical_tokens(expression)?;
             let expression = LogicalParser::new(tokens).parse()?;
-            Some(compile_logical_expression(
-                &expression,
-                None,
-                timestamp_unit,
-                query_now,
-            )?)
+            Some(compile_logical_expression(&expression, None, context)?)
         }
     } else {
         None
@@ -1439,8 +1417,7 @@ fn parse_extract_pipe(
 
 fn parse_extract_regexp_pipe(
     segment: &str,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
+    context: &mut ParseContext,
 ) -> Result<PipelineOp, LogsqlError> {
     let operation = "extract_regexp";
     let command = segment
@@ -1477,12 +1454,7 @@ fn parse_extract_regexp_pipe(
         } else {
             let tokens = lex_logical_tokens(expression)?;
             let expression = LogicalParser::new(tokens).parse()?;
-            Some(compile_logical_expression(
-                &expression,
-                None,
-                timestamp_unit,
-                query_now,
-            )?)
+            Some(compile_logical_expression(&expression, None, context)?)
         }
     } else {
         None
@@ -2961,8 +2933,7 @@ fn parse_pack_json_fields(
 
 fn parse_unpack_json_pipe(
     segment: &str,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
+    context: &mut ParseContext,
 ) -> Result<PipelineOp, LogsqlError> {
     let operation = "unpack_json";
     let command = segment
@@ -2983,12 +2954,7 @@ fn parse_unpack_json_pipe(
         } else {
             let tokens = lex_logical_tokens(expression)?;
             let expression = LogicalParser::new(tokens).parse()?;
-            Some(compile_logical_expression(
-                &expression,
-                None,
-                timestamp_unit,
-                query_now,
-            )?)
+            Some(compile_logical_expression(&expression, None, context)?)
         }
     } else {
         None
@@ -3866,6 +3832,18 @@ pub fn parse_at(
     timestamp_unit: TimestampUnit,
     query_now: i64,
 ) -> Result<LogsqlPlan, LogsqlError> {
+    let mut context = ParseContext {
+        timestamp_unit,
+        query_now,
+        query_backed_depth: 0,
+        query_backed_lists: 0,
+    };
+    parse_with_context(query, &mut context)
+}
+
+fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlPlan, LogsqlError> {
+    let timestamp_unit = context.timestamp_unit;
+    let query_now = context.query_now;
     let prepared_query = prepare_query_layout(query)?;
     let query = prepared_query.as_ref();
     let mut spec = QuerySpec {
@@ -3893,7 +3871,7 @@ pub fn parse_at(
     }) || matches!(logical_tokens.first(), Some(LogicalToken::LeftParen));
     if use_logical_parser {
         let expression = LogicalParser::new(logical_tokens).parse()?;
-        let predicate = compile_logical_expression(&expression, None, timestamp_unit, query_now)?;
+        let predicate = compile_logical_expression(&expression, None, context)?;
         apply_safe_logical_pushdowns(&predicate, &mut spec)?;
         spec.predicate = Some(predicate);
     } else {
@@ -3945,7 +3923,7 @@ pub fn parse_at(
                     ))
                 }
                 LogsqlTerm::Token(token) if metadata_operator(&token).is_some() => {
-                    apply_metadata_filter(&mut spec, &token)?;
+                    apply_metadata_filter(&mut spec, &token, context)?;
                 }
                 LogsqlTerm::Token(token) => {
                     if matches!(token.to_ascii_uppercase().as_str(), "AND" | "OR" | "NOT") {
@@ -3957,11 +3935,13 @@ pub fn parse_at(
                         append_predicate(&mut spec, exact.predicate(LogField::Message));
                         continue;
                     }
-                    if let Some(exact) = parse_multi_exact_filter(&token)? {
+                    if let Some(exact) = parse_multi_exact_filter(&token, context)? {
                         append_predicate(&mut spec, exact.predicate(LogField::Message));
                         continue;
                     }
-                    if let Some(predicate) = parse_contains_filter(&token, LogField::Message)? {
+                    if let Some(predicate) =
+                        parse_contains_filter(&token, LogField::Message, context)?
+                    {
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
@@ -4135,7 +4115,7 @@ pub fn parse_at(
                 has_session_thirteen_pipeline = true;
             }
             _ if segment.starts_with("filter ") || segment.starts_with("where ") => {
-                pipeline.push(parse_filter_pipe(segment, timestamp_unit, query_now)?);
+                pipeline.push(parse_filter_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if segment.starts_with("stats ") => {
@@ -4187,7 +4167,7 @@ pub fn parse_at(
                 has_session_thirteen_pipeline = true;
             }
             _ if is_format_pipe(segment) => {
-                pipeline.push(parse_format_pipe(segment, timestamp_unit, query_now)?);
+                pipeline.push(parse_format_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_math_pipe(segment) => {
@@ -4207,23 +4187,15 @@ pub fn parse_at(
                 has_session_thirteen_pipeline = true;
             }
             _ if is_replace_pipe(segment) => {
-                pipeline.push(parse_replace_pipe(segment, timestamp_unit, query_now)?);
+                pipeline.push(parse_replace_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_replace_regexp_pipe(segment) => {
-                pipeline.push(parse_replace_regexp_pipe(
-                    segment,
-                    timestamp_unit,
-                    query_now,
-                )?);
+                pipeline.push(parse_replace_regexp_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_extract_regexp_pipe(segment) => {
-                pipeline.push(parse_extract_regexp_pipe(
-                    segment,
-                    timestamp_unit,
-                    query_now,
-                )?);
+                pipeline.push(parse_extract_regexp_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_pack_json_pipe(segment) => {
@@ -4231,11 +4203,11 @@ pub fn parse_at(
                 has_session_thirteen_pipeline = true;
             }
             _ if is_unpack_json_pipe(segment) => {
-                pipeline.push(parse_unpack_json_pipe(segment, timestamp_unit, query_now)?);
+                pipeline.push(parse_unpack_json_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_extract_pipe(segment) => {
-                pipeline.push(parse_extract_pipe(segment, timestamp_unit, query_now)?);
+                pipeline.push(parse_extract_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -4326,10 +4298,15 @@ fn parse_exact_filter(token: &str) -> Result<Option<ParsedExactFilter>, LogsqlEr
     parse_exact_argument(inner, "LogsQL exact() filter").map(Some)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum ParsedMultiExactFilter {
     Values(Vec<String>),
     Noop,
+    Query {
+        query: Box<LogsqlPlan>,
+        output_path: Vec<String>,
+        cache_key: String,
+    },
 }
 
 impl ParsedMultiExactFilter {
@@ -4337,30 +4314,58 @@ impl ParsedMultiExactFilter {
         match self {
             Self::Values(values) => LogPredicate::TextualIn { field, values },
             Self::Noop => LogPredicate::True,
+            Self::Query {
+                query,
+                output_path,
+                cache_key,
+            } => LogPredicate::QueryBackedTextualIn {
+                field,
+                query,
+                output_path,
+                cache_key,
+            },
         }
     }
 }
 
-fn parse_multi_exact_filter(token: &str) -> Result<Option<ParsedMultiExactFilter>, LogsqlError> {
-    let Some(parsed) = parse_static_value_list(token, "in")? else {
+fn parse_multi_exact_filter(
+    token: &str,
+    context: &mut ParseContext,
+) -> Result<Option<ParsedMultiExactFilter>, LogsqlError> {
+    let Some(parsed) = parse_value_list(token, "in", context)? else {
         return Ok(None);
     };
     Ok(Some(match parsed {
-        ParsedStaticValueList::Values(values) => ParsedMultiExactFilter::Values(values),
-        ParsedStaticValueList::Noop => ParsedMultiExactFilter::Noop,
+        ParsedValueList::Values(values) => ParsedMultiExactFilter::Values(values),
+        ParsedValueList::Noop => ParsedMultiExactFilter::Noop,
+        ParsedValueList::Query {
+            query,
+            output_path,
+            cache_key,
+        } => ParsedMultiExactFilter::Query {
+            query,
+            output_path,
+            cache_key,
+        },
     }))
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ParsedStaticValueList {
+#[derive(Clone, Debug)]
+enum ParsedValueList {
     Values(Vec<String>),
     Noop,
+    Query {
+        query: Box<LogsqlPlan>,
+        output_path: Vec<String>,
+        cache_key: String,
+    },
 }
 
-fn parse_static_value_list(
+fn parse_value_list(
     token: &str,
     function: &str,
-) -> Result<Option<ParsedStaticValueList>, LogsqlError> {
+    context: &mut ParseContext,
+) -> Result<Option<ParsedValueList>, LogsqlError> {
     if token.eq_ignore_ascii_case(function) {
         return Err(LogsqlError::malformed(format!(
             "LogsQL {function} filter requires parentheses"
@@ -4379,14 +4384,44 @@ fn parse_static_value_list(
             LogsqlError::malformed(format!("unterminated LogsQL {function}() filter"))
         })?;
     if contains_top_level(inner, '|')? {
-        return Err(LogsqlError::unsupported(format!(
-            "LogsQL {function}(subquery) is owned by deferred LQL-F38 and is not supported"
-        )));
+        let source = inner.trim();
+        if source.is_empty() {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function}(subquery) is empty"
+            )));
+        }
+        if context.query_backed_depth >= MAX_QUERY_BACKED_LIST_DEPTH {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL query-backed list nesting exceeds {MAX_QUERY_BACKED_LIST_DEPTH}"
+            )));
+        }
+        if context.query_backed_lists >= MAX_QUERY_BACKED_LISTS {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL query contains more than {MAX_QUERY_BACKED_LISTS} query-backed lists"
+            )));
+        }
+        context.query_backed_lists += 1;
+        context.query_backed_depth += 1;
+        let parsed = parse_with_context(source, context);
+        context.query_backed_depth -= 1;
+        let mut query = parsed.map_err(|error| {
+            LogsqlError::malformed(format!(
+                "cannot parse LogsQL {function}(subquery): {}",
+                error.message
+            ))
+        })?;
+        let output_path = finalize_query_backed_list(&mut query, function)?;
+        let cache_key = format!("{}\u{0}{}", source, output_path.join("."));
+        return Ok(Some(ParsedValueList::Query {
+            query: Box::new(query),
+            output_path,
+            cache_key,
+        }));
     }
 
     let inner = inner.trim();
     if inner.is_empty() {
-        return Ok(Some(ParsedStaticValueList::Values(Vec::new())));
+        return Ok(Some(ParsedValueList::Values(Vec::new())));
     }
     let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
     if inner.is_empty() {
@@ -4420,21 +4455,67 @@ fn parse_static_value_list(
         values.push(value);
     }
     if wildcard {
-        return Ok(Some(ParsedStaticValueList::Noop));
+        return Ok(Some(ParsedValueList::Noop));
     }
     values.sort_unstable();
     values.dedup();
-    Ok(Some(ParsedStaticValueList::Values(values)))
+    Ok(Some(ParsedValueList::Values(values)))
+}
+
+fn finalize_query_backed_list(
+    query: &mut LogsqlPlan,
+    function: &str,
+) -> Result<Vec<String>, LogsqlError> {
+    let (field, append_uniq) = match query.pipeline.last() {
+        Some(PipelineOp::Project(fields)) => {
+            let [field @ PipelineField::Exact { .. }] = fields.as_slice() else {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL {function}(subquery) must end in fields/keep with one exact field"
+                )));
+            };
+            (field.clone(), true)
+        }
+        Some(PipelineOp::Uniq(spec)) => {
+            let [field @ PipelineField::Exact { .. }] = spec.by_fields.as_slice() else {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL {function}(subquery) must end in uniq with one exact field"
+                )));
+            };
+            (field.clone(), false)
+        }
+        _ => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function}(subquery) must end in fields/keep or uniq"
+            )))
+        }
+    };
+    let PipelineField::Exact { path, .. } = &field else {
+        unreachable!("query-backed list output was checked as exact")
+    };
+    let output_path = path.clone();
+    if append_uniq {
+        query.pipeline.push(PipelineOp::Uniq(UniqSpec {
+            by_fields: vec![field],
+            filter: None,
+            hits_field: None,
+            limit: None,
+        }));
+    }
+    // A list subquery must consume its complete bounded rowset. The regular
+    // HTTP default of 100 rows is a response convenience, not query syntax.
+    query.implicit_result_limit = None;
+    Ok(output_path)
 }
 
 fn parse_contains_filter(
     token: &str,
     field: LogField,
+    context: &mut ParseContext,
 ) -> Result<Option<LogPredicate>, LogsqlError> {
-    if let Some(parsed) = parse_static_value_list(token, "contains_all")? {
+    if let Some(parsed) = parse_value_list(token, "contains_all", context)? {
         return Ok(Some(match parsed {
-            ParsedStaticValueList::Noop => LogPredicate::True,
-            ParsedStaticValueList::Values(mut values) => {
+            ParsedValueList::Noop => LogPredicate::True,
+            ParsedValueList::Values(mut values) => {
                 values.retain(|value| !value.is_empty());
                 if values.is_empty() {
                     LogPredicate::True
@@ -4442,12 +4523,22 @@ fn parse_contains_filter(
                     LogPredicate::TextualContainsAll { field, values }
                 }
             }
+            ParsedValueList::Query {
+                query,
+                output_path,
+                cache_key,
+            } => LogPredicate::QueryBackedTextualContainsAll {
+                field,
+                query,
+                output_path,
+                cache_key,
+            },
         }));
     }
-    if let Some(parsed) = parse_static_value_list(token, "contains_any")? {
+    if let Some(parsed) = parse_value_list(token, "contains_any", context)? {
         return Ok(Some(match parsed {
-            ParsedStaticValueList::Noop => LogPredicate::True,
-            ParsedStaticValueList::Values(values) => {
+            ParsedValueList::Noop => LogPredicate::True,
+            ParsedValueList::Values(values) => {
                 if values.iter().any(String::is_empty) {
                     LogPredicate::True
                 } else if values.is_empty() {
@@ -4456,6 +4547,16 @@ fn parse_contains_filter(
                     LogPredicate::TextualContainsAny { field, values }
                 }
             }
+            ParsedValueList::Query {
+                query,
+                output_path,
+                cache_key,
+            } => LogPredicate::QueryBackedTextualContainsAny {
+                field,
+                query,
+                output_path,
+                cache_key,
+            },
         }));
     }
     Ok(None)
@@ -6156,33 +6257,38 @@ fn combine_logical_or(expressions: Vec<LogicalExpression>) -> LogicalExpression 
 fn compile_logical_expression(
     expression: &LogicalExpression,
     inherited_field: Option<&LogField>,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
+    context: &mut ParseContext,
 ) -> Result<LogPredicate, LogsqlError> {
     match expression {
-        LogicalExpression::Atom(atom) => {
-            compile_logical_atom(atom, inherited_field, timestamp_unit, query_now)
-        }
+        LogicalExpression::Atom(atom) => compile_logical_atom(atom, inherited_field, context),
         LogicalExpression::Field(field, expression) => {
             let field = parse_field_selector(field)?;
-            compile_logical_expression(expression, Some(&field), timestamp_unit, query_now)
+            compile_logical_expression(expression, Some(&field), context)
         }
-        LogicalExpression::And(expressions) => expressions
-            .iter()
-            .map(|expression| {
-                compile_logical_expression(expression, inherited_field, timestamp_unit, query_now)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(LogPredicate::And),
-        LogicalExpression::Or(expressions) => expressions
-            .iter()
-            .map(|expression| {
-                compile_logical_expression(expression, inherited_field, timestamp_unit, query_now)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(LogPredicate::Or),
+        LogicalExpression::And(expressions) => {
+            let mut predicates = Vec::with_capacity(expressions.len());
+            for expression in expressions {
+                predicates.push(compile_logical_expression(
+                    expression,
+                    inherited_field,
+                    context,
+                )?);
+            }
+            Ok(LogPredicate::And(predicates))
+        }
+        LogicalExpression::Or(expressions) => {
+            let mut predicates = Vec::with_capacity(expressions.len());
+            for expression in expressions {
+                predicates.push(compile_logical_expression(
+                    expression,
+                    inherited_field,
+                    context,
+                )?);
+            }
+            Ok(LogPredicate::Or(predicates))
+        }
         LogicalExpression::Not(expression) => Ok(LogPredicate::Not(Box::new(
-            compile_logical_expression(expression, inherited_field, timestamp_unit, query_now)?,
+            compile_logical_expression(expression, inherited_field, context)?,
         ))),
     }
 }
@@ -6190,8 +6296,7 @@ fn compile_logical_expression(
 fn compile_logical_atom(
     atom: &str,
     inherited_field: Option<&LogField>,
-    timestamp_unit: TimestampUnit,
-    query_now: i64,
+    context: &mut ParseContext,
 ) -> Result<LogPredicate, LogsqlError> {
     if atom == "*" {
         return Ok(LogPredicate::True);
@@ -6202,7 +6307,7 @@ fn compile_logical_atom(
         if let Some(predicate) = parse_repeating_time_range_filter(&value)? {
             return Ok(predicate);
         }
-        apply_time_filter(&mut spec, &value, timestamp_unit, query_now)?;
+        apply_time_filter(&mut spec, &value, context.timestamp_unit, context.query_now)?;
         return Ok(LogPredicate::Timestamp {
             minimum: spec.ts_min,
             maximum: spec.ts_max,
@@ -6212,16 +6317,17 @@ fn compile_logical_atom(
         let width = if typed { 2 } else { 1 };
         let field = parse_field_selector(&atom[..operator])?;
         let value = &atom[operator + width..];
-        return compile_field_filter(&field, value, typed);
+        return compile_field_filter(&field, value, typed, context);
     }
     let field = inherited_field.cloned().unwrap_or(LogField::Message);
-    compile_unqualified_filter(&field, atom)
+    compile_unqualified_filter(&field, atom, context)
 }
 
 fn compile_field_filter(
     field: &LogField,
     value: &str,
     typed: bool,
+    context: &mut ParseContext,
 ) -> Result<LogPredicate, LogsqlError> {
     if matches!(field, LogField::FieldPrefix(_)) && value.is_empty() {
         return Err(LogsqlError::malformed(
@@ -6255,10 +6361,10 @@ fn compile_field_filter(
     if let Some(exact) = parse_exact_filter(value)? {
         return Ok(exact.predicate(field.clone()));
     }
-    if let Some(exact) = parse_multi_exact_filter(value)? {
+    if let Some(exact) = parse_multi_exact_filter(value, context)? {
         return Ok(exact.predicate(field.clone()));
     }
-    if let Some(predicate) = parse_contains_filter(value, field.clone())? {
+    if let Some(predicate) = parse_contains_filter(value, field.clone(), context)? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_sequence_filter(value, field.clone())? {
@@ -6330,7 +6436,11 @@ fn compile_field_filter(
     })
 }
 
-fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredicate, LogsqlError> {
+fn compile_unqualified_filter(
+    field: &LogField,
+    atom: &str,
+    context: &mut ParseContext,
+) -> Result<LogPredicate, LogsqlError> {
     if let Some(value) = quoted_value(atom)? {
         return Ok(if value.is_empty() && !matches!(field, LogField::Message) {
             LogPredicate::Empty {
@@ -6347,10 +6457,10 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
     if let Some(exact) = parse_exact_filter(atom)? {
         return Ok(exact.predicate(field.clone()));
     }
-    if let Some(exact) = parse_multi_exact_filter(atom)? {
+    if let Some(exact) = parse_multi_exact_filter(atom, context)? {
         return Ok(exact.predicate(field.clone()));
     }
-    if let Some(predicate) = parse_contains_filter(atom, field.clone())? {
+    if let Some(predicate) = parse_contains_filter(atom, field.clone(), context)? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_sequence_filter(atom, field.clone())? {
@@ -6967,7 +7077,11 @@ fn is_named_filter_call(value: &str, function: &str) -> bool {
         .is_some_and(|open| value[..open].eq_ignore_ascii_case(function))
 }
 
-fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), LogsqlError> {
+fn apply_metadata_filter(
+    spec: &mut QuerySpec,
+    token: &str,
+    context: &mut ParseContext,
+) -> Result<(), LogsqlError> {
     let Some((operator, typed)) = metadata_operator(token) else {
         return Err(LogsqlError::unsupported(format!(
             "unsupported LogsQL term {token:?}"
@@ -6978,7 +7092,7 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
     let value = &token[operator + operator_width..];
     let field = parse_field_selector(field_text)?;
     if matches!(field, LogField::FieldPrefix(_)) {
-        append_predicate(spec, compile_field_filter(&field, value, typed)?);
+        append_predicate(spec, compile_field_filter(&field, value, typed, context)?);
         return Ok(());
     }
     let path = parse_field_path(field_text)?;
@@ -6996,10 +7110,10 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
     } else if let Some(exact) = parse_exact_filter(value)? {
         append_predicate(spec, exact.predicate(log_field(&path)));
         return Ok(());
-    } else if let Some(exact) = parse_multi_exact_filter(value)? {
+    } else if let Some(exact) = parse_multi_exact_filter(value, context)? {
         append_predicate(spec, exact.predicate(log_field(&path)));
         return Ok(());
-    } else if let Some(predicate) = parse_contains_filter(value, log_field(&path))? {
+    } else if let Some(predicate) = parse_contains_filter(value, log_field(&path), context)? {
         append_predicate(spec, predicate);
         return Ok(());
     } else if let Some(predicate) = parse_sequence_filter(value, log_field(&path))? {
@@ -8223,15 +8337,6 @@ mod tests {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
         }
-
-        let subquery = parse_at(
-            "case:in(word | fields case)",
-            TimestampUnit::Microseconds,
-            0,
-        )
-        .unwrap_err();
-        assert_eq!(subquery.kind, LogsqlErrorKind::Unsupported);
-        assert!(subquery.message.contains("subquery"));
     }
 
     #[test]
@@ -8278,15 +8383,6 @@ mod tests {
             assert!(plan.is_ok(), "{query}: {plan:?}");
         }
 
-        let subquery = parse_at(
-            "case:contains_all(* | fields case)",
-            TimestampUnit::Microseconds,
-            0,
-        )
-        .unwrap_err();
-        assert_eq!(subquery.kind, LogsqlErrorKind::Unsupported);
-        assert!(subquery.message.contains("LQL-F38"), "{subquery}");
-
         for malformed in [
             "contains_all",
             "contains_all(",
@@ -8330,6 +8426,67 @@ mod tests {
     }
 
     #[test]
+    fn session_eighteen_query_backed_list_grammar_is_explicit_and_bounded() {
+        for query in [
+            "case:in(case:=word-exact | fields case)",
+            "case:contains_any(case:=word-exact | fields case)",
+            "case:contains_all(case:=word-exact | fields case)",
+            "in(case:=word-exact | uniq case)",
+            "case:in(case:=word-exact | fields case) AND alpha",
+            "* | filter case:in(case:=word-exact | fields case)",
+            "* | format if (case:in(case:=word-exact | fields case)) hit as result",
+            "case:in(case:in(case:=word-exact | fields case) | fields case)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        for malformed in [
+            "in(case:=word-exact | limit 1)",
+            "in(case:=word-exact | fields case,probe)",
+            "in(case:=word-exact | fields *)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+
+        let mut nested = "case:=word-exact | fields case".to_owned();
+        for _ in 0..MAX_QUERY_BACKED_LIST_DEPTH {
+            nested = format!("case:in({nested}) | fields case");
+        }
+        assert!(
+            parse_at(&nested, TimestampUnit::Microseconds, 0).is_ok(),
+            "the documented nesting limit itself must remain usable"
+        );
+        let error = parse_at(
+            &format!("case:in({nested})"),
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("nesting exceeds 8"), "{error:?}");
+
+        let list = r#"case:in(case:=word-exact | fields case)"#;
+        let accepted = std::iter::repeat_n(list, MAX_QUERY_BACKED_LISTS)
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        assert!(
+            parse_at(&accepted, TimestampUnit::Microseconds, 0).is_ok(),
+            "the documented list-count limit itself must remain usable"
+        );
+        let error = parse_at(
+            &format!("{accepted} OR {list}"),
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("more than 32 query-backed lists"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn session_sixteen_contains_any_static_grammar_is_complete_and_strict() {
         for query in [
             "contains_any(alpha)",
@@ -8347,15 +8504,6 @@ mod tests {
             let plan = parse_at(query, TimestampUnit::Microseconds, 0);
             assert!(plan.is_ok(), "{query}: {plan:?}");
         }
-
-        let subquery = parse_at(
-            "case:contains_any(* | fields case)",
-            TimestampUnit::Microseconds,
-            0,
-        )
-        .unwrap_err();
-        assert_eq!(subquery.kind, LogsqlErrorKind::Unsupported);
-        assert!(subquery.message.contains("LQL-F38"), "{subquery}");
 
         for malformed in [
             "contains_any",

@@ -859,3 +859,17 @@ shared tokenizer at immutable VictoriaLogs commit
 `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 313
 row-query cases, 314 error cases, and 335 statistics/pipeline cases: 962 cases
 total, all passing against the immutable image. The fixture now contains 962 cases.
+
+`LQL-F38` adds fourteen row-query cases and five error cases for query-backed
+`in`, `contains_any`, and `contains_all`. They pin exact `fields` and `uniq`
+output, duplicate removal, numeric and missing-value textual projection,
+empty-subquery identities, nested lists, logical and current-row pipeline
+composition, case-insensitive function names, subquery pipeline order/limit,
+and strict one-exact-field output grammar. Source audit covers `in_values.go`,
+`filter_in.go`, `filter_generic.go`, `parser.go`, and `storage_search.go` at
+immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. Timeless retains native rich
+JSON rather than flattened string columns, but uses the established compact
+textual projection only while materializing query values. The fixture now
+contains 327 row-query cases, 319 error cases, and 335 statistics/pipeline
+cases: 981 cases total, all passing against the immutable image. The fixture now contains 981 cases.

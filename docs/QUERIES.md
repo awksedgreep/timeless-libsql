@@ -282,6 +282,27 @@ JSON without changing stored types. VictoriaLogs flattens rich objects into
 dotted string fields; Timeless deliberately retains native nested JSON and can
 also sequence-match an explicitly selected parent object's compact projection.
 
+`field:in(query | fields value)`,
+`field:contains_any(query | fields value)`, and
+`field:contains_all(query | fields value)` materialize a request-local value
+list from a complete bounded LogsQL subquery. The subquery must end in exactly
+one exact `fields`/`keep` field or one-field `uniq`; a final `fields` is
+automatically deduplicated, and the ordinary implicit 100-row response limit
+does not truncate the list. Missing and null output project to empty text;
+strings keep their bytes; numbers, booleans, arrays, and objects use the same
+compact textual projection as static filters without changing retained data.
+Empty query results make `in` and `contains_any` false and `contains_all`
+true. Nested lists, logical expressions, current-row pipeline conditions, and
+subquery pipeline order/limit are supported.
+
+Every subquery and the outer query executes sequentially through the public
+`logs` row/pipeline contract with one request timestamp. Equivalent subqueries
+are evaluated once per request. The parser accepts at most eight nested levels
+and 32 query-backed lists; materialized values, result cardinality, cumulative
+decoded work, response/state bytes, and the complete request deadline remain
+bounded. The cache is released before the outer scan. No LogsQL syntax,
+nested cursor, or private shadow table enters the extension.
+
 `field:json_array_contains_any(v1, ..., vN)` selects only a retained JSON
 array and succeeds when any top-level primitive element has the same exact
 textual representation as a static candidate. Decoded strings compare by
@@ -292,8 +313,9 @@ scalars, objects, and empty arrays do not match. An empty candidate list is
 false, while `json_array_contains_any("")` matches only an actual empty-string
 array element. A trailing comma is accepted, duplicates are irrelevant,
 function names are case-insensitive, a quoted `"*"` is literal, and an
-unquoted `*` is invalid for this function. Query-backed lists remain deferred
-as `LQL-F38`.
+unquoted `*` is invalid for this function. Query-backed candidates for this
+JSON-array-specific function remain explicitly unsupported; shipped
+`LQL-F38` covers `in`, `contains_any`, and `contains_all` only.
 
 Timeless intentionally applies this operation to its retained semantic JSON.
 For example, a stored `"a\u0062"` array element is decoded to `ab` and matches
@@ -308,6 +330,8 @@ Direct SQLite/libSQL users can express static membership with parameterized
 column pruning for a declared string-only index key. `SQL-LOG-017` uses public
 `json_each` rows for exact top-level JSON-array primitive membership. These API
 constructs do not require a private table or new extension primitive.
+`SQL-LOG-048` shows the bounded two-public-scan foundation for query-backed
+exact membership, including cumulative work-budget guidance.
 
 There is intentionally no `contains_all`, `contains_any`, or `seq` SQL recipe.
 Portable SQLite `LIKE`, `GLOB`, and `instr` cannot reproduce the required

@@ -155,6 +155,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-045`](#sql-log-045-summed-utf-8-byte-length-of-one-exact-field) | `LQL-S09` | current foundation | summed UTF-8/compact-JSON byte length for one exact public metadata path; API owns dynamic field selection, canonical fields, checked unsigned overflow, limits, cancellation, and envelopes |
 | [`SQL-LOG-046`](#sql-log-046-deterministic-any-and-numeric-companion-field-extrema) | `LQL-S10` | current foundation | deterministic first nonempty rich JSON value plus finite native-number companion-field minima/maxima over exact public metadata paths; API owns complete natural ordering, canonical fields, typed results, state limits, cancellation, and envelopes |
 | [`SQL-LOG-047`](#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema) | `LQL-S11` | current foundation | deterministic first qualifying rich row plus finite native-number row minima/maxima for two fixed exact public metadata paths; API owns dynamic selectors, complete natural ordering, canonical fields, state limits, cancellation, and envelopes |
+| [`SQL-LOG-048`](#sql-log-048-query-backed-exact-membership) | `LQL-F38` | current foundation | bounded two-scan exact membership for retained strings through public rows; API owns subquery grammar, rich projection, phrase variants, cumulative limits, cancellation, caching, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -5092,7 +5093,8 @@ compact projection. The Rust Logs API therefore parses the static `in()`
 list, deduplicates it within the request's bounded query text, projects all
 retained rich types without mutating storage, and owns `in()`, wildcard,
 logical/pipeline, limit, cancellation, and error semantics. Subquery
-membership is the separate deferred `LQL-F38` row. The declared string-key
+membership is separately shipped by `LQL-F38` with the executable
+[`SQL-LOG-048`](#sql-log-048-query-backed-exact-membership) foundation. The declared string-key
 form reuses the existing public posting index; the other forms use bounded
 public rows. No new extension primitive is required.
 
@@ -7764,6 +7766,96 @@ access, or storage-format change is warranted.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_row_selection_stats_are_rich_bounded_and_durable`.
+
+### SQL-LOG-048: query-backed exact membership
+
+Materialize one exact retained-string field from a bounded public subquery,
+then apply its distinct values to a separately bounded public outer scan:
+
+```sql
+WITH query_values AS MATERIALIZED (
+  SELECT DISTINCT
+    CASE
+      WHEN json_type(metadata, :subquery_output_path) IS NULL THEN ''
+      WHEN json_type(metadata, :subquery_output_path) = 'null' THEN ''
+      WHEN json_type(metadata, :subquery_output_path) = 'text'
+        THEN json_extract(metadata, :subquery_output_path)
+      ELSE NULL
+    END AS value
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND level = :subquery_level
+    AND max_work_entries = :subquery_max_work_entries
+), outer_bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ms
+    AND ts <= :end_ms
+    AND max_work_entries = :outer_max_work_entries
+), projected AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN json_type(metadata, :outer_field_path) IS NULL THEN ''
+      WHEN json_type(metadata, :outer_field_path) = 'null' THEN ''
+      WHEN json_type(metadata, :outer_field_path) = 'text'
+        THEN json_extract(metadata, :outer_field_path)
+      ELSE NULL
+    END AS field_text
+  FROM outer_bounded
+)
+SELECT ts, level, message, metadata
+FROM projected
+WHERE field_text COLLATE BINARY IN (
+  SELECT value COLLATE BINARY
+  FROM query_values
+  WHERE value IS NOT NULL
+)
+ORDER BY ts DESC
+LIMIT :limit;
+```
+
+For the copyable fixture, bind `:subquery_output_path` and
+`:outer_field_path` to `$.deployment.region`, `:subquery_level` to `error`,
+inclusive `:start_ms`/`:end_ms` to `1000`/`2000`, and positive work limits.
+The statement returns the `ts=1000` row because the subquery produces the
+single value `us-east`. Timestamps use the virtual table's configured native
+unit (milliseconds in this fixture). Both scans are independently bounded;
+the caller must ensure
+`:subquery_max_work_entries + :outer_max_work_entries` does not exceed its
+cumulative request budget. `ORDER BY ts DESC` and `LIMIT` make the returned
+row order and cardinality explicit.
+
+This statement is exact for retained strings. Missing fields and JSON null
+project to the same empty string as LogsQL, while non-string rich values are
+excluded instead of being formatted with SQLite-dependent rules. An empty
+subquery therefore makes `IN` false. The Rust Logs API additionally
+compact-projects numbers, booleans, arrays, and objects with the same
+canonical serializer used by current-row predicates; requires the subquery
+to end in exactly one `fields`/`keep` or `uniq` field; removes the ordinary
+100-row response default; and deduplicates the complete bounded result.
+
+`contains_any(subquery)` and `contains_all(subquery)` share this public
+two-scan value-materialization foundation, but their complete case-sensitive
+phrase and Unicode word-boundary behavior has no honest portable core-SQL
+predicate. The Rust API owns those predicates, nested query-backed lists,
+one request timestamp, eight-level nesting and 32-list parse limits,
+request-local equivalent-subquery caching, cumulative work and state limits,
+cooperative cancellation, error/result envelopes, and empty-list identities.
+It executes each subquery and the outer query through the public `logs`
+row/pipeline contract; it does not expose LogsQL to SQLite, open a nested
+virtual-table cursor, or read a private shadow table.
+
+Both sides already require their own bounded public scan, so moving this
+composition into the extension would not eliminate a block read, decode,
+allocation, or row crossing. No extension primitive or storage-format change
+is warranted. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
+harness; HTTP/oracle/optimize/flush/reopen regression:
+`session_eighteen_query_backed_lists_are_rich_cumulative_cached_and_reopenable`.
 
 ## Adding the next recipe
 

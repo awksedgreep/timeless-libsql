@@ -817,7 +817,10 @@ for byte-identical same-scan controls; the bounded +4.6%/+11.2% variation does
 not justify another storage primitive.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
-no-ops; query-backed lists remain explicitly deferred. Patterns intentionally
+no-ops. Query-backed forms require a subquery ending in one exact `fields`,
+`keep`, or `uniq` output and execute through bounded public row/pipeline reads
+with request-local caching, cumulative work/state limits, and one deadline.
+Patterns intentionally
 make no inexact `LIKE`/`GLOB` equivalence claim; direct SQLite/libSQL users have
 executable exact-prefix, parameterized-membership, constant-true, and JSON1
 array-membership recipes in `SQL-LOG-014` through `SQL-LOG-017`, plus the
@@ -825,7 +828,8 @@ retained-text byte-range and codepoint-length foundations in `SQL-LOG-019`
 and `SQL-LOG-020`, plus complete retained-model field equality and the
 bytewise ordering fallback in `SQL-LOG-021`, including the
 literal public-row prefix-selected field-set foundation in `SQL-LOG-022`, and
-existing public posting index for declared string-only keys. `contains_all`,
+the bounded two-scan query-backed membership foundation in `SQL-LOG-048`, and
+the existing public posting index for declared string-only keys. `contains_all`,
 `contains_any`, and ordered `seq` remain honest API-only rows: portable SQLite
 does not supply their Unicode phrase-boundary predicate, and `seq` also needs
 ordered non-overlapping search state. JSON-array membership needs no new

@@ -51,7 +51,9 @@ full-message exact, start-anchored exact-prefix, and static
 `in(v1, ..., vN)` exact membership; field-independent wildcard no-ops for
 `in`, `contains_any`, and `contains_all`; static case-sensitive
 `contains_all(v1, ..., vN)` and `contains_any(v1, ..., vN)` with VictoriaLogs
-phrase boundaries; ordered non-overlapping `seq(v1, ..., vN)` matching with
+phrase boundaries; query-backed `in`, `contains_any`, and `contains_all`
+using one exact `fields`/`keep` or `uniq` output; ordered non-overlapping
+`seq(v1, ..., vN)` matching with
 the same Unicode boundaries; retained-array primitive membership through
 `json_array_contains_any(v1, ..., vN)`; inclusive one-address, CIDR, or
 two-address `ipv4_range(...)` filtering over exact retained strings;
@@ -413,9 +415,7 @@ sort and deduplicate the request-owned list, and apply case-sensitive full-
 value membership to the same rich textual projection. `in()` matches nothing;
 a trailing comma is accepted; quoted `"*"` is literal; and any standalone
 unquoted `*` argument makes the filter a field-independent no-op, matching the
-pinned VictoriaLogs behavior. A top-level pipe inside `in(...)` is rejected as
-the separately deferred subquery capability instead of being mistaken for a
-static value or outer pipeline. `SQL-LOG-015` gives direct SQLite/libSQL users
+pinned VictoriaLogs behavior. `SQL-LOG-015` gives direct SQLite/libSQL users
 the parameterized message and retained-text equivalents.
 
 The standalone unquoted wildcard has the same field-independent no-op meaning
@@ -427,8 +427,23 @@ least one. `contains_all()` and empty arguments are true identities;
 `contains_any()` is false, while any empty argument makes it true without
 inspecting the field. Both preserve case, Unicode word boundaries, compact
 rich-value projection, aliases, and logical/pipeline composition. Query-backed
-lists remain explicitly deferred as `LQL-F38`.
+lists use the same predicates under `LQL-F38`.
 `SQL-LOG-016` shows the direct SQL equivalent: omit the field predicate.
+
+Query-backed `in`, `contains_any`, and `contains_all` parse the nested source
+as a complete LogsQL plan with the same request clock. The source must end in
+one exact `fields`/`keep` field or one-field `uniq`; `fields` output is
+deduplicated automatically and is not truncated by the ordinary implicit
+100-row response limit. Missing/null output becomes empty text, while every
+rich value uses the established compact projection without storage mutation.
+An empty source makes `in`/`contains_any` false and `contains_all` true.
+Equivalent sources run once per request; nesting is capped at eight levels and
+32 lists; decoded work, materialized state, result rows, and the deadline are
+cumulative. The cache is dropped before the outer scan. Every read uses the
+public `logs` row/pipeline surface, and unresolved dynamic predicates fail
+closed before reaching storage. `SQL-LOG-048` gives direct SQLite/libSQL users
+the bounded two-scan retained-string foundation. LogsQL syntax, nested virtual-
+table cursors, and private shadow tables remain outside the extension.
 
 Ordered `seq(...)` filters use the same rich textual projection and Unicode
 phrase boundaries, but order and duplicates matter. They remain API-owned:

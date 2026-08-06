@@ -12067,6 +12067,371 @@ async fn assert_evidence_rich_rows(storage: &Storage, passes: usize) {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_query_backed_lists_are_rich_cumulative_cached_and_reopenable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("query-backed-list-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut body = String::new();
+    for index in 0..8_192_u64 {
+        let mut row = serde_json::json!({
+            "_time": 1_813_000_000_000_000_i64 + index as i64,
+            "_msg": "request filler",
+            "level": "info",
+            "case": format!("filler-{index}"),
+            "role": "filler",
+        });
+        match index {
+            0 => {
+                row["case"] = serde_json::json!("source-alpha");
+                row["role"] = serde_json::json!("dictionary");
+                row["lookup"] = serde_json::json!("alpha");
+                row["_msg"] = serde_json::json!("dictionary alpha");
+            }
+            1 => {
+                row["case"] = serde_json::json!("source-beta");
+                row["role"] = serde_json::json!("dictionary");
+                row["lookup"] = serde_json::json!("beta");
+                row["_msg"] = serde_json::json!("dictionary beta");
+            }
+            2 => {
+                row["case"] = serde_json::json!("source-rich");
+                row["role"] = serde_json::json!("rich-dictionary");
+                row["lookup_value"] = serde_json::json!(2.5);
+                row["_msg"] = serde_json::json!("dictionary rich");
+            }
+            3 => {
+                row["case"] = serde_json::json!("target-alpha");
+                row["target_group"] = serde_json::json!("target");
+                row["_msg"] = serde_json::json!("alpha");
+            }
+            4 => {
+                row["case"] = serde_json::json!("target-beta");
+                row["target_group"] = serde_json::json!("target");
+                row["_msg"] = serde_json::json!("before beta after");
+            }
+            5 => {
+                row["case"] = serde_json::json!("target-both");
+                row["target_group"] = serde_json::json!("target");
+                row["_msg"] = serde_json::json!("alpha before beta");
+            }
+            6 => {
+                row["case"] = serde_json::json!("target-rich");
+                row["target_group"] = serde_json::json!("target");
+                row["n"] = serde_json::json!(2.5);
+            }
+            7 => {
+                row["case"] = serde_json::json!("source-empty");
+                row["role"] = serde_json::json!("empty-dictionary");
+            }
+            8 => {
+                row["case"] = serde_json::json!("target-missing");
+                row["target_group"] = serde_json::json!("empty");
+            }
+            9 => {
+                row["case"] = serde_json::json!("target-empty");
+                row["target_group"] = serde_json::json!("empty");
+                row["probe"] = serde_json::json!("");
+            }
+            10 => {
+                row["case"] = serde_json::json!("target-null");
+                row["target_group"] = serde_json::json!("empty");
+                row["probe"] = serde_json::Value::Null;
+            }
+            _ => {}
+        }
+        body.push_str(&row.to_string());
+        body.push('\n');
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn cases(app: &axum::Router, query: &str) -> Vec<String> {
+        let mut cases = pipeline_rows(app, &format!("{query} | fields case | limit 10000"))
+            .await
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cases.sort();
+        cases
+    }
+
+    assert_eq!(
+        cases(
+            &app,
+            r#"target_group:="target" AND _msg:in(role:="dictionary" | fields lookup)"#,
+        )
+        .await,
+        ["target-alpha"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"target_group:="target" AND _msg:contains_any(role:="dictionary" | fields lookup)"#,
+        )
+        .await,
+        ["target-alpha", "target-beta", "target-both"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"target_group:="target" AND _msg:contains_all(role:="dictionary" | fields lookup)"#,
+        )
+        .await,
+        ["target-both"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"n:in(role:="rich-dictionary" | fields lookup_value)"#
+        )
+        .await,
+        ["target-rich"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"target_group:="empty" AND probe:in(role:="empty-dictionary" | fields missing_value)"#,
+        )
+        .await,
+        ["target-empty", "target-missing", "target-null"]
+    );
+    assert!(cases(&app, r#"case:in(role:="absent" | fields lookup)"#)
+        .await
+        .is_empty());
+    assert!(
+        cases(&app, r#"case:contains_any(role:="absent" | fields lookup)"#)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"target_group:="target" AND case:contains_all(role:="absent" | fields lookup)"#,
+        )
+        .await,
+        ["target-alpha", "target-beta", "target-both", "target-rich"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"case:in(target_group:="target" AND _msg:in(role:="dictionary" | fields lookup) | fields case)"#,
+        )
+        .await,
+        ["target-alpha"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"* | copy case as selected | filter selected:in(role:="dictionary" | fields case)"#,
+        )
+        .await,
+        ["source-alpha", "source-beta"]
+    );
+    assert_eq!(
+        cases(
+            &app,
+            r#"* | format if (case:in(role:="dictionary" | fields case)) hit as result | filter result:=hit"#,
+        )
+        .await,
+        ["source-alpha", "source-beta"]
+    );
+
+    let before_cached = storage.stats().await.unwrap().api_query_count;
+    assert_eq!(
+        cases(
+            &app,
+            r#"case:in(role:="dictionary" | fields case) OR case:in(role:="dictionary" | fields case)"#,
+        )
+        .await,
+        ["source-alpha", "source-beta"]
+    );
+    assert_eq!(
+        storage.stats().await.unwrap().api_query_count - before_cached,
+        2,
+        "one cached list scan plus one outer scan"
+    );
+
+    for malformed in [
+        r#"in(role:="dictionary" | limit 1)"#,
+        r#"in(role:="dictionary" | fields case,lookup)"#,
+        r#"in(role:="dictionary" | fields *)"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            max_work_rows: 100,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:in(role:="dictionary" | fields case) | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(work_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+
+    let result_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:in(role:="dictionary" | fields case) | limit 1"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(result_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(result_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_result_rows"
+    );
+
+    let state_bounded = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            max_response_bytes: 500,
+            ..LogsQueryLimits::default()
+        },
+    );
+    assert_eq!(
+        cases(
+            &state_bounded,
+            r#"case:in(role:="dictionary" | fields case)"#,
+        )
+        .await,
+        ["source-alpha", "source-beta"]
+    );
+    let state_limited = state_bounded
+        .oneshot(logsql_request(
+            r#"case:in(role:="dictionary" | fields case) OR case:in(role:="dictionary" | fields case) | fields case | limit 10000"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(state_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(state_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_response_bytes",
+            "limit": 500
+        })
+    );
+
+    let cancelled_before = storage.stats().await.unwrap().api_query_cancelled;
+    let timed_out = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "case:in(seq(request, absent) | fields case) | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(timed_out.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before);
+    assert_eq!(stats.api_query_in_flight, 0);
+    assert_eq!(
+        cases(
+            &app,
+            r#"target_group:="target" AND _msg:in(role:="dictionary" | fields lookup)"#,
+        )
+        .await,
+        ["target-alpha"]
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    assert_eq!(
+        cases(
+            &app,
+            r#"target_group:="target" AND _msg:in(role:="dictionary" | fields lookup)"#,
+        )
+        .await,
+        ["target-alpha"]
+    );
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        cases(
+            &router(reopened.clone()),
+            r#"target_group:="target" AND _msg:in(role:="dictionary" | fields lookup)"#,
+        )
+        .await,
+        ["target-alpha"]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 fn make_evidence_rich_lines(count: usize) -> String {
     const BASE_TS: i64 = 1_800_000_000_000_000;
     const SEVERITIES: [&str; 8] = [

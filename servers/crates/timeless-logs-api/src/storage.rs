@@ -20,7 +20,9 @@ use timeless_api_common::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::logsql::{logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, PipelineOp};
+use crate::logsql::{
+    logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, LogsqlPlan, PipelineOp,
+};
 use crate::pipeline::{self, PipelineLimits};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -642,6 +644,15 @@ pub enum LogPredicate {
         field: LogField,
         values: Vec<String>,
     },
+    /// API-owned `in(query | fields field)` plan. HTTP and embedded LogsQL
+    /// execution must resolve this through the public row/pipeline surface
+    /// before a storage cursor sees the predicate.
+    QueryBackedTextualIn {
+        field: LogField,
+        query: Box<LogsqlPlan>,
+        output_path: Vec<String>,
+        cache_key: String,
+    },
     /// VictoriaLogs `contains_all(v1, ..., vN)` semantics over the public
     /// textual projection of a retained field. Every non-empty value must
     /// match as a case-sensitive phrase with LogsQL word boundaries.
@@ -649,12 +660,29 @@ pub enum LogPredicate {
         field: LogField,
         values: Vec<String>,
     },
+    /// API-owned `contains_all(query | fields field)` plan. This variant is
+    /// never extension syntax and must be replaced by a static bounded list
+    /// before storage execution.
+    QueryBackedTextualContainsAll {
+        field: LogField,
+        query: Box<LogsqlPlan>,
+        output_path: Vec<String>,
+        cache_key: String,
+    },
     /// VictoriaLogs `contains_any(v1, ..., vN)` semantics over the public
     /// textual projection of a retained field. At least one non-empty value
     /// must match as a case-sensitive phrase with LogsQL word boundaries.
     TextualContainsAny {
         field: LogField,
         values: Vec<String>,
+    },
+    /// API-owned `contains_any(query | fields field)` plan. This variant is
+    /// resolved recursively by the Rust API and never crosses into SQLite.
+    QueryBackedTextualContainsAny {
+        field: LogField,
+        query: Box<LogsqlPlan>,
+        output_path: Vec<String>,
+        cache_key: String,
     },
     /// VictoriaLogs `seq(v1, ..., vN)` semantics over the public textual
     /// projection of a retained field. Phrases remain ordered (including
@@ -978,8 +1006,9 @@ enum ReadCommand {
         rate_window_seconds: Option<f64>,
         timestamp_unit: TimestampUnit,
         limits: PipelineLimits,
+        capture_query_report: bool,
         cancelled: Arc<AtomicBool>,
-        reply: oneshot::Sender<Result<Vec<JsonValue>, String>>,
+        reply: oneshot::Sender<Result<(Vec<JsonValue>, LogQueryExecutionReport), String>>,
     },
     Count {
         spec: QuerySpec,
@@ -1266,6 +1295,49 @@ impl Storage {
         rate_window_seconds: Option<f64>,
         limits: PipelineLimits,
     ) -> Result<Vec<JsonValue>, String> {
+        let capture_query_report = operations
+            .iter()
+            .any(|operation| matches!(operation, PipelineOp::QueryStats));
+        self.pipeline_inner(
+            spec,
+            operations,
+            implicit_result_limit,
+            rate_window_seconds,
+            limits,
+            capture_query_report,
+        )
+        .await
+        .map(|(rows, _report)| rows)
+    }
+
+    pub(crate) async fn pipeline_with_report(
+        &self,
+        spec: QuerySpec,
+        operations: Vec<PipelineOp>,
+        implicit_result_limit: Option<usize>,
+        rate_window_seconds: Option<f64>,
+        limits: PipelineLimits,
+    ) -> Result<(Vec<JsonValue>, LogQueryExecutionReport), String> {
+        self.pipeline_inner(
+            spec,
+            operations,
+            implicit_result_limit,
+            rate_window_seconds,
+            limits,
+            true,
+        )
+        .await
+    }
+
+    async fn pipeline_inner(
+        &self,
+        spec: QuerySpec,
+        operations: Vec<PipelineOp>,
+        implicit_result_limit: Option<usize>,
+        rate_window_seconds: Option<f64>,
+        limits: PipelineLimits,
+        capture_query_report: bool,
+    ) -> Result<(Vec<JsonValue>, LogQueryExecutionReport), String> {
         validate_work_limit(&spec)?;
         let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1278,6 +1350,7 @@ impl Storage {
                 rate_window_seconds,
                 timestamp_unit: self.timestamp_unit(),
                 limits,
+                capture_query_report,
                 cancelled,
                 reply: reply_tx,
             })
@@ -1736,22 +1809,20 @@ fn reader_main(
                 rate_window_seconds,
                 timestamp_unit,
                 limits,
+                capture_query_report,
                 cancelled,
                 reply,
             } => {
                 let started = Instant::now();
-                let needs_query_report = operations
-                    .iter()
-                    .any(|operation| matches!(operation, PipelineOp::QueryStats));
                 let result = cancellable_read(&conn, &cancelled, || {
                     let (rows, report) = query_pipeline_rows(
                         &conn,
                         &spec,
                         cancelled.as_ref(),
                         timestamp_unit,
-                        needs_query_report,
+                        capture_query_report,
                     )?;
-                    pipeline::execute_query_rows(
+                    let rows = pipeline::execute_query_rows(
                         rows,
                         pipeline::PipelineExecution {
                             report,
@@ -1763,9 +1834,10 @@ fn reader_main(
                             cancelled: cancelled.as_ref(),
                             query_started: started,
                         },
-                    )
+                    )?;
+                    Ok((rows, report))
                 });
-                let rows = result.as_ref().map_or(0, Vec::len);
+                let rows = result.as_ref().map_or(0, |(rows, _)| rows.len());
                 record_query(&profile, started.elapsed(), result.is_err(), rows);
                 let _ = reply.send(result);
             }
@@ -2693,6 +2765,11 @@ fn log_predicate_matches_resolved(
                     .is_ok()
             },
         )),
+        LogPredicate::QueryBackedTextualIn { .. }
+        | LogPredicate::QueryBackedTextualContainsAll { .. }
+        | LogPredicate::QueryBackedTextualContainsAny { .. } => {
+            Err("unresolved LogsQL query-backed list reached storage execution".into())
+        }
         LogPredicate::TextualContainsAll { field, values } => {
             let matched = log_field_projected_matches(
                 resolved_field!(field),
@@ -2936,8 +3013,11 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::Exact { field, .. }
         | LogPredicate::TextualExact { field, .. }
         | LogPredicate::TextualIn { field, .. }
+        | LogPredicate::QueryBackedTextualIn { field, .. }
         | LogPredicate::TextualContainsAll { field, .. }
+        | LogPredicate::QueryBackedTextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::QueryBackedTextualContainsAny { field, .. }
         | LogPredicate::TextualSequence { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }
@@ -3052,8 +3132,11 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::Exact { field, .. }
         | LogPredicate::TextualExact { field, .. }
         | LogPredicate::TextualIn { field, .. }
+        | LogPredicate::QueryBackedTextualIn { field, .. }
         | LogPredicate::TextualContainsAll { field, .. }
+        | LogPredicate::QueryBackedTextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::QueryBackedTextualContainsAny { field, .. }
         | LogPredicate::TextualSequence { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }

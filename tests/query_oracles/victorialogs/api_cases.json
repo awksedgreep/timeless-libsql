@@ -2106,6 +2106,90 @@
       "query": "case:=delete-row | DrOp_EmPtY_FiElDs;",
       "status": 200,
       "expected_cases": ["delete-row"]
+    },
+    {
+      "id": "LQL-F38-in-fields-exact-membership",
+      "query": "case:in(case:=word-exact | fields case)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F38-in-uniq-two-values",
+      "query": "case:in(case:in(word-exact, word-case) | uniq case)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-case"]
+    },
+    {
+      "id": "LQL-F38-in-rich-numeric-text",
+      "query": "numeric_group:=\"numeric\" n:in(case:=numeric-decimal | fields n)",
+      "status": 200,
+      "expected_cases": ["numeric-decimal"]
+    },
+    {
+      "id": "LQL-F38-in-missing-output-is-empty-text",
+      "query": "state_group:=\"state\" probe:in(case:=state-missing | fields probe)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty"]
+    },
+    {
+      "id": "LQL-F38-in-empty-subquery-matches-nothing",
+      "query": "case:in(case:=does-not-exist | fields case)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F38-contains-any-query-uses-phrases",
+      "query": "_msg:contains_any(case:=word-exact | fields _msg)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-inside", "word-punctuation"]
+    },
+    {
+      "id": "LQL-F38-contains-all-query-requires-every-phrase",
+      "query": "_msg:contains_all(case:in(word-exact, word-inside) | fields _msg)",
+      "status": 200,
+      "expected_cases": ["word-inside"]
+    },
+    {
+      "id": "LQL-F38-contains-any-empty-subquery-is-false",
+      "query": "case:contains_any(case:=does-not-exist | fields case)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F38-contains-all-empty-subquery-is-identity",
+      "query": "state_group:=\"state\" never_present:contains_all(case:=does-not-exist | fields case)",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F38-nested-query-backed-membership",
+      "query": "case:in(case:in(case:=word-exact | fields case) | fields case)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F38-logical-composition",
+      "query": "case:in(case:=word-exact | fields case) OR case:in(case:=word-case | fields case)",
+      "status": 200,
+      "expected_cases": ["word-exact", "word-case"]
+    },
+    {
+      "id": "LQL-F38-current-row-filter-pipeline",
+      "query": "state_group:=\"state\" | filter case:in(case:=state-string | fields case)",
+      "status": 200,
+      "expected_cases": ["state-string"]
+    },
+    {
+      "id": "LQL-F38-query-function-name-is-case-insensitive",
+      "query": "case:In(case:=word-exact | fields case)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F38-subquery-pipeline-order-and-limit",
+      "query": "case:in(alpha | sort by (_time) asc | limit 1 | fields case)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
     }
   ],
   "stats_cases": [
@@ -4040,6 +4124,41 @@
     {
       "id": "LQL-Q08-unsupported-pipe",
       "query": "* | definitely_not_a_pipe",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F38-in-query-requires-output-pipe",
+      "query": "in(case:=word-exact | limit 1)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F38-in-query-rejects-multiple-output-fields",
+      "query": "in(case:=word-exact | fields case,probe)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F38-in-query-rejects-wildcard-output",
+      "query": "in(case:=word-exact | fields *)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F38-contains-any-query-requires-output-pipe",
+      "query": "contains_any(case:=word-exact | limit 1)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F38-contains-all-query-rejects-multiple-output-fields",
+      "query": "contains_all(case:=word-exact | fields case,probe)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
