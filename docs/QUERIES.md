@@ -1990,6 +1990,13 @@ array path. SQLite cannot preserve raw numeric spellings or bare `NaN`, so the
 complete LogsQL transform remains in the Rust logs API. No extension opcode,
 private shadow table, storage format, or batching behavior is added.
 
+Exact-build p50/p95/p99 is 3.202/3.872/4.930 ms narrow and
+34.373/35.216/35.316 ms wide, versus 3.332/3.418/3.614 and
+38.555/40.200/40.598 ms for equal-output format controls. The +13.3%/-12.4%
+p95 and -1.1%/-8.4% request-attributed API mean follow byte-identical public
+storage work and identical 64-row, 1,536-byte responses. `QSF-229` retains the
+opposing narrow tail/mean honestly and accepts the bounded post-scan cost.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level

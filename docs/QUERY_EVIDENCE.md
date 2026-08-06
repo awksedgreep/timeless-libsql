@@ -4408,6 +4408,65 @@ transactions, migrations, and public batch/SQL contracts are unchanged. No
 private shadow table, Elixir/BEAM/NIF/process fallback, CI workflow or
 invocation, tag, release, or downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `json_array_concat`
+
+The checked-in
+[`2026-08-06_session18_lql_p40_json_array_concat.json`](evidence/2026-08-06_session18_lql_p40_json_array_concat.json)
+was captured from exact release extension and server build
+`51beb50eb359a2ac2f9d03669547dcff12f8d774` and has SHA-256
+`9dd275ddc4ddc94c3129d2a5d6d2e76ab929145e80f304034fa2dfdc2d1d520c`.
+Each shape sorts and materializes the full public candidate set, applies a
+deterministic 64-row limit, projects the retained native `tags` array, and
+then either joins it with `,` or formats the known identical `query,true`
+result. Candidate and control therefore return exactly the same rows and
+bytes while isolating bounded native-array traversal and destination writing
+after identical public storage, sort, limit, and projection work.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `json_array_concat`, indexed host | 64 | 1,536 | 3.202 | 3.872 | 4.930 | 1 | 1,024 | 235,778 | 128 |
+| `json_array_concat`, full fixture | 64 | 1,536 | 34.373 | 35.216 | 35.316 | 4 | 8,192 | 1,914,055 | 8,192 |
+| equal-output format control, indexed host | 64 | 1,536 | 3.332 | 3.418 | 3.614 | 1 | 1,024 | 235,778 | 128 |
+| equal-output format control, full fixture | 64 | 1,536 | 38.555 | 40.200 | 40.598 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 13.3% above the narrow control and 12.4% below the wide
+control. Request-attributed API averages are 2.528/33.271 ms versus
+2.557/36.315 ms, or 1.1%/8.4% lower. The opposing narrow endpoint tail and
+API mean are retained as whole-run variation rather than attributed to array
+traversal. Every equal-width pair performs byte-identical public block
+selection, decode, payload reads, row materialization, sorting, limiting,
+projection, response cardinality, and response bytes. Native traversal,
+delimiter insertion, output allocation, and request-local destination writes
+are bounded post-scan Rust API work. The string-backed raw-token scanner is
+covered semantically rather than substituted into this representative native
+fixture; it has the same unavoidable public row boundary.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+14.125 ms and the explicit durability barrier took 38.957 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 99,612 KiB, 1,284 KiB above
+LQL-P39; metrics HWM was 52,056 KiB, 1,052 KiB above it. Both are retained as
+whole-process variation after four new repeated query shapes. Cancellation
+ended with zero requests in flight; direct evaluator and HTTP deadline
+regressions pin JSON depth/token/state/result/response bounds, rejection,
+cancellation, and reader reuse.
+
+All 1,199 pinned VictoriaLogs v1.52.0 cases pass live. The final local gates
+also pass: 136 logs library tests, 67 logs real-extension tests, 90 metrics
+real-extension tests, both complete Rust workspaces, the six focused storage
+correctness profiles, all 45 CLI/crash/transaction sections, DB-health, the
+33-test Rust query harness, Clippy with warnings denied, and formatting. The
+executable SQL cookbook contains 121 recipes and 159 statements, all of which
+run through the public release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. Direct SQLite/libSQL users have
+executable canonical-array `SQL-LOG-055`; measured equal public work provides
+no evidence for a new extension primitive. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

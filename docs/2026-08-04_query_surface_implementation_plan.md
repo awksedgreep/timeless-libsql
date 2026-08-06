@@ -1161,6 +1161,29 @@ remains four raw blocks; queues and in-flight cancellation are zero. The
 complete local gates close the shipped row without an extension primitive or
 storage-contract change.
 
+Session 18's `LQL-P40` implementation is complete as API-owned
+`json_array_concat` over public `logs` rows with canonical-array
+`SQL-LOG-055`. Pinned VictoriaLogs source plus the complete 1,199-case live
+oracle establish optional delimiters, default/bare/explicit fields, source
+snapshots, decoded strings, compact nonstrings, raw numeric spelling, object
+order, nested escape spelling, bare `NaN`, empty/nonarray behavior, and strict
+errors. The upstream processor assigns empty text while its streaming JSON
+encoder omits that column; Timeless explicitly returns the empty value to
+preserve its richer missing/null/empty model.
+
+The Rust evaluator traverses retained native arrays directly and uses a
+bounded validating scanner for JSON text rather than a lossy value round trip.
+Work/state/result/response/deadline limits, cancellation/reuse, rich dotted
+destinations, actionable conflicts, immutable storage, optimize, shutdown,
+and reopen are pinned. Exact release build
+`51beb50eb359a2ac2f9d03669547dcff12f8d774` measures 3.872/35.216 ms
+narrow/wide p95 versus 3.418/40.200 ms equal-output controls. `QSF-229`
+accepts the +13.3%/-12.4% p95 and -1.1%/-8.4% request-attributed API mean
+after identical public storage work and identical 64-row, 1,536-byte
+responses. All 8,192 entries complete durably; storage remains four raw
+blocks; queues and in-flight cancellation are zero. No extension primitive,
+private table, storage contract, or authoritative batching behavior changed.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

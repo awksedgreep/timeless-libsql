@@ -976,6 +976,12 @@ cancellation, and envelopes remain in the Rust logs API. The same public rows
 already cross the storage boundary, so no extension opcode or private-table
 path is added.
 
+Exact-build p50/p95/p99 is 3.202/3.872/4.930 ms narrow and
+34.373/35.216/35.316 ms wide, versus 3.332/3.418/3.614 and
+38.555/40.200/40.598 ms for equal-output controls. `QSF-229` accepts the
++13.3%/-12.4% p95 and -1.1%/-8.4% request-attributed API mean after identical
+public reads and identical 64-row, 1,536-byte responses.
+
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

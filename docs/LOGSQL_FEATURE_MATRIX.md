@@ -143,7 +143,7 @@ extension.
 | `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent)) | shipped | no | none | `API` | P3 |
-| `LQL-P40` | `json_array_concat` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-055-concatenate-one-json-array)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P40` | `json_array_concat` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-055-concatenate-one-json-array)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P42` | `unroll` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P43` | `join` | missing | no | `SQL` | `API` | P3 |
@@ -947,6 +947,16 @@ canonical array path. It cannot honestly preserve lexical number spelling or
 bare `NaN`, so complete behavior remains Rust API composition. Every value
 already crossed the public row boundary; no extension opcode, private table,
 durable mutation, or storage-contract change is justified.
+
+Exact-build `QSF-229` measures the native-array transform at
+3.202/3.872/4.930 ms narrow and 34.373/35.216/35.316 ms wide p50/p95/p99.
+Equal-output format controls measure 3.332/3.418/3.614 and
+38.555/40.200/40.598 ms. The +13.3%/-12.4% p95 and -1.1%/-8.4%
+request-attributed API mean occur after identical public blocks, decode,
+payload, materialized rows, sorting, limiting, projection, cardinality, and
+1,536 response bytes. The narrow opposing endpoint/API result is retained as
+whole-run variation. Bounded traversal and writes do not justify storage
+pushdown.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare
