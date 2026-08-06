@@ -2669,6 +2669,10 @@ fn is_extract_regexp_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "extract_regexp")
 }
 
+fn is_pack_json_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "pack_json")
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -2725,6 +2729,123 @@ fn lex_first_pipe(segment: &str, operation: &str) -> Result<Vec<String>, LogsqlE
         tokens.push(current);
     }
     Ok(tokens)
+}
+
+fn parse_pack_json_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let operation = "pack_json";
+    let tokens = lex_first_pipe(segment, operation)?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL pack_json pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL pack_json pipe, not {command:?}"
+        )));
+    }
+
+    let mut cursor = 1usize;
+    let mut fields = Vec::new();
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("fields"))
+    {
+        cursor += 1;
+        fields = parse_pack_json_fields(&tokens, &mut cursor)?;
+        if fields
+            .iter()
+            .any(|field| matches!(field, PipelineField::All))
+        {
+            fields.clear();
+        }
+    }
+
+    let mut destination = parse_pipeline_field("_msg", false)?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("as"))
+    {
+        // VictoriaLogs treats a terminal `as` as the omitted default `_msg`.
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        if matches!(token.as_str(), "(" | ")" | ",") {
+            return Err(LogsqlError::malformed(
+                "LogsQL pack_json result must be an exact field",
+            ));
+        }
+        destination = match parse_delete_field(token)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL pack_json result must be an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL pack_json token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::PackJson(PackJsonSpec {
+        fields,
+        destination,
+    }))
+}
+
+fn parse_pack_json_fields(
+    tokens: &[String],
+    cursor: &mut usize,
+) -> Result<Vec<PipelineField>, LogsqlError> {
+    if tokens.get(*cursor).is_none_or(|token| token != "(") {
+        return Err(LogsqlError::malformed(
+            "LogsQL pack_json fields requires parenthesized fields",
+        ));
+    }
+    *cursor += 1;
+    let mut fields = Vec::new();
+    loop {
+        match tokens.get(*cursor).map(String::as_str) {
+            Some(")") => {
+                *cursor += 1;
+                return Ok(fields);
+            }
+            Some(",") | None => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL pack_json fields requires a field after each comma",
+                ));
+            }
+            Some(token) => {
+                fields.push(parse_delete_field(token)?);
+                *cursor += 1;
+                match tokens.get(*cursor).map(String::as_str) {
+                    Some(")") => {
+                        *cursor += 1;
+                        return Ok(fields);
+                    }
+                    Some(",") => {
+                        *cursor += 1;
+                        if tokens.get(*cursor).is_some_and(|token| token == ")") {
+                            *cursor += 1;
+                            return Ok(fields);
+                        }
+                    }
+                    Some(token) => {
+                        return Err(LogsqlError::malformed(format!(
+                            "unexpected LogsQL pack_json fields token {token:?}; expected ',' or ')'"
+                        )));
+                    }
+                    None => {
+                        return Err(LogsqlError::malformed(
+                            "unterminated LogsQL pack_json fields",
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn parse_first_sort_fields(
@@ -3320,6 +3441,12 @@ pub(crate) struct ExtractRegexpSpec {
     pub condition: Option<LogPredicate>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PackJsonSpec {
+    pub fields: Vec<PipelineField>,
+    pub destination: PipelineField,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -3357,6 +3484,7 @@ pub(crate) enum PipelineOp {
     ReplaceRegexp(ReplaceRegexpSpec),
     Extract(ExtractSpec),
     ExtractRegexp(ExtractRegexpSpec),
+    PackJson(PackJsonSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3756,6 +3884,10 @@ pub fn parse_at(
                     timestamp_unit,
                     query_now,
                 )?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_pack_json_pipe(segment) => {
+                pipeline.push(parse_pack_json_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_extract_pipe(segment) => {
@@ -9084,6 +9216,32 @@ mod tests {
             "* | extract_regexp if (x:y)",
             r#"* | extract_regexp "(?P<field>.*)" keep_original_fields skip_empty_results"#,
             r#"* | extract_regexp "(?P<field>.*)" trailing"#,
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_pack_json_grammar_is_complete_and_strict() {
+        for query in [
+            "* | pack_json",
+            "* | pack_json as packed",
+            "* | pack_json packed",
+            "* | pack_json fields (case, nested.value, missing) as packed",
+            r#"* | PaCk_JsOn FiElDs ("nested."*, flag, *) As "packed field""#,
+        ] {
+            parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+
+        for query in [
+            "* | pack_json foo bar",
+            "* | pack_json fields",
+            "* | pack_json fields case",
+            "* | pack_json fields (case probe)",
+            "* | pack_json as *",
+            "* | pack_json as x*",
         ] {
             let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");

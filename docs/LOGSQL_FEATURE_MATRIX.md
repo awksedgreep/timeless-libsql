@@ -137,7 +137,7 @@ extension.
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
-| `LQL-P34` | `pack_json` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` | missing | no | `SQL` | `API` | P3 |
@@ -524,6 +524,34 @@ and -1.6%/+6.1% internal API variation follows exactly the same one/four
 blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 128/8,192 public rows. `QSF-185` accepts the bounded first-match capture/write
 cost above the unchanged public storage boundary.
+
+`LQL-P34` packs an exact, prefix, or all-field snapshot of each request-owned
+row into one deterministic compact JSON object. The Rust logs API accepts the
+case-insensitive `pack_json` command, optional `fields (...)`, default `_msg`,
+and explicit `as` or bare destinations. Selection is evaluated before the
+destination write, so packing `_msg` into `_msg` retains the source value in
+the generated object and later pipeline stages observe the packed string.
+Missing exact fields produce `{}`; prefix selection reconstructs nesting;
+overlapping selectors form an idempotent union. Work, selected paths,
+temporary JSON bytes, nesting, results, response bytes, deadlines, and
+cancellation are bounded, and request-local writes never mutate durable rows.
+
+This is an intentional rich-row compatibility profile rather than byte-for-
+byte VictoriaLogs flattening. Timeless preserves JSON numbers, booleans,
+arrays, objects, explicit nulls, and empty strings; it emits one valid object
+with stable key order. VictoriaLogs v1.52.0 flattens values to strings, omits
+empty values, follows current column order, and can emit duplicate keys for
+overlapping selectors. The complete 850-case pinned oracle records both the
+upstream behavior and this selected difference.
+
+Public
+[`SQL-LOG-041`](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)
+uses only `logs` plus SQLite JSON1 to distinguish missing paths and preserve
+native JSON values while constructing a bounded object. LogsQL selector
+grammar, recursive prefix/all selection, destination mutation, limits,
+cancellation, and HTTP envelopes remain Rust API composition over public
+rows. No extension primitive, private table, durable mutation, or storage-
+contract change is required.
 
 ## Statistics functions
 

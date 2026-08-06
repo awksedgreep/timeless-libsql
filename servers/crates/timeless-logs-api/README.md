@@ -978,6 +978,47 @@ one/four-block public scan. Responses and all storage counters are identical;
 no extension primitive can remove the already-required decode and row
 crossing.
 
+LogsQL `pack_json` serializes selected current-row fields into a compact JSON
+string without changing durable log metadata:
+
+```text
+* | pack_json
+* | pack_json as packed
+* | pack_json packed
+* | pack_json fields (host, status, context.*) as packed
+* | pack_json fields ("request."*) as request_json
+```
+
+The command is case-insensitive. Its destination defaults to `_msg` and may
+follow `as` or appear bare. An omitted or empty `fields (...)` list selects
+all fields; `*` anywhere in the list also selects all fields. Exact and
+prefix selectors may be quoted. Sources are snapshotted before the destination
+write, so default packing includes the old `_msg`, and later pipeline stages
+observe the new JSON string. A missing exact selection produces `{}`.
+Overlapping selectors are an idempotent union with deterministic key order.
+
+Timeless deliberately preserves retained rich metadata: numbers, booleans,
+arrays, objects, explicit nulls, empty strings, and empty objects remain their
+native JSON types, and dotted prefixes reconstruct nested objects. This is a
+documented compatibility difference from VictoriaLogs v1.52.0, which flattens
+columns to strings, omits empty values, follows current column order, and may
+emit duplicate keys for overlapping selectors. Timeless always emits one
+valid deterministic object.
+
+Selection, recursive traversal, paths, temporary JSON bytes, nesting, work,
+result rows, response bytes, deadlines, and cancellation use the shared hard
+limits. A destination beneath a scalar parent returns HTTP 422. The operation
+uses only request-owned public `logs` rows and remains immutable across flush,
+optimize, shutdown, and reopen.
+
+Direct SQLite/libSQL users can use executable
+[`SQL-LOG-041`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)
+to pack bounded exact metadata paths with public `logs` and JSON1 while
+preserving native types and missing/null/empty distinctions. Recursive
+LogsQL selectors, current-row destination writes, request limits,
+cancellation, and envelopes remain Rust API behavior; no language-specific
+extension primitive or private storage access is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

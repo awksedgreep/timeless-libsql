@@ -1249,6 +1249,51 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 128/8,192 public rows. `QSF-185` accepts the bounded API-side first-match
 capture and field-write work above the unchanged public storage boundary.
 
+## LogsQL typed `pack_json` over current rows
+
+`pack_json` snapshots selected request-owned fields and writes one compact
+JSON string to a current-row destination:
+
+```text
+* | pack_json
+* | pack_json as packed
+* | pack_json packed
+* | pack_json fields (host, status, context.*) as packed
+* | pack_json fields ("request."*) as request_json
+```
+
+The command, `fields`, and `as` are case-insensitive. The destination defaults
+to `_msg`; explicit destinations may follow `as` or be bare. Omitted or empty
+`fields (...)` selects all fields, as does `*` anywhere in the list. Exact and
+prefix selectors may be quoted. Selection snapshots the row before the
+destination write: `pack_json` includes the old `_msg` inside the new `_msg`,
+and packing over an existing destination captures its old value. Later stages
+observe the packed string. Missing exact fields yield `{}`; overlapping
+selectors form one idempotent union in deterministic key order.
+
+Timeless preserves the retained JSON model rather than flattening it.
+Numbers, booleans, arrays, objects, explicit nulls, empty strings, and empty
+objects retain their native JSON representation, while dotted prefix
+selection reconstructs nested objects. This intentionally differs from
+VictoriaLogs v1.52.0, which flattens current columns to strings, omits empty
+values, follows column order, and can emit duplicate keys for overlapping
+selectors. The pinned 850-case oracle records the upstream behavior; real-
+extension regressions pin the richer Timeless compatibility policy.
+
+Paths, recursive visits, selected values, temporary JSON bytes, nesting,
+work, result rows, response bytes, deadlines, and cancellation are bounded by
+the shared request limits. Destinations under scalar parents fail with HTTP
+422. Packing is query-local and never changes the public durable `logs` rows,
+including after optimize, shutdown, or reopen.
+
+Executable
+[`SQL-LOG-041`](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)
+uses public `logs`, `json_type`, `->`, and `json_set` to pack a bounded list
+of exact JSON paths while preserving missing/null/empty/type distinctions.
+Recursive prefix/all selectors, destination writes, language errors, limits,
+cancellation, and HTTP envelopes remain Rust API composition. No extension
+primitive, private table, or storage-format change is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

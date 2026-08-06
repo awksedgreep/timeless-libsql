@@ -3618,6 +3618,61 @@
       "id": "LQL-P33-extract-regexp-inline-case-folds-unicode",
       "query": "case:=format-row | format 'user=Царь' as source | extract_regexp '(?i)user=(?P<user>царь)' from source | fields case, user",
       "expected_rows": [{"case": "format-row", "user": "Царь"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-defaults-to-message-and-snapshots-source",
+      "query": "case:=state-zero | fields case, _msg | pack_json | fields case, _msg",
+      "expected_rows": [{"case": "state-zero", "_msg": "{\"case\":\"state-zero\",\"_msg\":\"state zero\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-selects-fields-and-textualizes-values",
+      "query": "case:=state-zero | fields case, probe | pack_json fields (case, probe) as packed | fields case, packed",
+      "expected_rows": [{"case": "state-zero", "packed": "{\"case\":\"state-zero\",\"probe\":\"0\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-prefix-selectors",
+      "query": "case:=format-row | fields case, math_a, math_b, host | pack_json fields (math_*) as packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "{\"math_a\":\"2\",\"math_b\":\"3\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-missing-selection-is-empty-object",
+      "query": "case:=state-zero | pack_json fields (missing) packed | fields case, packed",
+      "expected_rows": [{"case": "state-zero", "packed": "{}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-includes-old-destination-value",
+      "query": "case:=format-row | fields case, result | pack_json fields (result) as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "{\"result\":\"original\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-empty-fields-list-means-all",
+      "query": "case:=state-zero | fields case, probe | pack_json fields () as packed | fields case, packed",
+      "expected_rows": [{"case": "state-zero", "packed": "{\"case\":\"state-zero\",\"probe\":\"0\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-star-among-selectors-means-all",
+      "query": "case:=state-zero | fields case, probe | pack_json fields (missing, *,) as packed | fields case, packed",
+      "expected_rows": [{"case": "state-zero", "packed": "{\"case\":\"state-zero\",\"probe\":\"0\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-terminal-as-keeps-default-message",
+      "query": "case:=state-zero | fields case | pack_json as | fields case, _msg",
+      "expected_rows": [{"case": "state-zero", "_msg": "{\"case\":\"state-zero\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-omits-upstream-empty-values",
+      "query": "case:=state-empty | fields case, probe | pack_json fields (case, probe) as packed | fields case, packed",
+      "expected_rows": [{"case": "state-empty", "packed": "{\"case\":\"state-empty\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-packs-flattened-nested-fields",
+      "query": "case:=format-row | fields case, math_nested.value | pack_json fields (math_nested.*) as packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "{\"math_nested.value\":\"4\"}"}]
+    },
+    {
+      "id": "LQL-P34-pack-json-overlapping-selectors-repeat-upstream-key",
+      "query": "case:=format-row | fields case, math_a | pack_json fields (math_*, math_a) as packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "{\"math_a\":\"2\",\"math_a\":\"2\"}"}]
     }
   ],
   "error_cases": [
@@ -5458,6 +5513,34 @@
     {
       "id": "LQL-P33-extract-regexp-rejects-trailing-token",
       "query": "* | extract_regexp '(?P<foo>.*)' trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P34-pack-json-rejects-second-result-field",
+      "query": "* | pack_json foo bar",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P34-pack-json-requires-parenthesized-fields",
+      "query": "* | pack_json fields",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P34-pack-json-rejects-wildcard-result",
+      "query": "* | pack_json as *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P34-pack-json-rejects-prefix-result",
+      "query": "* | pack_json as x*",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

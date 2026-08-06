@@ -148,6 +148,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-038`](#sql-log-038-drop-one-empty-retained-metadata-field) | `LQL-P28` | current foundation | typed removal of one exact public metadata path when it is JSON null or an empty string; API owns dynamic current-row traversal, recursive empty-parent/row pruning, canonical fields, limits, cancellation, and envelopes |
 | [`SQL-LOG-039`](#sql-log-039-literal-replacement-in-one-exact-retained-field) | `LQL-P29` | current foundation | all-occurrence literal replacement over one exact public metadata path's textual projection; API owns LogsQL grammar, conditional/limited/sequential mutation, rich-value preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-040`](#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field) | `LQL-P32` | current foundation | two unquoted captures from one exact public metadata path using fixed literal prefix/middle/suffix delimiters; API owns LogsQL patterns, quoted-string decoding, conditions, current-row mutation/preservation, limits, cancellation, and envelopes |
+| [`SQL-LOG-041`](#sql-log-041-pack-selected-rich-metadata-fields-as-json) | `LQL-P34` | current foundation | bounded packing of a fixed list of exact public metadata paths into one typed nested JSON object; API owns current-row/canonical fields, prefix selection, destination mutation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6983,6 +6984,97 @@ storage read, block decode, or row crossing.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_extract_is_literal_typed_bounded_and_durable`.
+
+### SQL-LOG-041: pack selected rich metadata fields as JSON
+
+Bind a fixed list of exact SQLite JSON paths, inclusive native timestamp
+bounds, and positive work/result limits. This recursive statement builds one
+compact JSON object per public log row while preserving strings, numbers,
+booleans, arrays, objects, explicit nulls, empty strings, and nested paths:
+
+```sql
+WITH RECURSIVE
+bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), selected(position, path) AS (
+  VALUES
+    (1, :pack_path_1),
+    (2, :pack_path_2),
+    (3, :pack_path_3),
+    (4, :pack_path_4),
+    (5, :pack_path_5),
+    (6, :pack_path_6)
+), packed(ts, level, message, metadata, position, packed_json) AS (
+  SELECT ts, level, message, metadata, 0, json('{}')
+  FROM bounded
+  UNION ALL
+  SELECT
+    packed.ts,
+    packed.level,
+    packed.message,
+    packed.metadata,
+    selected.position,
+    CASE
+      WHEN json_type(packed.metadata, selected.path) IS NULL
+      THEN packed.packed_json
+      ELSE json_set(
+        packed.packed_json,
+        selected.path,
+        packed.metadata -> selected.path
+      )
+    END
+  FROM packed
+  JOIN selected ON selected.position = packed.position + 1
+)
+SELECT ts, level, message, packed_json
+FROM packed
+WHERE position = (SELECT count(*) FROM selected)
+  AND :max_result_rows > 0
+ORDER BY ts, level, message, packed_json
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit. The six
+`:pack_path_N` values are valid exact SQLite JSON paths such as `$.host`,
+`$.nested.ok`, or `$.tags`; extend or shorten the `selected` values for the
+application's fixed schema. `json_type(...) IS NULL` means the path is
+missing and omits that key. The JSON type name `null` is non-NULL, so explicit
+JSON null is packed. The `->` operator preserves JSON subtypes when
+`json_set()` inserts booleans, numbers, arrays, objects, and nulls. Empty text
+is retained. Nested paths are reconstructed. Output is compact JSON TEXT,
+ordered deterministically with its source identity. The statement is
+read-only; it never updates durable metadata.
+
+The complete `LQL-P34` API additionally owns case-insensitive `pack_json`
+grammar; default `_msg`, optional bare, `as`, quoted, and dotted exact
+destinations; `fields (...)` exact/all/prefix selectors; canonical `_msg`,
+`_time`, and `level`; recursively selected current-row fields; sequential
+pipeline composition; and field-conflict, work, response, deadline, and
+cancellation envelopes. An empty selector list or a list containing `*`
+packs every current field. The API snapshots the row before overwriting its
+destination and keeps other fields unchanged.
+
+VictoriaLogs flattens every value to text, omits empty values, preserves
+current column order, and can emit duplicate JSON keys for overlapping
+selectors. Timeless deliberately returns one deterministic valid JSON object:
+selector overlap is an idempotent set union, retained native types and
+explicit empty/null values survive, and nested metadata remains nested. This
+is the selected compatibility policy rather than a claim of byte-identical
+output for richer Timeless rows.
+
+Every packed value already crosses the bounded public `logs` row interface.
+SQLite JSON1 provides the useful fixed-schema operation directly; moving
+dynamic LogsQL grammar or current-row mutation into the extension would not
+avoid a storage read, block decode, or row crossing. No extension primitive,
+private shadow-table access, or storage-format change is warranted.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_pack_json_is_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

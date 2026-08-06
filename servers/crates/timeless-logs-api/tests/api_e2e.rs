@@ -4708,6 +4708,267 @@ async fn session_seventeen_extract_regexp_is_first_match_typed_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_pack_json_is_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("pack-json-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: "original message".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"pack-json-admin",
+                        "pack_json_group":"pack-json",
+                        "number":101,
+                        "zero":0,
+                        "flag":false,
+                        "empty":"",
+                        "null_value":null,
+                        "array":["prod",1],
+                        "nested":{"keep":"yes", "drop":"no"},
+                        "empty_object":{},
+                        "old_destination":"old"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "second".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"pack-json-user",
+                        "pack_json_group":"pack-json",
+                        "number":202
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let rows = pipeline_rows(
+        &app,
+        r#"case:="pack-json-admin" | pack_json fields (case, number, zero, flag, empty, null_value, array, nested.keep, empty_object, missing) as packed | fields case, packed"#,
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["case"], "pack-json-admin");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0]["packed"].as_str().unwrap()).unwrap(),
+        serde_json::json!({
+            "case":"pack-json-admin",
+            "number":101,
+            "zero":0,
+            "flag":false,
+            "empty":"",
+            "null_value":null,
+            "array":["prod",1],
+            "nested":{"keep":"yes"},
+            "empty_object":{}
+        })
+    );
+
+    let rows = pipeline_rows(
+        &app,
+        r#"case:="pack-json-admin" | fields case, _msg, level, _time | pack_json | fields case, _msg"#,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0]["_msg"].as_str().unwrap()).unwrap(),
+        serde_json::json!({
+            "case":"pack-json-admin",
+            "_msg":"original message",
+            "level":"warning",
+            "_time":"2027-01-15T08:00:00.000001Z"
+        })
+    );
+
+    let rows = pipeline_rows(
+        &app,
+        r#"case:="pack-json-admin" | PaCk_JsOn FiElDs ("nested."*, flag, missing) As "packed field" | fields case, "packed field""#,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0]["packed field"].as_str().unwrap())
+            .unwrap(),
+        serde_json::json!({
+            "flag":false,
+            "nested":{"drop":"no", "keep":"yes"}
+        })
+    );
+
+    let rows = pipeline_rows(
+        &app,
+        r#"case:="pack-json-admin" | fields case, number | pack_json fields (missing, *,) packed | len(packed) as packed_len | fields case, packed, packed_len"#,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0]["packed"].as_str().unwrap()).unwrap(),
+        serde_json::json!({"case":"pack-json-admin", "number":101})
+    );
+    assert_eq!(
+        rows[0]["packed_len"],
+        rows[0]["packed"].as_str().unwrap().len().to_string()
+    );
+
+    let rows = pipeline_rows(
+        &app,
+        r#"case:="pack-json-admin" | pack_json fields (old_destination) as old_destination | fields case, old_destination"#,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0]["old_destination"].as_str().unwrap())
+            .unwrap(),
+        serde_json::json!({"old_destination":"old"})
+    );
+
+    for malformed in [
+        "* | pack_json foo bar",
+        "* | pack_json fields",
+        "* | pack_json fields case",
+        "* | pack_json fields (case number)",
+        "* | pack_json as *",
+        "* | pack_json as x*",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="pack-json-admin" | pack_json as number.child"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="pack-json-admin" | pack_json as packed"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let work_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(work_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(work_limited["reason"], "max_work_rows", "{work_limited}");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_response_bytes: 8,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="pack-json-admin" | pack_json as packed"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(response_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response_limited["reason"], "max_response_bytes",
+        "{response_limited}"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="pack-json-admin" | fields case, _msg, number, zero, flag, empty, null_value, array, nested, empty_object, old_destination"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"pack-json-admin",
+            "_msg":"original message",
+            "number":101,
+            "zero":0,
+            "flag":false,
+            "empty":"",
+            "null_value":null,
+            "array":["prod",1],
+            "nested":{"keep":"yes", "drop":"no"},
+            "empty_object":{},
+            "old_destination":"old"
+        })],
+        "pack_json must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let rows = pipeline_rows(
+        &router(reopened.clone()),
+        r#"case:="pack-json-admin" | pack_json fields (case, number, flag, null_value, array, nested) as packed | fields case, packed"#,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0]["packed"].as_str().unwrap()).unwrap(),
+        serde_json::json!({
+            "case":"pack-json-admin",
+            "number":101,
+            "flag":false,
+            "null_value":null,
+            "array":["prod",1],
+            "nested":{"keep":"yes", "drop":"no"}
+        })
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -10214,6 +10475,40 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_replace_regexp_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_pack_json = storage.stats().await.unwrap().api_query_cancelled;
+    let pack_json_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | pack_json as selected | fields selected | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(pack_json_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_pack_json && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_pack_json);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_pack_json_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            r#"level:error | pack_json fields (_msg, level) as selected | fields selected | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_pack_json_cancel.status(), StatusCode::OK);
 
     let cancelled_before_extract_regexp = storage.stats().await.unwrap().api_query_cancelled;
     let extract_regexp_timeout = router_with_limits(

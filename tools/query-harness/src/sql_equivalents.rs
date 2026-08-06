@@ -393,6 +393,12 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "extract_source_path" => Value::Text("$.client_ip".to_owned()),
         "extract_prefix" => Value::Text(String::new()),
         "extract_middle" | "extract_suffix" => Value::Text(".".to_owned()),
+        "pack_path_1" => Value::Text("$.host".to_owned()),
+        "pack_path_2" => Value::Text("$.duration_ms".to_owned()),
+        "pack_path_3" => Value::Text("$.nested.ok".to_owned()),
+        "pack_path_4" => Value::Text("$.nested.none".to_owned()),
+        "pack_path_5" => Value::Text("$.tags".to_owned()),
+        "pack_path_6" => Value::Text("$.nested.empty".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1687,6 +1693,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let drop_empty_rows = recipe_values("SQL-LOG-038", 0)?;
     let replace_rows = recipe_values("SQL-LOG-039", 0)?;
     let extract_rows = recipe_values("SQL-LOG-040", 0)?;
+    let pack_json_rows = recipe_values("SQL-LOG-041", 0)?;
     if [
         bounded,
         substring,
@@ -2114,6 +2121,43 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if source_ips != ["010.000.000.001", "10.0.1.1"] {
         bail!("SQL-LOG-040 mutated its public source: {source_ips:?}");
+    }
+    if pack_json_rows.len() != 2 {
+        bail!("SQL-LOG-041 result cardinality changed: {pack_json_rows:?}");
+    }
+    let expected_packed = [
+        serde_json::json!({
+            "host":"web-1",
+            "duration_ms":12,
+            "nested":{"ok":true, "none":null, "empty":""},
+            "tags":["prod", "", 123, true, false, null, {"nested":"ignored"}, ["ignored"], "ab", "*"]
+        }),
+        serde_json::json!({
+            "host":"web-2",
+            "duration_ms":4,
+            "nested":{"ok":"true", "empty":null},
+            "tags":["dev", 1.5, -2, "123", "a\"b", "a\nb", "a/b"]
+        }),
+    ];
+    for (row, expected) in pack_json_rows.iter().zip(expected_packed) {
+        let Some(Value::Text(packed)) = row.get(3) else {
+            bail!("SQL-LOG-041 packed result is not JSON TEXT: {row:?}");
+        };
+        let packed = serde_json::from_str::<serde_json::Value>(packed)?;
+        if packed != expected {
+            bail!("SQL-LOG-041 typed packed result changed: {packed}");
+        }
+    }
+    let source_packed_fields = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_packed_fields.len() != 2
+        || source_packed_fields
+            .iter()
+            .any(|metadata| serde_json::from_str::<serde_json::Value>(metadata).is_err())
+    {
+        bail!("SQL-LOG-041 mutated its public source: {source_packed_fields:?}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3340,13 +3384,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 106);
+        assert_eq!(recipes.len(), 107);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            136
+            137
         );
         assert_eq!(
             recipes
@@ -3354,7 +3398,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            142
+            143
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

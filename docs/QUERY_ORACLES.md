@@ -725,3 +725,20 @@ Source audit is against `pipe_extract_regexp.go` and
 row-query cases, 263 error cases, and 274 statistics/pipeline cases: 835 cases
 total, all passing against the immutable image.
 The fixture now contains 835 cases.
+
+`LQL-P34` adds eleven exact pipeline-result cases and four error cases for
+`pack_json`. They pin default `_msg` and explicit/bare destinations; source
+snapshotting before destination overwrite; exact, prefix, empty-list, and
+all-field selection; case-insensitive grammar; terminal `as`; missing-field
+objects; flattened nested fields; numeric textualization; upstream empty-value
+omission; and duplicate keys from overlapping upstream selectors. A second
+destination, missing parenthesized field list, and wildcard destinations fail.
+Source audit is against `pipe_pack_json.go`, `pipe_pack.go`, `rows.go`, and
+their tests at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 298
+row-query cases, 267 error cases, and 285 statistics/pipeline cases: 850 cases
+total, all passing against the immutable image. Timeless selects an explicit
+richer retained-model policy: one deterministic JSON object, idempotent
+selector union, native JSON types, explicit empty/null values, and reconstructed
+nested objects instead of duplicate flattened textual keys.
+The fixture now contains 850 cases.
