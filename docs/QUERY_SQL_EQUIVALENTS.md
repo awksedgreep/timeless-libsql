@@ -167,6 +167,14 @@ send LogsQL syntax to the extension. Each selected storage operation still
 uses the applicable public-row recipe above. Claiming a storage SQL equivalent
 for source preprocessing would conflate the two languages.
 
+`LQL-F37` intentionally has no SQL recipe. `seq(...)` is an ordered,
+non-overlapping phrase search with Unicode letter/digit/underscore boundary
+rules. Core SQLite has no portable predicate for those Unicode categories, and
+an `instr()` chain would silently accept attached word characters. Direct SQL
+users may deliberately write such a byte-substring chain when that weaker
+contract is wanted, but it is not an honest LogsQL equivalent. The matrix
+therefore keeps this row `ROWS`/`API`, not `SQL` or `EXT`.
+
 ## Setup and parameter conventions
 
 Examples assume the extension has been loaded and these tables exist:

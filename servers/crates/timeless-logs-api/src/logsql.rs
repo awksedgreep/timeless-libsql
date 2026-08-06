@@ -3965,6 +3965,10 @@ pub fn parse_at(
                         append_predicate(&mut spec, predicate);
                         continue;
                     }
+                    if let Some(predicate) = parse_sequence_filter(&token, LogField::Message)? {
+                        append_predicate(&mut spec, predicate);
+                        continue;
+                    }
                     if let Some(predicate) =
                         parse_json_array_contains_any_filter(&token, LogField::Message)?
                     {
@@ -4455,6 +4459,63 @@ fn parse_contains_filter(
         }));
     }
     Ok(None)
+}
+
+fn parse_sequence_filter(
+    token: &str,
+    field: LogField,
+) -> Result<Option<LogPredicate>, LogsqlError> {
+    const FUNCTION: &str = "seq";
+
+    // The bare name remains an ordinary word/exact field value upstream. It
+    // becomes a sequence function only when followed by an opening parenthesis.
+    let Some(open) = token.find('(') else {
+        return Ok(None);
+    };
+    if !token[..open].eq_ignore_ascii_case(FUNCTION) {
+        return Ok(None);
+    }
+    let inner = token[open..]
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| LogsqlError::malformed("unterminated LogsQL seq() filter"))?;
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Ok(Some(LogPredicate::True));
+    }
+    let inner = inner.strip_suffix(',').unwrap_or(inner).trim_end();
+    if inner.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL seq() cannot start with an empty value",
+        ));
+    }
+
+    let mut phrases = Vec::new();
+    for argument in split_top_level(inner, ',')? {
+        let argument = argument.trim();
+        let phrase = if let Some(value) = quoted_value(argument)? {
+            value
+        } else {
+            if argument.is_empty()
+                || argument.chars().any(|character| {
+                    character.is_whitespace() || matches!(character, '*' | '(' | ')')
+                })
+            {
+                return Err(LogsqlError::malformed(format!(
+                    "invalid LogsQL seq() value {argument:?}"
+                )));
+            }
+            argument.to_owned()
+        };
+        if !phrase.is_empty() {
+            phrases.push(phrase);
+        }
+    }
+    Ok(Some(if phrases.is_empty() {
+        LogPredicate::True
+    } else {
+        LogPredicate::TextualSequence { field, phrases }
+    }))
 }
 
 fn parse_json_array_contains_any_filter(
@@ -6200,6 +6261,9 @@ fn compile_field_filter(
     if let Some(predicate) = parse_contains_filter(value, field.clone())? {
         return Ok(predicate);
     }
+    if let Some(predicate) = parse_sequence_filter(value, field.clone())? {
+        return Ok(predicate);
+    }
     if let Some(predicate) = parse_json_array_contains_any_filter(value, field.clone())? {
         return Ok(predicate);
     }
@@ -6287,6 +6351,9 @@ fn compile_unqualified_filter(field: &LogField, atom: &str) -> Result<LogPredica
         return Ok(exact.predicate(field.clone()));
     }
     if let Some(predicate) = parse_contains_filter(atom, field.clone())? {
+        return Ok(predicate);
+    }
+    if let Some(predicate) = parse_sequence_filter(atom, field.clone())? {
         return Ok(predicate);
     }
     if let Some(predicate) = parse_json_array_contains_any_filter(atom, field.clone())? {
@@ -6879,6 +6946,7 @@ fn uses_legacy_exact_syntax(token: &str, prefix: &str) -> bool {
                 "in",
                 "contains_all",
                 "contains_any",
+                "seq",
                 "json_array_contains_any",
                 "ipv4_range",
                 "ipv6_range",
@@ -6932,6 +7000,9 @@ fn apply_metadata_filter(spec: &mut QuerySpec, token: &str) -> Result<(), Logsql
         append_predicate(spec, exact.predicate(log_field(&path)));
         return Ok(());
     } else if let Some(predicate) = parse_contains_filter(value, log_field(&path))? {
+        append_predicate(spec, predicate);
+        return Ok(());
+    } else if let Some(predicate) = parse_sequence_filter(value, log_field(&path))? {
         append_predicate(spec, predicate);
         return Ok(());
     } else if let Some(predicate) = parse_json_array_contains_any_filter(value, log_field(&path))? {
@@ -8222,6 +8293,36 @@ mod tests {
             "contains_all(,alpha)",
             "contains_all(alpha beta)",
             "contains_all(alpha*)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_sequence_grammar_preserves_order_and_is_strict() {
+        for query in [
+            "seq(ssh, login, fail)",
+            r#"seq("ssh:", "login fail")"#,
+            "case:seq(phrase, exact)",
+            r#"never_present:seq()"#,
+            r#"never_present:seq("", "")"#,
+            r#"seq("", ssh, "", fail,)"#,
+            "case:SeQ(word, exact)",
+            "seq",
+            "* | filter case:seq(pattern, num)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0);
+            assert!(plan.is_ok(), "{query}: {plan:?}");
+        }
+
+        for malformed in [
+            "seq(",
+            "seq(,alpha)",
+            "seq(alpha,,beta)",
+            "seq(alpha beta)",
+            "seq(alpha*)",
+            "seq(*)",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");

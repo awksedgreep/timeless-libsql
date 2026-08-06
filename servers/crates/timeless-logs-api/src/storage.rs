@@ -656,6 +656,13 @@ pub enum LogPredicate {
         field: LogField,
         values: Vec<String>,
     },
+    /// VictoriaLogs `seq(v1, ..., vN)` semantics over the public textual
+    /// projection of a retained field. Phrases remain ordered (including
+    /// duplicates) and each match resumes after the preceding phrase.
+    TextualSequence {
+        field: LogField,
+        phrases: Vec<String>,
+    },
     /// VictoriaLogs `json_array_contains_any(v1, ..., vN)` over a retained
     /// typed JSON array. Primitive elements compare by their exact string
     /// representation; nested arrays and objects never match.
@@ -2716,6 +2723,17 @@ fn log_predicate_matches_resolved(
             ensure_query_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::TextualSequence { field, phrases } => {
+            let matched = log_field_projected_matches(
+                resolved_field!(field),
+                message,
+                level,
+                metadata,
+                |text| logsql_sequence_matches(text, phrases),
+            );
+            ensure_query_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::JsonArrayContainsAny { field, values } => {
             let matched = match resolved_field!(field) {
                 LogField::Metadata(path) => metadata
@@ -2920,6 +2938,7 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::TextualIn { field, .. }
         | LogPredicate::TextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::TextualSequence { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }
         | LogPredicate::Ipv6Range { field, .. }
@@ -3035,6 +3054,7 @@ fn predicate_references_metadata(predicate: &LogPredicate) -> bool {
         | LogPredicate::TextualIn { field, .. }
         | LogPredicate::TextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::TextualSequence { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }
         | LogPredicate::Ipv6Range { field, .. }
@@ -3367,13 +3387,28 @@ fn logsql_prefix_matches(value: &str, prefix: &str, phrase: bool) -> bool {
 /// characters at either edge must begin/end a LogsQL word. Punctuation at an
 /// edge has no additional boundary requirement.
 fn logsql_phrase_matches(message: &str, phrase: &str) -> bool {
+    logsql_phrase_match_end(message, phrase).is_some()
+}
+
+fn logsql_sequence_matches(message: &str, phrases: &[String]) -> bool {
+    let mut remaining = message;
+    for phrase in phrases {
+        let Some(end) = logsql_phrase_match_end(remaining, phrase) else {
+            return false;
+        };
+        remaining = &remaining[end..];
+    }
+    true
+}
+
+fn logsql_phrase_match_end(message: &str, phrase: &str) -> Option<usize> {
     if phrase.is_empty() {
-        return false;
+        return None;
     }
     let require_start_boundary = phrase.chars().next().is_some_and(logsql_word_char);
     let require_end_boundary = phrase.chars().next_back().is_some_and(logsql_word_char);
 
-    message.match_indices(phrase).any(|(start, matched)| {
+    message.match_indices(phrase).find_map(|(start, matched)| {
         let start_ok = !require_start_boundary
             || start == 0
             || message[..start]
@@ -3387,7 +3422,7 @@ fn logsql_phrase_matches(message: &str, phrase: &str) -> bool {
                 .chars()
                 .next()
                 .is_none_or(|character| !logsql_word_char(character));
-        start_ok && end_ok
+        (start_ok && end_ok).then_some(end)
     })
 }
 

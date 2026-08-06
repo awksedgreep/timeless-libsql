@@ -699,6 +699,96 @@
       "expected_cases": ["numeric-negative", "numeric-two", "numeric-decimal"]
     },
     {
+      "id": "LQL-F37-unqualified-ordered-sequence",
+      "query": "seq(ssh, login, fail)",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-inside", "phrase-punctuation", "phrase-space", "phrase-unicode-punctuation"]
+    },
+    {
+      "id": "LQL-F37-order-is-significant",
+      "query": "seq(fail, login, ssh)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F37-repeated-phrase-requires-repeated-text",
+      "query": "seq(ssh, ssh)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F37-field-scoped-sequence",
+      "query": "case:seq(phrase, exact)",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-F37-quoted-phrases-preserve-boundaries",
+      "query": "seq(\"ssh:\", \"login fail\")",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-inside", "phrase-punctuation", "phrase-space", "phrase-unicode-punctuation"]
+    },
+    {
+      "id": "LQL-F37-quoted-comma-is-one-phrase",
+      "query": "seq(\"time=10:20:30,123\")",
+      "status": 200,
+      "expected_cases": ["pattern-time"]
+    },
+    {
+      "id": "LQL-F37-empty-list-is-field-independent",
+      "query": "state_group:=\"state\" never_present:seq()",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F37-empty-phrases-are-ignored",
+      "query": "state_group:=\"state\" never_present:seq(\"\", \"\")",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-F37-empty-phrases-and-trailing-comma",
+      "query": "seq(\"\", ssh, \"\", fail,)",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-inside", "phrase-punctuation", "phrase-space", "phrase-unicode-punctuation"]
+    },
+    {
+      "id": "LQL-F37-function-name-is-case-insensitive",
+      "query": "case:SeQ(word, exact)",
+      "status": 200,
+      "expected_cases": ["word-exact"]
+    },
+    {
+      "id": "LQL-F37-bare-name-remains-a-word-filter",
+      "query": "seq",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F37-missing-field-with-nonempty-sequence-does-not-match",
+      "query": "state_group:=\"state\" never_present:seq(value)",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
+      "id": "LQL-F37-pipeline-composition",
+      "query": "pattern_group:=\"number\" | filter case:seq(pattern, num)",
+      "status": 200,
+      "expected_cases": ["pattern-num-decimal", "pattern-num-hex", "pattern-num-short-hex"]
+    },
+    {
+      "id": "LQL-F37-logical-composition",
+      "query": "seq(ssh, fail) AND NOT case:=\"phrase-inside\"",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-punctuation", "phrase-space", "phrase-unicode-punctuation"]
+    },
+    {
+      "id": "LQL-F37-rich-textual-number-projection",
+      "query": "numeric_group:=\"numeric\" n:seq(2, .5)",
+      "status": 200,
+      "expected_cases": ["numeric-decimal"]
+    },
+    {
       "id": "LQL-F22-unqualified-word-or-phrase",
       "query": "contains_any(alpha, \"ssh: login fail\")",
       "status": 200,
@@ -4048,6 +4138,48 @@
     {
       "id": "LQL-F21-attached-wildcard-is-invalid",
       "query": "contains_all(alpha*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F37-leading-empty-value-is-invalid",
+      "query": "seq(,alpha)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F37-interior-empty-value-is-invalid",
+      "query": "seq(alpha,,beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F37-unseparated-values-are-invalid",
+      "query": "seq(alpha beta)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F37-attached-wildcard-is-invalid",
+      "query": "seq(alpha*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F37-standalone-wildcard-is-invalid",
+      "query": "seq(*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F37-unterminated-list-is-invalid",
+      "query": "seq(alpha",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

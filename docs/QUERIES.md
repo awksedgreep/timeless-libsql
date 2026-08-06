@@ -263,6 +263,25 @@ remain literal, function names are case-insensitive, and a non-empty list does
 not match a missing field. For example, `contains_any(error, "login failed")`
 matches either phrase; it does not require both.
 
+`seq(v1, ..., vN)` requires the non-empty phrases to appear in the selected
+field in the declared order. Each phrase uses the same case-sensitive Unicode
+letter/digit/underscore boundaries, and the next search begins only after the
+preceding match ends. Unlike `contains_all`, order and duplicates therefore
+matter: `seq(open, close)` differs from `seq(close, open)`, and
+`seq(retry, retry)` requires two non-overlapping occurrences. Empty arguments
+are ignored; `seq()` and an all-empty list are field-independent true
+predicates. One trailing comma is accepted, the function name is
+case-insensitive, and unquoted wildcards or malformed separators fail
+explicitly. The bare word `seq` remains an ordinary word filter.
+
+Unqualified sequences inspect `_msg`; `field:seq(...)`, field-prefix groups,
+logical expressions, and `filter`/`where` pipelines inspect the selected
+current-row textual projection. Strings retain their bytes, numbers and
+booleans use their exact textual form, and retained arrays/objects use compact
+JSON without changing stored types. VictoriaLogs flattens rich objects into
+dotted string fields; Timeless deliberately retains native nested JSON and can
+also sequence-match an explicitly selected parent object's compact projection.
+
 `field:json_array_contains_any(v1, ..., vN)` selects only a retained JSON
 array and succeeds when any top-level primitive element has the same exact
 textual representation as a static candidate. Decoded strings compare by
@@ -290,12 +309,14 @@ column pruning for a declared string-only index key. `SQL-LOG-017` uses public
 `json_each` rows for exact top-level JSON-array primitive membership. These API
 constructs do not require a private table or new extension primitive.
 
-There is intentionally no `contains_all` or `contains_any` SQL recipe. Portable
-SQLite `LIKE`, `GLOB`, and `instr` cannot reproduce the required Unicode-
-category word boundaries, and adding a storage primitive would not avoid the
-public row decode already required for arbitrary rich fields. Direct SQL users
-can compose intentionally looser substring predicates when that is their
-desired contract; those predicates are not labeled LogsQL parity.
+There is intentionally no `contains_all`, `contains_any`, or `seq` SQL recipe.
+Portable SQLite `LIKE`, `GLOB`, and `instr` cannot reproduce the required
+Unicode-category word boundaries; `seq` additionally requires ordered,
+non-overlapping phrase searches. Adding a storage primitive would not avoid
+the public row decode already required for arbitrary rich fields. Direct SQL
+users can compose intentionally looser `instr()` substring predicates when
+that is their desired contract; those predicates are not labeled LogsQL
+parity.
 
 `field:string_range(minimum, maximum)` compares the complete textual field in
 plain unsigned UTF-8 byte order. It includes `minimum`, excludes `maximum`,

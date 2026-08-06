@@ -683,6 +683,8 @@ public rows while retaining Timeless's rich JSON types, plus static
 `contains_all(...)` phrase conjunction and `contains_any(...)` phrase
 disjunction over the same rich projection, plus exact top-level primitive
 membership for retained JSON arrays through `json_array_contains_any(...)`,
+plus ordered non-overlapping `seq(...)` phrase matching with the same Unicode
+boundaries and strict static-list grammar,
 plus lower-inclusive/upper-exclusive bytewise `string_range(...)` filtering
 over the same non-mutating rich projection, plus inclusive Unicode-codepoint
 `len_range(...)` filtering with VictoriaLogs-compatible unsigned bound
@@ -823,9 +825,10 @@ retained-text byte-range and codepoint-length foundations in `SQL-LOG-019`
 and `SQL-LOG-020`, plus complete retained-model field equality and the
 bytewise ordering fallback in `SQL-LOG-021`, including the
 literal public-row prefix-selected field-set foundation in `SQL-LOG-022`, and
-existing public posting index for declared string-only keys. `contains_all`
-and `contains_any` remain honest API-only rows: portable SQLite does not supply
-their Unicode phrase-boundary predicate. JSON-array membership needs no new
+existing public posting index for declared string-only keys. `contains_all`,
+`contains_any`, and ordered `seq` remain honest API-only rows: portable SQLite
+does not supply their Unicode phrase-boundary predicate, and `seq` also needs
+ordered non-overlapping search state. JSON-array membership needs no new
 extension primitive because bounded public rows plus `json_each` expose the
 exact retained-type operation. The
 extension exposes general SQLite/libSQL primitives and

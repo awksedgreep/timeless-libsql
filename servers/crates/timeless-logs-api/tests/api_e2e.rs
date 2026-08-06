@@ -9289,6 +9289,201 @@ async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reope
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_sequence_filters_are_ordered_rich_bounded_and_reopenable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("sequence-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let mut body = String::new();
+    for index in 0..8_192_u64 {
+        let (message, case, n, payload) = match index {
+            0 => (
+                "ssh: login fail",
+                "exact",
+                Some(serde_json::json!(2.5)),
+                Some(serde_json::json!({"ready": true, "stage": "ssh login fail"})),
+            ),
+            1 => ("prefix ssh: login fail suffix", "inside", None, None),
+            2 => ("ssh: login failed", "suffix", None, None),
+            3 => ("fail before login before ssh", "reverse", None, None),
+            4 => ("ssh before ssh", "repeated", None, None),
+            5 => ("éssh login fail", "unicode-prefix", None, None),
+            6 => ("alpha then beta", "unicode", None, None),
+            _ => ("request sequence filler", "filler", None, None),
+        };
+        let mut row = serde_json::json!({
+            "_time": 1_812_000_000_000_000_i64 + index as i64,
+            "_msg": message,
+            "level": "info",
+            "case": case,
+        });
+        if let Some(n) = n {
+            row["n"] = n;
+        }
+        if let Some(payload) = payload {
+            row["payload"] = payload;
+        }
+        body.push_str(&row.to_string());
+        body.push('\n');
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn cases(app: &axum::Router, query: &str) -> Vec<String> {
+        let mut cases = pipeline_rows(app, &format!("{query} | fields case | limit 10000"))
+            .await
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cases.sort();
+        cases
+    }
+
+    assert_eq!(
+        cases(&app, "seq(ssh, login, fail)").await,
+        ["exact", "inside"]
+    );
+    assert_eq!(cases(&app, "seq(fail, login, ssh)").await, ["reverse"]);
+    assert_eq!(cases(&app, "seq(ssh, ssh)").await, ["repeated"]);
+    assert_eq!(cases(&app, "payload.stage:seq(ssh, fail)").await, ["exact"]);
+    assert_eq!(cases(&app, "n:seq(2, .5)").await, ["exact"]);
+    assert_eq!(cases(&app, "payload:seq(ready, true)").await, ["exact"]);
+    assert_eq!(
+        cases(
+            &app,
+            "* | copy _msg as current | filter current:seq(ssh, fail)"
+        )
+        .await,
+        ["exact", "inside"]
+    );
+    assert_eq!(
+        cases(&app, "seq(ssh, fail) AND NOT case:=\"inside\"").await,
+        ["exact"]
+    );
+
+    let no_op = app
+        .clone()
+        .oneshot(logsql_request("never_present:seq() | stats count()"))
+        .await
+        .unwrap();
+    assert_eq!(no_op.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(no_op.into_body(), usize::MAX).await.unwrap()[..],
+        b"{\"total\":8192}\n"
+    );
+
+    for malformed in [
+        "seq(,alpha)",
+        "seq(alpha,,beta)",
+        "seq(alpha beta)",
+        "seq(alpha*)",
+        "seq(*)",
+        "seq(alpha",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("seq(request, absent) | limit 10000"))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(work_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+
+    let cancelled_before = storage.stats().await.unwrap().api_query_cancelled;
+    let timed_out = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("seq(request, absent) | limit 10000"))
+    .await
+    .unwrap();
+    assert_eq!(timed_out.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before);
+    assert_eq!(stats.api_query_in_flight, 0);
+    assert_eq!(
+        cases(&app, "seq(ssh, login, fail)").await,
+        ["exact", "inside"]
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    assert_eq!(
+        cases(&app, "seq(ssh, login, fail)").await,
+        ["exact", "inside"]
+    );
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        cases(&reopened_app, "seq(ssh, login, fail)").await,
+        ["exact", "inside"]
+    );
+    assert_eq!(
+        cases(&reopened_app, "payload:seq(ready, true)").await,
+        ["exact"]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_twelve_logsql_word_filter_matches_unicode_oracle_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

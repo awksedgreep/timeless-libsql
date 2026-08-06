@@ -5806,6 +5806,13 @@ fn predicate_matches_resolved(
             ensure_active(cancelled)?;
             Ok(matched)
         }
+        LogPredicate::TextualSequence { field, phrases } => {
+            let matched = projected_field_matches(row, resolved_field!(field), |text| {
+                sequence_matches(text, phrases)
+            });
+            ensure_active(cancelled)?;
+            Ok(matched)
+        }
         LogPredicate::JsonArrayContainsAny { field, values } => {
             let matched = field_json(row, resolved_field!(field))
                 .and_then(Value::as_array)
@@ -5995,6 +6002,7 @@ fn predicate_field_prefix(predicate: &LogPredicate) -> Option<&str> {
         | LogPredicate::TextualIn { field, .. }
         | LogPredicate::TextualContainsAll { field, .. }
         | LogPredicate::TextualContainsAny { field, .. }
+        | LogPredicate::TextualSequence { field, .. }
         | LogPredicate::JsonArrayContainsAny { field, .. }
         | LogPredicate::Ipv4Range { field, .. }
         | LogPredicate::Ipv6Range { field, .. }
@@ -6324,12 +6332,27 @@ fn prefix_matches(value: &str, prefix: &str, phrase: bool) -> bool {
 }
 
 fn phrase_matches(value: &str, phrase: &str) -> bool {
+    phrase_match_end(value, phrase).is_some()
+}
+
+fn sequence_matches(value: &str, phrases: &[String]) -> bool {
+    let mut remaining = value;
+    for phrase in phrases {
+        let Some(end) = phrase_match_end(remaining, phrase) else {
+            return false;
+        };
+        remaining = &remaining[end..];
+    }
+    true
+}
+
+fn phrase_match_end(value: &str, phrase: &str) -> Option<usize> {
     if phrase.is_empty() {
-        return false;
+        return None;
     }
     let require_start_boundary = phrase.chars().next().is_some_and(word_character);
     let require_end_boundary = phrase.chars().next_back().is_some_and(word_character);
-    value.match_indices(phrase).any(|(start, matched)| {
+    value.match_indices(phrase).find_map(|(start, matched)| {
         let start_ok = !require_start_boundary
             || start == 0
             || value[..start]
@@ -6343,7 +6366,7 @@ fn phrase_matches(value: &str, phrase: &str) -> bool {
                 .chars()
                 .next()
                 .is_none_or(|character| !word_character(character));
-        start_ok && end_ok
+        (start_ok && end_ok).then_some(end)
     })
 }
 

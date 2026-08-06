@@ -844,6 +844,18 @@ selected paths are omitted while null, empty, false, zero, arrays, and objects
 remain distinct. Extrema preserve upstream comparison and strict first-tie
 behavior. The live audit also proved that `stats row_max(a,b) result` is a
 valid implicit alias, so two trailing words—not one—form the malformed case.
-The fixture now contains 298 row-query cases, 308 error cases, and 335
+The fixture then contained 298 row-query cases, 308 error cases, and 335
 statistics/pipeline cases: 941 cases total, all passing against the immutable
-image. The fixture now contains 941 cases.
+image.
+
+`LQL-F37` adds fifteen row-query cases and six error cases for `seq(...)`.
+They pin ordered non-overlapping matching, duplicate phrases, Unicode phrase
+boundaries, quoted commas, empty/all-empty identity, one trailing comma,
+field scope, missing fields, rich numeric projection, case-insensitive
+function names, bare-name word behavior, logical/pipeline composition, and
+strict separator/wildcard/termination errors. Source audit covers
+`filter_sequence.go`, parser and filter tests, `filter_phrase.go`, and the
+shared tokenizer at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 313
+row-query cases, 314 error cases, and 335 statistics/pipeline cases: 962 cases
+total, all passing against the immutable image. The fixture now contains 962 cases.

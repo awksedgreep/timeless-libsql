@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P28 LQL-P29 LQL-P30 LQL-P32 LQL-P33 LQL-P34 LQL-P36 LQL-P41 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P28 LQL-P29 LQL-P30 LQL-P32 LQL-P33 LQL-P34 LQL-P36 LQL-P41 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -51,7 +51,8 @@ full-message exact, start-anchored exact-prefix, and static
 `in(v1, ..., vN)` exact membership; field-independent wildcard no-ops for
 `in`, `contains_any`, and `contains_all`; static case-sensitive
 `contains_all(v1, ..., vN)` and `contains_any(v1, ..., vN)` with VictoriaLogs
-phrase boundaries; retained-array primitive membership through
+phrase boundaries; ordered non-overlapping `seq(v1, ..., vN)` matching with
+the same Unicode boundaries; retained-array primitive membership through
 `json_array_contains_any(v1, ..., vN)`; inclusive one-address, CIDR, or
 two-address `ipv4_range(...)` filtering over exact retained strings;
 inclusive-lower/exclusive-upper `string_range(minimum, maximum)` bytewise
@@ -72,6 +73,15 @@ parentheses and field-scoped groups override precedence.
 Safe top-level indexed conjuncts are pushed into public extension rows before
 the bounded Rust predicate evaluator. Predicates below `OR` or `NOT` are not
 unsafely pushed.
+
+`seq(v1, ..., vN)` preserves argument order and duplicates, then resumes each
+phrase search after the preceding match. Empty phrases are ignored; an empty
+or all-empty sequence is a field-independent true predicate. Malformed
+separators and unquoted wildcards fail explicitly. The matcher stores only the
+request-bounded phrase list, scans each row monotonically without per-row
+allocation, and observes the existing work, deadline, and cancellation limits
+in base queries and current-row `filter`/`where` pipelines. No extension
+primitive or portable exact SQL recipe is claimed.
 
 Source may use LF or CRLF multiline layout and `#` line comments outside
 double-quoted, single-quoted, and raw-backtick literals. A hash inside a quoted
@@ -419,6 +429,11 @@ inspecting the field. Both preserve case, Unicode word boundaries, compact
 rich-value projection, aliases, and logical/pipeline composition. Query-backed
 lists remain explicitly deferred as `LQL-F38`.
 `SQL-LOG-016` shows the direct SQL equivalent: omit the field predicate.
+
+Ordered `seq(...)` filters use the same rich textual projection and Unicode
+phrase boundaries, but order and duplicates matter. They remain API-owned:
+portable SQLite cannot express the boundary contract exactly, while moving the
+matcher into the extension would not avoid required public-row decode.
 
 `field:json_array_contains_any(v1, ..., vN)` inspects only a retained JSON
 array. It compares top-level strings, numbers, booleans, and null to the exact
