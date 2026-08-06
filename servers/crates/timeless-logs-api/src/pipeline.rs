@@ -222,6 +222,9 @@ pub(crate) fn execute(
                 execution.limits,
                 execution.cancelled,
             )?,
+            PipelineOp::Decolorize(field) => {
+                decolorize_fields(rows, field, execution.limits, execution.cancelled)?
+            }
             PipelineOp::JsonArrayLen(spec) => {
                 json_array_len_fields(rows, spec, execution.limits, execution.cancelled)?
             }
@@ -2403,6 +2406,167 @@ fn collapse_nums_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn decolorize_fields(
+    rows: Vec<Value>,
+    field: &PipelineField,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: field_path,
+        name: field_name,
+    } = field
+    else {
+        return Err("LogsQL decolorize target is not exact".into());
+    };
+
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "decolorize")?;
+            let mut state_bytes = size_of::<Value>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "decolorize")?;
+            let projected = textual_transform_projection(
+                coalesce_exact_value(&row, field_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "decolorize",
+            )?;
+            let Some(decolorized) = bounded_decolorize(
+                projected.as_ref(),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?
+            else {
+                // Timeless retains typed and missing/null source states. A
+                // no-op textual projection therefore keeps the richer native
+                // value instead of flattening it merely because a pipe ran.
+                return Ok(row);
+            };
+
+            charge_transfer_string(
+                field_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "decolorize",
+            )?;
+            for segment in field_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "decolorize",
+                )?;
+            }
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL decolorize input row is not a JSON object".to_string())?;
+            if copy_destination_replaces_object(object, field_path) {
+                return Err(format!(
+                    "LogsQL decolorize target conflict: field {field_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, field_path, Value::String(decolorized))
+                .map_err(|error| format!("LogsQL decolorize target conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn bounded_decolorize(
+    source: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Option<String>, String> {
+    let bytes = source.as_bytes();
+    let mut offset = 0usize;
+    let mut removed_bytes = 0usize;
+    while let Some(start) = find_csi_start(bytes, offset, cancelled)? {
+        charge_transfer_work(work_items, limits.max_state_items, "decolorize")?;
+        let end = skip_csi_sequence(bytes, start);
+        removed_bytes = removed_bytes
+            .checked_add(end - start)
+            .ok_or_else(|| "LogsQL decolorize output size overflow".to_string())?;
+        offset = end;
+    }
+    if removed_bytes == 0 {
+        return Ok(None);
+    }
+
+    let output_len = source
+        .len()
+        .checked_sub(removed_bytes)
+        .ok_or_else(|| "LogsQL decolorize output size underflow".to_string())?;
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL decolorize state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "decolorize")?;
+
+    let mut output = String::with_capacity(output_len);
+    let mut copied = 0usize;
+    let mut search = 0usize;
+    while let Some(start) = find_csi_start(bytes, search, cancelled)? {
+        output.push_str(&source[copied..start]);
+        let end = skip_csi_sequence(bytes, start);
+        copied = end;
+        search = end;
+    }
+    output.push_str(&source[copied..]);
+    if output.len() != output_len {
+        return Err("LogsQL decolorize output length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    Ok(Some(output))
+}
+
+fn find_csi_start(
+    source: &[u8],
+    offset: usize,
+    cancelled: &AtomicBool,
+) -> Result<Option<usize>, String> {
+    let last_start = source.len().saturating_sub(1);
+    for index in offset..last_start {
+        check_periodically(cancelled, index)?;
+        if source[index] == 0x1b && source[index + 1] == b'[' {
+            return Ok(Some(index));
+        }
+    }
+    ensure_active(cancelled)?;
+    Ok(None)
+}
+
+fn skip_csi_sequence(source: &[u8], start: usize) -> usize {
+    let mut offset = start + 2;
+    while source
+        .get(offset)
+        .is_some_and(|byte| matches!(byte, 0x30..=0x3f))
+    {
+        offset += 1;
+    }
+    while source
+        .get(offset)
+        .is_some_and(|byte| matches!(byte, 0x20..=0x2f))
+    {
+        offset += 1;
+    }
+    if source
+        .get(offset)
+        .is_some_and(|byte| matches!(byte, 0x30..=0x7e))
+    {
+        offset += 1;
+    }
+    offset
 }
 
 fn bounded_collapse_nums(
@@ -8950,6 +9114,108 @@ mod tests {
                 &cancelled,
             )
             .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn decolorize_matches_csi_bytes_preserves_rich_noops_and_observes_bounds() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 1_000,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "_msg":"\u{1b}[mfoo\u{1b}[1;31mERROR bar\u{1b}[10;5H",
+            "source field":"left\u{1b}[2Jright",
+            "classes":"A\u{1b}[?25lB\u{1b}[1;2$zC",
+            "invalid":format!("a\u{1b}[\u{1}b\u{1b}[abc\u{1b}["),
+            "osc":format!("\u{1b}]0;title\u{7}tail"),
+            "plain":"unchanged",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["\u{1b}[31m",1],
+            "null_value":null,
+            "object":{"child":"retained"},
+            "nested":{"source":"nested \u{1b}[32mgreen\u{1b}[0m"}
+        });
+        let plan = crate::logsql::parse_at(
+            "* | decolorize | decolorize \"source field\" | decolorize classes | decolorize invalid | decolorize osc | decolorize plain | decolorize number | decolorize flag | decolorize array | decolorize null_value | decolorize object | decolorize missing | decolorize nested.source | format '<nested.source>' as rendered",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["_msg"], "fooERROR bar");
+        assert_eq!(result[0]["source field"], "leftright");
+        assert_eq!(result[0]["classes"], "ABC");
+        assert_eq!(result[0]["invalid"], format!("a\u{1}bbc"));
+        assert_eq!(result[0]["osc"], row["osc"]);
+        assert_eq!(result[0]["plain"], row["plain"]);
+        assert_eq!(result[0]["number"], row["number"]);
+        assert_eq!(result[0]["flag"], row["flag"]);
+        assert_eq!(result[0]["array"], row["array"]);
+        assert_eq!(result[0]["null_value"], row["null_value"]);
+        assert_eq!(result[0]["object"], row["object"]);
+        assert!(result[0].get("missing").is_none());
+        assert_eq!(result[0]["nested"]["source"], "nested green");
+        assert_eq!(result[0]["rendered"], "nested green");
+
+        let field = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Decolorize(field)] = plan.pipeline.as_slice() else {
+                panic!("unexpected decolorize plan: {plan:?}");
+            };
+            field.clone()
+        };
+        let many = field("* | decolorize many");
+        let work_error = decolorize_fields(
+            vec![json!({"many":"\u{1b}[m\u{1b}[m"})],
+            &many,
+            PipelineLimits {
+                max_state_items: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL decolorize"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=2"), "{work_error}");
+
+        let state_error = decolorize_fields(
+            vec![json!({"many":"\u{1b}[m"})],
+            &many,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL decolorize"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            decolorize_fields(vec![json!({"many":"\u{1b}[m"})], &many, limits, &cancelled,)
+                .unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

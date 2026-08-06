@@ -372,7 +372,10 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "keep_const_fields" => Value::Integer(0),
         "timestamp_units_per_second" => Value::Integer(1_000),
         "start_ts" => Value::Integer(1_000),
+        "end_ts" if identifier == "SQL-LOG-050" => Value::Integer(1_000),
         "end_ts" => Value::Integer(2_000),
+        "source_path" if identifier == "SQL-LOG-050" => Value::Text("$.host".to_owned()),
+        "source_override" if identifier == "SQL-LOG-050" => Value::Null,
         "source_path_1" => Value::Text("$.nested.empty".to_owned()),
         "source_path_2" => Value::Text("$.host".to_owned()),
         "source_path_3" => Value::Text("$.service".to_owned()),
@@ -1728,6 +1731,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let row_extrema_rows = recipe_values("SQL-LOG-047", 1)?;
     let query_backed_rows = recipe_values("SQL-LOG-048", 0)?;
     let sample_one_rows = recipe_values("SQL-LOG-049", 0)?;
+    let decolorize_rows = recipe_values("SQL-LOG-050", 0)?;
     if [
         bounded,
         substring,
@@ -1794,6 +1798,44 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if sample_one_timestamps != [Some(Value::Integer(1000)), Some(Value::Integer(2000))] {
         bail!("SQL-LOG-049 sample-one rows changed: {sample_one_rows:?}");
+    }
+    if decolorize_rows != [vec![Value::Integer(1000), Value::Text("web-1".to_owned())]] {
+        bail!("SQL-LOG-050 decolorize rows changed: {decolorize_rows:?}");
+    }
+    let decolorize_sql = recipe_sql("SQL-LOG-050", 0)?;
+    let mut decolorize_statement = connection.prepare(&decolorize_sql)?;
+    for index in 1..=decolorize_statement.parameter_count() {
+        let name = decolorize_statement
+            .parameter_name(index)
+            .context("SQL-LOG-050 parameter must be named")?
+            .trim_start_matches(':');
+        let value = if name == "source_override" {
+            Value::Text("plain \u{1b}[31mRED\u{1b}[0m \u{1b}[2Jtail".to_owned())
+        } else {
+            parameter("SQL-LOG-050", name)
+        };
+        decolorize_statement.raw_bind_parameter(index, value)?;
+    }
+    let decolorize_override_rows = {
+        let columns = decolorize_statement.column_count();
+        let mut rows = decolorize_statement.raw_query();
+        let mut output = Vec::new();
+        while let Some(row) = rows.next()? {
+            output.push(
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<Value>>>()?,
+            );
+        }
+        output
+    };
+    if decolorize_override_rows
+        != [vec![
+            Value::Integer(1000),
+            Value::Text("plain RED tail".to_owned()),
+        ]]
+    {
+        bail!("SQL-LOG-050 CSI override changed: {decolorize_override_rows:?}");
     }
     let sample_sql = recipe_sql("SQL-LOG-049", 0)?;
     let mut sample_statement = connection.prepare(&sample_sql)?;
@@ -3859,13 +3901,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 115);
+        assert_eq!(recipes.len(), 116);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            147
+            148
         );
         assert_eq!(
             recipes
@@ -3873,7 +3915,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            153
+            154
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

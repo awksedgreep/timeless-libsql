@@ -829,8 +829,8 @@ Frequency `top` measures 3.385/35.948 ms narrow/wide p95 versus
 not justify an extension primitive; executable public SQL remains the direct
 SQLite/libSQL path.
 The ordered LogsQL pipeline also supports bounded rich-row `coalesce`,
-`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, `len`, `hash`, and
-`collapse_nums` composition.
+`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, `len`, `hash`,
+`collapse_nums`, and `decolorize` composition.
 Math provides the pinned VictoriaLogs binary64 operator/function/coercion
 model. `len` counts UTF-8 bytes across the pinned flattened textual view while
 preserving typed sources. `hash` uses seed-zero xxHash64 masked to 53 exact
@@ -855,6 +855,14 @@ no-recipe disposition. Exact-build p95 is 3.135/34.525 ms narrow/wide versus
 3.143/36.735 ms for identical-public-work, identical-output controls. The
 -0.3%/-6.0% variation follows unchanged storage reads and does not justify an
 extension tokenizer.
+`decolorize` removes VictoriaLogs' exact ANSI CSI byte form from `_msg` or one
+exact quoted/dotted current-row field. Incomplete CSI is removed; invalid
+final bytes and non-CSI OSC/DCS sequences remain. Native rich values survive
+no-op projections, transformed rows are request-local, and grammar, work,
+state, response, deadline, and cancellation limits are strict. Direct
+SQLite/libSQL users have the byte-exact public-row recursive-CTE foundation in
+`SQL-LOG-050`; complete LogsQL behavior stays in the Rust API, and no private
+table or extension primitive is involved.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

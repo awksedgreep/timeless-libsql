@@ -4229,7 +4229,7 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
-## Session 18 LogsQL P3: bounded `collapse_nums`
+## Session 18 LogsQL P3: bounded collapse nums
 
 The checked-in
 [`2026-08-06_session18_lql_p26_collapse_nums.json`](evidence/2026-08-06_session18_lql_p26_collapse_nums.json)

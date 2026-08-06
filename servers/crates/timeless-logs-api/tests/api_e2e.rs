@@ -3975,6 +3975,224 @@ async fn session_eighteen_collapse_nums_is_exact_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_decolorize_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("decolorize-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let invalid = format!("a\u{1b}[\u{1}b\u{1b}[abc\u{1b}[");
+    let osc = format!("\u{1b}]0;title\u{7}tail");
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "\u{1b}[mfoo\u{1b}[1;31mERROR bar\u{1b}[10;5H".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"decolorize-rich",
+                        "decolorize_group":"decolorize",
+                        "source field":"left\u{1b}[2Jright",
+                        "classes":"A\u{1b}[?25lB\u{1b}[1;2$zC",
+                        "invalid":invalid,
+                        "osc":osc,
+                        "plain":"unchanged",
+                        "number":9007199254740993u64,
+                        "flag":false,
+                        "array":["\u{1b}[31m",1],
+                        "empty":"",
+                        "null_value":null,
+                        "object":{"child":"retained"},
+                        "nested":{"source":"nested \u{1b}[32mgreen\u{1b}[0m"},
+                        "many":"\u{1b}[m\u{1b}[m"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 3,
+                    severity: "emergency".into(),
+                    message: "plain".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"decolorize-noop",
+                        "decolorize_group":"decolorize",
+                        "flag":false,
+                        "null_value":null,
+                        "object":{"child":"unchanged"}
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="decolorize-rich" | decolorize | DECOLORIZE "source field" | decolorize classes | decolorize invalid | decolorize osc | decolorize plain | decolorize number | decolorize flag | decolorize array | decolorize empty | decolorize null_value | decolorize object | decolorize missing | decolorize nested.source | format '<nested.source>' as rendered | fields case, _msg, "source field", classes, invalid, osc, plain, number, flag, array, empty, null_value, object, missing, nested, rendered"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"decolorize-rich",
+            "_msg":"fooERROR bar",
+            "source field":"leftright",
+            "classes":"ABC",
+            "invalid":format!("a\u{1}bbc"),
+            "osc":format!("\u{1b}]0;title\u{7}tail"),
+            "plain":"unchanged",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["\u{1b}[31m",1],
+            "empty":"",
+            "null_value":null,
+            "object":{"child":"retained"},
+            "nested":{"source":"nested green"},
+            "rendered":"nested green"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="decolorize-noop" | decolorize "" | decolorize missing | decolorize flag | decolorize null_value | decolorize object | fields case, _msg, missing, flag, null_value, object"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"decolorize-noop",
+            "_msg":"plain",
+            "flag":false,
+            "null_value":null,
+            "object":{"child":"unchanged"}
+        })],
+        "no-op projections preserve missing, null, bool, and rich-object states"
+    );
+
+    for malformed in [
+        "* | decolorize *",
+        "* | decolorize source*",
+        "* | decolorize (source)",
+        "* | decolorize source, other",
+        "* | decolorize source trailing",
+        "* | decolorize.source",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"decolorize_group:="decolorize" | decolorize | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="decolorize-rich" | decolorize | fields _msg"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="decolorize-rich" | decolorize many | fields many"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{query}: {body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="decolorize-rich" | fields case, _msg, "source field", classes, invalid, osc, plain, number, flag, array, empty, null_value, object, nested, many"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"decolorize-rich",
+            "_msg":"\u{1b}[mfoo\u{1b}[1;31mERROR bar\u{1b}[10;5H",
+            "source field":"left\u{1b}[2Jright",
+            "classes":"A\u{1b}[?25lB\u{1b}[1;2$zC",
+            "invalid":invalid,
+            "osc":osc,
+            "plain":"unchanged",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["\u{1b}[31m",1],
+            "empty":"",
+            "null_value":null,
+            "object":{"child":"retained"},
+            "nested":{"source":"nested \u{1b}[32mgreen\u{1b}[0m"},
+            "many":"\u{1b}[m\u{1b}[m"
+        })],
+        "decolorize must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="decolorize-rich" | decolorize | decolorize nested.source | fields case, _msg, nested, array, object"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"decolorize-rich",
+            "_msg":"fooERROR bar",
+            "nested":{"source":"nested green"},
+            "array":["\u{1b}[31m",1],
+            "object":{"child":"retained"}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_seventeen_drop_empty_fields_is_typed_bounded_and_durable() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

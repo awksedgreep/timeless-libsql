@@ -130,7 +130,7 @@ extension.
 | `LQL-P24` | `len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-037-utf-8-byte-length-of-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` ([evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-hash)) | shipped | no | none | `API` | P3 |
 | `LQL-P26` | `collapse_nums` ([evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-collapse-nums)) | shipped | no | none | `API` | P3 |
-| `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P27` | `decolorize` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-050-strip-csi-color-sequences-from-one-exact-field)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
@@ -457,6 +457,28 @@ evidence measures 3.135/34.525 ms narrow/wide p95 versus 3.143/36.735 ms for
 same-public-work controls. `QSF-212` accepts the -0.3%/-6.0% endpoint-tail
 variation as whole-run/API variation after identical storage reads and keeps
 the transform above the unchanged public extension boundary.
+
+`LQL-P27` removes VictoriaLogs' exact Control Sequence Introducer byte form
+from one current-row field. The case-insensitive command defaults to `_msg`
+and accepts at most one exact quoted or dotted field. Wildcards, prefixes,
+parentheses, comma-separated fields, attached suffixes, and trailing tokens
+fail explicitly. It removes `ESC [` followed by zero or more parameter bytes
+`0x30..0x3f`, zero or more intermediate bytes `0x20..0x2f`, and an optional
+final byte `0x30..0x7e`. Incomplete CSI is removed, a byte outside those
+classes remains, and OSC/DCS sequences are unchanged.
+
+Timeless preserves native missing, null, number, boolean, array, and object
+states when their textual projection contains no CSI; a real removal writes a
+string only to the request-owned current row. Sequential pipes see that
+string, while durable rich rows remain immutable. Work, temporary state,
+result/response size, deadline, cancellation, optimize, shutdown, and reopen
+are bounded by the shared contracts. Executable `SQL-LOG-050` supplies direct
+SQLite/libSQL users an exact BLOB-state recursive-CTE foundation over public
+rows. The API still owns LogsQL grammar, rich no-op preservation, composition,
+limits, cancellation, and envelopes. The complete 1,069-case pinned oracle,
+direct evaluator regression, and real-extension durability regression pin the
+semantic boundary. Every row has already crossed the bounded public `logs`
+surface, so no extension primitive or private-table access is justified.
 
 `LQL-P28` removes every empty field from the current row. Empty means an
 explicit JSON null or a zero-byte string under the pinned VictoriaLogs

@@ -2424,6 +2424,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "decolorize_narrow",
+                "logs-decolorize-narrow",
+                r#"host:="h00" AND query | fields range_key | format '\x1b[31m<range_key>\x1b[0m' as rendered | decolorize rendered | limit 64 | fields rendered"#,
+                64,
+                None,
+            ),
+            (
+                "decolorize_wide",
+                "logs-decolorize-wide",
+                r#"query | fields range_key | format '\x1b[31m<range_key>\x1b[0m' as rendered | decolorize rendered | limit 64 | fields rendered"#,
+                64,
+                None,
+            ),
+            (
+                "decolorize_control_narrow",
+                "logs-decolorize-control-narrow",
+                "host:=\"h00\" AND query | fields range_key | format '<range_key>' as rendered | limit 64 | fields rendered",
+                64,
+                None,
+            ),
+            (
+                "decolorize_control_wide",
+                "logs-decolorize-control-wide",
+                "query | fields range_key | format '<range_key>' as rendered | limit 64 | fields rendered",
+                64,
+                None,
+            ),
+            (
                 "drop_empty_fields_narrow",
                 "logs-drop-empty-fields-narrow",
                 "host:=\"h00\" AND query | fields context, status | drop_empty_fields | limit 64 | fields context, status",
@@ -3112,6 +3140,8 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "collapse_nums_control_wide",
             "collapse_nums_wide",
         )?;
+        require_same_public_query_work(&queries, "decolorize_control_narrow", "decolorize_narrow")?;
+        require_same_public_query_work(&queries, "decolorize_control_wide", "decolorize_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({

@@ -1017,6 +1017,19 @@ verdict without adding an extension primitive. The full 1,055-case oracle,
 documentation contracts, real-extension/API suites, SQL cookbook, local
 formatting, lint, crash/transaction, and lifecycle gates pass.
 
+Session 18's `LQL-P27` implementation is semantically complete as an
+API-owned `decolorize` pipe over the public logs surface. Pinned VictoriaLogs
+source and the complete 1,069-case live oracle establish default `_msg`, one
+exact quoted/dotted field, strict grammar, exact CSI parameter/intermediate/
+optional-final byte classes, incomplete-sequence removal, invalid-final
+preservation, unchanged OSC/DCS, native no-op fidelity, and sequential
+composition. The bounded Rust evaluator changes no durable storage or
+extension contract. Executable `SQL-LOG-050` gives direct SQLite/libSQL users
+the byte-exact recursive-BLOB-CTE foundation over bounded public rows. Focused
+parser, evaluator, and real-extension ingest/flush/optimize/shutdown/reopen
+regressions pass. Exact-build performance/HWM evidence and the complete local
+gate remain before the row closes.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

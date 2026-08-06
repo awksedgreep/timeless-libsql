@@ -3765,6 +3765,53 @@
       "expected_rows": [{"case": "format-row", "source": "request <N>", "rendered": "request <N>"}]
     },
     {
+      "id": "LQL-P27-decolorize-defaults-to-message",
+      "query": "case:=format-row | format \"\\x1b[mfoo\\x1b[1;31mERROR bar\\x1b[10;5H\" | decolorize | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "fooERROR bar"}]
+    },
+    {
+      "id": "LQL-P27-decolorize-supports-quoted-fields-and-case-insensitive-keywords",
+      "query": "case:=format-row | format \"left\\x1b[2Jright\" as \"source field\" | DeCoLoRiZe \"source field\" | fields case, \"source field\"",
+      "expected_rows": [{"case": "format-row", "source field": "leftright"}]
+    },
+    {
+      "id": "LQL-P27-decolorize-empty-field-name-aliases-message",
+      "query": "case:=format-row | format \"a\\x1b[31mb\" | decolorize \"\" | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "ab"}]
+    },
+    {
+      "id": "LQL-P27-decolorize-observes-parameter-intermediate-and-final-byte-classes",
+      "query": "case:=format-row | format \"A\\x1b[?25lB\\x1b[1;2$zC\" | decolorize | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "ABC"}]
+    },
+    {
+      "id": "LQL-P27-decolorize-preserves-invalid-final-bytes-and-drops-incomplete-csi",
+      "query": "case:=format-row | format \"a\\x1b[\\x01b\\x1b[abc\\x1b[\" | decolorize | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "a\u0001bbc"}]
+    },
+    {
+      "id": "LQL-P27-decolorize-leaves-non-csi-osc-sequences-unchanged",
+      "query": "case:=format-row | format \"\\x1b]0;title\\x07tail\" | decolorize | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "\u001b]0;title\u0007tail"}]
+    },
+    {
+      "id": "LQL-P27-decolorize-noop-textual-fields-remain-unchanged",
+      "query": "state_group:=state | decolorize probe | fields case, probe | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty"},
+        {"case": "state-false", "probe": "false"},
+        {"case": "state-missing"},
+        {"case": "state-null"},
+        {"case": "state-string", "probe": "value"},
+        {"case": "state-zero", "probe": "0"}
+      ]
+    },
+    {
+      "id": "LQL-P27-decolorize-supports-dotted-fields-and-sequential-composition",
+      "query": "case:=format-row | format \"nested \\x1b[32mgreen\\x1b[0m\" as nested.value | decolorize nested.value | format '<nested.value>' as rendered | fields case, nested.value, rendered",
+      "expected_rows": [{"case": "format-row", "nested.value": "nested green", "rendered": "nested green"}]
+    },
+    {
       "id": "LQL-P28-drop-empty-fields-removes-null-and-empty-but-retains-rich-values",
       "query": "case:=delete-row | drop_empty_fields | fields case, keep, empty_value, null_value, nested.drop, nested.keep, array",
       "expected_rows": [{"case": "delete-row", "keep": "kept", "nested.drop": "nested-gone", "nested.keep": "nested-kept", "array": "[\"x\",1]"}]
@@ -4428,6 +4475,48 @@
     {
       "id": "LQL-P26-collapse-nums-rejects-an-attached-suffix",
       "query": "* | collapse_nums.at source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P27-decolorize-rejects-a-wildcard-field",
+      "query": "* | decolorize *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P27-decolorize-rejects-a-prefix-field",
+      "query": "* | decolorize source*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P27-decolorize-rejects-parentheses",
+      "query": "* | decolorize (source)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P27-decolorize-rejects-comma-separated-fields",
+      "query": "* | decolorize source, other",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P27-decolorize-rejects-a-trailing-token",
+      "query": "* | decolorize source trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P27-decolorize-rejects-an-attached-suffix",
+      "query": "* | decolorize.source",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -157,6 +157,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-047`](#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema) | `LQL-S11` | current foundation | deterministic first qualifying rich row plus finite native-number row minima/maxima for two fixed exact public metadata paths; API owns dynamic selectors, complete natural ordering, canonical fields, state limits, cancellation, and envelopes |
 | [`SQL-LOG-048`](#sql-log-048-query-backed-exact-membership) | `LQL-F38` | current foundation | bounded two-scan exact membership for retained strings through public rows; API owns subquery grammar, rich projection, phrase variants, cumulative limits, cancellation, caching, and envelopes |
 | [`SQL-LOG-049`](#sql-log-049-bounded-random-log-sample) | `LQL-P17` | current foundation | bounded independent `1/N` random selection over public log rows; API owns LogsQL unsigned grammar, exponential-gap compatibility, limits, cancellation, and envelopes |
+| [`SQL-LOG-050`](#sql-log-050-strip-csi-color-sequences-from-one-exact-field) | `LQL-P27` | current foundation | exact byte-state removal of CSI sequences from one bounded public row field; API owns LogsQL grammar, current-row composition, rich no-op preservation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7944,6 +7945,151 @@ random predicate. No extension primitive, private shadow-table access, or
 storage-format change is warranted. Direct regression: `tests/cli.sh` section
 45 and the Rust SQL harness; HTTP/oracle/optimize/flush/reopen regression:
 `session_eighteen_sample_is_random_bounded_durable_and_row_preserving`.
+
+### SQL-LOG-050: strip CSI color sequences from one exact field
+
+Bind inclusive native timestamp bounds, positive work/result limits, and
+`:source_path` as a SQLite JSON path for one exact retained metadata field.
+Use `$._msg` for the canonical message and `$.level` for the canonical level.
+This statement removes exactly the ANSI Control Sequence Introducer form used
+by VictoriaLogs `decolorize`: `ESC [`; zero or more parameter bytes
+`0x30..0x3f`; zero or more intermediate bytes `0x20..0x2f`; and one optional
+final byte `0x30..0x7e`.
+
+```sql
+WITH RECURSIVE
+bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN :source_path IN ('$._msg', '$.level') THEN NULL
+      ELSE json_type(metadata, :source_path)
+    END AS source_type
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT
+    row_id,
+    ts,
+    CAST(COALESCE(:source_override, CASE
+        WHEN :source_path = '$._msg' THEN message
+        WHEN :source_path = '$.level' THEN level
+        WHEN source_type IS NULL OR source_type IN ('null', 'object') THEN ''
+        WHEN source_type = 'true' THEN 'true'
+        WHEN source_type = 'false' THEN 'false'
+        WHEN source_type = 'array' THEN json(json_extract(metadata, :source_path))
+        ELSE CAST(json_extract(metadata, :source_path) AS TEXT)
+      END) AS BLOB) AS source
+  FROM bounded
+), strip(row_id, ts, source, pos, phase, output) AS (
+  SELECT row_id, ts, source, 1, 0, CAST(X'' AS BLOB)
+  FROM projected
+
+  UNION ALL
+
+  SELECT
+    row_id,
+    ts,
+    source,
+    CASE
+      WHEN phase = 0 AND instr(substr(source, pos), X'1B5B') = 0
+        THEN length(source) + 1
+      WHEN phase = 0
+        THEN pos + instr(substr(source, pos), X'1B5B') + 1
+      WHEN phase = 1
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 48 AND 63
+        THEN pos + 1
+      WHEN phase = 1
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 32 AND 47
+        THEN pos + 1
+      WHEN phase = 1
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 48 AND 126
+        THEN pos + 1
+      WHEN phase = 1 THEN pos
+      WHEN phase = 2
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 32 AND 47
+        THEN pos + 1
+      WHEN phase = 2
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 48 AND 126
+        THEN pos + 1
+      ELSE pos
+    END,
+    CASE
+      WHEN phase = 0 AND instr(substr(source, pos), X'1B5B') > 0 THEN 1
+      WHEN phase = 0 THEN 0
+      WHEN phase = 1
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 48 AND 63
+        THEN 1
+      WHEN phase = 1
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 32 AND 47
+        THEN 2
+      WHEN phase = 1 THEN 0
+      WHEN phase = 2
+        AND unicode(CAST(substr(source, pos, 1) AS TEXT)) BETWEEN 32 AND 47
+        THEN 2
+      ELSE 0
+    END,
+    CASE
+      WHEN phase = 0 AND instr(substr(source, pos), X'1B5B') = 0
+        THEN CAST(output || substr(source, pos) AS BLOB)
+      WHEN phase = 0
+        THEN CAST(
+          output || substr(
+            source,
+            pos,
+            instr(substr(source, pos), X'1B5B') - 1
+          ) AS BLOB
+        )
+      ELSE output
+    END
+  FROM strip
+  WHERE pos <= length(source)
+)
+SELECT ts, CAST(output AS TEXT) AS decolorized
+FROM strip
+WHERE pos > length(source)
+  AND :max_result_rows > 0
+ORDER BY ts, row_id
+LIMIT :max_result_rows;
+```
+
+For ordinary use, bind `:source_override` to SQL `NULL`. For the executable
+public-row fixture, bind `:start_ts`/`:end_ts` to `1000`,
+`:max_work_entries` to `100000`, `:max_result_rows` to `100`, and
+`:source_path` to `$.host`; the single result is `web-1`. The Rust harness also
+executes the same public-row statement with `:source_override` set to
+`plain ESC[31m RED ESC[0m ESC[2J tail` and proves the result is
+`plain RED tail`. The override exists only to make the copyable statement
+self-testing without changing durable fixture data; applications normally
+bind it to `NULL`. The BLOB state is intentional:
+it makes positions and byte classes exact, preserves UTF-8 and embedded NUL
+bytes, and avoids confusing SQLite character offsets with ANSI byte offsets.
+The normal phase jumps directly to the next `ESC [` with `instr`; recursion
+is proportional to CSI sequences and their short control tails rather than to
+every ordinary message byte. An incomplete CSI is removed, an invalid final
+byte remains, and OSC/DCS sequences are unchanged.
+
+The SQL result is the field's flattened textual projection. Missing, JSON
+null, and retained object parents project to empty text; booleans use
+`true`/`false`; numbers use SQLite text; arrays use compact JSON. The Rust API
+preserves Timeless native missing/null/number/boolean/array/object states when
+no CSI removal occurs, mutates only the request-owned current row after a real
+change, composes sequentially, and enforces cumulative work/state/result/
+response/deadline/cancellation and explicit error envelopes. It also parses
+the default/quoted/dotted field grammar and canonical aliases.
+
+Every input row has already crossed the bounded public `logs` surface. The
+state machine does not reduce block selection, decode, payload transfer, or
+row crossing, so an extension scalar or opcode would not improve storage
+work. Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_eighteen_decolorize_is_exact_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

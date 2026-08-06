@@ -1184,6 +1184,50 @@ entries, and transfer 235,778/1,914,055 extension payload bytes per query.
 variation after the unchanged public scan and keeps number collapsing in the
 Rust language layer.
 
+## LogsQL `decolorize` over rich current rows
+
+`decolorize` removes the exact VictoriaLogs ANSI Control Sequence Introducer
+form from `_msg` or one exact current-row field:
+
+```text
+* | decolorize
+* | decolorize "rendered message"
+* | decolorize nested.output | format '<nested.output>' as rendered
+```
+
+The command is case-insensitive. An omitted or empty quoted field means
+`_msg`; quoted and dotted exact fields are valid. Wildcards, prefix selectors,
+parentheses, comma-separated fields, attached suffixes, and extra tokens are
+malformed rather than silently ignored.
+
+The scanner is byte-exact. It removes `ESC [`; zero or more parameter bytes
+in `0x30..0x3f`; zero or more intermediate bytes in `0x20..0x2f`; and one
+optional final byte in `0x30..0x7e`. An incomplete CSI is removed. If the next
+byte is outside those classes, it remains in the output. Other escape families
+such as OSC and DCS are not CSI and remain unchanged. This is intentionally
+the pinned VictoriaLogs behavior, not a claim to strip every terminal escape
+language.
+
+Strings use decoded bytes; numbers and booleans use their textual spelling;
+arrays use compact JSON; and missing, null, and exact object parents project
+as empty text. Timeless preserves native missing/null/number/boolean/array/
+object states when no CSI is found. A real removal writes a string to the same
+request-owned current-row field, and subsequent pipes observe it. Stored rich
+rows remain immutable. Cumulative work, temporary bytes, result/response
+size, deadline, cancellation, destination conflicts, optimize, shutdown, and
+reopen use the shared hard contracts.
+
+[`SQL-LOG-050`](QUERY_SQL_EQUIVALENTS.md#sql-log-050-strip-csi-color-sequences-from-one-exact-field)
+is an executable direct-SQL foundation. It scans bounded public `logs` rows
+and uses BLOB positions plus an optimized recursive state machine so UTF-8,
+embedded NUL, byte classes, incomplete sequences, and invalid-final behavior
+remain exact. The statement returns the flattened textual projection. The
+Rust API adds LogsQL grammar, native no-op preservation, current-row
+composition, limits, cancellation, and response envelopes. Because every row
+already crossed the public storage boundary, adding a language-specific
+extension primitive would not avoid a block read, decode, payload transfer,
+or row crossing.
+
 ## LogsQL `drop_empty_fields` over current rows
 
 `drop_empty_fields` removes empty fields from each current pipeline row:

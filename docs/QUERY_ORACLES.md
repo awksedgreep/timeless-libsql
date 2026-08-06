@@ -938,3 +938,18 @@ documentation at immutable VictoriaLogs commit
 row-query cases, one stochastic case, 353 error cases, and 357
 statistics/pipeline cases: 1,055 cases total, all passing against the immutable
 image. The fixture now contains 1055 cases.
+
+`LQL-P27` adds eight exact pipeline-result cases and six error cases for
+`decolorize`. They pin the default and empty quoted `_msg` aliases; exact
+quoted and dotted fields; case-insensitive syntax; sequential composition;
+parameter, intermediate, and optional final CSI byte classes; incomplete CSI
+removal; invalid-final preservation; unchanged OSC sequences; and native
+typed-value preservation when textual projection contains no CSI. Error cases
+pin wildcard, prefix-wildcard, parenthesized, comma-separated, extra-token,
+and attached-suffix syntax. Source audit covers `pipe_decolorize.go`,
+`pipe_decolorize_test.go`, `color_sequence.go`, `color_sequence_test.go`,
+`pipe_update.go`, and the public LogsQL documentation at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture
+now contains 344 row-query cases, one stochastic case, 359 error cases, and
+365 statistics/pipeline cases: 1,069 cases total, all passing against the
+immutable image. The fixture now contains 1069 cases.

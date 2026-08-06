@@ -1873,6 +1873,47 @@ fn parse_collapse_nums_pipe(
     }))
 }
 
+fn parse_decolorize_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let operation = "decolorize";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL decolorize pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL decolorize pipe, not {command:?}"
+        )));
+    }
+    if segment[operation.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL decolorize requires whitespace before its field",
+        ));
+    }
+
+    let tokens = lex_first_pipe(segment, operation)?;
+    let field = match tokens.as_slice() {
+        [_] => parse_delete_field("_msg")?,
+        [_, value] => match parse_delete_field(value)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL decolorize requires one exact field",
+                ));
+            }
+        },
+        [_, token, ..] => {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected LogsQL decolorize token {token:?}; expected one exact field"
+            )));
+        }
+        [] => return Err(LogsqlError::malformed("LogsQL decolorize pipe is empty")),
+    };
+    Ok(PipelineOp::Decolorize(field))
+}
+
 fn parse_json_array_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::JsonArrayLen(parse_length_pipe(
         segment,
@@ -2850,6 +2891,13 @@ fn is_hash_pipe(segment: &str) -> bool {
 
 fn is_collapse_nums_pipe(segment: &str) -> bool {
     let operation = "collapse_nums";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
+fn is_decolorize_pipe(segment: &str) -> bool {
+    let operation = "decolorize";
     segment
         .get(..operation.len())
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
@@ -3917,6 +3965,7 @@ pub(crate) enum PipelineOp {
     Len(UnaryFieldSpec),
     Hash(UnaryFieldSpec),
     CollapseNums(CollapseNumsSpec),
+    Decolorize(PipelineField),
     JsonArrayLen(UnaryFieldSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
@@ -4340,6 +4389,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_collapse_nums_pipe(segment) => {
                 pipeline.push(parse_collapse_nums_pipe(segment, context)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_decolorize_pipe(segment) => {
+                pipeline.push(parse_decolorize_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_json_array_len_pipe(segment) => {
@@ -10237,6 +10290,32 @@ mod tests {
             "* | collapse_nums prettify if ()",
             "* | collapse_nums at source trailing",
             "* | collapse_nums.at source",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_decolorize_grammar_is_exact_and_strict() {
+        for query in [
+            "* | decolorize",
+            "* | DECOLORIZE",
+            "* | decolorize source",
+            r#"* | decolorize "source field""#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | decolorize *",
+            "* | decolorize source*",
+            "* | decolorize (source)",
+            "* | decolorize source, other",
+            "* | decolorize source trailing",
+            "* | decolorize.source",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
