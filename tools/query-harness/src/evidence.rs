@@ -55,7 +55,11 @@ fn git_commit(root: &Path) -> Result<String> {
 
 fn require_clean_worktree(root: &Path) -> Result<()> {
     let output = Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=normal"])
+        // Evidence identifies the committed source used to build the binaries.
+        // Untracked operator notes and the not-yet-created evidence output do
+        // not change that source identity, while staged or unstaged changes to
+        // tracked files do.
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(root)
         .output()?;
     if !output.status.success() {
@@ -64,7 +68,7 @@ fn require_clean_worktree(root: &Path) -> Result<()> {
     let status = String::from_utf8(output.stdout)?;
     if !status.trim().is_empty() {
         bail!(
-            "evidence requires a clean worktree so artifact identity describes the exact source; pending paths:\n{status}"
+            "evidence requires clean tracked files so artifact identity describes the exact source; pending paths:\n{status}"
         );
     }
     Ok(())
@@ -3411,6 +3415,48 @@ pub(crate) fn run(root: &Path, args: EvidenceArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn evidence_identity_ignores_untracked_notes_but_rejects_tracked_changes() {
+        let repository = TempDir::with_prefix("timeless-evidence-git-test-").unwrap();
+        run_git(repository.path(), &["init", "--quiet"]);
+        fs::write(repository.path().join("tracked.txt"), "committed\n").unwrap();
+        run_git(repository.path(), &["add", "tracked.txt"]);
+        run_git(
+            repository.path(),
+            &[
+                "-c",
+                "user.name=Timeless test",
+                "-c",
+                "user.email=test@timeless.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+
+        fs::write(repository.path().join("operator-notes.md"), "untracked\n").unwrap();
+        require_clean_worktree(repository.path()).unwrap();
+
+        fs::write(repository.path().join("tracked.txt"), "modified\n").unwrap();
+        let error = require_clean_worktree(repository.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("tracked.txt"));
+    }
 
     #[test]
     fn nearest_rank_percentiles_are_stable() {
