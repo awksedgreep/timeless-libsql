@@ -764,13 +764,14 @@ Frequency `top` measures 3.385/35.948 ms narrow/wide p95 versus
 not justify an extension primitive; executable public SQL remains the direct
 SQLite/libSQL path.
 The ordered LogsQL pipeline also supports bounded rich-row `coalesce`,
-`copy`/`cp`, `rename`/`mv`, `format`, and `math`/`eval` composition. Math
-provides the pinned VictoriaLogs binary64 operator/function/coercion model,
-sequential destinations, fixed string results, strict errors, cancellation,
-and immutable typed source rows. Direct SQLite/libSQL users can use the
-parameterized public JSON1 arithmetic foundation in `SQL-LOG-036`; complete
-LogsQL parsing and expression semantics stay in the Rust logs API rather than
-the extension.
+`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, and `len` composition.
+Math provides the pinned VictoriaLogs binary64 operator/function/coercion
+model. `len` counts UTF-8 bytes across the pinned flattened textual view while
+preserving typed sources. Both support sequential destinations, strict errors,
+cancellation, and immutable stored rows. Direct SQLite/libSQL users can use
+the parameterized public JSON1 arithmetic and byte-length foundations in
+`SQL-LOG-036` and `SQL-LOG-037`; complete LogsQL parsing and expression
+semantics stay in the Rust logs API rather than the extension.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops; query-backed lists remain explicitly deferred. Patterns intentionally

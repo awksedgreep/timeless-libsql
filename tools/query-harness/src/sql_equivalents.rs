@@ -384,6 +384,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "math_source_path_1" => Value::Text("$.duration_ms".to_owned()),
         "math_source_path_2" => Value::Text("$.nested.count".to_owned()),
         "math_multiplier" => Value::Real(2.0),
+        "len_source_path" => Value::Text("$.host".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1674,6 +1675,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let rename_rows = recipe_values("SQL-LOG-034", 0)?;
     let format_rows = recipe_values("SQL-LOG-035", 0)?;
     let math_rows = recipe_values("SQL-LOG-036", 0)?;
+    let len_rows = recipe_values("SQL-LOG-037", 0)?;
     if [
         bounded,
         substring,
@@ -2007,6 +2009,65 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-036 arithmetic result changed: {math_rows:?}");
+    }
+    if len_rows
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text("error".into()),
+                Value::Text("request timeout".into()),
+                Value::Integer(5),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text("info".into()),
+                Value::Text("request ok".into()),
+                Value::Integer(5),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-037 byte-length result changed: {len_rows:?}");
+    }
+    let len_sql = recipe_sql("SQL-LOG-037", 0)?;
+    let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
+        let mut statement = connection.prepare(&len_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-037 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "len_source_path" => Value::Text(source_path.to_owned()),
+                _ => parameter("SQL-LOG-037", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        statement
+            .raw_query()
+            .mapped(|row| row.get::<_, i64>(3))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    let sqlite_unicode_lengths = connection.query_row(
+        "SELECT length('ßİ'), length(CAST('ßİ' AS BLOB))",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    if sqlite_unicode_lengths != (2, 4)
+        || measured_lengths("$.nested.none")? != [0, 0]
+        || measured_lengths("$.deployment")? != [0, 0]
+        || measured_lengths("$.nested.ok")? != [4, 4]
+        || measured_lengths("$.duration_ms")? != [2, 1]
+        || measured_lengths("$.missing")? != [0, 0]
+    {
+        bail!(
+            "SQL-LOG-037 UTF-8/rich-value projection changed: sqlite={sqlite_unicode_lengths:?} null={:?} object={:?} boolean={:?} number={:?} missing={:?}",
+            measured_lengths("$.nested.none")?,
+            measured_lengths("$.deployment")?,
+            measured_lengths("$.nested.ok")?,
+            measured_lengths("$.duration_ms")?,
+            measured_lengths("$.missing")?,
+        );
     }
     let coalesce_sql = recipe_sql("SQL-LOG-032", 0)?;
     let coalesced = |source_path_1: &str,
@@ -3192,13 +3253,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 102);
+        assert_eq!(recipes.len(), 103);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            132
+            133
         );
         assert_eq!(
             recipes
@@ -3206,7 +3267,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            138
+            139
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

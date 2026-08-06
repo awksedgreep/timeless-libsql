@@ -628,3 +628,18 @@ The fixture contains 296 row-query cases, 206 error cases, and 188
 statistics/pipeline cases: 690 cases total, all passing against the immutable
 image.
 The fixture now contains 690 cases.
+
+`LQL-P24` adds thirteen successful pipeline cases and eight error cases for
+the `len` pipe. They pin UTF-8 byte length rather than Unicode codepoint
+length; optional parentheses and `as`; default and empty-alias `_msg`
+behavior; case-insensitive syntax; sequential overwrite; exact quoted and
+dotted fields; canonical `_time` rendering; composition with `math`;
+missing/null/empty/object-parent zeroes; and textual number, boolean, array,
+and nested-leaf lengths. Wildcards, absent sources, unclosed or multiple
+source arguments, and trailing tokens fail. Source audit is against
+`pipe_len.go`, its parser helpers, and the result-column encoders at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+The fixture contains 296 row-query cases, 214 error cases, and 201
+statistics/pipeline cases: 711 cases total, all passing against the immutable
+image.
+The fixture now contains 711 cases.

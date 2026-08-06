@@ -144,6 +144,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-034`](#sql-log-034-rename-one-exact-top-level-retained-metadata-field) | `LQL-P21` | current foundation | typed move of one exact top-level retained metadata field to one exact top-level destination, including source removal and missing/object-parent compatibility behavior; API owns flattened prefixes, sequential composition, nested-parent pruning/conflicts, limits, cancellation, and envelopes |
 | [`SQL-LOG-035`](#sql-log-035-format-two-exact-retained-metadata-fields) | `LQL-P22` | current foundation | bounded `printf` interpolation of two exact public metadata paths with explicit rich-value textual projection; API owns LogsQL patterns, codecs, conditions, destination mutation/preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-036`](#sql-log-036-arithmetic-over-exact-retained-numeric-fields) | `LQL-P23` | current foundation | bounded row-local arithmetic over two exact typed numeric metadata paths; API owns LogsQL math grammar, broader coercions, functions, sequential destinations, fixed float rendering, limits, cancellation, and envelopes |
+| [`SQL-LOG-037`](#sql-log-037-utf-8-byte-length-of-one-exact-retained-field) | `LQL-P24` | current foundation | UTF-8/compact-JSON byte length for one exact public metadata path with explicit missing/null/object-parent behavior; API owns LogsQL grammar, canonical fields, sequential destinations, rich conflicts, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6663,6 +6664,72 @@ extension primitive, private shadow-table access, or storage-format change.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_math_is_sequential_typed_and_durable`.
+
+### SQL-LOG-037: UTF-8 byte length of one exact retained field
+
+Bind one exact SQLite JSON path, inclusive native timestamp bounds, and
+positive work/result limits. This ordinary statement returns the byte length
+of the public field's VictoriaLogs-compatible textual projection:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), measured AS (
+  SELECT
+    ts,
+    level,
+    message,
+    CASE
+      WHEN json_type(metadata, :len_source_path) IS NULL THEN 0
+      WHEN json_type(metadata, :len_source_path) IN ('null', 'object') THEN 0
+      WHEN json_type(metadata, :len_source_path) = 'true' THEN 4
+      WHEN json_type(metadata, :len_source_path) = 'false' THEN 5
+      WHEN json_type(metadata, :len_source_path) = 'text' THEN length(
+        CAST(json_extract(metadata, :len_source_path) AS BLOB)
+      )
+      ELSE length(CAST(json(metadata -> :len_source_path) AS BLOB))
+    END AS byte_length
+  FROM bounded
+)
+SELECT ts, level, message, byte_length
+FROM measured
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, byte_length
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit, and
+`:len_source_path` is one exact SQLite JSON path such as `$.host`,
+`$.nested.count`, or `$.tags`. Casting text to `BLOB` before `length()` is
+essential: SQLite `length(TEXT)` counts Unicode code points, while the LogsQL
+`len` pipe counts UTF-8 bytes. Missing, explicit null, and a retained object
+parent have length zero because VictoriaLogs exposes flattened leaves rather
+than an object-parent column. Strings count their decoded UTF-8 bytes;
+booleans count lowercase `true`/`false`; numbers and arrays count compact JSON
+text. The SQL result is an integer. The API renders the result as a decimal
+string, matching VictoriaLogs stream JSON.
+
+The complete `LQL-P24` API also accepts case-insensitive `len`, optional
+parentheses, optional `as`, empty quoted `_msg` aliases, canonical `_msg`,
+`_time`, and `level` sources, exact nested current-row paths, a default `_msg`
+destination, and sequential composition. It preserves retained rich source
+types, rejects a destination that would replace an object or descend through
+a scalar, and enforces work/state/result/response limits, cancellation, and
+HTTP envelopes. Repeat this ordinary SQL expression in explicit CTE order
+when direct users need several sequential calculations.
+
+Every selected value already crosses the bounded public log-row interface.
+SQLite JSON1 and `length(CAST(... AS BLOB))` provide the direct operation
+without a new extension primitive, private shadow-table access, or storage-
+format change.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_len_counts_textual_bytes_and_preserves_rich_sources`.
 
 ## Adding the next recipe
 

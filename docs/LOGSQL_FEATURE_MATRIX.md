@@ -127,7 +127,7 @@ extension.
 | `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P24` | `len` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P24` | `len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-037-utf-8-byte-length-of-one-exact-retained-field)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P26` | `collapse_nums` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
@@ -394,6 +394,26 @@ primitive, private table, or storage-contract change is required.
 Exact-build evidence records 3.357/39.127 ms narrow/wide p95 versus
 3.292/37.655 ms for byte-identical same-scan controls; `QSF-173` accepts the
 +2.0%/+3.9% bounded expression cost.
+
+`LQL-P24` measures one exact current-row field in UTF-8 bytes and writes a
+decimal string to one exact destination. Parentheses and `as` are optional;
+the default and empty quoted alias are `_msg`; case is ignored; and later
+pipeline stages observe the result. Strings count decoded bytes, booleans and
+numbers count their textual representation, and arrays count compact JSON.
+Missing, null, empty strings, and exact retained object parents count as zero
+under the pinned flattened-view policy, while dotted leaves remain
+addressable. Canonical `_msg`, `_time`, and `level` fields use their current
+rendered values.
+
+Sources remain typed and immutable. A destination that would replace an
+object or descend through a scalar fails with HTTP 422 `field_conflict`.
+Traversal work, temporary state, result/response size, and cancellation are
+bounded. Executable `SQL-LOG-037` uses public rows, JSON1, and a `BLOB` cast to
+distinguish UTF-8 bytes from SQLite's codepoint-counting `length(TEXT)`.
+Grammar, canonical fields, sequential composition, limits, and HTTP envelopes
+remain Rust API work. The complete 711-case pinned oracle and `QSF-174` record
+the language and rich-retention boundary; no extension primitive, private
+table, or storage-contract change is required.
 
 ## Statistics functions
 

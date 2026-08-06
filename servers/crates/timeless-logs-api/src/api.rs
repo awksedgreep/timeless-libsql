@@ -461,6 +461,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL rename destination conflict:")
         || error.starts_with("LogsQL format destination conflict:")
         || error.starts_with("LogsQL math destination conflict:")
+        || error.starts_with("LogsQL len destination conflict:")
     {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,

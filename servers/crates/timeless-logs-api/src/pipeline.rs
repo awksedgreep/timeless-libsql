@@ -21,8 +21,8 @@ use serde_json::{Map, Number, Value};
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CopySpec,
-    FacetsSpec, FirstSpec, FormatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec,
-    PipelineField, PipelineOp, RenameSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
+    FacetsSpec, FirstSpec, FormatSpec, LenSpec, MathBinaryOperator, MathExpression, MathFunction,
+    MathSpec, PipelineField, PipelineOp, RenameSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -203,6 +203,7 @@ pub(crate) fn execute(
             PipelineOp::Math(spec) => {
                 math_fields(rows, spec, execution.limits, execution.cancelled)?
             }
+            PipelineOp::Len(spec) => len_fields(rows, spec, execution.limits, execution.cancelled)?,
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -1383,6 +1384,162 @@ fn math_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn len_fields(
+    rows: Vec<Value>,
+    spec: &LenSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path, ..
+    } = &spec.source
+    else {
+        return Err("LogsQL len source is not exact".into());
+    };
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL len destination is not exact".into());
+    };
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            let mut work_items = 0usize;
+            let length = victorialogs_len(
+                coalesce_exact_value(&row, source_path),
+                &mut work_items,
+                limits.max_state_items,
+                cancelled,
+            )?;
+            let rendered = length.to_string();
+            let mut state_bytes = size_of::<Value>();
+            charge_transfer_string(
+                &rendered,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "len",
+            )?;
+            charge_transfer_string(
+                destination_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "len",
+            )?;
+            for segment in destination_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "len",
+                )?;
+            }
+
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL len input row is not a JSON object".to_string())?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL len destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(rendered))
+                .map_err(|error| format!("LogsQL len destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn victorialogs_len(
+    value: Option<&Value>,
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<usize, String> {
+    match value {
+        None | Some(Value::Null | Value::Object(_)) => Ok(0),
+        Some(Value::String(value)) => Ok(value.len()),
+        Some(Value::Bool(value)) => Ok(if *value { 4 } else { 5 }),
+        Some(Value::Number(value)) => Ok(value.to_string().len()),
+        Some(value @ Value::Array(_)) => {
+            compact_json_len(value, 0, work_items, max_work_items, cancelled)
+        }
+    }
+}
+
+fn compact_json_len(
+    value: &Value,
+    depth: usize,
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<usize, String> {
+    const MAX_JSON_NESTING: usize = 128;
+    if depth > MAX_JSON_NESTING {
+        return Err(format!(
+            "LogsQL len JSON nesting exceeds {MAX_JSON_NESTING}"
+        ));
+    }
+    charge_transfer_work(work_items, max_work_items, "len")?;
+    check_periodically(cancelled, *work_items)?;
+    match value {
+        Value::Null => Ok(4),
+        Value::Bool(true) => Ok(4),
+        Value::Bool(false) => Ok(5),
+        Value::Number(value) => Ok(value.to_string().len()),
+        Value::String(value) => compact_json_string_len(value),
+        Value::Array(values) => {
+            let mut length = 2usize;
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    length = checked_len_add(length, 1)?;
+                }
+                length = checked_len_add(
+                    length,
+                    compact_json_len(value, depth + 1, work_items, max_work_items, cancelled)?,
+                )?;
+            }
+            Ok(length)
+        }
+        Value::Object(object) => {
+            let mut length = 2usize;
+            for (index, (name, value)) in object.iter().enumerate() {
+                if index != 0 {
+                    length = checked_len_add(length, 1)?;
+                }
+                length = checked_len_add(length, compact_json_string_len(name)?)?;
+                length = checked_len_add(length, 1)?;
+                length = checked_len_add(
+                    length,
+                    compact_json_len(value, depth + 1, work_items, max_work_items, cancelled)?,
+                )?;
+            }
+            Ok(length)
+        }
+    }
+}
+
+fn compact_json_string_len(value: &str) -> Result<usize, String> {
+    let mut length = 2usize;
+    for character in value.chars() {
+        let encoded = match character {
+            '"' | '\\' | '\u{0008}' | '\u{000c}' | '\n' | '\r' | '\t' => 2,
+            '\u{0000}'..='\u{001f}' => 6,
+            _ => character.len_utf8(),
+        };
+        length = checked_len_add(length, encoded)?;
+    }
+    Ok(length)
+}
+
+fn checked_len_add(left: usize, right: usize) -> Result<usize, String> {
+    left.checked_add(right)
+        .ok_or_else(|| "LogsQL len result overflows usize".to_string())
 }
 
 fn evaluate_math_expression(
@@ -5138,6 +5295,116 @@ mod tests {
         assert_eq!(
             victorialogs_math_float(math_bitwise(-1.0, 1.0, |left, right| left | right)),
             "18446744073709552000"
+        );
+    }
+
+    #[test]
+    fn len_counts_textual_bytes_sequentially_preserves_rich_values_and_observes_bounds() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let array = json!([1, "x\n", {"q":"\""}]);
+        let row = json!({
+            "_msg":"hello",
+            "unicode":"ßİ",
+            "number":9007199254740993u64,
+            "flag":false,
+            "empty":"",
+            "null_value":null,
+            "array":array.clone(),
+            "object":{"child":"leaf"}
+        });
+        let plan = crate::logsql::parse_at(
+            "* | len(unicode) byte_len | len(number) number_len | len(flag) flag_len | len(empty) empty_len | len(null_value) null_len | len(missing) missing_len | len(array) array_len | len(object) parent_len | len(object.child) leaf_len | len(byte_len) second",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["byte_len"], "4");
+        assert_eq!(result[0]["number_len"], "16");
+        assert_eq!(result[0]["flag_len"], "5");
+        assert_eq!(result[0]["empty_len"], "0");
+        assert_eq!(result[0]["null_len"], "0");
+        assert_eq!(result[0]["missing_len"], "0");
+        assert_eq!(
+            result[0]["array_len"],
+            serde_json::to_string(&array).unwrap().len().to_string()
+        );
+        assert_eq!(result[0]["parent_len"], "0");
+        assert_eq!(result[0]["leaf_len"], "4");
+        assert_eq!(result[0]["second"], "1");
+        assert_eq!(result[0]["unicode"], row["unicode"]);
+        assert_eq!(result[0]["number"], row["number"]);
+        assert_eq!(result[0]["flag"], row["flag"]);
+        assert_eq!(result[0]["array"], row["array"]);
+        assert_eq!(result[0]["object"], row["object"]);
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Len(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected len plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let array_spec = parse_spec("* | len(array) as result");
+        let work_error = len_fields(
+            vec![row.clone()],
+            &array_spec,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL len"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = len_fields(
+            vec![row.clone()],
+            &array_spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL len"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | len(unicode) as object");
+        let conflict_error =
+            len_fields(vec![row.clone()], &conflict, limits, &cancelled).unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL len destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            len_fields(vec![row], &array_spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
         );
     }
 

@@ -3274,6 +3274,240 @@ async fn session_seventeen_math_is_sequential_typed_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_len_counts_textual_bytes_and_preserves_rich_sources() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("len-pipe-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "hello \"world\"\nnext".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"len-rich",
+                        "len_group":"len",
+                        "unicode":"ßİ",
+                        "number":9007199254740993u64,
+                        "flag":false,
+                        "empty":"",
+                        "null_value":null,
+                        "array":["x",1],
+                        "nested":{"child":"nested-gone"},
+                        "result":"original"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "missing".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"len-missing",
+                        "len_group":"len"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="len-rich" | len(unicode) byte_len | len(number) number_len | len(flag) flag_len | len(empty) empty_len | len(null_value) null_len | len(missing) missing_len | len(array) array_len | len(nested) parent_len | len(nested.child) leaf_len | len(_time) time_len | fields case, byte_len, number_len, flag_len, empty_len, null_len, missing_len, array_len, parent_len, leaf_len, time_len"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"len-rich",
+            "byte_len":"4",
+            "number_len":"16",
+            "flag_len":"5",
+            "empty_len":"0",
+            "null_len":"0",
+            "missing_len":"0",
+            "array_len":"7",
+            "parent_len":"0",
+            "leaf_len":"11",
+            "time_len":"27"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="len-rich" | len("") as message_len | len(unicode) as "" | fields case, message_len, _msg"#,
+        )
+        .await,
+        [serde_json::json!({"case":"len-rich","message_len":"18","_msg":"4"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="len-rich" | LEN unicode AS unicode | len(unicode) second | len(result) as | fields case, unicode, second, _msg"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"len-rich",
+            "unicode":"4",
+            "second":"1",
+            "_msg":"8"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="len-missing" | len(missing) as computed.value | fields case, computed.value"#,
+        )
+        .await,
+        [serde_json::json!({"case":"len-missing","computed":{"value":"0"}})]
+    );
+
+    for malformed in [
+        "* | len",
+        "* | len(",
+        "* | len()",
+        "* | len(source",
+        "* | len(source, other)",
+        "* | len(*)",
+        "* | len(source*)",
+        "* | len(source) as result*",
+        "* | len(source) result trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="len-rich" | len(unicode) as nested"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["error"], "query_execution");
+    assert_eq!(conflict["reason"], "field_conflict");
+    assert!(conflict["message"]
+        .as_str()
+        .unwrap()
+        .contains("LogsQL len destination conflict"));
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"len_group:="len" | len(_msg) result | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="len-rich" | len(unicode) result | fields result"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="len-rich" | len(array) result | fields result"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{query}: {body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="len-rich" | fields case, unicode, number, flag, empty, null_value, array, nested, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"len-rich",
+            "unicode":"ßİ",
+            "number":9007199254740993u64,
+            "flag":false,
+            "empty":"",
+            "null_value":null,
+            "array":["x",1],
+            "nested":{"child":"nested-gone"},
+            "result":"original"
+        })],
+        "len must not mutate durable rich source values and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="len-rich" | LEN ( unicode ) AS byte_len | fields case, byte_len, unicode, array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"len-rich",
+            "byte_len":"4",
+            "unicode":"ßİ",
+            "array":["x",1],
+            "nested":{"child":"nested-gone"}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {

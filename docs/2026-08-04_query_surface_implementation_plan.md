@@ -713,7 +713,20 @@ the corrected unsigned-cast/HTTP-envelope/AST-stack regressions. Exact-build
 commit `84c1a77352aa33fc32139efe8c814e9dcadcff3c` measures 3.357/39.127 ms
 narrow/wide p95 versus 3.292/37.655 ms for byte-identical same-scan controls.
 `QSF-173` accepts the +2.0%/+3.9% bounded expression cost, records unchanged
-four-block storage and the HWM verdict, and closes `LQL-P23` and Session 17.
+four-block storage and the HWM verdict, and closes `LQL-P23`. Session 17
+continues with `LQL-P24`; its remaining declared P2 rows must not be skipped
+before Session 18 begins.
+
+`LQL-P24` now has strict case-insensitive `len` grammar, optional parentheses
+and `as`, default/empty-alias `_msg`, exact quoted/dotted/current-row fields,
+sequential destinations, UTF-8 byte counting, pinned textual/compact-JSON
+projection, flattened object-parent behavior, hard work/state/result/response
+limits, cancellation, rich-object conflict errors, optimize/reopen coverage,
+and executable public `SQL-LOG-037`. Thirteen successful and eight error cases
+pass the complete 711-case pinned VictoriaLogs oracle. Timeless preserves rich
+typed sources while matching upstream's absent object-parent query view.
+`QSF-174` records the semantic boundary. Exact-build performance/HWM evidence
+remains the exit criterion before the row can ship.
 
 ### Session 18: applicable LogsQL P3
 

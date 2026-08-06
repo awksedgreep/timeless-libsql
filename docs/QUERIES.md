@@ -919,6 +919,46 @@ same one/four candidate blocks, 1,024/8,192 decoded entries, and
 235,778/1,914,055 payload bytes. `QSF-173` accepts this bounded expression
 cost above the unchanged public storage boundary.
 
+## LogsQL `len` over rich current rows
+
+`len` measures the byte length of one current-row field and writes the decimal
+result as a string:
+
+```text
+* | len(_msg) as message_bytes
+* | len unicode byte_length
+* | len(nested.value)
+* | len(host)
+```
+
+The command and `as` are case-insensitive. Parentheses and `as` are optional;
+the destination defaults to `_msg`, including the accepted `len(field) as`
+form. An empty quoted source or destination is the canonical `_msg` alias.
+Only exact quoted or dotted source and destination fields are accepted, and
+sequential pipes observe earlier destinations.
+
+Length is measured in UTF-8 bytes, so `len("ßİ")` is four even though the
+text contains two Unicode codepoints. Strings use their decoded bytes;
+booleans and numbers use their textual representation; arrays use compact
+JSON. Missing fields, explicit null, empty strings, and exact retained object
+parents have length zero, matching VictoriaLogs' flattened query view. A
+nested object leaf remains addressable. Canonical `_msg`, `_time`, and
+`level` fields are measured from their current rendered values. Rich source
+values and durable storage remain unchanged.
+
+An exact scalar destination is overwritten. A destination that would replace
+a retained object or descend through a scalar fails with HTTP 422 reason
+`field_conflict`. Array traversal work, temporary result/path state, result
+rows, response bytes, and cancellation use the hard request limits.
+Executable
+[`SQL-LOG-037`](QUERY_SQL_EQUIVALENTS.md#sql-log-037-utf-8-byte-length-of-one-exact-retained-field)
+uses only public `logs` rows plus SQLite JSON1 and
+`length(CAST(value AS BLOB))`; the `BLOB` cast is required because SQLite
+`length(TEXT)` counts codepoints. Grammar, canonical/current-row fields,
+sequential destinations, limits, cancellation, and envelopes remain Rust API
+work. No extension primitive, private table, or storage-format change is
+needed.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

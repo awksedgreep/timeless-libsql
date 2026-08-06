@@ -3148,6 +3148,78 @@
       "id": "LQL-P23-math-bitwise-nonfinite-and-out-of-range-conversion",
       "query": "case:=format-row | math (1 / 0) & 1 inf_and, 18446744073709551616 & 1 overflow_and, -1 or 1 negative_or | fields case, inf_and, overflow_and, negative_or",
       "expected_rows": [{"case": "format-row", "inf_and": "0", "overflow_and": "0", "negative_or": "18446744073709552000"}]
+    },
+    {
+      "id": "LQL-P24-len-counts-utf8-bytes-not-codepoints",
+      "query": "case:=format-row | len(unicode_edge) as byte_len | fields case, byte_len",
+      "expected_rows": [{"case": "format-row", "byte_len": "4"}]
+    },
+    {
+      "id": "LQL-P24-len-defaults-to-message",
+      "query": "case:=format-row | len(host) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "4"}]
+    },
+    {
+      "id": "LQL-P24-len-allows-unparenthesized-source-and-optional-as",
+      "query": "case:=format-row | len host host_len | fields case, host_len",
+      "expected_rows": [{"case": "format-row", "host_len": "4"}]
+    },
+    {
+      "id": "LQL-P24-len-is-case-insensitive",
+      "query": "case:=format-row | LEN ( host ) AS host_len | fields case, host_len",
+      "expected_rows": [{"case": "format-row", "host_len": "4"}]
+    },
+    {
+      "id": "LQL-P24-len-empty-as-retains-default-destination",
+      "query": "case:=format-row | len(host) as | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "4"}]
+    },
+    {
+      "id": "LQL-P24-len-missing-null-empty-array-parent-and-leaf",
+      "query": "case:=delete-row | len(missing) missing_len | len(null_value) null_len | len(empty_value) empty_len | len(array) array_len | len(nested) parent_len | len(nested.drop) leaf_len | fields case, missing_len, null_len, empty_len, array_len, parent_len, leaf_len",
+      "expected_rows": [{"case": "delete-row", "missing_len": "0", "null_len": "0", "empty_len": "0", "array_len": "7", "parent_len": "0", "leaf_len": "11"}]
+    },
+    {
+      "id": "LQL-P24-len-textualizes-numeric-and-boolean-fields",
+      "query": "state_group:=state | len(probe) as probe_len | fields case, probe_len | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty", "probe_len": "0"},
+        {"case": "state-false", "probe_len": "5"},
+        {"case": "state-missing", "probe_len": "0"},
+        {"case": "state-null", "probe_len": "0"},
+        {"case": "state-string", "probe_len": "5"},
+        {"case": "state-zero", "probe_len": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P24-len-observes-sequential-overwrite",
+      "query": "case:=format-row | len(host) as host | len(host) as second | fields case, host, second",
+      "expected_rows": [{"case": "format-row", "host": "4", "second": "1"}]
+    },
+    {
+      "id": "LQL-P24-len-supports-quoted-and-flattened-fields",
+      "query": "case:=format-row | len(\"math left field\") as spaced | len(math_nested.value) as nested | fields case, spaced, nested",
+      "expected_rows": [{"case": "format-row", "spaced": "1", "nested": "1"}]
+    },
+    {
+      "id": "LQL-P24-len-composes-with-math",
+      "query": "case:=format-row | len(_msg) as message_len | math message_len + 2 as adjusted | fields case, message_len, adjusted",
+      "expected_rows": [{"case": "format-row", "message_len": "18", "adjusted": "20"}]
+    },
+    {
+      "id": "LQL-P24-len-empty-source-alias-means-message",
+      "query": "case:=format-row | len(\"\") as message_len | fields case, message_len",
+      "expected_rows": [{"case": "format-row", "message_len": "18"}]
+    },
+    {
+      "id": "LQL-P24-len-empty-destination-alias-means-message",
+      "query": "case:=format-row | len(host) as \"\" | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "4"}]
+    },
+    {
+      "id": "LQL-P24-len-time-uses-rendered-timestamp-bytes",
+      "query": "case:=format-row | len(_time) as time_len | fields case, time_len",
+      "expected_rows": [{"case": "format-row", "time_len": "27"}]
     }
   ],
   "error_cases": [
@@ -4589,6 +4661,62 @@
     {
       "id": "LQL-P23-math-function-requires-parentheses",
       "query": "* | math abs value as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-requires-source",
+      "query": "* | len",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-rejects-open-parenthesis-only",
+      "query": "* | len(",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-rejects-empty-parentheses",
+      "query": "* | len()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-requires-closing-parenthesis",
+      "query": "* | len(source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-rejects-multiple-sources",
+      "query": "* | len(source, other)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-rejects-source-wildcard",
+      "query": "* | len(source*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-rejects-destination-wildcard",
+      "query": "* | len(source) as result*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P24-len-rejects-trailing-token",
+      "query": "* | len(source) result trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -1047,6 +1047,78 @@ fn parse_math_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Math(MathSpec { entries }))
 }
 
+fn parse_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "len")?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL len pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("len") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL len pipe, not {command:?}"
+        )));
+    }
+
+    let mut cursor = 1usize;
+    let parenthesized = tokens.get(cursor).is_some_and(|token| token == "(");
+    if parenthesized {
+        cursor += 1;
+    }
+    let source_token = tokens
+        .get(cursor)
+        .filter(|token| !matches!(token.as_str(), "(" | ")" | ","))
+        .ok_or_else(|| LogsqlError::malformed("LogsQL len requires a source field"))?;
+    let source = parse_len_exact_field(source_token, "source")?;
+    cursor += 1;
+    if parenthesized {
+        if tokens.get(cursor).is_none_or(|token| token != ")") {
+            return Err(LogsqlError::malformed("LogsQL len source is missing ')'"));
+        }
+        cursor += 1;
+    }
+
+    let mut destination = PipelineField::Exact {
+        path: vec!["_msg".into()],
+        name: "_msg".into(),
+    };
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("as"))
+    {
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        destination = parse_len_exact_field(token, "destination")?;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL len token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Len(LenSpec {
+        source,
+        destination,
+    }))
+}
+
+fn parse_len_exact_field(value: &str, role: &str) -> Result<PipelineField, LogsqlError> {
+    if matches!(value.chars().next(), Some('"' | '\'' | '`'))
+        && quoted_value(value)?.is_some_and(|value| value.is_empty())
+    {
+        return Ok(PipelineField::Exact {
+            path: vec!["_msg".into()],
+            name: "_msg".into(),
+        });
+    }
+    match parse_pipeline_field(value, false)? {
+        field @ PipelineField::Exact { .. } => Ok(field),
+        PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
+            "LogsQL len {role} must be an exact field"
+        ))),
+    }
+}
+
 impl MathParser {
     fn peek(&self) -> Option<&MathToken> {
         self.tokens.get(self.cursor)
@@ -1906,6 +1978,10 @@ fn is_math_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "math") || is_first_last_pipe(segment, "eval")
 }
 
+fn is_len_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "len")
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -2497,6 +2573,12 @@ pub(crate) struct MathSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct LenSpec {
+    pub source: PipelineField,
+    pub destination: PipelineField,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -2527,6 +2609,7 @@ pub(crate) enum PipelineOp {
     Rename(RenameSpec),
     Format(FormatSpec),
     Math(MathSpec),
+    Len(LenSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2898,6 +2981,10 @@ pub fn parse_at(
             }
             _ if is_math_pipe(segment) => {
                 pipeline.push(parse_math_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_len_pipe(segment) => {
+                pipeline.push(parse_len_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -8038,6 +8125,38 @@ mod tests {
             "* | math now(1) as x",
             "* | math 1e-9 as x",
             "* | math abs value as x",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_len_grammar_is_complete_and_strict() {
+        for query in [
+            "* | len(source)",
+            "* | len source result",
+            "* | len(source) as result",
+            "* | LEN ( source ) AS result",
+            "* | len(\"left field\") as \"byte length\"",
+            "* | len(nested.value) result",
+            "* | len(source) as",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | len",
+            "* | len(",
+            "* | len()",
+            "* | len(source",
+            "* | len(source, other)",
+            "* | len(*)",
+            "* | len(source*)",
+            "* | len(source) as result*",
+            "* | len(source) result trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

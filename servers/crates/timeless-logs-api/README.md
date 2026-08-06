@@ -753,6 +753,31 @@ Exact-build `math` evidence measures 3.357/39.127 ms narrow/wide p95 versus
 unchanged one/four-block public scan; `SQL-LOG-036` remains the direct-user
 path for ordinary numeric SQL.
 
+LogsQL `len` counts UTF-8 bytes in one exact current-row field:
+
+```text
+* | len(_msg) as message_bytes
+* | len unicode byte_length
+* | len(nested.value)
+```
+
+Parentheses and `as` are optional, matching is case-insensitive, and the
+destination defaults to `_msg`. Empty quoted source or destination names also
+mean `_msg`. Strings count decoded UTF-8 bytes; numbers and booleans count
+their textual spelling; arrays count compact JSON. Missing/null/empty values
+and exact rich-object parents count as zero under the pinned flattened-view
+policy; nested leaves and canonical `_msg`, `_time`, and `level` fields remain
+addressable. Sequential pipes observe earlier results without mutating stored
+typed sources.
+
+Only exact sources and destinations are accepted. Replacing an object or
+descending through a scalar returns HTTP 422 `field_conflict`. Traversal work,
+temporary state, result/response size, and cancellation are bounded.
+[`SQL-LOG-037`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-037-utf-8-byte-length-of-one-exact-retained-field)
+provides direct users the public JSON1 and `length(CAST(... AS BLOB))`
+foundation. No extension primitive, private storage table, or durable format
+change is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical
