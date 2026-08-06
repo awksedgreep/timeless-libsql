@@ -304,6 +304,62 @@ fn numeric_delta(before: &Value, after: &Value) -> Value {
     Value::Object(delta)
 }
 
+fn require_same_public_query_work(
+    queries: &Map<String, Value>,
+    control_key: &str,
+    sampled_key: &str,
+) -> Result<()> {
+    let control = queries
+        .get(control_key)
+        .with_context(|| format!("missing evidence control {control_key}"))?;
+    let sampled = queries
+        .get(sampled_key)
+        .with_context(|| format!("missing evidence shape {sampled_key}"))?;
+    let iterations = control
+        .get("iterations")
+        .and_then(Value::as_u64)
+        .with_context(|| format!("missing evidence iterations for {control_key}"))?;
+    for (key, evidence) in [(control_key, control), (sampled_key, sampled)] {
+        let query_count = evidence
+            .pointer("/stats_delta/query_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let native_count = evidence
+            .pointer("/stats_delta/native_count_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if query_count != iterations || native_count != 0 {
+            bail!(
+                "sample evidence {key} must use {iterations} public row queries and no native-count fast path; got query_count={query_count}, native_count_count={native_count}"
+            );
+        }
+    }
+    for field in [
+        "query_bounded_requested_entries",
+        "query_candidate_blocks",
+        "query_decoded_entries",
+        "query_payload_bytes_read",
+        "query_matched_entries",
+        "query_returned_entries",
+    ] {
+        let pointer = format!("/stats_delta/{field}");
+        let control_value = control
+            .pointer(&pointer)
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let sampled_value = sampled
+            .pointer(&pointer)
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if control_value != sampled_value {
+            bail!(
+                "sample evidence {control_key}/{sampled_key} changed public {field}: {control_value} != {sampled_value}"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn percentile(values: &[u128], quantile: f64) -> u128 {
     let mut ordered = values.to_vec();
     ordered.sort_unstable();
@@ -1642,7 +1698,7 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             (
                 "sample_control_narrow",
                 "logs-sample-control-narrow",
-                "host:=\"h00\" | stats count() as total",
+                "host:=\"h00\" | sample 1 | stats count() as total",
                 1,
                 None,
             ),
@@ -1656,7 +1712,7 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             (
                 "sample_control_wide",
                 "logs-sample-control-wide",
-                "* | stats count() as total",
+                "* | sample 1 | stats count() as total",
                 1,
                 None,
             ),
@@ -2986,6 +3042,8 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             .with_context(|| format!("measure LogsQL evidence {key} ({expression})"))?;
             queries.insert(key.to_owned(), measured);
         }
+        require_same_public_query_work(&queries, "sample_control_narrow", "sample_narrow")?;
+        require_same_public_query_work(&queries, "sample_control_wide", "sample_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
@@ -3088,6 +3146,45 @@ mod tests {
         assert_eq!(percentile(&values, 0.50), 50);
         assert_eq!(percentile(&values, 0.95), 95);
         assert_eq!(percentile(&values, 0.99), 99);
+    }
+
+    #[test]
+    fn sample_controls_must_use_the_same_public_row_work() {
+        let public = |candidate_blocks, decoded_entries, payload_bytes, matched_entries| {
+            json!({
+                "iterations": 50,
+                "stats_delta": {
+                    "query_count": 50,
+                    "query_bounded_requested_entries": 5_000_050,
+                    "query_candidate_blocks": candidate_blocks,
+                    "query_decoded_entries": decoded_entries,
+                    "query_payload_bytes_read": payload_bytes,
+                    "query_matched_entries": matched_entries,
+                    "query_returned_entries": matched_entries,
+                }
+            })
+        };
+        let mut queries = Map::from_iter([
+            (
+                "control".to_owned(),
+                public(200, 409_600, 95_702_750, 409_600),
+            ),
+            (
+                "sampled".to_owned(),
+                public(200, 409_600, 95_702_750, 409_600),
+            ),
+        ]);
+        require_same_public_query_work(&queries, "control", "sampled").unwrap();
+
+        queries.insert(
+            "control".to_owned(),
+            json!({
+                "iterations": 50,
+                "stats_delta": {"native_count_count": 50}
+            }),
+        );
+        let error = require_same_public_query_work(&queries, "control", "sampled").unwrap_err();
+        assert!(format!("{error:#}").contains("native-count fast path"));
     }
 
     #[test]
