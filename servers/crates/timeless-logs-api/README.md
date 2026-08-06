@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-P20 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S08 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -689,6 +689,15 @@ internal API cost follows byte-identical public storage work. Responses are
 1,088 bytes versus 960 because they contain the selected destination field.
 The bounded row-local transform is accepted in the Rust API; `SQL-LOG-032`
 already supplies direct users the exact-field operation.
+
+Exact-build recursively flattened typed `copy` evidence measures
+3.229/46.025 ms narrow/wide p95 while returning 64 rows, versus
+3.659/41.958 ms for same-scan, equal-cardinality controls. The
+-11.8%/+9.7% p95 and -11.2%/+3.8% internal API variation follows
+byte-identical public storage work. Responses are 2,474 bytes versus 2,538
+because the copied prefix is one byte shorter than the control field. The
+mixed bounded row-transform variation is accepted in the Rust API;
+`SQL-LOG-033` already supplies direct users the exact-field operation.
 
 Malformed LogsQL returns JSON HTTP 400 with `invalid_query` and
 `malformed_logsql`; recognized but unsupported syntax returns JSON HTTP 422

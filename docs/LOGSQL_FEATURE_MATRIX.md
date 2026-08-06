@@ -123,7 +123,7 @@ extension.
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
 | `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` | missing | no | `SQL` | `API` | P2 |
@@ -293,6 +293,10 @@ results, response bytes, and cancellation use existing request limits.
 Executable `SQL-LOG-033` provides the public exact-field JSON1 foundation;
 the operation requires no extension primitive, private table, or storage
 contract change.
+Exact-build evidence records 3.229/46.025 ms narrow/wide p95 versus
+3.659/41.958 ms for byte-identical same-scan controls; `QSF-167` accepts the
+mixed -11.8%/+9.7% bounded row-transform variation above the public storage
+boundary.
 
 ## Statistics functions
 

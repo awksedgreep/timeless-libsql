@@ -647,7 +647,7 @@ ms for byte-identical same-scan controls. `QSF-165` accepts the +7.2%/+3.4%
 p95 row-transform cost, records unchanged four-block storage and the HWM
 verdict, and closes the row. Session 17 continues with `LQL-P20`.
 
-`LQL-P20` is in progress with strict case-insensitive `copy`/`cp` grammar,
+`LQL-P20` is shipped with strict case-insensitive `copy`/`cp` grammar,
 optional `as`, sequential comma-separated pairs, exact/all/prefix sources and
 destinations, typed exact cloning, deterministic recursively flattened
 wildcard snapshots, prefix substitution, missing/object-parent compatibility,
@@ -657,8 +657,12 @@ destination conflicts, optimize/reopen coverage, and executable public
 VictoriaLogs oracle. An added empty-suffix regression found and corrected an
 initial mistaken `_msg` canonicalization: wildcard substitution may create a
 literal empty field, while exact quoted `""` remains the message alias.
-Exact-build evidence and the complete local release gates remain before the
-row can ship.
+`QSF-166` records the semantic boundary and regression. Exact-build commit
+`aac910be8a13bdc7f96be48175602cef566cffa3` measures `copy` at
+3.229/46.025 ms narrow/wide p95 versus 3.659/41.958 ms for byte-identical
+same-scan controls. `QSF-167` accepts the -11.8%/+9.7% mixed row-transform
+variation, records unchanged four-block storage and the HWM verdict, and
+closes the row. Session 17 continues with `LQL-P21`.
 
 ### Session 18: applicable LogsQL P3
 

@@ -4318,3 +4318,56 @@ indexes, retention, optimize, transactions, migrations, and public batch/SQL
 contracts are unchanged. No private shadow table, Elixir/BEAM/NIF/process
 fallback, CI workflow, tag, release, or downstream repository was used or
 modified.
+
+## Session 17 LogsQL P2: bounded `copy`
+
+The checked-in
+[`2026-08-05_session17_lql_p20_copy.json`](evidence/2026-08-05_session17_lql_p20_copy.json)
+was captured from exact release extension and server build
+`aac910be8a13bdc7f96be48175602cef566cffa3`. The narrow shape scans one
+indexed host, recursively copies `context.*` to `copied.*`, and returns 64
+rich rows containing the copied object. The wide shape performs the same
+transform across all 8,192 entries before its 64-row limit. Same-run controls
+scan the identical source rowsets and return the same cardinality using the
+established time sort and original `context` projection. They control storage
+and result count; they are not semantic equivalents to sequential typed copy.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `copy`, indexed host | 64 | 2,474 | 2.995 | 3.229 | 3.483 | 1 | 1,024 | 235,778 | 128 |
+| `copy`, full fixture | 64 | 2,474 | 39.746 | 46.025 | 46.293 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 64 | 2,538 | 3.346 | 3.659 | 3.783 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 64 | 2,538 | 39.132 | 41.958 | 43.491 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The `copy` p95 is 11.8% below/9.7% above its narrow/wide same-run control.
+Its internal API timer averages 2.479/39.751 ms versus 2.791/38.307 ms, or
+11.2% below/3.8% above. Responses are 2.5% smaller because destination name
+`copied` is one byte shorter than control field `context`. Every equal-width
+pair performs exactly the same public storage scan, block decode, payload
+read, and row materialization. The bounded wildcard snapshot, recursive
+flattening, typed clone, and destination mutation cost is accepted in the
+Rust API. `SQL-LOG-033` already gives direct SQLite/libSQL users the public
+exact-field equivalent, so a new extension primitive would not avoid storage
+work.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.095 ms and the explicit durability barrier took 35.741 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Those values are byte-identical to LQL-P19.
+Logs HWM was 94,120 KiB, 744 KiB below LQL-P19; metrics HWM was 52,744 KiB,
+556 KiB below it. Each maximum spans the enlarged complete workload and is
+retained as whole-process variation rather than attributed to one `copy`
+request. Cancellation ended with zero requests in flight; direct evaluator
+and HTTP deadline regressions pin cancellation, bounded work/state/result/
+response behavior, rejection, and reader reuse.
+
+All 587 pinned VictoriaLogs v1.52.0 cases pass live. The final 37-test logs
+real-extension suite, 79 logs library tests, complete supported extension and
+Rust server workspaces, complete 45-section CLI/crash/transaction suite,
+30-test Rust query harness, documentation contracts, Clippy with warnings
+denied, formatting, and all 99 SQL recipes (135 statements) pass locally. The
+extension's authoritative 8,192-entry batching, storage formats, compression,
+indexes, retention, optimize, transactions, migrations, and public batch/SQL
+contracts are unchanged. No private shadow table, Elixir/BEAM/NIF/process
+fallback, CI workflow, tag, release, or downstream repository was used or
+modified.
