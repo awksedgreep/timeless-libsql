@@ -23,10 +23,10 @@ use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CollapseNumsSpec,
     CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
-    MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec,
-    PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
-    SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
-    UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec,
+    JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec,
+    PackLogfmtSpec, PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec,
+    ReplaceRegexpSpec, ReplaceSpec, SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec,
+    UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -230,6 +230,9 @@ pub(crate) fn execute(
             }
             PipelineOp::Split(spec) => {
                 split_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
+            PipelineOp::JsonArrayConcat(spec) => {
+                json_array_concat_fields(rows, spec, execution.limits, execution.cancelled)?
             }
             PipelineOp::JsonArrayLen(spec) => {
                 json_array_len_fields(rows, spec, execution.limits, execution.cancelled)?
@@ -4122,6 +4125,702 @@ fn skip_collapse_nums_timezone(source: &str) -> usize {
     } else {
         0
     }
+}
+
+fn json_array_concat_fields(
+    rows: Vec<Value>,
+    spec: &JsonArrayConcatSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path,
+        name: source_name,
+    } = &spec.source
+    else {
+        return Err("LogsQL json_array_concat source is not exact".into());
+    };
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL json_array_concat destination is not exact".into());
+    };
+
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(
+                &mut work_items,
+                limits.max_state_items,
+                "json_array_concat",
+            )?;
+            let mut state_bytes = size_of::<Value>();
+            ensure_first_state_bytes(
+                state_bytes,
+                limits.max_state_bytes,
+                "json_array_concat",
+            )?;
+            charge_transfer_string(
+                source_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "json_array_concat",
+            )?;
+            for segment in source_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "json_array_concat",
+                )?;
+            }
+            charge_transfer_string(
+                &spec.delimiter,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "json_array_concat",
+            )?;
+
+            let joined = victorialogs_json_array_concat(
+                coalesce_exact_value(&row, source_path),
+                &spec.delimiter,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            charge_transfer_string(
+                destination_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "json_array_concat",
+            )?;
+            for segment in destination_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "json_array_concat",
+                )?;
+            }
+
+            let object = row.as_object_mut().ok_or_else(|| {
+                "LogsQL json_array_concat input row is not a JSON object".to_string()
+            })?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL json_array_concat destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(joined)).map_err(|error| {
+                format!("LogsQL json_array_concat destination conflict: {error}")
+            })?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn victorialogs_json_array_concat(
+    value: Option<&Value>,
+    delimiter: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    ensure_active(cancelled)?;
+    match value {
+        Some(Value::Array(values)) => bounded_native_json_array_concat(
+            values,
+            delimiter,
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+        ),
+        Some(Value::String(source)) => {
+            charge_transfer_string(
+                source,
+                state_bytes,
+                limits.max_state_bytes,
+                "json_array_concat",
+            )?;
+            let elements =
+                scan_text_json_array_concat(source, state_bytes, work_items, limits, cancelled)?;
+            bounded_text_json_array_concat(
+                source,
+                elements.as_deref().unwrap_or_default(),
+                delimiter,
+                state_bytes,
+                limits,
+                cancelled,
+            )
+        }
+        None | Some(Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_)) => {
+            bounded_native_json_array_concat(
+                &[],
+                delimiter,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )
+        }
+    }
+}
+
+fn bounded_native_json_array_concat(
+    values: &[Value],
+    delimiter: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let mut output_len = delimiter
+        .len()
+        .checked_mul(values.len().saturating_sub(1))
+        .ok_or_else(|| "LogsQL json_array_concat result size overflow".to_string())?;
+    for (index, value) in values.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        let value_len = match value {
+            Value::String(value) => {
+                charge_transfer_work(work_items, limits.max_state_items, "json_array_concat")?;
+                value.len()
+            }
+            value => compact_json_len_for_operation(
+                value,
+                0,
+                work_items,
+                limits.max_state_items,
+                cancelled,
+                "json_array_concat",
+            )?,
+        };
+        output_len = output_len
+            .checked_add(value_len)
+            .ok_or_else(|| "LogsQL json_array_concat result size overflow".to_string())?;
+    }
+    charge_json_array_concat_output(output_len, state_bytes, limits.max_state_bytes)?;
+
+    let mut output = Vec::with_capacity(output_len);
+    for (index, value) in values.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index != 0 {
+            output.extend_from_slice(delimiter.as_bytes());
+        }
+        match value {
+            Value::String(value) => output.extend_from_slice(value.as_bytes()),
+            value => serde_json::to_writer(&mut output, value)
+                .map_err(|error| format!("encode LogsQL json_array_concat item: {error}"))?,
+        }
+    }
+    finish_json_array_concat_output(output, output_len, cancelled)
+}
+
+#[derive(Debug)]
+enum JsonArrayConcatElement {
+    String(String),
+    Raw { start: usize, end: usize },
+}
+
+#[derive(Debug)]
+enum JsonArrayScanError {
+    Malformed,
+    Pipeline(String),
+}
+
+struct JsonArrayScanner<'a, 'b> {
+    source: &'a str,
+    cursor: usize,
+    state_bytes: &'b mut usize,
+    work_items: &'b mut usize,
+    limits: PipelineLimits,
+    cancelled: &'b AtomicBool,
+}
+
+impl JsonArrayScanner<'_, '_> {
+    const MAX_JSON_NESTING: usize = 128;
+
+    fn scan(mut self) -> Result<Vec<JsonArrayConcatElement>, JsonArrayScanError> {
+        self.skip_whitespace()?;
+        if self.peek() != Some(b'[') {
+            return Err(JsonArrayScanError::Malformed);
+        }
+        self.charge_work()?;
+        self.cursor += 1;
+        self.skip_whitespace()?;
+
+        let mut elements = Vec::new();
+        *self.state_bytes = self
+            .state_bytes
+            .checked_add(size_of::<Vec<JsonArrayConcatElement>>())
+            .ok_or_else(|| {
+                JsonArrayScanError::Pipeline("LogsQL json_array_concat state size overflow".into())
+            })?;
+        self.ensure_state_bytes()?;
+        if self.peek() == Some(b']') {
+            self.cursor += 1;
+            self.finish_document()?;
+            return Ok(elements);
+        }
+
+        loop {
+            self.skip_whitespace()?;
+            let (start, end, decoded) = self.parse_value(1, true)?;
+            *self.state_bytes = self
+                .state_bytes
+                .checked_add(size_of::<JsonArrayConcatElement>())
+                .ok_or_else(|| {
+                    JsonArrayScanError::Pipeline(
+                        "LogsQL json_array_concat state size overflow".into(),
+                    )
+                })?;
+            self.ensure_state_bytes()?;
+            elements.push(match decoded {
+                Some(value) => JsonArrayConcatElement::String(value),
+                None => JsonArrayConcatElement::Raw { start, end },
+            });
+            self.skip_whitespace()?;
+            match self.peek() {
+                Some(b',') => {
+                    self.cursor += 1;
+                    self.skip_whitespace()?;
+                    if self.peek() == Some(b']') {
+                        return Err(JsonArrayScanError::Malformed);
+                    }
+                }
+                Some(b']') => {
+                    self.cursor += 1;
+                    self.finish_document()?;
+                    return Ok(elements);
+                }
+                _ => return Err(JsonArrayScanError::Malformed),
+            }
+        }
+    }
+
+    fn parse_value(
+        &mut self,
+        depth: usize,
+        retain_string: bool,
+    ) -> Result<(usize, usize, Option<String>), JsonArrayScanError> {
+        if depth > Self::MAX_JSON_NESTING {
+            return Err(JsonArrayScanError::Pipeline(format!(
+                "LogsQL json_array_concat JSON nesting exceeds {}",
+                Self::MAX_JSON_NESTING
+            )));
+        }
+        self.charge_work()?;
+        let start = self.cursor;
+        let decoded = match self.peek() {
+            Some(b'"') => self.parse_string(retain_string)?,
+            Some(b'{') => {
+                self.parse_object(depth)?;
+                None
+            }
+            Some(b'[') => {
+                self.parse_array(depth)?;
+                None
+            }
+            Some(b't') => {
+                self.parse_literal(b"true")?;
+                None
+            }
+            Some(b'f') => {
+                self.parse_literal(b"false")?;
+                None
+            }
+            Some(b'n') => {
+                self.parse_literal(b"null")?;
+                None
+            }
+            Some(b'N') => {
+                self.parse_literal(b"NaN")?;
+                None
+            }
+            Some(b'-' | b'0'..=b'9') => {
+                self.parse_number()?;
+                None
+            }
+            _ => return Err(JsonArrayScanError::Malformed),
+        };
+        Ok((start, self.cursor, decoded))
+    }
+
+    fn parse_object(&mut self, depth: usize) -> Result<(), JsonArrayScanError> {
+        self.cursor += 1;
+        self.skip_whitespace()?;
+        if self.peek() == Some(b'}') {
+            self.cursor += 1;
+            return Ok(());
+        }
+        loop {
+            if self.peek() != Some(b'"') {
+                return Err(JsonArrayScanError::Malformed);
+            }
+            self.charge_work()?;
+            self.parse_string(false)?;
+            self.skip_whitespace()?;
+            if self.peek() != Some(b':') {
+                return Err(JsonArrayScanError::Malformed);
+            }
+            self.cursor += 1;
+            self.skip_whitespace()?;
+            self.parse_value(depth + 1, false)?;
+            self.skip_whitespace()?;
+            match self.peek() {
+                Some(b',') => {
+                    self.cursor += 1;
+                    self.skip_whitespace()?;
+                }
+                Some(b'}') => {
+                    self.cursor += 1;
+                    return Ok(());
+                }
+                _ => return Err(JsonArrayScanError::Malformed),
+            }
+        }
+    }
+
+    fn parse_array(&mut self, depth: usize) -> Result<(), JsonArrayScanError> {
+        self.cursor += 1;
+        self.skip_whitespace()?;
+        if self.peek() == Some(b']') {
+            self.cursor += 1;
+            return Ok(());
+        }
+        loop {
+            self.parse_value(depth + 1, false)?;
+            self.skip_whitespace()?;
+            match self.peek() {
+                Some(b',') => {
+                    self.cursor += 1;
+                    self.skip_whitespace()?;
+                }
+                Some(b']') => {
+                    self.cursor += 1;
+                    return Ok(());
+                }
+                _ => return Err(JsonArrayScanError::Malformed),
+            }
+        }
+    }
+
+    fn parse_string(&mut self, retain: bool) -> Result<Option<String>, JsonArrayScanError> {
+        let start = self.cursor;
+        self.cursor += 1;
+        let mut escaped = false;
+        loop {
+            let Some(character) = self.source[self.cursor..].chars().next() else {
+                return Err(JsonArrayScanError::Malformed);
+            };
+            if !escaped && character == '"' {
+                self.cursor += 1;
+                break;
+            }
+            if !escaped && character <= '\u{001f}' {
+                return Err(JsonArrayScanError::Malformed);
+            }
+            if escaped {
+                if character == 'u' {
+                    let digits_start = self.cursor + 1;
+                    let digits_end = digits_start
+                        .checked_add(4)
+                        .ok_or(JsonArrayScanError::Malformed)?;
+                    let Some(digits) = self.source.get(digits_start..digits_end) else {
+                        return Err(JsonArrayScanError::Malformed);
+                    };
+                    if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return Err(JsonArrayScanError::Malformed);
+                    }
+                    self.cursor = digits_end;
+                    escaped = false;
+                    continue;
+                }
+                if !matches!(character, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') {
+                    return Err(JsonArrayScanError::Malformed);
+                }
+                escaped = false;
+                self.cursor += character.len_utf8();
+                continue;
+            }
+            if character == '\\' {
+                escaped = true;
+            }
+            self.cursor += character.len_utf8();
+            self.check_cursor()?;
+        }
+        if escaped {
+            return Err(JsonArrayScanError::Malformed);
+        }
+        let raw = &self.source[start..self.cursor];
+        charge_transfer_string(
+            raw,
+            self.state_bytes,
+            self.limits.max_state_bytes,
+            "json_array_concat",
+        )
+        .map_err(JsonArrayScanError::Pipeline)?;
+        let decoded =
+            serde_json::from_str::<String>(raw).map_err(|_| JsonArrayScanError::Malformed)?;
+        Ok(retain.then_some(decoded))
+    }
+
+    fn parse_literal(&mut self, literal: &[u8]) -> Result<(), JsonArrayScanError> {
+        if self
+            .source
+            .as_bytes()
+            .get(self.cursor..self.cursor.saturating_add(literal.len()))
+            != Some(literal)
+        {
+            return Err(JsonArrayScanError::Malformed);
+        }
+        self.cursor += literal.len();
+        Ok(())
+    }
+
+    fn parse_number(&mut self) -> Result<(), JsonArrayScanError> {
+        let bytes = self.source.as_bytes();
+        if self.peek() == Some(b'-') {
+            self.cursor += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.cursor += 1,
+            Some(b'1'..=b'9') => {
+                self.cursor += 1;
+                while bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
+                    self.cursor += 1;
+                }
+            }
+            _ => return Err(JsonArrayScanError::Malformed),
+        }
+        if self.peek() == Some(b'.') {
+            self.cursor += 1;
+            let fraction_start = self.cursor;
+            while bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
+                self.cursor += 1;
+            }
+            if self.cursor == fraction_start {
+                return Err(JsonArrayScanError::Malformed);
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.cursor += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.cursor += 1;
+            }
+            let exponent_start = self.cursor;
+            while bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
+                self.cursor += 1;
+            }
+            if self.cursor == exponent_start {
+                return Err(JsonArrayScanError::Malformed);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_document(&mut self) -> Result<(), JsonArrayScanError> {
+        self.skip_whitespace()?;
+        if self.cursor == self.source.len() {
+            Ok(())
+        } else {
+            Err(JsonArrayScanError::Malformed)
+        }
+    }
+
+    fn skip_whitespace(&mut self) -> Result<(), JsonArrayScanError> {
+        while self.peek().is_some_and(json_whitespace) {
+            self.cursor += 1;
+            self.check_cursor()?;
+        }
+        Ok(())
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.source.as_bytes().get(self.cursor).copied()
+    }
+
+    fn check_cursor(&self) -> Result<(), JsonArrayScanError> {
+        check_periodically(self.cancelled, self.cursor).map_err(JsonArrayScanError::Pipeline)
+    }
+
+    fn charge_work(&mut self) -> Result<(), JsonArrayScanError> {
+        charge_transfer_work(
+            self.work_items,
+            self.limits.max_state_items,
+            "json_array_concat",
+        )
+        .map_err(JsonArrayScanError::Pipeline)?;
+        check_periodically(self.cancelled, *self.work_items).map_err(JsonArrayScanError::Pipeline)
+    }
+
+    fn ensure_state_bytes(&self) -> Result<(), JsonArrayScanError> {
+        ensure_first_state_bytes(
+            *self.state_bytes,
+            self.limits.max_state_bytes,
+            "json_array_concat",
+        )
+        .map_err(JsonArrayScanError::Pipeline)
+    }
+}
+
+fn scan_text_json_array_concat(
+    source: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Option<Vec<JsonArrayConcatElement>>, String> {
+    match (JsonArrayScanner {
+        source,
+        cursor: 0,
+        state_bytes,
+        work_items,
+        limits,
+        cancelled,
+    })
+    .scan()
+    {
+        Ok(elements) => Ok(Some(elements)),
+        Err(JsonArrayScanError::Malformed) => Ok(None),
+        Err(JsonArrayScanError::Pipeline(error)) => Err(error),
+    }
+}
+
+fn bounded_text_json_array_concat(
+    source: &str,
+    elements: &[JsonArrayConcatElement],
+    delimiter: &str,
+    state_bytes: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let mut output_len = delimiter
+        .len()
+        .checked_mul(elements.len().saturating_sub(1))
+        .ok_or_else(|| "LogsQL json_array_concat result size overflow".to_string())?;
+    for (index, element) in elements.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        let element_len = match element {
+            JsonArrayConcatElement::String(value) => value.len(),
+            JsonArrayConcatElement::Raw { start, end } => {
+                compact_json_token_len(&source[*start..*end], cancelled)?
+            }
+        };
+        output_len = output_len
+            .checked_add(element_len)
+            .ok_or_else(|| "LogsQL json_array_concat result size overflow".to_string())?;
+    }
+    charge_json_array_concat_output(output_len, state_bytes, limits.max_state_bytes)?;
+
+    let mut output = Vec::with_capacity(output_len);
+    for (index, element) in elements.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index != 0 {
+            output.extend_from_slice(delimiter.as_bytes());
+        }
+        match element {
+            JsonArrayConcatElement::String(value) => output.extend_from_slice(value.as_bytes()),
+            JsonArrayConcatElement::Raw { start, end } => {
+                append_compact_json_token(&mut output, &source[*start..*end], cancelled)?
+            }
+        }
+    }
+    finish_json_array_concat_output(output, output_len, cancelled)
+}
+
+fn compact_json_token_len(source: &str, cancelled: &AtomicBool) -> Result<usize, String> {
+    let mut length = 0usize;
+    visit_compact_json_token(source, cancelled, |chunk| {
+        length = length
+            .checked_add(chunk.len())
+            .ok_or_else(|| "LogsQL json_array_concat result size overflow".to_string())?;
+        Ok(())
+    })?;
+    Ok(length)
+}
+
+fn append_compact_json_token(
+    output: &mut Vec<u8>,
+    source: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    visit_compact_json_token(source, cancelled, |chunk| {
+        output.extend_from_slice(chunk.as_bytes());
+        Ok(())
+    })
+}
+
+fn visit_compact_json_token(
+    source: &str,
+    cancelled: &AtomicBool,
+    mut visit: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut chunk_start = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        check_periodically(cancelled, index)?;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            continue;
+        }
+        if json_whitespace(character as u8) {
+            if chunk_start < index {
+                visit(&source[chunk_start..index])?;
+            }
+            chunk_start = index + character.len_utf8();
+        }
+    }
+    if chunk_start < source.len() {
+        visit(&source[chunk_start..])?;
+    }
+    ensure_active(cancelled)
+}
+
+fn json_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+fn charge_json_array_concat_output(
+    output_len: usize,
+    state_bytes: &mut usize,
+    max_state_bytes: usize,
+) -> Result<(), String> {
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL json_array_concat state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, max_state_bytes, "json_array_concat")
+}
+
+fn finish_json_array_concat_output(
+    output: Vec<u8>,
+    expected_len: usize,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    if output.len() != expected_len {
+        return Err("LogsQL json_array_concat result length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    String::from_utf8(output)
+        .map_err(|error| format!("encode LogsQL json_array_concat result: {error}"))
 }
 
 fn json_array_len_fields(
@@ -10639,6 +11338,124 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             split_fields(vec![row], &many, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn json_array_concat_preserves_rich_and_text_token_fidelity_with_bounds() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 1_000,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "native":[null,"",0,false,[1],{"x":1}],
+            "text":" \t[\"a\",2,true,{\"x\":1},[null],NaN] \r\n",
+            "tokens":"[{\"z\":1, \"a\":\"\\u0061\"},1.00,-0,1e3,[NaN]]",
+            "empty":[],
+            "malformed":"[1,",
+            "scalar":"not-an-array",
+            "null_value":null,
+            "number":42,
+            "object":{"child":"value"},
+            "nested":{"array":[1,2,3],"sibling":"retained"}
+        });
+        let plan = crate::logsql::parse_at(
+            "* | json_array_concat \",\" native native_joined | json_array_concat \"|\" text text_joined | json_array_concat \";\" tokens token_joined | json_array_concat \",\" empty empty_joined | json_array_concat \",\" malformed malformed_joined | json_array_concat \",\" scalar scalar_joined | json_array_concat \",\" null_value null_joined | json_array_concat \",\" number number_joined | json_array_concat \",\" object object_joined | json_array_concat \",\" missing missing_joined | json_array_concat \";\" nested.array nested.joined",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["native_joined"], r#"null,,0,false,[1],{"x":1}"#);
+        assert_eq!(result[0]["text_joined"], r#"a|2|true|{"x":1}|[null]|NaN"#);
+        assert_eq!(
+            result[0]["token_joined"],
+            r#"{"z":1,"a":"\u0061"};1.00;-0;1e3;[NaN]"#
+        );
+        for field in [
+            "empty_joined",
+            "malformed_joined",
+            "scalar_joined",
+            "null_joined",
+            "number_joined",
+            "object_joined",
+            "missing_joined",
+        ] {
+            assert_eq!(result[0][field], "", "{field}");
+        }
+        assert_eq!(result[0]["nested"]["joined"], "1;2;3");
+        assert_eq!(result[0]["native"], row["native"]);
+        assert_eq!(result[0]["text"], row["text"]);
+        assert_eq!(result[0]["tokens"], row["tokens"]);
+        assert_eq!(result[0]["nested"]["array"], row["nested"]["array"]);
+        assert_eq!(result[0]["nested"]["sibling"], row["nested"]["sibling"]);
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::JsonArrayConcat(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected json_array_concat plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let text_spec = parse_spec("* | json_array_concat \",\" text joined");
+        let work_error = json_array_concat_fields(
+            vec![row.clone()],
+            &text_spec,
+            PipelineLimits {
+                max_state_items: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            work_error.contains("LogsQL json_array_concat"),
+            "{work_error}"
+        );
+        assert!(work_error.contains("max_work_rows=2"), "{work_error}");
+
+        let state_error = json_array_concat_fields(
+            vec![row.clone()],
+            &text_spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | json_array_concat \",\" native nested");
+        let conflict_error =
+            json_array_concat_fields(vec![row.clone()], &conflict, limits, &cancelled).unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL json_array_concat destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            json_array_concat_fields(vec![row], &text_spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

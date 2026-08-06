@@ -1565,6 +1565,44 @@ includes exact tokenization, deduplication, compact JSON-array encoding, and
 sort, limit, and row work. `QSF-227` accepts this bounded API-owned cost
 without an extension primitive.
 
+LogsQL `json_array_concat` joins one current-row JSON array without changing
+durable log storage:
+
+```text
+* | json_array_concat
+* | json_array_concat ","
+* | json_array_concat from tags as joined
+* | json_array_concat " | " tags joined
+* | json_array_concat "\n" from payload.items
+```
+
+The delimiter is optional, sources and destinations default to `_msg` and the
+source, and `from`/`as` may be omitted in the upstream shorthand. Exact quoted
+and dotted fields are supported; malformed, wildcard, prefix, missing, and
+trailing syntax fails explicitly. The source is snapshotted before the
+request-local destination write.
+
+Native retained arrays stay typed. JSON-array strings accept surrounding
+whitespace and preserve VictoriaLogs bare `NaN`, numeric token spelling,
+object order, and nested escape spelling through a bounded validating Rust
+scanner. Top-level strings are decoded; other elements use compact JSON.
+Empty, missing, null, malformed, scalar, and nonarray sources yield explicit
+empty text. VictoriaLogs assigns the same value internally but omits the empty
+column from its streaming JSON response; Timeless returns `""` to preserve its
+missing/null/empty distinction.
+
+JSON depth, token work, decoded strings, raw spans, output, paths, rows,
+response bytes, deadlines, and cancellation are bounded. Dotted writes retain
+siblings; replacing an object or descending through a scalar returns HTTP
+422. Optimize, shutdown, and reopen leave durable sources unchanged.
+
+Executable
+[`SQL-LOG-055`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-055-concatenate-one-json-array)
+provides the fixed canonical-array JSON1 foundation for direct SQLite/libSQL
+users. SQLite cannot preserve raw number spelling or bare `NaN`, so complete
+grammar and raw-token behavior stay in this Rust API. No extension opcode,
+private table, or storage-format change is involved.
+
 LogsQL `json_array_len` counts top-level array elements without changing
 durable log metadata:
 

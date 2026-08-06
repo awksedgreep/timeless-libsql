@@ -1980,6 +1980,92 @@ fn parse_split_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     }))
 }
 
+fn parse_json_array_concat_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let operation = "json_array_concat";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL json_array_concat pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL json_array_concat pipe, not {command:?}"
+        )));
+    }
+    if segment[operation.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL json_array_concat requires whitespace before its delimiter",
+        ));
+    }
+
+    let tokens = pipeline_words(segment)?;
+    let mut cursor = 1usize;
+    let mut delimiter = String::new();
+    if tokens.get(cursor).is_some_and(|token| {
+        !token.eq_ignore_ascii_case("from") && !token.eq_ignore_ascii_case("as")
+    }) {
+        delimiter = parse_split_separator(&tokens[cursor])?;
+        cursor += 1;
+    }
+
+    let mut source = parse_json_array_concat_exact_field("_msg", "source")?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| !token.eq_ignore_ascii_case("as"))
+    {
+        if tokens[cursor].eq_ignore_ascii_case("from") {
+            cursor += 1;
+        }
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL json_array_concat from requires a source field")
+        })?;
+        source = parse_json_array_concat_exact_field(token, "source")?;
+        cursor += 1;
+    }
+
+    let mut destination = source.clone();
+    if tokens.get(cursor).is_some() {
+        if tokens[cursor].eq_ignore_ascii_case("as") {
+            cursor += 1;
+        }
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL json_array_concat as requires a destination field")
+        })?;
+        destination = parse_json_array_concat_exact_field(token, "destination")?;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL json_array_concat token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::JsonArrayConcat(JsonArrayConcatSpec {
+        delimiter,
+        source,
+        destination,
+    }))
+}
+
+fn parse_json_array_concat_exact_field(
+    value: &str,
+    role: &str,
+) -> Result<PipelineField, LogsqlError> {
+    if quoted_value(value)?.is_none() && !is_split_compound_token(value) {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL json_array_concat {role} {value:?} must be one exact compound field or a quoted value"
+        )));
+    }
+    match parse_pipeline_field(value, false)? {
+        field @ PipelineField::Exact { .. } => Ok(field),
+        PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
+            "LogsQL json_array_concat {role} must be an exact field"
+        ))),
+    }
+}
+
 fn parse_split_separator(value: &str) -> Result<String, LogsqlError> {
     if let Some(value) = quoted_value(value)? {
         return Ok(value);
@@ -3016,6 +3102,13 @@ fn is_decolorize_pipe(segment: &str) -> bool {
 
 fn is_split_pipe(segment: &str) -> bool {
     let operation = "split";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
+fn is_json_array_concat_pipe(segment: &str) -> bool {
+    let operation = "json_array_concat";
     segment
         .get(..operation.len())
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
@@ -4424,6 +4517,13 @@ pub(crate) struct SplitSpec {
     pub destination: PipelineField,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JsonArrayConcatSpec {
+    pub delimiter: String,
+    pub source: PipelineField,
+    pub destination: PipelineField,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct UnpackJsonSpec {
     pub source: PipelineField,
@@ -4500,6 +4600,7 @@ pub(crate) enum PipelineOp {
     CollapseNums(CollapseNumsSpec),
     Decolorize(PipelineField),
     Split(SplitSpec),
+    JsonArrayConcat(JsonArrayConcatSpec),
     JsonArrayLen(UnaryFieldSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
@@ -4935,6 +5036,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_split_pipe(segment) => {
                 pipeline.push(parse_split_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_json_array_concat_pipe(segment) => {
+                pipeline.push(parse_json_array_concat_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_json_array_len_pipe(segment) => {
@@ -10907,6 +11012,38 @@ mod tests {
             "* | split separator, result",
             r#"* | split(",")"#,
             r#"* | split.source from input as output"#,
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_json_array_concat_grammar_is_complete_and_strict() {
+        for query in [
+            "* | json_array_concat",
+            r#"* | JSON_ARRAY_CONCAT ",""#,
+            "* | json_array_concat from source",
+            "* | json_array_concat as destination",
+            r#"* | json_array_concat ", " from source as destination"#,
+            r#"* | json_array_concat "from" from "source field" as nested.result"#,
+            r#"* | json_array_concat "," source destination"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | json_array_concat from",
+            "* | json_array_concat as",
+            r#"* | json_array_concat "," from *"#,
+            r#"* | json_array_concat "," from source*"#,
+            r#"* | json_array_concat "," from source as *"#,
+            r#"* | json_array_concat "," from source as result*"#,
+            r#"* | json_array_concat "," from source result trailing"#,
+            r#"* | json_array_concat(",")"#,
+            "* | json_array_concat.extra",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

@@ -962,6 +962,20 @@ compact arrays add 640 response bytes; both pairs retain byte-identical public
 block, decode, payload, sort, limit, and row work, so no extension primitive
 is warranted.
 
+`json_array_concat` joins a retained native array or JSON-array string with an
+optional delimiter and writes the result to the request-local source or one
+exact destination. The bounded Rust scanner preserves VictoriaLogs bare
+`NaN`, numeric token spelling, object order, and nested escape spelling for
+string sources; native arrays remain typed and durable rows remain immutable.
+Empty, missing, malformed, scalar, and nonarray sources produce explicit empty
+text, retaining Timeless's richer missing/null/empty distinction even though
+VictoriaLogs omits empty columns from its streaming JSON response. Executable
+`SQL-LOG-055` gives direct SQLite/libSQL users the canonical JSON1 foundation;
+complete grammar, raw-token fidelity, current-row writes, limits,
+cancellation, and envelopes remain in the Rust logs API. The same public rows
+already cross the storage boundary, so no extension opcode or private-table
+path is added.
+
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

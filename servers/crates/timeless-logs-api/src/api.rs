@@ -761,6 +761,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL len destination conflict:")
         || error.starts_with("LogsQL hash destination conflict:")
         || error.starts_with("LogsQL json_array_len destination conflict:")
+        || error.starts_with("LogsQL json_array_concat destination conflict:")
         || error.starts_with("LogsQL split destination conflict:")
         || error.starts_with("LogsQL extract destination conflict:")
         || error.starts_with("LogsQL extract_regexp destination conflict:")

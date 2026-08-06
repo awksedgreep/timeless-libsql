@@ -437,6 +437,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "unpack_path_4" => Value::Text("$.empty".to_owned()),
         "unpack_path_5" => Value::Text("$.missing".to_owned()),
         "json_array_source_path" => Value::Text("$.tags".to_owned()),
+        "json_array_concat_source_path" => Value::Text("$.tags".to_owned()),
+        "json_array_concat_source_override" => Value::Null,
+        "json_array_concat_delimiter" => Value::Text("|".to_owned()),
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "any_source_path" => Value::Text("$.host".to_owned()),
@@ -1762,6 +1765,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let pack_logfmt_rows = recipe_values("SQL-LOG-052", 0)?;
     let unpack_logfmt_rows = recipe_values("SQL-LOG-053", 0)?;
     let unpack_syslog_rows = recipe_values("SQL-LOG-054", 0)?;
+    let json_array_concat_rows = recipe_values("SQL-LOG-055", 0)?;
     if [
         bounded,
         substring,
@@ -1909,6 +1913,80 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         }]
     {
         bail!("SQL-LOG-054 unpack_syslog rows changed: {unpack_syslog_rows:?}");
+    }
+    if json_array_concat_rows
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text("error".to_owned()),
+                Value::Text("request timeout".to_owned()),
+                Value::Text(
+                    r#"prod||123|true|false|null|{"nested":"ignored"}|["ignored"]|ab|*"#.to_owned(),
+                ),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text("info".to_owned()),
+                Value::Text("request ok".to_owned()),
+                Value::Text("dev|1.5|-2|123|a\"b|a\nb|a/b".to_owned()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-055 JSON array concatenation changed: {json_array_concat_rows:?}");
+    }
+    let json_array_concat_sql = recipe_sql("SQL-LOG-055", 0)?;
+    let measured_json_array_concatenation =
+        |source_path: &str, source_override: Option<&str>| -> Result<Vec<String>> {
+            let mut statement = connection.prepare(&json_array_concat_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-055 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "json_array_concat_source_path" => Value::Text(source_path.to_owned()),
+                    "json_array_concat_source_override" => source_override
+                        .map(|value| Value::Text(value.to_owned()))
+                        .unwrap_or(Value::Null),
+                    _ => parameter("SQL-LOG-055", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            statement
+                .raw_query()
+                .mapped(|row| row.get::<_, String>(3))
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        };
+    for (path, source_override, expected) in [
+        (
+            "$.nested.array_text",
+            None,
+            vec![
+                r#"1|{"x":2}|[3]|null"#.to_owned(),
+                r#"1|{"x":2}|[3]|null"#.to_owned(),
+            ],
+        ),
+        ("$.nested.count", None, vec![String::new(), String::new()]),
+        ("$.missing", None, vec![String::new(), String::new()]),
+        (
+            "$.ignored",
+            Some(r#"["x",2,true,{"a":1},[null],null]"#),
+            vec![
+                r#"x|2|true|{"a":1}|[null]|null"#.to_owned(),
+                r#"x|2|true|{"a":1}|[null]|null"#.to_owned(),
+            ],
+        ),
+        (
+            "$.ignored",
+            Some("not-an-array"),
+            vec![String::new(), String::new()],
+        ),
+    ] {
+        let actual = measured_json_array_concatenation(path, source_override)?;
+        if actual != expected {
+            bail!("SQL-LOG-055 path {path:?} override {source_override:?} changed: {actual:?}");
+        }
     }
     let split_sql = recipe_sql("SQL-LOG-051", 0)?;
     for (source, separator, expected) in [
@@ -2422,6 +2500,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             .any(|metadata| serde_json::from_str::<serde_json::Value>(metadata).is_err())
     {
         bail!("SQL-LOG-041 mutated its public source: {source_packed_fields:?}");
+    }
+    let source_after_array_concat = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_after_array_concat != source_packed_fields {
+        bail!("SQL-LOG-055 mutated its public source: {source_after_array_concat:?}");
     }
     if unpack_json_rows.len() != 2 {
         bail!("SQL-LOG-042 result cardinality changed: {unpack_json_rows:?}");
@@ -4049,13 +4134,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 120);
+        assert_eq!(recipes.len(), 121);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            152
+            153
         );
         assert_eq!(
             recipes
@@ -4063,7 +4148,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            158
+            159
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

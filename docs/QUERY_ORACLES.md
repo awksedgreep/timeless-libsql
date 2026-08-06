@@ -1045,3 +1045,22 @@ closing a shared-boundary regression exposed by this audit. The fixture now
 contains 166 source rows, 346 row-query cases, one stochastic case, 407 error
 cases, and 421 statistics/pipeline cases: 1,175 cases total, all passing
 against the immutable image. The fixture now contains 1175 cases.
+
+`LQL-P40` adds sixteen exact pipeline/statistics cases and eight error cases
+for `json_array_concat`. They pin the optional delimiter; default `_msg`;
+bare and explicit source/destination forms; source snapshots; string, mixed,
+nested, empty, malformed, scalar, object, and missing input; surrounding JSON
+whitespace; decoded string escapes; bare `NaN`; case-insensitive keywords;
+quoted fields; raw numeric spelling; object key order; and nested JSON escape
+spelling. Missing operands, wildcard or prefix sources/destinations, attached
+suffixes, and trailing tokens fail. Source audit covers
+`pipe_json_array_concat.go`, `pipe_json_array_concat_test.go`, and the shared
+`unpackJSONArray` implementation in `pipe_unroll.go` at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The upstream
+processor tests prove that empty/nonarray/missing sources assign an empty
+string; the live streaming JSON API omits that empty-valued column. Timeless
+records this as an explicit response-encoding boundary and returns the empty
+string to preserve its richer missing/null/empty model. The fixture now
+contains 166 source rows, 346 row-query cases, one stochastic case, 415 error
+cases, and 437 statistics/pipeline cases: 1,199 cases total, all passing
+against the immutable image. The fixture now contains 1199 cases.

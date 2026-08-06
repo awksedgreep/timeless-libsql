@@ -2979,31 +2979,45 @@ async fn session_seventeen_math_is_sequential_typed_and_durable() {
     .unwrap();
     storage
         .ingest(
-            [LogEntry {
-                ts: 1_800_000_000_000_001,
-                level: 1,
-                severity: "info".into(),
-                message: "math rich".into(),
-                metadata_json: serde_json::json!({
-                    "case":"math-rich",
-                    "a":"2",
-                    "b":"3",
-                    "negative":-2,
-                    "bad":"nope",
-                    "empty":"",
-                    "duration":"10m5s",
-                    "bytes":"1.5KiB",
-                    "timestamp":"2024-05-30T01:02:03Z",
-                    "ipv4":"123.45.67.89",
-                    "math abs":"7",
-                    "math left field":"2",
-                    "result":"original",
-                    "nested":{"value":"4"},
-                    "source_array":[1,2],
-                    "source_null":null
-                })
-                .to_string(),
-            }]
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "math rich".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"math-rich",
+                        "a":"2",
+                        "b":"3",
+                        "negative":-2,
+                        "bad":"nope",
+                        "empty":"",
+                        "duration":"10m5s",
+                        "bytes":"1.5KiB",
+                        "timestamp":"2024-05-30T01:02:03Z",
+                        "ipv4":"123.45.67.89",
+                        "math abs":"7",
+                        "math left field":"2",
+                        "result":"original",
+                        "nested":{"value":"4"},
+                        "source_array":[1,2],
+                        "source_null":null
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: r#"["second"]"#.into(),
+                    metadata_json: serde_json::json!({
+                        "case":"json-array-concat-second",
+                        "array_concat_group":"json-array-concat",
+                        "native_array":["second"]
+                    })
+                    .to_string(),
+                },
+            ]
             .into(),
         )
         .await
@@ -7436,6 +7450,226 @@ async fn session_eighteen_unpack_words_is_exact_rich_bounded_and_durable() {
         [serde_json::json!({
             "case":"unpack-words-message",
             "reopened":{"words":r#"["alpha","βeta","42_7","z","q","e","१२"]"#}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_json_array_concat_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("json-array-concat-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [LogEntry {
+                ts: 1_800_000_000_000_001,
+                level: 1,
+                severity: "info".into(),
+                message: r#"["message",1]"#.into(),
+                metadata_json: serde_json::json!({
+                    "case":"json-array-concat",
+                    "array_concat_group":"json-array-concat",
+                    "native_array":[null,"",0,false,[1],{"x":1}],
+                    "text_array":" \t[\"a\",2,true,{\"x\":1},[null],NaN] \r\n",
+                    "token_array":"[{\"z\":1, \"a\":\"\\u0061\"},1.00,-0,1e3,[NaN]]",
+                    "empty_array":[],
+                    "malformed_array":"[1,",
+                    "scalar":"not-an-array",
+                    "null_value":null,
+                    "number":42,
+                    "object":{"child":"value"},
+                    "nested":{"array":[1,2,3],"sibling":"retained"},
+                    "result":"original",
+                    "left field":["quoted", "path"]
+                })
+                .to_string(),
+            }]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let query = r#"case:="json-array-concat" | json_array_concat "," from native_array as native_joined | json_array_concat "|" text_array text_joined | json_array_concat ";" token_array token_joined | json_array_concat "," from empty_array as empty_joined | json_array_concat "," malformed_array malformed_joined | json_array_concat "," scalar scalar_joined | json_array_concat "," null_value null_joined | json_array_concat "," number number_joined | json_array_concat "," object object_joined | json_array_concat "," missing missing_joined | json_array_concat ";" nested.array nested.joined | json_array_concat "\n" from "left field" as lines | fields case, native_joined, text_joined, token_joined, empty_joined, malformed_joined, scalar_joined, null_joined, number_joined, object_joined, missing_joined, nested, lines"#;
+    assert_eq!(
+        pipeline_rows(&app, query).await,
+        [serde_json::json!({
+            "case":"json-array-concat",
+            "native_joined":r#"null,,0,false,[1],{"x":1}"#,
+            "text_joined":r#"a|2|true|{"x":1}|[null]|NaN"#,
+            "token_joined":r#"{"z":1,"a":"\u0061"};1.00;-0;1e3;[NaN]"#,
+            "empty_joined":"",
+            "malformed_joined":"",
+            "scalar_joined":"",
+            "null_joined":"",
+            "number_joined":"",
+            "object_joined":"",
+            "missing_joined":"",
+            "nested":{"array":[1,2,3],"sibling":"retained","joined":"1;2;3"},
+            "lines":"quoted\npath"
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="json-array-concat" | JsOn_ArRaY_CoNcAt | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({"case":"json-array-concat", "_msg":"message1"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="json-array-concat" | json_array_concat "," native_array result | fields case, native_array, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"json-array-concat",
+            "native_array":[null,"",0,false,[1],{"x":1}],
+            "result":r#"null,,0,false,[1],{"x":1}"#
+        })],
+        "bare source and destination must preserve the native source"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="json-array-concat" | json_array_concat "," from native_array | fields case, native_array"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"json-array-concat",
+            "native_array":r#"null,,0,false,[1],{"x":1}"#
+        })],
+        "in-place concatenation must snapshot the source before replacement"
+    );
+
+    for malformed in [
+        "* | json_array_concat from",
+        r#"* | json_array_concat "," from *"#,
+        r#"* | json_array_concat "," from source*"#,
+        r#"* | json_array_concat "," from source as"#,
+        r#"* | json_array_concat "," from source as *"#,
+        r#"* | json_array_concat "," from source as result*"#,
+        r#"* | json_array_concat "," from source result trailing"#,
+        "* | json_array_concat.extra",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="json-array-concat" | json_array_concat "," native_array nested"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                r#"array_concat_group:="json-array-concat" | json_array_concat "," native_array joined | limit 10000"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="json-array-concat" | fields case, native_array, text_array, token_array, empty_array, malformed_array, scalar, null_value, number, object, nested, result, "left field""#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"json-array-concat",
+            "native_array":[null,"",0,false,[1],{"x":1}],
+            "text_array":" \t[\"a\",2,true,{\"x\":1},[null],NaN] \r\n",
+            "token_array":"[{\"z\":1, \"a\":\"\\u0061\"},1.00,-0,1e3,[NaN]]",
+            "empty_array":[],
+            "malformed_array":"[1,",
+            "scalar":"not-an-array",
+            "null_value":null,
+            "number":42,
+            "object":{"child":"value"},
+            "nested":{"array":[1,2,3],"sibling":"retained"},
+            "result":"original",
+            "left field":["quoted", "path"]
+        })],
+        "request-local concatenation must not mutate durable rich values"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="json-array-concat" | json_array_concat "," native_array reopened.joined | fields case, reopened, native_array"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"json-array-concat",
+            "reopened":{"joined":r#"null,,0,false,[1],{"x":1}"#},
+            "native_array":[null,"",0,false,[1],{"x":1}]
         })]
     );
     reopened.shutdown().await.unwrap();
@@ -14075,6 +14309,47 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_unpack_words_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_json_array_concat = storage.stats().await.unwrap().api_query_cancelled;
+    let json_array_concat_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | format '[\"a\",{\"z\":1},[NaN]]' as selected | json_array_concat "," selected joined | fields joined | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        json_array_concat_timeout.status(),
+        StatusCode::GATEWAY_TIMEOUT
+    );
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_json_array_concat
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_json_array_concat);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_json_array_concat_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            r#"level:error | format '[\"a\",{\"z\":1},[NaN]]' as selected | json_array_concat "," selected joined | fields joined | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        reused_after_json_array_concat_cancel.status(),
+        StatusCode::OK
+    );
 
     let cancelled_before_extract_regexp = storage.stats().await.unwrap().api_query_cancelled;
     let extract_regexp_timeout = router_with_limits(

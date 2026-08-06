@@ -162,6 +162,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-052`](#sql-log-052-pack-fixed-exact-fields-as-logfmt) | `LQL-P35` | current foundation | deterministic logfmt packing of a fixed ordered list of exact public metadata paths with missing/null/object-parent textualization and Victoria-compatible quoting; API owns dynamic selectors, canonical/current fields, rich flattening, mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-053`](#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt) | `LQL-P37` | current foundation | bounded extraction of fixed keys from well-formed space-delimited unquoted logfmt in one public metadata path, with last-duplicate-wins and exact-missing empties; API owns the complete quoted/escaped grammar, dynamic selection, mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-054`](#sql-log-054-decode-one-fixed-rfc5424-header) | `LQL-P38` | current foundation | bounded decoding of PRI and the five fixed RFC5424 header fields when structured data is `-`; API owns RFC3164, structured data, CEF/CEE, timezone/year rules, mutation, limits, cancellation, and envelopes |
+| [`SQL-LOG-055`](#sql-log-055-concatenate-one-json-array) | `LQL-P40` | current foundation | ordered concatenation of one bounded canonical JSON array from a public metadata path; API owns raw token spelling, bare `NaN`, grammar, rich mutation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -8697,6 +8698,129 @@ composition after the same scan. An extension parser would not avoid block
 reads, decode, payload transfer, or row crossing. Direct regression:
 `tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
 regression: `session_eighteen_unpack_syslog_is_exact_rich_bounded_and_durable`.
+
+### SQL-LOG-055: concatenate one JSON array
+
+Bind one exact metadata JSON path, one delimiter, inclusive native timestamp
+bounds, and positive work/source/result limits. This read-only statement joins
+the ordered top-level values of either a retained native array or a string
+containing a strict canonical JSON array. String elements are decoded and
+joined without JSON quotes; nulls, booleans, numbers, objects, and nested
+arrays use compact JSON text.
+
+```sql
+WITH
+bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    level,
+    message,
+    metadata,
+    :json_array_concat_source_override AS source_override,
+    json_type(metadata, :json_array_concat_source_path) AS stored_type,
+    json_extract(metadata, :json_array_concat_source_path) AS stored_value
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), sources AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    level,
+    message,
+    CASE
+      WHEN source_override IS NOT NULL THEN
+        CASE WHEN json_valid(source_override) THEN
+          CASE WHEN json_type(source_override) = 'array'
+            THEN source_override
+          END
+        END
+      WHEN stored_type = 'array' THEN stored_value
+      WHEN stored_type = 'text' THEN
+        CASE WHEN json_valid(stored_value) THEN
+          CASE WHEN json_type(stored_value) = 'array'
+            THEN stored_value
+          END
+        END
+    END AS source_json
+  FROM bounded
+), accepted AS MATERIALIZED (
+  SELECT row_id, ts, level, message, source_json
+  FROM sources
+  WHERE :max_source_bytes > 0
+    AND (
+      source_json IS NULL
+      OR length(CAST(source_json AS BLOB)) <= :max_source_bytes
+    )
+), parts AS MATERIALIZED (
+  SELECT
+    accepted.row_id,
+    CAST(item.key AS INTEGER) AS item_index,
+    CASE item.type
+      WHEN 'text' THEN CAST(item.atom AS TEXT)
+      WHEN 'null' THEN 'null'
+      WHEN 'true' THEN 'true'
+      WHEN 'false' THEN 'false'
+      ELSE CAST(item.value AS TEXT)
+    END AS part
+  FROM accepted
+  JOIN json_each(accepted.source_json) AS item
+), joined AS MATERIALIZED (
+  SELECT
+    row_id,
+    group_concat(part, :json_array_concat_delimiter ORDER BY item_index) AS joined
+  FROM parts
+  GROUP BY row_id
+)
+SELECT
+  accepted.ts,
+  accepted.level,
+  accepted.message,
+  COALESCE(joined.joined, '') AS joined
+FROM accepted
+LEFT JOIN joined USING (row_id)
+WHERE :max_result_rows > 0
+ORDER BY accepted.ts, accepted.row_id
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:max_work_entries` to `100000`, `:max_source_bytes` to `4096`,
+`:max_result_rows` to `100`, `:json_array_concat_source_path` to `$.tags`,
+`:json_array_concat_source_override` to `NULL`, and
+`:json_array_concat_delimiter` to `|`. The two results are
+`prod||123|true|false|null|{"nested":"ignored"}|["ignored"]|ab|*` and a
+second row containing `dev|1.5|-2|123|a"b|a\nb|a/b`, where `\n` denotes an
+actual newline in the result string. A valid empty array, missing path,
+explicit null, malformed JSON string, JSON scalar string, or retained
+non-array produces empty TEXT. The source remains unchanged.
+
+This SQL foundation deliberately accepts strict canonical JSON only. SQLite
+JSON1 decodes numeric values before concatenation, so it cannot preserve
+lexical spellings such as `1.00`, `-0`, or `1e3`; JSON5 `NaN` is also
+canonicalized incompatibly. Complete `LQL-P40` therefore remains in the Rust
+API. Its bounded scanner preserves those spellings, object order, nested JSON
+escape spelling, and VictoriaLogs bare `NaN`; it also owns case-insensitive
+grammar, default/bare/quoted/dotted fields, decoded delimiters, source
+snapshots, current-row rich mutation, destination conflicts, and cumulative
+work, state, result, response, deadline, cancellation, and HTTP envelopes.
+
+The pinned VictoriaLogs streaming JSON response omits empty-valued columns,
+although its processor assigns an empty string. Timeless retains and returns
+the empty string so missing, null, and empty remain distinguishable in its
+richer row model. This is an explicit response-encoding boundary, not a
+different transform result.
+
+Every source row already crosses the bounded public `logs` interface, and
+JSON1 supplies this useful canonical-array operation directly. Neither the
+language grammar nor raw-token-preserving composition would avoid a storage
+read, block decode, or row crossing if moved into the extension. No extension
+primitive or private shadow-table access is warranted. Direct regression:
+`tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
+regression:
+`session_eighteen_json_array_concat_is_exact_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

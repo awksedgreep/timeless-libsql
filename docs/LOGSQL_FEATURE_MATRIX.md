@@ -143,7 +143,7 @@ extension.
 | `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent)) | shipped | no | none | `API` | P3 |
-| `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P40` | `json_array_concat` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-055-concatenate-one-json-array)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P42` | `unroll` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P43` | `join` | missing | no | `SQL` | `API` | P3 |
@@ -912,6 +912,41 @@ response bytes after byte-identical public work: one/four candidate blocks,
 235,778/1,914,055 payload bytes per query. Request-attributed API means are
 2.498/34.612 ms versus 2.479/33.106 ms, or +0.8%/+4.5%. The bounded
 post-scan cost is accepted and does not justify storage pushdown.
+
+`LQL-P40` snapshots one exact current-row array source and joins its top-level
+elements with an optional delimiter. `json_array_concat` defaults source and
+destination to `_msg`; accepts optional `from`/`as`, their bare shorthand,
+quoted and dotted exact fields, and case-insensitive keywords; and replaces
+the source only after producing the complete result. Wildcards, prefixes,
+attached suffixes, missing operands, and trailing tokens fail explicitly.
+
+Retained native arrays are traversed without flattening the source. A string
+source must contain a valid JSON array with optional surrounding whitespace.
+Top-level strings are decoded and joined without quotes; nulls, booleans,
+numbers, objects, and nested arrays use compact JSON text. The bounded Rust
+scanner preserves VictoriaLogs' raw numeric spelling, object order, nested
+escape spelling, and bare `NaN`, which a `serde_json::Value` or SQLite JSON1
+round trip would silently normalize. Empty arrays, missing/null fields,
+malformed or scalar JSON text, and retained nonarrays produce empty text.
+Timeless returns that explicit empty value to preserve its richer
+missing/null/empty distinction; VictoriaLogs assigns the same empty value
+internally but omits it from its streaming JSON response.
+
+Dotted destinations reconstruct retained nesting and preserve siblings;
+replacing an object or descending through a scalar returns HTTP 422. Parser,
+JSON traversal, decoded strings, raw spans, result bytes, paths, rows,
+response bytes, deadline, and cancellation are bounded. Request-local writes
+never mutate durable rows through optimize, shutdown, or reopen. The complete
+1,199-case pinned oracle establishes the upstream grammar and raw-token
+behavior; real-extension tests add native rich-array fidelity.
+
+Public
+[`SQL-LOG-055`](QUERY_SQL_EQUIVALENTS.md#sql-log-055-concatenate-one-json-array)
+uses bounded public `logs` rows and SQLite JSON1 to concatenate one fixed
+canonical array path. It cannot honestly preserve lexical number spelling or
+bare `NaN`, so complete behavior remains Rust API composition. Every value
+already crossed the public row boundary; no extension opcode, private table,
+durable mutation, or storage-contract change is justified.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare

@@ -4662,6 +4662,86 @@
       "expected_rows": [{"case": "unpack-words-rich", "array_words": "[\"left\",\"right\"]"}]
     },
     {
+      "id": "LQL-P40-json-array-concat-joins-strings-with-delimiter",
+      "query": "case:=json-array-strings | json_array_concat \",\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-strings", "joined": "prod,canary,"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-default-delimiter-is-empty",
+      "query": "case:=json-array-strings | json_array_concat from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-strings", "joined": "prodcanary"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-bare-source-and-destination",
+      "query": "case:=json-array-strings | json_array_concat \",\" tags joined | fields case, tags, joined",
+      "expected_rows": [{"case": "json-array-strings", "tags": "[\"prod\",\"canary\",\"\"]", "joined": "prod,canary,"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-renders-mixed-primitives",
+      "query": "case:=json-array-mixed | json_array_concat \"|\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-mixed", "joined": "123|1.5|-2|true|false|null|123"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-renders-nested-json",
+      "query": "case:=json-array-nested | json_array_concat \";\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-nested", "joined": "{\"a\":\"b\"};[\"a\"];leaf"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-empty-array-is-empty",
+      "query": "case:=json-array-empty | json_array_concat \",\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-empty"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-non-array-is-empty",
+      "query": "case:=json-array-scalar | json_array_concat \",\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-scalar"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-object-is-empty",
+      "query": "case:=json-array-object | json_array_concat \",\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-object"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-missing-is-empty",
+      "query": "case:=json-array-missing | json_array_concat \",\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-missing"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-decodes-string-escapes",
+      "query": "case:=json-array-escaped | json_array_concat \"|\" from tags as joined | fields case, joined",
+      "expected_rows": [{"case": "json-array-escaped", "joined": "a\"b|a\nb|a/b|ab"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-defaults-to-message-and-source-destination-snapshot",
+      "query": "case:=format-row | format '[\"x\",1]' | json_array_concat | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "x1"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-trims-space-and-preserves-bare-nan",
+      "query": "case:=format-row | format '  [\"a\",NaN,{\"x\":1}]  ' as source | json_array_concat \",\" from source as joined | fields case, joined",
+      "expected_rows": [{"case": "format-row", "joined": "a,NaN,{\"x\":1}"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-preserves-json-token-spelling-and-object-order",
+      "query": "case:=format-row | format '[{\"z\":1, \"a\":2},1.00,-0,1e3,[NaN]]' as source | json_array_concat \"|\" from source as joined | fields case, joined",
+      "expected_rows": [{"case": "format-row", "joined": "{\"z\":1,\"a\":2}|1.00|-0|1e3|[NaN]"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-preserves-nested-json-string-token-spelling",
+      "query": "case:=format-row | format `[{\"x\":\"\\u0061\",\"slash\":\"a\\/b\",\"solid\":\"\\u003c\"}]` as source | json_array_concat from source as joined | fields case, joined",
+      "expected_rows": [{"case": "format-row", "joined": "{\"x\":\"\\u0061\",\"slash\":\"a\\/b\",\"solid\":\"\\u003c\"}"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-keywords-and-quoted-fields-are-case-insensitive",
+      "query": "case:=format-row | format '[\"x\",\"y\"]' as \"left field\" | JsOn_ArRaY_CoNcAt \"-\" FrOm \"left field\" As \"joined field\" | fields case, \"joined field\"",
+      "expected_rows": [{"case": "format-row", "joined field": "x-y"}]
+    },
+    {
+      "id": "LQL-P40-json-array-concat-without-destination-replaces-source",
+      "query": "case:=json-array-strings | json_array_concat \"|\" from tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-strings", "tags": "prod|canary|"}]
+    },
+    {
       "id": "LQL-P41-json-array-len-counts-string-elements",
       "query": "case:=json-array-strings | json_array_len(tags) as length | fields case, length",
       "expected_rows": [{"case": "json-array-strings", "length": "3"}]
@@ -7235,6 +7315,62 @@
     {
       "id": "LQL-P39-unpack-words-rejects-attached-suffix",
       "query": "* | unpack_words.extra",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-from-requires-source",
+      "query": "* | json_array_concat from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-as-requires-destination",
+      "query": "* | json_array_concat as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-rejects-wildcard-source",
+      "query": "* | json_array_concat \",\" from *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-rejects-prefix-source",
+      "query": "* | json_array_concat \",\" from source*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-rejects-wildcard-destination",
+      "query": "* | json_array_concat \",\" from source as *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-rejects-prefix-destination",
+      "query": "* | json_array_concat \",\" from source as result*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-rejects-trailing-token",
+      "query": "* | json_array_concat \",\" from source result trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P40-json-array-concat-rejects-attached-suffix",
+      "query": "* | json_array_concat.extra",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

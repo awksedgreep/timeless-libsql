@@ -1940,6 +1940,56 @@ includes Unicode classification, deduplication, compact-array creation, and a
 `QSF-227` accepts the bounded Rust API cost and preserves the no-extension
 verdict.
 
+## LogsQL JSON array concatenation over current rows
+
+`json_array_concat` snapshots one exact request-owned field, joins its
+top-level array elements with an optional delimiter, and writes TEXT to one
+exact current-row destination:
+
+```text
+* | json_array_concat
+* | json_array_concat ","
+* | json_array_concat from tags as joined
+* | json_array_concat " | " tags joined
+* | json_array_concat "\n" from payload.items
+```
+
+Keywords are case-insensitive. Source and destination default to `_msg` and
+the source respectively. `from` and `as` are optional when the operands are
+unambiguous; fields may be quoted or dotted. The delimiter is a decoded quoted
+value or one supported compound token. Wildcards, prefixes, attached
+suffixes, missing operands, and trailing tokens fail before storage work.
+
+Retained native arrays are traversed without changing their types. String
+sources accept valid JSON arrays with surrounding JSON whitespace. Top-level
+strings are decoded and joined without JSON quotes; nulls, booleans, numbers,
+objects, and nested arrays use compact JSON. The pinned VictoriaLogs bare
+`NaN` token is retained. For string-backed arrays, the bounded scanner also
+preserves raw numeric spelling (`1.00`, `-0`, `1e3`), object key order, and
+nested escape spelling while removing only insignificant JSON whitespace.
+Empty arrays, missing/null sources, malformed or scalar JSON text, and native
+nonarrays produce an explicit empty string.
+
+VictoriaLogs internally assigns that empty result but its streaming JSON
+encoder omits empty-valued columns. Timeless returns `""` so its retained
+missing-versus-null-versus-empty contract remains observable. This explicit
+response-encoding difference preserves more fidelity without changing the
+transform value.
+
+The source is fully read before any destination write. Dotted destinations
+reconstruct nesting and preserve siblings; a write that would replace an
+object or descend through a scalar fails with HTTP 422. JSON depth, token
+work, decoded strings, span state, result bytes, rows, response bytes,
+deadlines, and cancellation are bounded. Durable public rows remain unchanged
+through optimize, shutdown, and reopen.
+
+Executable
+[`SQL-LOG-055`](QUERY_SQL_EQUIVALENTS.md#sql-log-055-concatenate-one-json-array)
+uses only bounded public `logs` rows plus SQLite JSON1 for a fixed canonical
+array path. SQLite cannot preserve raw numeric spellings or bare `NaN`, so the
+complete LogsQL transform remains in the Rust logs API. No extension opcode,
+private shadow table, storage format, or batching behavior is added.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level
