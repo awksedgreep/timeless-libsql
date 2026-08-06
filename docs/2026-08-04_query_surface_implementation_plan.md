@@ -801,6 +801,19 @@ write cost, records unchanged four-block storage and the HWM verdict, and
 closes `LQL-P32`. Session 17 continues with its remaining declared P2 rows;
 none may be skipped before Session 18 begins.
 
+`LQL-P33` is in progress with a strict case-insensitive `extract_regexp`
+parser; request-once bounded RE2-family compilation; named-capture and
+first-match semantics; dot-newline default and inline flags; exact `_msg` or
+`from` sources; conditions; default, keep-original, and skip-empty writes;
+typed textual projection; sequential current-row composition; explicit rich-
+object conflicts; work/state/result/response limits; deadline cancellation;
+optimize/reopen coverage; and immutable durable sources. Nineteen exact-result
+and fourteen error cases pass the complete 835-case pinned VictoriaLogs
+oracle. `QSF-184` records why core SQLite and the public extension have no
+honest portable RE2 named-capture SQL recipe and why this stays bounded Rust
+API work over public rows. Exact-build evidence remains the row's final exit
+criterion.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

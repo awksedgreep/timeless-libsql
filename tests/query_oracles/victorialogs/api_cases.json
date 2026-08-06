@@ -3523,6 +3523,101 @@
       "id": "LQL-P32-extract-decodes-single-quoted-byte-escapes-as-runes",
       "query": "case:=format-row | format \"'\\\\xFF'\" as source | extract '<decoded>' from source | fields case, decoded",
       "expected_rows": [{"case": "format-row", "decoded": "ÿ"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-named-and-anonymous-captures",
+      "query": "case:=format-row | format 'user=alice id=42' as source | extract_regexp 'user=(?P<user>[a-z]+) id=([0-9]+)(?P<tail>.*)' from source | fields case, user, tail",
+      "expected_rows": [{"case": "format-row", "user": "alice"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-uses-the-first-match",
+      "query": "case:=format-row | format 'id=1 id=2' as source | extract_regexp 'id=(?P<id>[0-9]+)' from source | fields case, id",
+      "expected_rows": [{"case": "format-row", "id": "1"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-dot-matches-newlines-by-default",
+      "query": "case:=format-row | format 'Query text: SELECT\\nNEXT' as source | extract_regexp 'Query text: (?P<query>.+)' from source | fields case, query",
+      "expected_rows": [{"case": "format-row", "query": "SELECT\nNEXT"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-inline-flag-disables-dot-newline",
+      "query": "case:=format-row | format 'Query text: SELECT\\nNEXT' as source | extract_regexp '(?-s)Query text: (?P<query>.+)' from source | fields case, query",
+      "expected_rows": [{"case": "format-row", "query": "SELECT"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-unmatched-optional-capture-is-empty",
+      "query": "case:=format-row | format 'kind=admin' as source | extract_regexp 'kind=(?P<kind>[a-z]+)(?: id=(?P<id>[0-9]+))?' from source | fields case, kind, id",
+      "expected_rows": [{"case": "format-row", "kind": "admin"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-default-empty-overwrites-existing-field",
+      "query": "case:=format-row | format 'no match' as source | extract_regexp 'result=(?P<result>.+)' from source | fields case, result",
+      "expected_rows": [{"case": "format-row"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-keep-original-preserves-nonempty-field",
+      "query": "case:=format-row | format 'result=changed' as source | extract_regexp 'result=(?P<result>.+)' from source keep_original_fields | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-skip-empty-preserves-nonempty-field",
+      "query": "case:=format-row | format 'no match' as source | extract_regexp 'result=(?P<result>.+)' from source skip_empty_results | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-skip-empty-allows-nonempty-overwrite",
+      "query": "case:=format-row | format 'result=changed' as source | extract_regexp 'result=(?P<result>.+)' from source skip_empty_results | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "changed"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-conditional-match",
+      "query": "case:=format-row | format 'result=changed' as source | extract_regexp if (host:=aцC) 'result=(?P<result>.+)' from source | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "changed"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-conditional-miss-preserves-field",
+      "query": "case:=format-row | format 'result=changed' as source | extract_regexp if (host:=other) 'result=(?P<result>.+)' from source | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-keywords-are-case-insensitive",
+      "query": "case:=format-row | format 'kind=admin' as \"source field\" | ExTrAcT_ReGeXp 'kind=(?P<kind>[a-z]+)' FrOm \"source field\" SkIp_EmPtY_ReSuLtS | fields case, kind",
+      "expected_rows": [{"case": "format-row", "kind": "admin"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-composes-sequentially",
+      "query": "case:=format-row | format 'value=first' as source | extract_regexp 'value=(?P<first>.+)' from source | extract_regexp '(?P<copied>.+)' from first | fields case, first, copied",
+      "expected_rows": [{"case": "format-row", "first": "first", "copied": "first"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-textualizes-a-number",
+      "query": "case:=state-zero | extract_regexp '^(?P<probe>.*)$' from probe | fields case, probe",
+      "expected_rows": [{"case": "state-zero", "probe": "0"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-textualizes-a-boolean",
+      "query": "case:=state-false | extract_regexp '^(?P<probe>.*)$' from probe | fields case, probe",
+      "expected_rows": [{"case": "state-false", "probe": "false"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-textualizes-a-json-array",
+      "query": "case:=json-array-strings | extract_regexp '^(?P<tags>.*)$' from tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-strings", "tags": "[\"prod\",\"canary\",\"\"]"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-can-overwrite-the-message",
+      "query": "case:=format-row | extract_regexp 'hello \"(?P<_msg>[^\"]+)\"' | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "world"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-supports-angle-named-groups",
+      "query": "case:=format-row | format 'kind=admin' as source | extract_regexp 'kind=(?<kind>[a-z]+)' from source | fields case, kind",
+      "expected_rows": [{"case": "format-row", "kind": "admin"}]
+    },
+    {
+      "id": "LQL-P33-extract-regexp-inline-case-folds-unicode",
+      "query": "case:=format-row | format 'user=Царь' as source | extract_regexp '(?i)user=(?P<user>царь)' from source | fields case, user",
+      "expected_rows": [{"case": "format-row", "user": "Царь"}]
     }
   ],
   "error_cases": [
@@ -5265,6 +5360,104 @@
     {
       "id": "LQL-P32-extract-condition-requires-pattern",
       "query": "* | extract if (x:y)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-requires-pattern",
+      "query": "* | extract_regexp",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-modifier-is-not-a-pattern",
+      "query": "* | extract_regexp keep_original_fields",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-requires-pattern-after-condition",
+      "query": "* | extract_regexp if (x:y)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-requires-a-named-capture",
+      "query": "* | extract_regexp '(foo)'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-invalid-regexp",
+      "query": "* | extract_regexp '(?P<foo>[)'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-backreferences",
+      "query": "* | extract_regexp '(?P<foo>(a)\\2)'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-lookaround",
+      "query": "* | extract_regexp '(?P<foo>a(?=b))'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-wildcard-capture",
+      "query": "* | extract_regexp 'foo(?P<*>.*)'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-wildcard-source",
+      "query": "* | extract_regexp '(?P<foo>.*)' from *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-prefix-wildcard-source",
+      "query": "* | extract_regexp '(?P<foo>.*)' from x*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-requires-source-after-from",
+      "query": "* | extract_regexp '(?P<foo>.*)' from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-condition-after-pattern",
+      "query": "* | extract_regexp '(?P<foo>.*)' if (x:y)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-both-preservation-modifiers",
+      "query": "* | extract_regexp '(?P<foo>.*)' keep_original_fields skip_empty_results",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P33-extract-regexp-rejects-trailing-token",
+      "query": "* | extract_regexp '(?P<foo>.*)' trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -1355,6 +1355,148 @@ fn parse_extract_pipe(
     }))
 }
 
+fn parse_extract_regexp_pipe(
+    segment: &str,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<PipelineOp, LogsqlError> {
+    let operation = "extract_regexp";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL extract_regexp pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL extract_regexp pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[operation.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL extract_regexp requires whitespace before its pattern",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL extract_regexp requires a pattern",
+        ));
+    }
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, operation)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(
+                &expression,
+                None,
+                timestamp_unit,
+                query_now,
+            )?)
+        }
+    } else {
+        None
+    };
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL extract_regexp requires a pattern after its condition",
+        ));
+    }
+
+    let (pattern, consumed) = if let Some((pattern, consumed)) = parse_quoted_prefix(rest)? {
+        (pattern, consumed)
+    } else {
+        let consumed = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        (rest[..consumed].to_owned(), consumed)
+    };
+    let regex = RegexBuilder::new(&pattern)
+        .dot_matches_new_line(true)
+        .size_limit(1 << 20)
+        .build()
+        .map_err(|error| {
+            LogsqlError::malformed(format!(
+                "invalid LogsQL extract_regexp regexp {pattern:?}: {error}"
+            ))
+        })?;
+    let mut captures = Vec::new();
+    for (index, name) in regex.capture_names().enumerate() {
+        let Some(name) = name else {
+            continue;
+        };
+        let field = match parse_delete_field(name)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL extract_regexp capture {name:?} is not an exact field"
+                )));
+            }
+        };
+        captures.push(ExtractRegexpCapture { index, field });
+    }
+    if captures.is_empty() {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL extract_regexp pattern {pattern:?} must contain a named capture"
+        )));
+    }
+    rest = rest[consumed..].trim_start();
+
+    let tokens = pipeline_words(rest)?;
+    let mut cursor = 0usize;
+    let mut source = parse_delete_field("_msg")?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("from"))
+    {
+        cursor += 1;
+        let field = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL extract_regexp from requires an exact field")
+        })?;
+        source = match parse_delete_field(field)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL extract_regexp from requires an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+
+    let mut keep_original_fields = false;
+    let mut skip_empty_results = false;
+    if let Some(modifier) = tokens.get(cursor) {
+        if modifier.eq_ignore_ascii_case("keep_original_fields") {
+            keep_original_fields = true;
+            cursor += 1;
+        } else if modifier.eq_ignore_ascii_case("skip_empty_results") {
+            skip_empty_results = true;
+            cursor += 1;
+        }
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL extract_regexp token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::ExtractRegexp(ExtractRegexpSpec {
+        regex,
+        captures,
+        source,
+        keep_original_fields,
+        skip_empty_results,
+        condition,
+    }))
+}
+
 fn parse_extract_pattern(pattern: &str) -> Result<Vec<FormatStep>, LogsqlError> {
     let steps = parse_format_pattern(pattern)?;
     if steps.iter().all(|step| step.field.is_none()) {
@@ -2523,6 +2665,10 @@ fn is_extract_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "extract")
 }
 
+fn is_extract_regexp_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "extract_regexp")
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -3159,6 +3305,22 @@ pub(crate) struct ExtractSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ExtractRegexpCapture {
+    pub index: usize,
+    pub field: PipelineField,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExtractRegexpSpec {
+    pub regex: Regex,
+    pub captures: Vec<ExtractRegexpCapture>,
+    pub source: PipelineField,
+    pub keep_original_fields: bool,
+    pub skip_empty_results: bool,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -3194,6 +3356,7 @@ pub(crate) enum PipelineOp {
     Replace(ReplaceSpec),
     ReplaceRegexp(ReplaceRegexpSpec),
     Extract(ExtractSpec),
+    ExtractRegexp(ExtractRegexpSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3581,6 +3744,14 @@ pub fn parse_at(
             }
             _ if is_replace_regexp_pipe(segment) => {
                 pipeline.push(parse_replace_regexp_pipe(
+                    segment,
+                    timestamp_unit,
+                    query_now,
+                )?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_extract_regexp_pipe(segment) => {
+                pipeline.push(parse_extract_regexp_pipe(
                     segment,
                     timestamp_unit,
                     query_now,
@@ -8884,6 +9055,35 @@ mod tests {
             "* | extract if (x:y)",
             r#"* | extract "<field>" keep_original_fields skip_empty_results"#,
             r#"* | extract "<field>" trailing"#,
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_extract_regexp_grammar_is_complete_and_strict() {
+        for query in [
+            r#"* | extract_regexp "user=(?P<user>[a-z]+) id=([0-9]+)""#,
+            r#"* | ExTrAcT_ReGeXp if (kind:=admin) "(?s:kind=(?<kind>.+))" from text keep_original_fields"#,
+            r#"* | extract_regexp "(?P<left>.*) &lt; (?P<right>.*)" from "quoted field" skip_empty_results"#,
+        ] {
+            parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+
+        for query in [
+            "* | extract_regexp",
+            "* | extract_regexp keep_original_fields",
+            r#"* | extract_regexp "(anonymous-only)""#,
+            r#"* | extract_regexp "(?P<field>[)""#,
+            r#"* | extract_regexp "(?P<field>(a)\\2)""#,
+            r#"* | extract_regexp "(?P<field>a(?=b))""#,
+            r#"* | extract_regexp "(?P<field>.*)" from *"#,
+            r#"* | extract_regexp "(?P<field>.*)" from x*"#,
+            "* | extract_regexp if (x:y)",
+            r#"* | extract_regexp "(?P<field>.*)" keep_original_fields skip_empty_results"#,
+            r#"* | extract_regexp "(?P<field>.*)" trailing"#,
         ] {
             let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");

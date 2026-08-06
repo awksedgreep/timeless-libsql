@@ -708,3 +708,20 @@ against `pipe_extract.go`, `pipe_extract_test.go`, `pattern.go`, and
 row-query cases, 249 error cases, and 255 statistics/pipeline cases: 802 cases
 total, all passing against the immutable image.
 The fixture now contains 802 cases.
+
+`LQL-P33` adds nineteen exact pipeline-result cases and fourteen error cases
+for `extract_regexp`. They pin named and anonymous groups; first-match-only
+behavior; dot-newline default and inline disablement; unmatched optional
+captures; default, keep-original, and skip-empty writes; matching and
+nonmatching conditions; case-insensitive syntax; exact quoted sources;
+sequential composition; number, boolean, and JSON-array textual projection;
+message replacement; both named-group spellings; and Unicode case folding.
+Missing patterns, anonymous-only patterns, invalid regular expressions,
+backreferences, lookaround, wildcard captures/sources, missing sources,
+misplaced conditions, conflicting modifiers, and trailing tokens fail.
+Source audit is against `pipe_extract_regexp.go` and
+`pipe_extract_regexp_test.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 298
+row-query cases, 263 error cases, and 274 statistics/pipeline cases: 835 cases
+total, all passing against the immutable image.
+The fixture now contains 835 cases.

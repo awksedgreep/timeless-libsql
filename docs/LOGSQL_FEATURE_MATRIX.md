@@ -136,7 +136,7 @@ extension.
 | `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P33` | `extract_regexp` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P33` | `extract_regexp` | in progress | no | none | `API` | P2 |
 | `LQL-P34` | `pack_json` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` | missing | no | `SQL` | `API` | P2 |
@@ -494,6 +494,29 @@ records 3.269/39.052 ms narrow/wide p95 versus 3.201/33.944 ms for byte-
 identical same-scan controls; `QSF-183` accepts the +2.1%/+15.0% bounded
 literal extraction/field-write cost above the unchanged public storage
 boundary.
+
+`LQL-P33` compiles one RE2-family pattern in the Rust logs API and applies it
+only to request-owned rows returned by the public `logs` table. The first
+match supplies every named capture; anonymous groups participate in matching
+but do not create fields. The command supports default `_msg` or one exact
+`from` source, optional `if`, case-insensitive syntax, dot-newline matching by
+default with inline flag overrides, `(?P<name>...)` and `(?<name>...)` groups,
+default empty writes, `keep_original_fields`, `skip_empty_results`, and
+sequential current-row composition. Strings, numbers, booleans, and arrays
+use the retained textual projection; preserved rich values stay native.
+Missing matches and unmatched optional groups become explicit empty strings
+in Timeless output. Writes that would replace a retained object fail with an
+actionable field-conflict envelope. Pattern compilation, captures, projected
+bytes, paths, work, response state, deadlines, and cancellation are bounded;
+durable rows remain immutable across optimize and reopen.
+
+Core SQLite and the public extension expose no portable RE2-compatible
+named-capture extraction scalar. This row therefore has foundation `none`
+and no SQL recipe: direct SQLite/libSQL users must compose the regex in their
+host or deliberately load a separate general regexp extension. The language
+operation remains API composition over public rows. It does not justify
+LogsQL syntax, private-table access, or a language-specific primitive in the
+storage extension.
 
 ## Statistics functions
 

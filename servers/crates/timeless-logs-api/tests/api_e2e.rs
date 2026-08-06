@@ -4442,6 +4442,272 @@ async fn session_seventeen_extract_is_literal_typed_bounded_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_extract_regexp_is_first_match_typed_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("extract-regexp-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "prefix user=Alice id=42\nnext user=Later id=99".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"extract-regexp-admin",
+                        "extract_regexp_group":"extract-regexp",
+                        "kind":"admin",
+                        "result":"original",
+                        "empty":"",
+                        "number":101,
+                        "flag":false,
+                        "array":["prod",1],
+                        "null_value":null,
+                        "optional_source":"kind=admin",
+                        "nested":{"value":"source=xy", "keep":1}
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "public".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"extract-regexp-user",
+                        "extract_regexp_group":"extract-regexp",
+                        "kind":"user",
+                        "result":"original"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-regexp-admin" | extract_regexp 'user=(?P<user>[A-Za-z]+) id=([0-9]+)(?P<id_tail>.*)' | extract_regexp '(?P<id>[0-9]+)' from id_tail | fields case, user, id"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-regexp-admin",
+            "user":"Alice",
+            "id":"99"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-regexp-admin" | extract_regexp '(?P<whole>user=(?P<first>[A-Za-z]+) id=(?P<id>[0-9]+).*(?P<tail>next))' | fields case, whole, first, id, tail"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-regexp-admin",
+            "whole":"user=Alice id=42\nnext",
+            "first":"Alice",
+            "id":"42",
+            "tail":"next"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-regexp-admin" | ExTrAcT_ReGeXp '(?-s)prefix (?<first_line>.+)' SkIp_EmPtY_ReSuLtS | fields case, first_line"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-regexp-admin",
+            "first_line":"user=Alice id=42"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"extract_regexp_group:=extract-regexp | extract_regexp if (kind:=admin) 'user=(?P<parsed>[A-Za-z]+)' | fields case, parsed"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"extract-regexp-admin", "parsed":"Alice"}),
+            serde_json::json!({"case":"extract-regexp-user"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-regexp-admin" | extract_regexp 'number=(?P<number>.+)' from optional_source keep_original_fields | extract_regexp 'missing=(?P<array>.+)' from optional_source skip_empty_results | extract_regexp '^(?P<number_text>.*)$' from number | extract_regexp '^(?P<array_text>.*)$' from array | extract_regexp 'missing=(?P<null_value>.+)' from optional_source | fields case, number, number_text, flag, array, array_text, null_value, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-regexp-admin",
+            "number":101,
+            "number_text":"101",
+            "flag":false,
+            "array":["prod",1],
+            "array_text":"[\"prod\",1]",
+            "null_value":"",
+            "nested":{"value":"source=xy", "keep":1}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-regexp-admin" | extract_regexp 'source=(?P<nested_value>.+)' from nested.value | extract_regexp '(?P<copied>.+)' from nested_value | extract_regexp 'kind=(?P<optional_kind>[a-z]+)(?: id=(?P<optional_id>[0-9]+))?' from optional_source | fields case, nested_value, copied, optional_kind, optional_id"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-regexp-admin",
+            "nested_value":"xy",
+            "copied":"xy",
+            "optional_kind":"admin",
+            "optional_id":""
+        })]
+    );
+
+    for malformed in [
+        "* | extract_regexp",
+        "* | extract_regexp keep_original_fields",
+        r#"* | extract_regexp '(anonymous-only)'"#,
+        r#"* | extract_regexp '(?P<field>[)'"#,
+        r#"* | extract_regexp '(?P<field>(a)\2)'"#,
+        r#"* | extract_regexp '(?P<field>a(?=b))'"#,
+        r#"* | extract_regexp '(?P<field>.*)' from *"#,
+        r#"* | extract_regexp '(?P<field>.*)' from x*"#,
+        "* | extract_regexp if (x:y)",
+        r#"* | extract_regexp '(?P<field>.*)' keep_original_fields skip_empty_results"#,
+        r#"* | extract_regexp '(?P<field>.*)' trailing"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="extract-regexp-admin" | extract_regexp 'user=(?P<nested>.+)'"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"extract_regexp_group:=extract-regexp | extract_regexp '(?P<captured>.+)'"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let work_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(work_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(work_limited["reason"], "max_work_rows", "{work_limited}");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_response_bytes: 8,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="extract-regexp-admin" | extract_regexp '(?P<captured>.+)'"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(response_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response_limited["reason"], "max_response_bytes",
+        "{response_limited}"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-regexp-admin" | fields case, _msg, kind, result, empty, number, flag, array, null_value, optional_source, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-regexp-admin",
+            "_msg":"prefix user=Alice id=42\nnext user=Later id=99",
+            "kind":"admin",
+            "result":"original",
+            "empty":"",
+            "number":101,
+            "flag":false,
+            "array":["prod",1],
+            "null_value":null,
+            "optional_source":"kind=admin",
+            "nested":{"value":"source=xy", "keep":1}
+        })],
+        "extract_regexp must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="extract-regexp-admin" | extract_regexp 'user=(?P<user>[A-Za-z]+) id=(?P<id>[0-9]+)' | extract_regexp 'source=(?P<nested_value>.+)' from nested.value | fields case, user, id, nested_value, number, array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-regexp-admin",
+            "user":"Alice",
+            "id":"42",
+            "nested_value":"xy",
+            "number":101,
+            "array":["prod",1],
+            "nested":{"value":"source=xy", "keep":1}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -9941,12 +10207,47 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_replace_regexp);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_replace_regexp_cancel = default_app
+        .clone()
         .oneshot(logsql_request(
             r#"level:error | replace_regexp ("e", E) | fields _msg | limit 1"#,
         ))
         .await
         .unwrap();
     assert_eq!(reused_after_replace_regexp_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_extract_regexp = storage.stats().await.unwrap().api_query_cancelled;
+    let extract_regexp_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | extract_regexp "(?P<selected>.+)" | fields selected | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(extract_regexp_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_extract_regexp
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_extract_regexp);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_extract_regexp_cancel = default_app
+        .oneshot(logsql_request(
+            r#"level:error | extract_regexp "(?P<selected>e.+)" | fields selected | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_extract_regexp_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

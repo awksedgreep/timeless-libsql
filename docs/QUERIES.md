@@ -1196,6 +1196,50 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 quoted decoding, and field-write work above the unchanged public storage
 boundary.
 
+## LogsQL RE2 `extract_regexp` over current rows
+
+`extract_regexp` writes the named captures from the first regular-expression
+match into request-owned fields:
+
+```text
+* | extract_regexp 'user=(?P<user>[A-Za-z]+) id=([0-9]+)'
+* | extract_regexp 'kind=(?<kind>[a-z]+)' from payload
+* | extract_regexp if (service:=api) 'request=(?P<request>.+)' keep_original_fields
+* | extract_regexp '(?P<line>.+)' from "source field" skip_empty_results
+```
+
+The command and the `if`, `from`, `keep_original_fields`, and
+`skip_empty_results` keywords are case-insensitive. The quoted or unquoted
+RE2-family pattern must contain at least one named group. Both
+`(?P<name>...)` and `(?<name>...)` are accepted. Anonymous groups affect the
+match but create no field. Backreferences and lookaround are rejected. The
+source defaults to `_msg` and may be one exact quoted or dotted current-row
+field; wildcard sources and capture destinations are rejected.
+
+Only the first match is used. Dot matches newline by default, matching
+VictoriaLogs; inline flags such as `(?-s)` may disable that behavior. A
+missing match or unmatched optional named group produces an empty capture.
+Default mode writes that empty string, `keep_original_fields` preserves every
+nonempty existing destination, and `skip_empty_results` preserves a nonempty
+destination only when the new capture is empty. Later stages observe earlier
+writes. Strings, lowercase booleans, numbers, and compact JSON arrays use the
+standard textual projection. Preserved native numbers, booleans, arrays,
+objects, nulls, and nested siblings are not rewritten. Replacing a retained
+object with a scalar fails with HTTP 422 instead of silently discarding it.
+
+Regex compilation is request-once and size-bounded. Source projection,
+captures, paths, work, temporary state, result rows, response bytes,
+deadlines, and cancellation use the shared hard limits. Transformations never
+mutate durable log metadata and survive flush, optimize, shutdown, and reopen
+through the same public storage rows.
+
+There is intentionally no SQL-equivalent recipe for this row. Core SQLite
+and the public timeless-libsql extension do not provide a portable
+RE2-compatible named-capture extraction scalar. Direct users can apply a
+host regex or load a separate general regexp extension; timeless-libsql does
+not claim that as ordinary SQL support. No private table, extension storage
+primitive, or durable-format change is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

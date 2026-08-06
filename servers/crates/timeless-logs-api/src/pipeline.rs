@@ -21,9 +21,10 @@ use serde_json::{Map, Number, Value};
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CopySpec,
-    ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep, LenSpec, MathBinaryOperator,
-    MathExpression, MathFunction, MathSpec, PipelineField, PipelineOp, RegexpReplacementStep,
-    RenameSpec, ReplaceRegexpSpec, ReplaceSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
+    ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep, LenSpec,
+    MathBinaryOperator, MathExpression, MathFunction, MathSpec, PipelineField, PipelineOp,
+    RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, StatsExpression, StatsKind,
+    TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -223,6 +224,13 @@ pub(crate) fn execute(
                 execution.cancelled,
             )?,
             PipelineOp::Extract(spec) => extract_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
+            PipelineOp::ExtractRegexp(spec) => extract_regexp_fields(
                 rows,
                 spec,
                 execution.timestamp_unit,
@@ -2056,6 +2064,166 @@ fn extract_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn extract_regexp_fields(
+    rows: Vec<Value>,
+    spec: &ExtractRegexpSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path, ..
+    } = &spec.source
+    else {
+        return Err("LogsQL extract_regexp source is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(
+                &mut work_items,
+                limits.max_state_items,
+                "extract_regexp",
+            )?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let source = coalesce_exact_value(&row, source_path);
+            let mut state_bytes = size_of::<Value>();
+            let projected = textual_transform_projection(
+                source,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "extract_regexp",
+            )?;
+            let mut captures = bounded_extract_regexp_captures(
+                projected.as_ref(),
+                spec,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+
+            state_bytes = state_bytes
+                .checked_add(size_of::<Vec<bool>>())
+                .and_then(|bytes| {
+                    bytes.checked_add(spec.captures.len().checked_mul(size_of::<bool>())?)
+                })
+                .ok_or_else(|| "LogsQL extract_regexp state size overflow".to_string())?;
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "extract_regexp")?;
+            let preserve = spec
+                .captures
+                .iter()
+                .zip(&captures)
+                .map(|(capture, value)| {
+                    let PipelineField::Exact { path, .. } = &capture.field else {
+                        return false;
+                    };
+                    let original_nonempty =
+                        extract_value_is_nonempty(coalesce_exact_value(&row, path));
+                    (spec.keep_original_fields && original_nonempty)
+                        || (spec.skip_empty_results && value.is_empty() && original_nonempty)
+                })
+                .collect::<Vec<_>>();
+
+            for (capture_index, capture) in spec.captures.iter().enumerate() {
+                if preserve[capture_index] {
+                    continue;
+                }
+                let PipelineField::Exact {
+                    path: field_path,
+                    name: field_name,
+                } = &capture.field
+                else {
+                    return Err("LogsQL extract_regexp destination is not exact".to_string());
+                };
+                charge_transfer_work(
+                    &mut work_items,
+                    limits.max_state_items,
+                    "extract_regexp",
+                )?;
+                charge_transfer_string(
+                    field_name,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "extract_regexp",
+                )?;
+                for segment in field_path {
+                    charge_transfer_string(
+                        segment,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                        "extract_regexp",
+                    )?;
+                }
+                let object = row.as_object_mut().ok_or_else(|| {
+                    "LogsQL extract_regexp input row is not a JSON object".to_string()
+                })?;
+                if copy_destination_replaces_object(object, field_path) {
+                    return Err(format!(
+                        "LogsQL extract_regexp destination conflict: field {field_name:?} would replace a retained object"
+                    ));
+                }
+                insert_path(
+                    object,
+                    field_path,
+                    Value::String(std::mem::take(&mut captures[capture_index])),
+                )
+                .map_err(|error| {
+                    format!("LogsQL extract_regexp destination conflict: {error}")
+                })?;
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+fn bounded_extract_regexp_captures(
+    source: &str,
+    spec: &ExtractRegexpSpec,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    *state_bytes = state_bytes
+        .checked_add(size_of::<Vec<String>>())
+        .and_then(|bytes| bytes.checked_add(spec.captures.len().checked_mul(size_of::<String>())?))
+        .ok_or_else(|| "LogsQL extract_regexp state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "extract_regexp")?;
+    let mut values = vec![String::new(); spec.captures.len()];
+
+    ensure_active(cancelled)?;
+    let matched = spec.regex.captures(source);
+    ensure_active(cancelled)?;
+    for (output_index, capture) in spec.captures.iter().enumerate() {
+        check_periodically(cancelled, output_index)?;
+        charge_transfer_work(work_items, limits.max_state_items, "extract_regexp")?;
+        let Some(value) = matched
+            .as_ref()
+            .and_then(|matched| matched.get(capture.index))
+            .map(|matched| matched.as_str())
+        else {
+            continue;
+        };
+        *state_bytes = state_bytes
+            .checked_add(value.len())
+            .ok_or_else(|| "LogsQL extract_regexp state size overflow".to_string())?;
+        ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "extract_regexp")?;
+        values[output_index].push_str(value);
+    }
+    ensure_active(cancelled)?;
+    Ok(values)
 }
 
 fn extract_value_is_nonempty(value: Option<&Value>) -> bool {
@@ -6926,6 +7094,150 @@ mod tests {
             extract_fields(
                 vec![row],
                 &first_prefix,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn extract_regexp_is_first_match_typed_and_bounded() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::ExtractRegexp(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected extract_regexp plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "kind":"admin",
+            "_msg":"prefix user=Alice id=42\nnext user=Later id=99",
+            "result":"original",
+            "empty":"",
+            "number":101,
+            "flag":false,
+            "array":["prod",1],
+            "nested":{"value":"source=xy", "keep":1}
+        });
+        let plan = crate::logsql::parse_at(
+            r#"* | extract_regexp 'user=(?P<user>[A-Za-z]+) id=(?P<id>[0-9]+).*(?P<tail>next)' | extract_regexp '^(?P<number_text>.*)$' from number | extract_regexp '^(?P<array_text>.*)$' from array | extract_regexp 'missing=(?P<result>.+)' keep_original_fields | extract_regexp 'missing=(?P<empty>.+)' skip_empty_results | extract_regexp 'source=(?P<nested_value>.+)' from nested.value"#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["user"], "Alice");
+        assert_eq!(result[0]["id"], "42");
+        assert_eq!(result[0]["tail"], "next");
+        assert_eq!(result[0]["result"], row["result"]);
+        assert_eq!(result[0]["empty"], row["empty"]);
+        assert_eq!(result[0]["number"], row["number"]);
+        assert_eq!(result[0]["number_text"], "101");
+        assert_eq!(result[0]["flag"], row["flag"]);
+        assert_eq!(result[0]["array"], row["array"]);
+        assert_eq!(result[0]["array_text"], r#"["prod",1]"#);
+        assert_eq!(result[0]["nested"], row["nested"]);
+        assert_eq!(result[0]["nested_value"], "xy");
+
+        let first_match = parse_spec(r#"* | extract_regexp 'id=(?P<id>[0-9]+)'"#);
+        assert_eq!(
+            extract_regexp_fields(
+                vec![json!({"_msg":"id=1 id=2"})],
+                &first_match,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"_msg":"id=1 id=2", "id":"1"})]
+        );
+
+        let work_error = extract_regexp_fields(
+            vec![row.clone()],
+            &first_match,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL extract_regexp"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = extract_regexp_fields(
+            vec![row.clone()],
+            &first_match,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("LogsQL extract_regexp"),
+            "{state_error}"
+        );
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec(r#"* | extract_regexp 'user=(?P<nested>.+)'"#);
+        let conflict_error = extract_regexp_fields(
+            vec![row.clone()],
+            &conflict,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL extract_regexp destination conflict"),
+            "{conflict_error}"
+        );
+
+        let false_condition = parse_spec(r#"* | extract_regexp if (kind:=user) '(?P<changed>.+)'"#);
+        let unchanged = extract_regexp_fields(
+            vec![row.clone()],
+            &false_condition,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(unchanged.as_slice(), std::slice::from_ref(&row));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            extract_regexp_fields(
+                vec![row],
+                &first_match,
                 TimestampUnit::Microseconds,
                 limits,
                 &cancelled,

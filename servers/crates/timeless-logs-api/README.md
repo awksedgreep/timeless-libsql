@@ -938,6 +938,38 @@ current-row writes after the unchanged one/four-block public scan. Responses
 and storage work are byte-identical; `SQL-LOG-040` remains the direct-user
 foundation for fixed unquoted captures.
 
+LogsQL `extract_regexp` performs bounded first-match RE2-family extraction
+into named current-row fields:
+
+```text
+* | extract_regexp 'user=(?P<user>[A-Za-z]+) id=([0-9]+)'
+* | extract_regexp 'kind=(?<kind>[a-z]+)' from payload
+* | extract_regexp if (service:=api) '(?P<request>.+)' from request keep_original_fields
+* | extract_regexp '(?P<line>.+)' from "source field" skip_empty_results
+```
+
+At least one named `(?P<name>...)` or `(?<name>...)` group is required;
+anonymous groups affect matching but create no field. The source defaults to
+`_msg` and may be one exact quoted or dotted field. Dot matches newline by
+default, inline flags may override it, and backreferences/lookaround or
+wildcard fields fail explicitly. Only the first match contributes captures.
+No match and unmatched optional groups yield empty results.
+
+Default mode writes empty strings, `keep_original_fields` preserves nonempty
+destinations, and `skip_empty_results` preserves a nonempty destination only
+for an empty capture. Conditions and writes observe current-row state in
+pipeline order. Textual projection covers strings, booleans, numbers, and
+compact arrays; preservation retains native rich values. Object-replacing
+writes return HTTP 422. Pattern compilation, work, state, captures, paths,
+results, response bytes, deadlines, and cancellation are bounded, and no
+request-local write mutates durable storage.
+
+There is no claimed SQL recipe. Core SQLite and the public extension have no
+portable RE2 named-capture extraction scalar. Direct SQLite/libSQL hosts must
+compose it outside SQL or deliberately load a separate regexp extension. The
+Rust API uses only public `logs` rows and does not add a private-table,
+language-specific extension, or storage-format dependency.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical
