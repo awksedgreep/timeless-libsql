@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P28 LQL-P29 LQL-P30 LQL-P32 LQL-P33 LQL-P34 LQL-P36 LQL-P41 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F38 LQL-F39 LQL-F40 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P28 LQL-P29 LQL-P30 LQL-P32 LQL-P33 LQL-P34 LQL-P36 LQL-P41 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -1466,6 +1466,20 @@ Every pair reads the same one/four blocks, 1,024/8,192 entries, and
 remains four raw blocks, 1,914,055 logical bytes, and 2,022,736 physical bytes;
 whole-process logs HWM is 100,236KiB. `QSF-201` retains the 52.146ms rich wide
 p99 and rejects both an inexact SQL claim and a redundant extension primitive.
+
+Session 18 query-backed exact membership measured
+5.849/7.341/7.440ms narrow and 32.622/33.501/34.096ms wide p50/p95/p99.
+Equivalent static-list controls measured 3.220/4.251/4.312ms and
+31.197/35.548/41.786ms. The narrow second scan doubles work to two candidate
+blocks, 2,048 decoded entries, and 471,556 payload bytes per request. The wide
+shape adds one indexed subquery block to the four-block outer scan: five
+blocks, 9,216 entries, and 2,149,833 bytes. Wide internal API time is 1.5%
+higher even though endpoint p95/p99 are lower run variation. Both pairs return
+identical result cardinality and response bytes. Storage remains four raw
+blocks, 1,914,055 logical bytes, and 2,022,736 physical bytes; whole-process
+logs HWM is 102,488KiB. `SQL-LOG-048` documents the same two-scan direct SQL
+foundation, and `QSF-203` accepts the inherent composition cost without adding
+a nested extension cursor.
 
 Session 16 `json_array_contains_any` measured 2.416ms/33.611ms string and
 2.447ms/33.549ms boolean narrow/wide p95 while returning 128/8,192 rows. All

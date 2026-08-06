@@ -684,7 +684,9 @@ public rows while retaining Timeless's rich JSON types, plus static
 disjunction over the same rich projection, plus exact top-level primitive
 membership for retained JSON arrays through `json_array_contains_any(...)`,
 plus ordered non-overlapping `seq(...)` phrase matching with the same Unicode
-boundaries and strict static-list grammar,
+boundaries and strict static-list grammar, plus query-backed `in`,
+`contains_any`, and `contains_all` with exact one-field output, request-local
+caching, nested composition, and cumulative work/state/deadline bounds,
 plus lower-inclusive/upper-exclusive bytewise `string_range(...)` filtering
 over the same non-mutating rich projection, plus inclusive Unicode-codepoint
 `len_range(...)` filtering with VictoriaLogs-compatible unsigned bound
@@ -708,6 +710,12 @@ offset policy. `SQL-LOG-024` gives direct users the Euclidean native-timestamp
 equivalent, including pre-epoch dates and bracket-wrap edges. Exact-build p95
 is 3.547/39.768 ms narrow/wide with byte-identical public reads versus the
 same-run equal-cardinality word baseline.
+Query-backed exact membership measures 5.849/7.341/7.440 ms narrow and
+32.622/33.501/34.096 ms wide p50/p95/p99 versus 3.220/4.251/4.312 and
+31.197/35.548/41.786 ms static-list controls. The required second public scan
+doubles narrow decoded work and adds one indexed block to the wide scan;
+storage remains byte-identical. `SQL-LOG-048` gives direct SQLite/libSQL users
+the same bounded two-scan retained-string foundation.
 LogsQL source also accepts VictoriaLogs-compatible `#` line comments, LF/CRLF
 multiline composition, literal hashes inside all three quoted forms, and one
 optional terminal semicolon. Malformed tails fail explicitly with lexical

@@ -152,7 +152,8 @@ case-insensitive function names, mixed value/wildcard lists, `NOT`, pipelines,
 the optimized Timeless `service` and `level` aliases, and strict comma/
 separator errors. A quoted `"*"` is an ordinary value; non-wildcard
 `contains_all` and `contains_any` semantics are pinned independently by
-`LQL-F21` and `LQL-F22`, while query-backed lists remain `LQL-F38`. The
+`LQL-F21` and `LQL-F22`, while query-backed lists are pinned separately by
+shipped `LQL-F38`. The
 wildcard behavior is source-audited
 against `parseInValues`, `parseArgsInParensPossibleWildcard`, and
 `filter_noop.go` at the immutable VictoriaLogs commit above.
