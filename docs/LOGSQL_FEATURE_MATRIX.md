@@ -124,7 +124,7 @@ extension.
 | `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
 | `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` | missing | no | `SQL` | `API` | P2 |
@@ -325,8 +325,10 @@ paths, results, response bytes, and cancellation use existing request limits.
 Executable `SQL-LOG-034` provides the direct exact top-level JSON1
 foundation and documents nested-parent pruning and conflict responsibilities.
 The operation requires no extension primitive, private table, or storage
-contract change. Exact-build performance and HWM evidence remain required
-before the row can move from `in progress` to `shipped`.
+contract change. Exact-build evidence records 3.770/43.696 ms narrow/wide p95
+versus 3.553/36.673 ms for byte-identical same-scan controls; `QSF-169`
+accepts the +6.1%/+19.1% bounded move/prune/rebuild cost above the unchanged
+public storage boundary.
 
 ## Statistics functions
 

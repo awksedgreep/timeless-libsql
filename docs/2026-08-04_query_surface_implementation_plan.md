@@ -674,9 +674,12 @@ executable public `SQL-LOG-034`. Twenty successful and nine error cases pass
 the complete 616-case pinned VictoriaLogs oracle. The retained-model policy
 prunes empty response parents while keeping durable source rows immutable;
 object parents and rich empty objects that do not exist as flattened columns
-remain intact. `QSF-168` records the semantic boundary. The row remains `in
-progress` until exact-build query, completed-work, storage, and HWM evidence
-receives an explicit disposition.
+remain intact. `QSF-168` records the semantic boundary. Exact-build commit
+`0431fbc6b548e4a0153ff9c4e5997dfa0baf5968` measures `rename` at
+3.770/43.696 ms narrow/wide p95 versus 3.553/36.673 ms for byte-identical
+same-scan controls. `QSF-169` accepts the +6.1%/+19.1% bounded
+move/prune/rebuild cost, records unchanged four-block storage and the HWM
+verdict, and closes the row. Session 17 continues with `LQL-P22`.
 
 ### Session 18: applicable LogsQL P3
 
