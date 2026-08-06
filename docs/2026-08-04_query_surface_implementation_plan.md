@@ -994,7 +994,7 @@ records that no extension primitive or storage-contract change is justified.
 The real-extension regression, all 1,033 pinned VictoriaLogs cases, explicit
 no-SQL disposition, documentation contracts, and complete local gates pass.
 
-Session 18 is implementing `LQL-P26` as an API-owned `collapse_nums` pipe.
+Session 18's `LQL-P26` row is closed as an API-owned `collapse_nums` pipe.
 Pinned VictoriaLogs source and the complete 1,055-case live oracle establish
 optional condition, exact target, terminal prettify, token-boundary,
 hexadecimal, underscore/version/duration, Unicode-delimiter, UUID/IPv4/time/
@@ -1004,8 +1004,18 @@ preserves native values on no-op projections and changes no extension or
 storage contract. Core SQLite/libSQL has no portable equivalent tokenizer, so
 the SQL cookbook records an explicit no-recipe disposition. Focused parser,
 evaluator, and real-extension ingest/flush/optimize/shutdown/reopen regressions
-pass. Exact-build evidence and complete local gates remain required before the
-row closes.
+pass.
+
+Exact-build commit `a6047ffe8537188152c882e49b50b98ced7ceced` measures
+2.975/3.135/3.175 ms narrow and 33.889/34.525/34.728 ms wide p50/p95/p99.
+Same-public-work format controls measure 3.026/3.143/3.414 and
+33.720/36.735/42.843 ms. Every pair returns the same 64 rows and 1,536 bytes
+while reading the same one/four candidate blocks, decoding 1,024/8,192
+entries, and transferring 235,778/1,914,055 extension payload bytes per query.
+`QSF-212` accepts the -0.3%/-6.0% p95 variation, unchanged storage, and HWM
+verdict without adding an extension primitive. The full 1,055-case oracle,
+documentation contracts, real-extension/API suites, SQL cookbook, local
+formatting, lint, crash/transaction, and lifecycle gates pass.
 
 ### Session 19: experimental and data-model dispositions
 

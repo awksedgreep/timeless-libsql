@@ -129,7 +129,7 @@ extension.
 | `LQL-P23` | `math` / `eval` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-037-utf-8-byte-length-of-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` ([evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-hash)) | shipped | no | none | `API` | P3 |
-| `LQL-P26` | `collapse_nums` | in progress | no | none | `API` | P3 |
+| `LQL-P26` | `collapse_nums` ([evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-collapse-nums)) | shipped | no | none | `API` | P3 |
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
@@ -440,17 +440,23 @@ same-public-work controls. `QSF-210` accepts the -0.7%/+1.6% endpoint-tail
 variation and the larger decimal-hash response without adding an extension
 scalar.
 
-`LQL-P26` is being implemented as a strict, API-owned current-row text
-transform. Pinned VictoriaLogs source defines optional `if (...)`, optional
-exact `at <field>`, and terminal optional `prettify` grammar; decimal and
-eligible hexadecimal tokens collapse to `<N>`, while prettification recognizes
-UUID, IPv4, time, date, and datetime token shapes. The retained Timeless model
-must preserve native rich values when no textual change occurs and must never
-mutate durable source rows. Core SQLite/libSQL has no portable tokenizer with
-these exact boundary and prettification semantics, so the provisional
-foundation is `none`, not a misleading SQL recipe. Oracle, real-extension,
-bounded-work, exact-build evidence, and final primitive disposition remain
-required before shipment.
+`LQL-P26` is a strict, API-owned current-row text transform. Pinned
+VictoriaLogs source defines optional `if (...)`, optional exact `at <field>`,
+and terminal optional `prettify` grammar; decimal and eligible hexadecimal
+tokens collapse to `<N>`, while ordered prettification recognizes UUID, IPv4,
+time, date, and datetime token shapes. Timeless preserves native rich values
+when their textual projection is unchanged, writes a string only after an
+actual collapse, and never mutates durable source rows. Work, temporary state,
+result/response size, deadline, and cancellation are bounded.
+
+Core SQLite/libSQL has no portable tokenizer with these exact boundaries and
+prettification semantics, so the foundation is `none`, not a misleading SQL
+recipe. The complete 1,055-case pinned oracle, direct evaluator regression,
+and real-extension durability regression close the semantic row. Exact-build
+evidence measures 3.135/34.525 ms narrow/wide p95 versus 3.143/36.735 ms for
+same-public-work controls. `QSF-212` accepts the -0.3%/-6.0% endpoint-tail
+variation as whole-run/API variation after identical storage reads and keeps
+the transform above the unchanged public extension boundary.
 
 `LQL-P28` removes every empty field from the current row. Empty means an
 explicit JSON null or a zero-byte string under the pinned VictoriaLogs

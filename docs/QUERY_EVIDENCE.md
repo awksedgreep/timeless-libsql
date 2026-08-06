@@ -4229,6 +4229,56 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `collapse_nums`
+
+The checked-in
+[`2026-08-06_session18_lql_p26_collapse_nums.json`](evidence/2026-08-06_session18_lql_p26_collapse_nums.json)
+was captured from exact release extension and server build
+`a6047ffe8537188152c882e49b50b98ced7ceced` and has SHA-256
+`b5d3250ab63605af37ab789f929b48867054d59ca10e779edf7aef73a3d24b6b`.
+The narrow shapes select one indexed host and return 64 rows; the wide shapes
+transform all 8,192 retained entries before their 64-row limit. Controls
+format the same source into the same destination and output, so both paths
+perform identical public storage and wire work while isolating the bounded
+number scanner and prettifier.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| number collapse/prettify, indexed host | 64 | 1,536 | 2.975 | 3.135 | 3.175 | 1 | 1,024 | 235,778 | 128 |
+| number collapse/prettify, full fixture | 64 | 1,536 | 33.889 | 34.525 | 34.728 | 4 | 8,192 | 1,914,055 | 8,192 |
+| exact-output format control, indexed host | 64 | 1,536 | 3.026 | 3.143 | 3.414 | 1 | 1,024 | 235,778 | 128 |
+| exact-output format control, full fixture | 64 | 1,536 | 33.720 | 36.735 | 42.843 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Collapse p95 is 0.3%/6.0% lower than its narrow/wide control. Its
+request-attributed API timer averages 2.439/33.156 ms versus 2.468/33.406 ms,
+or 1.2%/0.7% lower. Every equal-width pair executes 50 public queries and
+performs identical candidate-block selection, entry decode, payload read,
+row match, row return, result-cardinality, and response-byte work. The lower
+wide tail is retained as whole-run/API variation rather than claimed as an
+optimization. Core SQLite/libSQL has no portable exact tokenizer for this
+language behavior, and adding one would not avoid a block read, decode,
+payload transfer, or row crossing, so the no-SQL/no-extension disposition is
+correct.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+15.719 ms and the explicit durability barrier took 34.073 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 99,356 KiB and metrics HWM was
+50,264 KiB across the complete enlarged workload. Cancellation ended with
+zero requests in flight; direct evaluator and HTTP regressions pin grammar,
+exact token/prettify semantics, rich-value fidelity, work/state/result/
+response bounds, cancellation, optimize, flush, shutdown, durability, and
+reopen.
+
+All 1,055 pinned VictoriaLogs cases pass live. The complete local extension,
+real-extension logs, server workspace, Rust query harness, documentation,
+oracle, SQL-cookbook, formatting, Clippy, CLI/crash/transaction, and dbhealth
+gates pass. The authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, tag, release, or downstream repository was
+used or modified.
+
 ## Session 17 LogsQL P2: `quantile` and `stddev`
 
 The checked-in

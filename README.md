@@ -851,7 +851,10 @@ remain bounded API/wire costs; no extension hash primitive is justified.
 token boundaries and optional UUID/IP/time/date/datetime prettification while
 preserving native rich values on no-op paths. Core SQLite/libSQL has no
 portable equivalent tokenizer, so the SQL cookbook records an explicit
-no-recipe disposition; exact-build evidence remains pending.
+no-recipe disposition. Exact-build p95 is 3.135/34.525 ms narrow/wide versus
+3.143/36.735 ms for identical-public-work, identical-output controls. The
+-0.3%/-6.0% variation follows unchanged storage reads and does not justify an
+extension tokenizer.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

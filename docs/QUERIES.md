@@ -1174,7 +1174,15 @@ has no tokenizer or replacement scalar with the exact boundary, hexadecimal,
 and ordered prettification behavior. A recursive character CTE or ordinary
 `replace()` chain would be a different language. The Rust logs API owns this
 bounded row-local transform; no private table, extension primitive, or storage
-format is involved. Exact-build performance evidence remains pending.
+format is involved.
+
+Exact-build evidence measures 3.135/34.525 ms narrow/wide p95 versus
+3.143/36.735 ms for identical-output, same-public-work controls. Both pairs
+return 64 rows and 1,536 bytes, read one/four blocks, decode 1,024/8,192
+entries, and transfer 235,778/1,914,055 extension payload bytes per query.
+`QSF-212` treats the -0.3%/-6.0% endpoint-tail difference as bounded run/API
+variation after the unchanged public scan and keeps number collapsing in the
+Rust language layer.
 
 ## LogsQL `drop_empty_fields` over current rows
 
