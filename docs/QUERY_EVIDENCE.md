@@ -4121,6 +4121,67 @@ migrations, and public batch/SQL contracts are unchanged. No private shadow
 table, Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `sample`
+
+The checked-in
+[`2026-08-06_session18_lql_p17_sample.json`](evidence/2026-08-06_session18_lql_p17_sample.json)
+was captured from exact release extension and server build
+`930a1f1c3dd9e4b016456b24c685bf25480bab53` and has SHA-256
+`d819f24d43610606fb4fdb4b88027323464d27ea5f9ca32023dd06babbf741ea`.
+Both shapes end in a scalar count so stochastic row identity does not make
+result cardinality or response transport dominate the comparison. `sample 4`
+is compared with exact `sample 1`, which follows the same public row path but
+retains every row.
+
+The first attempted wide control used plain `stats count()` and its counters
+revealed that it took the extension's native-count reduction: 50 native-count
+calls versus 50 full public scans. That capture was rejected rather than
+presented as a 30x regression. The harness now fails unless both sample/control
+pairs execute one public query per iteration, avoid native count, and report
+identical requested entries, candidate blocks, decoded entries, payload bytes,
+matched entries, and returned entries.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows returned/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `sample 4`, indexed host | 1 | 13 | 3.027 | 3.657 | 3.910 | 1 | 1,024 | 235,778 | 128 |
+| exact `sample 1` control, indexed host | 1 | 14 | 3.140 | 3.307 | 3.447 | 1 | 1,024 | 235,778 | 128 |
+| `sample 4`, full fixture | 1 | 15 | 25.179 | 26.060 | 26.533 | 4 | 8,192 | 1,914,055 | 8,192 |
+| exact `sample 1` control, full fixture | 1 | 15 | 32.412 | 33.206 | 33.678 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Narrow sample p95 is 10.6% above its control even though its request-attributed
+API timer averages 2.303 ms versus 2.410 ms, or 4.4% lower. The small endpoint
+tail is therefore retained as run variation. Wide sample p95 is 21.5% lower,
+and its internal API timer averages 24.233 ms versus 31.213 ms, or 22.4% lower.
+The wide improvement is consistent with first-stage in-place sampling: all
+public blocks and rows still cross the storage boundary, but roughly three
+quarters of rows are discarded before rich metadata JSON materialization and
+the following scalar reduction. Query materialization/storage time is nearly
+identical within each pair; this is API allocation/decode work avoided after
+the public scan, not extension pushdown.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.065 ms and the explicit durability barrier took 36.813 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 100,376 KiB, 4,404 KiB below
+LQL-F41 despite four additional repeated shapes; metrics HWM was 49,696 KiB,
+3,452 KiB below it. Both are whole-process workload variation rather than
+query-local attribution. Cancellation ended with zero requests in flight;
+the real-extension regression pins deadline cancellation, reader reuse, work,
+result, response, optimize, flush, shutdown, and reopen behavior.
+
+All 1,015 pinned VictoriaLogs v1.52.0 cases pass live. The final 58-test logs
+real-extension suite, 114 logs library/binary tests, 90-test metrics
+real-extension suite, complete extension and Rust server workspaces,
+45-section CLI/crash/transaction suite, six focused correctness sections,
+standalone dbhealth lifecycle gate, 32-test Rust query harness, documentation
+contracts, Clippy with warnings denied, formatting, and all 115 SQL recipes
+(153 statements) pass locally. The extension's authoritative 8,192-entry
+batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 17 LogsQL P2: `quantile` and `stddev`
 
 The checked-in

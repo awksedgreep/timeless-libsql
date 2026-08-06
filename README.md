@@ -726,6 +726,13 @@ materialization; it cannot avoid the required public block read and decode.
 `SQL-LOG-049` gives direct SQLite/libSQL users a parameterized bounded `1/N`
 random-subset recipe using ordinary SQLite randomness, so no sampling opcode
 or private storage access is added to the extension.
+Exact-build `sample 4` p50/p95/p99 is 3.027/3.657/3.910 ms narrow and
+25.179/26.060/26.533 ms wide, versus 3.140/3.307/3.447 and
+32.412/33.206/33.678 ms for exact `sample 1` controls. The 21.5% lower wide
+p95 comes from skipping rich JSON materialization after byte-identical public
+block reads; the 10.6% higher narrow p95 is retained as endpoint-tail
+variation because internal API time is 4.4% lower. The evidence harness now
+rejects native-count or otherwise storage-work-mismatched controls.
 LogsQL source also accepts VictoriaLogs-compatible `#` line comments, LF/CRLF
 multiline composition, literal hashes inside all three quoted forms, and one
 optional terminal semicolon. Malformed tails fail explicitly with lexical

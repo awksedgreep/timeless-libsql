@@ -948,7 +948,7 @@ deferred with a concrete prerequisite. Stateful and multi-query constructs
 prove strict memory/cardinality limits; partial responses remain opt-in and
 unmistakable.
 
-Session 18 continues with `LQL-P17`.
+Session 18's `LQL-P17` row is closed.
 
 `LQL-P17` implements VictoriaLogs-compatible `sample N` in the Rust logs API.
 The parser accepts exactly one positive unsigned base-zero/byte/duration/
@@ -962,10 +962,15 @@ Bernoulli equivalent. Because neither implementation can avoid the required
 public block scan and decode, no extension primitive or storage change is
 warranted.
 
-The row may close only after the real-extension grammar/fidelity/limit/
-cancellation/optimize/flush/reopen regression, complete 1,015-case pinned
-VictoriaLogs oracle, executable SQL harness, exact-build narrow/wide evidence,
-storage/HWM verdict, documentation contracts, and complete local gates pass.
+Exact-build commit `930a1f1c3dd9e4b016456b24c685bf25480bab53` closes
+the row. `sample 4` p95 is 3.657/26.060 ms narrow/wide versus
+3.307/33.206 ms for exact `sample 1`; every pair performs byte-identical public
+work. The evidence harness rejected and pinned the first invalid native-count
+control before recapture. `QSF-208` accepts the 10.6% higher narrow endpoint
+tail and records the 21.5% lower wide tail, unchanged storage, and HWM verdict.
+The real-extension grammar/fidelity/limit/cancellation/optimize/flush/reopen
+regression, all 1,015 pinned VictoriaLogs cases, executable `SQL-LOG-049`,
+documentation contracts, and complete local gates pass.
 
 ### Session 19: experimental and data-model dispositions
 

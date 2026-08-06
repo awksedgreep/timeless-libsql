@@ -120,7 +120,7 @@ extension.
 | `LQL-P14` | `last` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)) | shipped | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P15` | `top` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P16` | `uniq` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)) | shipped | no | `VALUES`, `SQL` | `API` | P2 |
-| `LQL-P17` | `sample` | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P17` | `sample` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-049-bounded-random-log-sample)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
 | `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |

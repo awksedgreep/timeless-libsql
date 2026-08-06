@@ -743,6 +743,17 @@ Bernoulli draws. It implements the public `1/N` random-subset contract without
 claiming VictoriaLogs' private exponential-gap RNG sequence. Ordinary SQL is
 sufficient, so no extension primitive or private storage access is used.
 
+Exact release-build evidence over 8,192 rich rows compares `sample 4` with the
+exact `sample 1` control before the same scalar count. Narrow p50/p95/p99 is
+3.027/3.657/3.910 ms versus 3.140/3.307/3.447 ms; wide is
+25.179/26.060/26.533 ms versus 32.412/33.206/33.678 ms. Wide sample p95 is
+21.5% lower because only retained rows reach metadata JSON materialization.
+Narrow p95 is 10.6% higher even though request-attributed API time is 4.4%
+lower, so the small-query tail is retained as endpoint variation. Every pair
+performs identical bounded public work; the evidence harness rejects native
+count or any control with different requested entries, blocks, decoded rows,
+payload bytes, matches, or returned rows.
+
 ## Bounded LogsQL `top`
 
 The Rust logs API implements frequency ranking over the current pipeline row:
