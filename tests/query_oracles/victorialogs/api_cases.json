@@ -3812,6 +3812,68 @@
       "expected_rows": [{"case": "format-row", "nested.value": "nested green", "rendered": "nested green"}]
     },
     {
+      "id": "LQL-P31-split-defaults-to-message-and-preserves-empty-pieces",
+      "query": "case:=format-row | format ',foo,bar,,baz,' | split \",\" | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "[\"\",\"foo\",\"bar\",\"\",\"baz\",\"\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-supports-explicit-keywords-and-case-insensitive-command",
+      "query": "case:=format-row | format 'left::right' as source | SpLiT \"::\" FrOm source As parts | fields case, source, parts",
+      "expected_rows": [{"case": "format-row", "source": "left::right", "parts": "[\"left\",\"right\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-supports-omitted-keywords-and-overwrites-source",
+      "query": "case:=format-row | format 'left::right' as source | split \"::\" source | fields case, source",
+      "expected_rows": [{"case": "format-row", "source": "[\"left\",\"right\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-empty-separator-uses-unicode-runes",
+      "query": "case:=format-row | format 'Шzч' as source | split \"\" source parts | fields case, source, parts",
+      "expected_rows": [{"case": "format-row", "source": "Шzч", "parts": "[\"Ш\",\"z\",\"ч\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-distinguishes-empty-source-by-separator",
+      "query": "case:=format-row | format '' as source | split ',' source literal_parts | split '' source rune_parts | fields case, literal_parts, rune_parts",
+      "expected_rows": [{"case": "format-row", "literal_parts": "[\"\"]", "rune_parts": "[]"}]
+    },
+    {
+      "id": "LQL-P31-split-missing-source-projects-empty-text",
+      "query": "case:=format-row | fields case | split ',' missing parts | fields case, parts",
+      "expected_rows": [{"case": "format-row", "parts": "[\"\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-textualizes-number-boolean-null-empty-and-missing",
+      "query": "state_group:=state | split ',' probe parts | fields case, parts | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty", "parts": "[\"\"]"},
+        {"case": "state-false", "parts": "[\"false\"]"},
+        {"case": "state-missing", "parts": "[\"\"]"},
+        {"case": "state-null", "parts": "[\"\"]"},
+        {"case": "state-string", "parts": "[\"value\"]"},
+        {"case": "state-zero", "parts": "[\"0\"]"}
+      ]
+    },
+    {
+      "id": "LQL-P31-split-textualizes-json-array-fields",
+      "query": "case:=delete-row | split ',' array parts | fields case, array, parts",
+      "expected_rows": [{"case": "delete-row", "array": "[\"x\",1]", "parts": "[\"[\\\"x\\\"\",\"1]\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-matches-victorialogs-json-string-escaping",
+      "query": "case:=format-row | format \"a&lt;'\\\"\\n\\\\b\" as source | split '' source parts | fields case, parts",
+      "expected_rows": [{"case": "format-row", "parts": "[\"a\",\"\\u003c\",\"\\u0027\",\"\\\"\",\"\\n\",\"\\\\\",\"b\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-allows-separator-named-from",
+      "query": "case:=format-row | format 'fromleftfromright' as source | split \"from\" source parts | fields case, parts",
+      "expected_rows": [{"case": "format-row", "parts": "[\"\",\"left\",\"right\"]"}]
+    },
+    {
+      "id": "LQL-P31-split-composes-with-json-array-len",
+      "query": "case:=format-row | format 'a,b,c' as source | split ',' source parts | json_array_len(parts) as count | fields case, source, parts, count",
+      "expected_rows": [{"case": "format-row", "source": "a,b,c", "parts": "[\"a\",\"b\",\"c\"]", "count": "3"}]
+    },
+    {
       "id": "LQL-P28-drop-empty-fields-removes-null-and-empty-but-retains-rich-values",
       "query": "case:=delete-row | drop_empty_fields | fields case, keep, empty_value, null_value, nested.drop, nested.keep, array",
       "expected_rows": [{"case": "delete-row", "keep": "kept", "nested.drop": "nested-gone", "nested.keep": "nested-kept", "array": "[\"x\",1]"}]
@@ -4517,6 +4579,83 @@
     {
       "id": "LQL-P27-decolorize-rejects-an-attached-suffix",
       "query": "* | decolorize.source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-requires-a-separator",
+      "query": "* | split",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-as-instead-of-a-separator",
+      "query": "* | split as result",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-a-wildcard-destination",
+      "query": "* | split \" \" as *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-requires-a-destination-after-as",
+      "query": "* | split \" \" as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-requires-a-source-after-from",
+      "query": "* | split \" \" from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-a-wildcard-source",
+      "query": "* | split \" \" from *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-a-prefix-source",
+      "query": "* | split \" \" from source*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-a-comma-after-the-source",
+      "query": "* | split separator source, result",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-a-comma-after-the-separator",
+      "query": "* | split separator, result",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-parenthesized-call-syntax",
+      "query": "* | split(\",\")",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P31-split-rejects-an-attached-suffix",
+      "query": "* | split.source from input as output",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

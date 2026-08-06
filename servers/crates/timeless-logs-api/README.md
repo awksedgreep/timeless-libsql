@@ -1039,6 +1039,39 @@ same-public-work controls. `QSF-214` accepts the -2.2%/+4.3% endpoint-tail and
 +1.4%/+3.7% request-attributed mean differences as bounded current-row work
 after identical public storage reads.
 
+LogsQL `split` divides `_msg` or one exact current-row field by a literal
+separator and writes compact VictoriaLogs-compatible JSON-array text:
+
+```text
+* | split ","
+* | split "::" from source as parts
+* | split "," source parts
+* | split "" unicode runes
+```
+
+The command and optional `from`/`as` keywords are case-insensitive and may be
+omitted in the upstream shorthand. Source defaults to `_msg`; destination
+defaults to source. Exact quoted and dotted fields are accepted. Missing
+operands, wildcards, prefixes, commas, parenthesized call syntax, attached
+suffixes, and trailing syntax fail explicitly. A keyword-like separator must
+be quoted.
+
+Literal splitting is non-overlapping and retains leading, trailing, and
+consecutive empty pieces. An empty separator iterates Unicode scalar values;
+an empty source therefore yields `[]` for an empty separator and `[""]` for a
+nonempty separator. The API emits a JSON-array string with exact VictoriaLogs
+escaping, not a native retained array. Numbers, booleans, and arrays use their
+textual projection; missing, null, and object parents project empty. Writing
+to another destination preserves the original typed source. Sequential
+stages see the result, while stored rows remain immutable.
+
+[`SQL-LOG-051`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-051-literal-split-of-one-exact-field)
+provides direct users a recursive CTE/JSON1 foundation over bounded public
+`logs` rows. The Rust API owns grammar, exact wire spelling, nested current-row
+destinations, conflicts, cumulative work/state/result/response limits,
+deadline, cancellation, and envelopes. No private table, extension primitive,
+or durable storage contract changes.
+
 LogsQL `drop_empty_fields` removes null and empty-string fields from the
 current rich row:
 

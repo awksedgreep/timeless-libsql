@@ -1914,6 +1914,117 @@ fn parse_decolorize_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Decolorize(field))
 }
 
+fn parse_split_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let operation = "split";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL split pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL split pipe, not {command:?}"
+        )));
+    }
+    if segment[operation.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL split requires whitespace before its separator",
+        ));
+    }
+
+    let tokens = pipeline_words(segment)?;
+    let separator_token = tokens
+        .get(1)
+        .ok_or_else(|| LogsqlError::malformed("LogsQL split requires a separator"))?;
+    let separator = parse_split_separator(separator_token)?;
+    let mut cursor = 2usize;
+
+    let mut source = parse_split_exact_field("_msg", "source")?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| !token.eq_ignore_ascii_case("as"))
+    {
+        if tokens[cursor].eq_ignore_ascii_case("from") {
+            cursor += 1;
+        }
+        let token = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL split from requires a source field"))?;
+        source = parse_split_exact_field(token, "source")?;
+        cursor += 1;
+    }
+
+    let mut destination = source.clone();
+    if tokens.get(cursor).is_some() {
+        if tokens[cursor].eq_ignore_ascii_case("as") {
+            cursor += 1;
+        }
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL split as requires a destination field")
+        })?;
+        destination = parse_split_exact_field(token, "destination")?;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL split token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Split(SplitSpec {
+        separator,
+        source,
+        destination,
+    }))
+}
+
+fn parse_split_separator(value: &str) -> Result<String, LogsqlError> {
+    if let Some(value) = quoted_value(value)? {
+        return Ok(value);
+    }
+    if value.eq_ignore_ascii_case("as") || value.eq_ignore_ascii_case("from") {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL split separator is missing before {value:?}"
+        )));
+    }
+    if !is_split_compound_token(value) {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL split separator {value:?} must be one compound token or a quoted value"
+        )));
+    }
+    if value.len() == 1 && matches!(value.as_bytes()[0], b'+' | b'-' | b'/' | b':' | b'.' | b'$') {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL split separator {value:?} must be quoted"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_split_exact_field(value: &str, role: &str) -> Result<PipelineField, LogsqlError> {
+    if quoted_value(value)?.is_none() && !is_split_compound_token(value) {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL split {role} {value:?} must be one exact compound field or a quoted value"
+        )));
+    }
+    match parse_pipeline_field(value, false)? {
+        field @ PipelineField::Exact { .. } => Ok(field),
+        PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
+            "LogsQL split {role} must be an exact field"
+        ))),
+    }
+}
+
+fn is_split_compound_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character == '_'
+                || character.is_alphanumeric()
+                || matches!(character, '+' | '-' | '/' | ':' | '.' | '$')
+        })
+}
+
 fn parse_json_array_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::JsonArrayLen(parse_length_pipe(
         segment,
@@ -2898,6 +3009,13 @@ fn is_collapse_nums_pipe(segment: &str) -> bool {
 
 fn is_decolorize_pipe(segment: &str) -> bool {
     let operation = "decolorize";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
+fn is_split_pipe(segment: &str) -> bool {
+    let operation = "split";
     segment
         .get(..operation.len())
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
@@ -3919,6 +4037,13 @@ pub(crate) struct PackJsonSpec {
     pub destination: PipelineField,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SplitSpec {
+    pub separator: String,
+    pub source: PipelineField,
+    pub destination: PipelineField,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct UnpackJsonSpec {
     pub source: PipelineField,
@@ -3966,6 +4091,7 @@ pub(crate) enum PipelineOp {
     Hash(UnaryFieldSpec),
     CollapseNums(CollapseNumsSpec),
     Decolorize(PipelineField),
+    Split(SplitSpec),
     JsonArrayLen(UnaryFieldSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
@@ -4393,6 +4519,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_decolorize_pipe(segment) => {
                 pipeline.push(parse_decolorize_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_split_pipe(segment) => {
+                pipeline.push(parse_split_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_json_array_len_pipe(segment) => {
@@ -10316,6 +10446,39 @@ mod tests {
             "* | decolorize source, other",
             "* | decolorize source trailing",
             "* | decolorize.source",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_split_grammar_is_complete_and_strict() {
+        for query in [
+            r#"* | split ",""#,
+            r#"* | SPLIT "-" AS result"#,
+            r#"* | split ";" from source"#,
+            r#"* | split ". " from "source field" as nested.result"#,
+            r#"* | split "from""#,
+            r#"* | split "," source result"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | split",
+            "* | split as result",
+            r#"* | split " " as *"#,
+            r#"* | split " " as"#,
+            r#"* | split " " from"#,
+            r#"* | split " " from *"#,
+            r#"* | split " " from source*"#,
+            "* | split separator source, result",
+            "* | split separator, result",
+            r#"* | split(",")"#,
+            r#"* | split.source from input as output"#,
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

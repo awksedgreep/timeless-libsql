@@ -4193,6 +4193,279 @@ async fn session_eighteen_decolorize_is_exact_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_split_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("split-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: ",foo,bar,,baz,".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"split-rich",
+                        "split_group":"split",
+                        "unicode":"Шzч",
+                        "multi":"йцуквенгшвевоы",
+                        "none":"foobar",
+                        "empty":"",
+                        "number":9007199254740993u64,
+                        "flag":false,
+                        "array":["x",1],
+                        "null_value":null,
+                        "object":{"child":"retained"},
+                        "escape":"<'\"\n\\",
+                        "sequence":"a,b,c",
+                        "many":",,",
+                        "nested":{"source":"left::right","sibling":"retained"},
+                        "result":"original"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 3,
+                    severity: "emergency".into(),
+                    message: "plain".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"split-missing",
+                        "split_group":"split",
+                        "flag":false,
+                        "null_value":null,
+                        "object":{"child":"unchanged"}
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="split-rich" | split "," | SPLIT "" FrOm unicode As unicode_parts | split ве multi multi_parts | split aaaa none none_parts | split "," empty empty_parts | split "" empty empty_runes | split "," number number_parts | split "," flag flag_parts | split "," array array_parts | split "," null_value null_parts | split "," missing missing_parts | split "" object object_parts | split "" escape escape_parts | split "::" nested.source nested.parts | split "," sequence parts | json_array_len(parts) as part_count | fields case, _msg, unicode_parts, multi_parts, none_parts, empty_parts, empty_runes, number_parts, flag_parts, array_parts, null_parts, missing_parts, object_parts, escape_parts, nested, sequence, parts, part_count, number, flag, array, object"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"split-rich",
+            "_msg":r#"["","foo","bar","","baz",""]"#,
+            "unicode_parts":r#"["Ш","z","ч"]"#,
+            "multi_parts":r#"["йцук","нгш","воы"]"#,
+            "none_parts":r#"["foobar"]"#,
+            "empty_parts":r#"[""]"#,
+            "empty_runes":"[]",
+            "number_parts":r#"["9007199254740993"]"#,
+            "flag_parts":r#"["false"]"#,
+            "array_parts":r#"["[\"x\"","1]"]"#,
+            "null_parts":r#"[""]"#,
+            "missing_parts":r#"[""]"#,
+            "object_parts":"[]",
+            "escape_parts":r#"["\u003c","\u0027","\"","\n","\\"]"#,
+            "nested":{
+                "source":"left::right",
+                "sibling":"retained",
+                "parts":r#"["left","right"]"#
+            },
+            "sequence":"a,b,c",
+            "parts":r#"["a","b","c"]"#,
+            "part_count":"3",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["x",1],
+            "object":{"child":"retained"}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="split-rich" | split "::" from nested.source | fields case, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"split-rich",
+            "nested":{
+                "source":r#"["left","right"]"#,
+                "sibling":"retained"
+            }
+        })],
+        "omitting as overwrites the selected current-row source"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="split-missing" | split "," missing parts | split "" absent runes | fields case, parts, runes, flag, null_value, object"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"split-missing",
+            "parts":r#"[""]"#,
+            "runes":"[]",
+            "flag":false,
+            "null_value":null,
+            "object":{"child":"unchanged"}
+        })]
+    );
+
+    for malformed in [
+        "* | split",
+        "* | split as result",
+        r#"* | split " " as *"#,
+        r#"* | split " " as"#,
+        r#"* | split " " from"#,
+        r#"* | split " " from *"#,
+        r#"* | split " " from source*"#,
+        "* | split separator source, result",
+        "* | split separator, result",
+        r#"* | split(",")"#,
+        r#"* | split.source from input as output"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="split-rich" | split "," from _msg as object"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["error"], "query_execution");
+    assert_eq!(conflict["reason"], "field_conflict");
+    assert!(conflict["message"]
+        .as_str()
+        .unwrap()
+        .contains("LogsQL split destination conflict"));
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"split_group:="split" | split "," | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="split-rich" | split "," many parts | fields parts"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 3,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="split-rich" | split "," many parts | fields parts"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{query}: {body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="split-rich" | fields case, _msg, unicode, multi, none, empty, number, flag, array, null_value, object, escape, sequence, many, nested, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"split-rich",
+            "_msg":",foo,bar,,baz,",
+            "unicode":"Шzч",
+            "multi":"йцуквенгшвевоы",
+            "none":"foobar",
+            "empty":"",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["x",1],
+            "null_value":null,
+            "object":{"child":"retained"},
+            "escape":"<'\"\n\\",
+            "sequence":"a,b,c",
+            "many":",,",
+            "nested":{"source":"left::right","sibling":"retained"},
+            "result":"original"
+        })],
+        "split must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="split-rich" | split "," | split "" unicode unicode_parts | split "::" nested.source nested.parts | fields case, _msg, unicode_parts, nested, array, object"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"split-rich",
+            "_msg":r#"["","foo","bar","","baz",""]"#,
+            "unicode_parts":r#"["Ш","z","ч"]"#,
+            "nested":{
+                "source":"left::right",
+                "sibling":"retained",
+                "parts":r#"["left","right"]"#
+            },
+            "array":["x",1],
+            "object":{"child":"retained"}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_seventeen_drop_empty_fields_is_typed_bounded_and_durable() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

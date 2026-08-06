@@ -953,3 +953,21 @@ VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture
 now contains 344 row-query cases, one stochastic case, 359 error cases, and
 365 statistics/pipeline cases: 1,069 cases total, all passing against the
 immutable image. The fixture now contains 1069 cases.
+
+`LQL-P31` adds eleven exact pipeline-result cases and eleven error cases for
+`split`. They pin default-message and explicit source/destination forms;
+optional `from`/`as` keywords and shorthand; case-insensitive syntax; literal
+non-overlapping multi-byte separators; leading, trailing, and consecutive
+empty pieces; missing separators; empty-source behavior; Unicode-scalar
+empty-separator behavior; a quoted separator named `from`; flattened
+number/boolean/null/missing/array projection; source preservation; sequential
+`json_array_len` composition; and VictoriaLogs' exact JSON-string escaping.
+Error cases pin missing separator/source/destination, wildcard and prefix
+fields, comma-separated near misses, parenthesized call syntax, and attached
+suffixes. Source audit covers `pipe_split.go`, `pipe_split_test.go`,
+`parser.go` compound-token behavior, `stats_uniq_values.go` JSON-array
+marshalling, parser tests, and the public LogsQL documentation at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture
+now contains 344 row-query cases, one stochastic case, 370 error cases, and
+376 statistics/pipeline cases: 1,091 cases total, all passing against the
+immutable image. The fixture now contains 1091 cases.

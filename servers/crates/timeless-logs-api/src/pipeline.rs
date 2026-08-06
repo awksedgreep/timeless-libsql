@@ -23,8 +23,8 @@ use crate::logsql::{
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CollapseNumsSpec,
     CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
     MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PipelineField,
-    PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, StatsExpression,
-    StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
+    PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, SplitSpec,
+    StatsExpression, StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -224,6 +224,9 @@ pub(crate) fn execute(
             )?,
             PipelineOp::Decolorize(field) => {
                 decolorize_fields(rows, field, execution.limits, execution.cancelled)?
+            }
+            PipelineOp::Split(spec) => {
+                split_fields(rows, spec, execution.limits, execution.cancelled)?
             }
             PipelineOp::JsonArrayLen(spec) => {
                 json_array_len_fields(rows, spec, execution.limits, execution.cancelled)?
@@ -2528,6 +2531,212 @@ fn bounded_decolorize(
     }
     ensure_active(cancelled)?;
     Ok(Some(output))
+}
+
+fn split_fields(
+    rows: Vec<Value>,
+    spec: &SplitSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path, ..
+    } = &spec.source
+    else {
+        return Err("LogsQL split source is not exact".into());
+    };
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL split destination is not exact".into());
+    };
+
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "split")?;
+            let mut state_bytes = size_of::<Value>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "split")?;
+            let source = textual_transform_projection(
+                coalesce_exact_value(&row, source_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "split",
+            )?;
+            let encoded = bounded_split_json_array(
+                source.as_ref(),
+                &spec.separator,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+
+            charge_transfer_string(
+                destination_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "split",
+            )?;
+            for segment in destination_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "split",
+                )?;
+            }
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL split input row is not a JSON object".to_string())?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL split destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(encoded))
+                .map_err(|error| format!("LogsQL split destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn bounded_split_json_array(
+    source: &str,
+    separator: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let mut output_len = 2usize;
+    visit_split_pieces(source, separator, cancelled, |piece, index| {
+        charge_transfer_work(work_items, limits.max_state_items, "split")?;
+        if index != 0 {
+            output_len = output_len
+                .checked_add(1)
+                .ok_or_else(|| "LogsQL split result size overflow".to_string())?;
+        }
+        output_len = output_len
+            .checked_add(victorialogs_json_string_len(piece, cancelled)?)
+            .ok_or_else(|| "LogsQL split result size overflow".to_string())?;
+        Ok(())
+    })?;
+
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL split state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "split")?;
+
+    let mut output = Vec::with_capacity(output_len);
+    output.push(b'[');
+    visit_split_pieces(source, separator, cancelled, |piece, index| {
+        if index != 0 {
+            output.push(b',');
+        }
+        append_victorialogs_json_string(&mut output, piece, cancelled)?;
+        Ok(())
+    })?;
+    output.push(b']');
+    if output.len() != output_len {
+        return Err("LogsQL split result length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    String::from_utf8(output).map_err(|error| format!("encode LogsQL split result: {error}"))
+}
+
+fn visit_split_pieces(
+    source: &str,
+    separator: &str,
+    cancelled: &AtomicBool,
+    mut visit: impl FnMut(&str, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    if separator.is_empty() {
+        for (index, (start, character)) in source.char_indices().enumerate() {
+            check_periodically(cancelled, index)?;
+            visit(&source[start..start + character.len_utf8()], index)?;
+        }
+        ensure_active(cancelled)?;
+        return Ok(());
+    }
+    if source.is_empty() {
+        return visit("", 0);
+    }
+
+    let mut start = 0usize;
+    let mut index = 0usize;
+    loop {
+        check_periodically(cancelled, index)?;
+        let Some(separator_start) = next_literal_match(source, separator, start, cancelled)? else {
+            visit(&source[start..], index)?;
+            break;
+        };
+        visit(&source[start..separator_start], index)?;
+        index = index
+            .checked_add(1)
+            .ok_or_else(|| "LogsQL split item count overflow".to_string())?;
+        start = separator_start + separator.len();
+        if start == source.len() {
+            visit("", index)?;
+            break;
+        }
+    }
+    ensure_active(cancelled)
+}
+
+fn victorialogs_json_string_len(value: &str, cancelled: &AtomicBool) -> Result<usize, String> {
+    let mut length = 2usize;
+    for (index, byte) in value.bytes().enumerate() {
+        check_periodically(cancelled, index)?;
+        let encoded = match byte {
+            b'\n' | b'\r' | b'\t' | 0x08 | 0x0c | b'"' | b'\\' => 2,
+            b'<' | b'\'' | 0x00..=0x1f => 6,
+            _ => 1,
+        };
+        length = length
+            .checked_add(encoded)
+            .ok_or_else(|| "LogsQL split JSON string size overflow".to_string())?;
+    }
+    ensure_active(cancelled)?;
+    Ok(length)
+}
+
+fn append_victorialogs_json_string(
+    output: &mut Vec<u8>,
+    value: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    output.push(b'"');
+    for (index, byte) in value.bytes().enumerate() {
+        check_periodically(cancelled, index)?;
+        match byte {
+            b'\n' => output.extend_from_slice(br"\n"),
+            b'\r' => output.extend_from_slice(br"\r"),
+            b'\t' => output.extend_from_slice(br"\t"),
+            0x08 => output.extend_from_slice(br"\b"),
+            0x0c => output.extend_from_slice(br"\f"),
+            b'"' => output.extend_from_slice(br#"\""#),
+            b'\\' => output.extend_from_slice(br"\\"),
+            b'<' => output.extend_from_slice(br"\u003c"),
+            b'\'' => output.extend_from_slice(br"\u0027"),
+            0x00..=0x1f => {
+                output.extend_from_slice(br"\u00");
+                output.push(HEX[(byte >> 4) as usize]);
+                output.push(HEX[(byte & 0x0f) as usize]);
+            }
+            _ => output.push(byte),
+        }
+    }
+    output.push(b'"');
+    ensure_active(cancelled)
 }
 
 fn find_csi_start(
@@ -9216,6 +9425,128 @@ mod tests {
         assert_eq!(
             decolorize_fields(vec![json!({"many":"\u{1b}[m"})], &many, limits, &cancelled,)
                 .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn split_matches_literal_rune_rich_escape_sequential_and_bound_semantics() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 1_000,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "_msg":",foo,bar,,baz,",
+            "unicode":"Шzч",
+            "multi":"йцуквенгшвевоы",
+            "none":"foobar",
+            "empty":"",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["x",1],
+            "null_value":null,
+            "object":{"child":"retained"},
+            "escape":"<'\"\n\\",
+            "sequence":"a,b,c",
+            "nested":{"source":"left::right","sibling":"retained"}
+        });
+        let plan = crate::logsql::parse_at(
+            "* | split \",\" | split \"\" from unicode as unicode_parts | split ве multi multi_parts | split aaaa none none_parts | split \",\" empty empty_parts | split \"\" empty empty_runes | split \",\" number number_parts | split \",\" flag flag_parts | split \",\" array array_parts | split \",\" null_value null_parts | split \",\" missing missing_parts | split \"\" object object_parts | split \"\" escape escape_parts | split \"::\" from nested.source as nested.parts | split \",\" sequence parts | json_array_len(parts) as part_count",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["_msg"], r#"["","foo","bar","","baz",""]"#);
+        assert_eq!(result[0]["unicode_parts"], r#"["Ш","z","ч"]"#);
+        assert_eq!(result[0]["multi_parts"], r#"["йцук","нгш","воы"]"#);
+        assert_eq!(result[0]["none_parts"], r#"["foobar"]"#);
+        assert_eq!(result[0]["empty_parts"], r#"[""]"#);
+        assert_eq!(result[0]["empty_runes"], "[]");
+        assert_eq!(result[0]["number_parts"], r#"["9007199254740993"]"#);
+        assert_eq!(result[0]["flag_parts"], r#"["false"]"#);
+        assert_eq!(result[0]["array_parts"], r#"["[\"x\"","1]"]"#);
+        assert_eq!(result[0]["null_parts"], r#"[""]"#);
+        assert_eq!(result[0]["missing_parts"], r#"[""]"#);
+        assert_eq!(result[0]["object_parts"], "[]");
+        assert_eq!(
+            result[0]["escape_parts"],
+            r#"["\u003c","\u0027","\"","\n","\\"]"#
+        );
+        assert_eq!(result[0]["nested"]["source"], row["nested"]["source"]);
+        assert_eq!(result[0]["nested"]["sibling"], row["nested"]["sibling"]);
+        assert_eq!(result[0]["nested"]["parts"], r#"["left","right"]"#);
+        assert_eq!(result[0]["sequence"], row["sequence"]);
+        assert_eq!(result[0]["parts"], r#"["a","b","c"]"#);
+        assert_eq!(result[0]["part_count"], "3");
+        assert_eq!(result[0]["number"], row["number"]);
+        assert_eq!(result[0]["flag"], row["flag"]);
+        assert_eq!(result[0]["array"], row["array"]);
+        assert_eq!(result[0]["object"], row["object"]);
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Split(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected split plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let many = parse_spec("* | split \",\" many parts");
+        let work_error = split_fields(
+            vec![json!({"many":",,"})],
+            &many,
+            PipelineLimits {
+                max_state_items: 3,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL split"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=3"), "{work_error}");
+
+        let state_error = split_fields(
+            vec![json!({"many":"a,b"})],
+            &many,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL split"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | split \",\" from _msg as object");
+        let conflict_error =
+            split_fields(vec![row.clone()], &conflict, limits, &cancelled).unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL split destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            split_fields(vec![row], &many, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

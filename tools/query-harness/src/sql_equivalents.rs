@@ -376,6 +376,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "end_ts" => Value::Integer(2_000),
         "source_path" if identifier == "SQL-LOG-050" => Value::Text("$.host".to_owned()),
         "source_override" if identifier == "SQL-LOG-050" => Value::Null,
+        "split_source_path" => Value::Text("$.host".to_owned()),
+        "split_source_override" => Value::Null,
+        "split_separator" => Value::Text("-".to_owned()),
         "source_path_1" => Value::Text("$.nested.empty".to_owned()),
         "source_path_2" => Value::Text("$.host".to_owned()),
         "source_path_3" => Value::Text("$.service".to_owned()),
@@ -1732,6 +1735,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let query_backed_rows = recipe_values("SQL-LOG-048", 0)?;
     let sample_one_rows = recipe_values("SQL-LOG-049", 0)?;
     let decolorize_rows = recipe_values("SQL-LOG-050", 0)?;
+    let split_rows = recipe_values("SQL-LOG-051", 0)?;
     if [
         bounded,
         substring,
@@ -1801,6 +1805,60 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     }
     if decolorize_rows != [vec![Value::Integer(1000), Value::Text("web-1".to_owned())]] {
         bail!("SQL-LOG-050 decolorize rows changed: {decolorize_rows:?}");
+    }
+    if split_rows
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text(r#"["web","1"]"#.to_owned()),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text(r#"["web","2"]"#.to_owned()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-051 split rows changed: {split_rows:?}");
+    }
+    let split_sql = recipe_sql("SQL-LOG-051", 0)?;
+    for (source, separator, expected) in [
+        (",foo,bar,,baz,", ",", r#"["","foo","bar","","baz",""]"#),
+        ("Шzч", "", r#"["Ш","z","ч"]"#),
+        ("", "", "[]"),
+    ] {
+        let mut split_statement = connection.prepare(&split_sql)?;
+        for index in 1..=split_statement.parameter_count() {
+            let name = split_statement
+                .parameter_name(index)
+                .context("SQL-LOG-051 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "split_source_override" => Value::Text(source.to_owned()),
+                "split_separator" => Value::Text(separator.to_owned()),
+                "end_ts" => Value::Integer(1_000),
+                _ => parameter("SQL-LOG-051", name),
+            };
+            split_statement.raw_bind_parameter(index, value)?;
+        }
+        let rows = {
+            let columns = split_statement.column_count();
+            let mut query = split_statement.raw_query();
+            let mut output = Vec::new();
+            while let Some(row) = query.next()? {
+                output.push(
+                    (0..columns)
+                        .map(|column| row.get(column))
+                        .collect::<rusqlite::Result<Vec<Value>>>()?,
+                );
+            }
+            output
+        };
+        let expected = [vec![Value::Integer(1000), Value::Text(expected.to_owned())]];
+        if rows != expected {
+            bail!(
+                "SQL-LOG-051 split override source={source:?} separator={separator:?} changed: {rows:?}"
+            );
+        }
     }
     let decolorize_sql = recipe_sql("SQL-LOG-050", 0)?;
     let mut decolorize_statement = connection.prepare(&decolorize_sql)?;
@@ -3901,13 +3959,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 116);
+        assert_eq!(recipes.len(), 117);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            148
+            149
         );
         assert_eq!(
             recipes
@@ -3915,7 +3973,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            154
+            155
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

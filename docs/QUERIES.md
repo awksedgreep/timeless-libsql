@@ -1236,6 +1236,54 @@ also constructs the colored current-row value being stripped. `QSF-214`
 accepts the -2.2%/+4.3% endpoint-tail and +1.4%/+3.7% request-attributed mean
 differences as bounded language-layer work after the unchanged public scan.
 
+## LogsQL `split` over rich current rows
+
+`split` divides one current-row field by a literal separator and writes a
+compact JSON-array string:
+
+```text
+* | split ","
+* | split "::" from source as parts
+* | split "," source parts
+* | split "" from unicode as runes
+```
+
+The command and optional `from`/`as` keywords are case-insensitive. Source
+defaults to `_msg`; destination defaults to the source, so omitting `as`
+overwrites only the request-owned current row. Both keywords may be omitted
+in the VictoriaLogs shorthand. Exact quoted and dotted fields are valid.
+Wildcards, prefixes, comma-separated operands, parenthesized call syntax,
+attached suffixes, missing operands, and trailing tokens are malformed. Quote
+a separator named `from` or `as`.
+
+Splitting is literal and non-overlapping. Leading, trailing, and consecutive
+separators retain empty elements. If a nonempty separator is absent, the
+whole source is one element. An empty separator emits one element per Unicode
+scalar value. Consequently, an empty source becomes `[""]` with a nonempty
+separator and `[]` with an empty separator. Output is a string containing
+compact JSON, not a native retained array; downstream `json_array_len` parses
+it normally. VictoriaLogs wire spelling is preserved exactly, including
+`\u003c` for `<` and `\u0027` for apostrophe.
+
+Strings split directly. Numbers and booleans use their textual spelling;
+arrays use compact JSON; and missing, null, and exact object parents project
+as empty text. When source and destination differ, the original native value
+remains present. Nested destination paths preserve siblings and reject an
+unsafe object/scalar replacement with HTTP 422 `field_conflict`. Durable
+public rows are never changed. Work per row and emitted piece, temporary
+bytes, result/response size, deadline, cancellation, optimize, shutdown, and
+reopen use the shared hard contracts.
+
+[`SQL-LOG-051`](QUERY_SQL_EQUIVALENTS.md#sql-log-051-literal-split-of-one-exact-field)
+is the executable direct-SQL foundation. It uses only bounded public `logs`
+rows, a recursive CTE, and JSON1, and pins literal, empty-piece, and
+Unicode-scalar behavior. SQLite JSON1 may spell `<` and apostrophe literally
+while preserving the same decoded array; the Rust API supplies the exact
+VictoriaLogs wire text plus LogsQL grammar, rich current-row mutation,
+limits, cancellation, and envelopes. Since every source row already crossed
+the public storage surface, an extension split primitive would not avoid a
+block read, decode, allocation, payload transfer, or row crossing.
+
 ## LogsQL `drop_empty_fields` over current rows
 
 `drop_empty_fields` removes empty fields from each current pipeline row:

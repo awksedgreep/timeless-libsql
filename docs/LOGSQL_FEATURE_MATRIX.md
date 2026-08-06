@@ -134,7 +134,7 @@ extension.
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
-| `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P31` | `split` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-051-literal-split-of-one-exact-field)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
@@ -485,6 +485,37 @@ Exact-build evidence measures 3.101/36.385 ms narrow/wide p95 versus
 request-attributed API mean as bounded current-row construction/scanning work
 after identical public reads. Storage formats and extension contracts remain
 unchanged.
+
+`LQL-P31` is a strict API-owned current-row literal split. Its
+case-insensitive grammar requires one quoted or compound-token separator,
+defaults the source and destination to `_msg`, accepts optional `from` and
+`as` keywords (including the upstream shorthand without either keyword), and
+requires exact quoted or dotted fields. Wildcards, prefixes, commas,
+parenthesized call syntax, attached suffixes, missing operands, and trailing
+tokens fail before storage work. The separator named `from` remains valid
+when quoted.
+
+Splitting is literal and non-overlapping. Leading, trailing, and consecutive
+separators retain empty elements; a missing separator produces one element;
+an empty separator emits Unicode scalar values; and an empty source therefore
+produces `[""]` for a nonempty separator but `[]` for an empty separator.
+VictoriaLogs-compatible output is compact JSON-array text, including its
+exact `\u003c` and `\u0027` spellings. Numbers, booleans, and arrays use the
+pinned textual projection; missing, null, and exact object parents project to
+empty text. The source remains typed and unchanged when the destination
+differs, and durable rows are never mutated.
+
+The bounded Rust evaluator uses no BEAM, NIF, HTTP fallback, private table, or
+extension language syntax. It observes cumulative work/state/result/response,
+deadline, cancellation, destination-conflict, optimize, shutdown, and reopen
+contracts. The complete 1,091-case pinned oracle, direct evaluator regression,
+and real-extension durability regression pin the semantic boundary.
+Executable `SQL-LOG-051` gives direct SQLite/libSQL users a public-row
+recursive-CTE/JSON1 foundation, including empty-piece and Unicode-scalar
+behavior. Every row has already crossed the bounded public `logs` surface, so
+the ordinary-SQL implementation does not justify an extension primitive or
+storage-contract change. Exact-build performance evidence remains the final
+exit criterion before the row changes from `in progress` to `shipped`.
 
 `LQL-P28` removes every empty field from the current row. Empty means an
 explicit JSON null or a zero-byte string under the pinned VictoriaLogs

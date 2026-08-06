@@ -158,6 +158,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-048`](#sql-log-048-query-backed-exact-membership) | `LQL-F38` | current foundation | bounded two-scan exact membership for retained strings through public rows; API owns subquery grammar, rich projection, phrase variants, cumulative limits, cancellation, caching, and envelopes |
 | [`SQL-LOG-049`](#sql-log-049-bounded-random-log-sample) | `LQL-P17` | current foundation | bounded independent `1/N` random selection over public log rows; API owns LogsQL unsigned grammar, exponential-gap compatibility, limits, cancellation, and envelopes |
 | [`SQL-LOG-050`](#sql-log-050-strip-csi-color-sequences-from-one-exact-field) | `LQL-P27` | current foundation | exact byte-state removal of CSI sequences from one bounded public row field; API owns LogsQL grammar, current-row composition, rich no-op preservation, limits, cancellation, and envelopes |
+| [`SQL-LOG-051`](#sql-log-051-literal-split-of-one-exact-field) | `LQL-P31` | current foundation | literal non-overlapping split of one bounded public row field into a JSON array, including Unicode-scalar empty-separator behavior; API owns LogsQL grammar, current-row mutation, exact wire spelling, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -8090,6 +8091,124 @@ row crossing, so an extension scalar or opcode would not improve storage
 work. Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_eighteen_decolorize_is_exact_rich_bounded_and_durable`.
+
+### SQL-LOG-051: literal split of one exact field
+
+Bind inclusive native timestamp bounds, positive work/result limits,
+`:split_source_path` as a SQLite JSON path for one exact retained metadata
+field, and `:split_separator` as non-NULL text. Use `$._msg` for the canonical
+message and `$.level` for the canonical level. This recursive statement splits
+on literal, non-overlapping separators while retaining leading, trailing, and
+consecutive empty pieces. An empty separator emits one element per Unicode
+scalar value; an empty source then emits `[]` rather than `[""]`.
+
+```sql
+WITH RECURSIVE
+bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN :split_source_path IN ('$._msg', '$.level') THEN NULL
+      ELSE json_type(metadata, :split_source_path)
+    END AS source_type
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT
+    row_id,
+    ts,
+    COALESCE(:split_source_override, CASE
+      WHEN :split_source_path = '$._msg' THEN message
+      WHEN :split_source_path = '$.level' THEN level
+      WHEN source_type IS NULL OR source_type IN ('null', 'object') THEN ''
+      WHEN source_type = 'true' THEN 'true'
+      WHEN source_type = 'false' THEN 'false'
+      WHEN source_type = 'array'
+        THEN json(json_extract(metadata, :split_source_path))
+      ELSE CAST(json_extract(metadata, :split_source_path) AS TEXT)
+    END) AS source,
+    CAST(:split_separator AS TEXT) AS separator
+  FROM bounded
+), pieces(row_id, ts, source, separator, ordinal, piece, remaining, done) AS (
+  SELECT row_id, ts, source, separator, -1, NULL, source, 0
+  FROM projected
+
+  UNION ALL
+
+  SELECT
+    row_id,
+    ts,
+    source,
+    separator,
+    ordinal + 1,
+    CASE
+      WHEN separator = '' THEN substr(remaining, 1, 1)
+      WHEN instr(remaining, separator) = 0 THEN remaining
+      ELSE substr(remaining, 1, instr(remaining, separator) - 1)
+    END,
+    CASE
+      WHEN separator = '' THEN substr(remaining, 2)
+      WHEN instr(remaining, separator) = 0 THEN ''
+      ELSE substr(remaining, instr(remaining, separator) + length(separator))
+    END,
+    CASE
+      WHEN separator = '' AND length(remaining) <= 1 THEN 1
+      WHEN separator <> '' AND instr(remaining, separator) = 0 THEN 1
+      ELSE 0
+    END
+  FROM pieces
+  WHERE done = 0
+    AND (separator <> '' OR remaining <> '')
+)
+SELECT
+  projected.ts,
+  (
+    SELECT json_group_array(piece)
+    FROM (
+      SELECT piece
+      FROM pieces
+      WHERE pieces.row_id = projected.row_id
+        AND ordinal >= 0
+      ORDER BY ordinal
+    )
+  ) AS split_json
+FROM projected
+WHERE :max_result_rows > 0
+ORDER BY projected.ts, projected.row_id
+LIMIT :max_result_rows;
+```
+
+For the executable public-row fixture, bind `:start_ts`/`:end_ts` to
+`1000`/`2000`, `:max_work_entries` to `100000`, `:max_result_rows` to `100`,
+`:split_source_path` to `$.host`, `:split_source_override` to SQL `NULL`, and
+`:split_separator` to `-`. The two results are `["web","1"]` and
+`["web","2"]`. The Rust harness additionally substitutes `,foo,bar,,baz,`
+with separator `,` and `Шzч` with an empty separator, pinning empty-piece and
+Unicode-scalar behavior. The override only makes the copyable statement
+self-testing; applications normally bind it to `NULL`.
+
+The result is compact JSON text. Core SQLite JSON1 preserves the same decoded
+array elements but may spell `<` and apostrophe literally; VictoriaLogs wire
+text spells those bytes as `\u003c` and `\u0027`. The Rust API owns that exact
+wire spelling, required separator/field grammar, canonical aliases, rich
+textual projection, nested destination conflicts, current-row sequential
+mutation, and cumulative work/state/result/response/deadline/cancellation
+limits. Missing, JSON null, and retained object parents project to empty text;
+booleans use `true`/`false`, numbers use SQLite text, and arrays use compact
+JSON. The public statement never mutates durable rows.
+
+Every input has already crossed the bounded public `logs` surface. Recursion
+does not reduce block selection, decode, payload transfer, or row crossing, so
+an extension split primitive would add API surface without reducing storage
+work. Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_eighteen_split_is_exact_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

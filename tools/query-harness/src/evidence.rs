@@ -2452,6 +2452,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "split_narrow",
+                "logs-split-narrow",
+                r#"host:="h00" AND query | fields range_key | split "-" range_key parts | limit 64 | fields parts"#,
+                64,
+                None,
+            ),
+            (
+                "split_wide",
+                "logs-split-wide",
+                r#"query | fields range_key | split "-" range_key parts | limit 64 | fields parts"#,
+                64,
+                None,
+            ),
+            (
+                "split_control_narrow",
+                "logs-split-control-narrow",
+                r#"host:="h00" AND query | fields range_key | extract 'key-<suffix>' from range_key | format '["key","<suffix>"]' as parts | limit 64 | fields parts"#,
+                64,
+                None,
+            ),
+            (
+                "split_control_wide",
+                "logs-split-control-wide",
+                r#"query | fields range_key | extract 'key-<suffix>' from range_key | format '["key","<suffix>"]' as parts | limit 64 | fields parts"#,
+                64,
+                None,
+            ),
+            (
                 "drop_empty_fields_narrow",
                 "logs-drop-empty-fields-narrow",
                 "host:=\"h00\" AND query | fields context, status | drop_empty_fields | limit 64 | fields context, status",
@@ -3142,6 +3170,8 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         )?;
         require_same_public_query_work(&queries, "decolorize_control_narrow", "decolorize_narrow")?;
         require_same_public_query_work(&queries, "decolorize_control_wide", "decolorize_wide")?;
+        require_same_public_query_work(&queries, "split_control_narrow", "split_narrow")?;
+        require_same_public_query_work(&queries, "split_control_wide", "split_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({

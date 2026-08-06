@@ -830,7 +830,7 @@ not justify an extension primitive; executable public SQL remains the direct
 SQLite/libSQL path.
 The ordered LogsQL pipeline also supports bounded rich-row `coalesce`,
 `copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, `len`, `hash`,
-`collapse_nums`, and `decolorize` composition.
+`collapse_nums`, `decolorize`, and `split` composition.
 Math provides the pinned VictoriaLogs binary64 operator/function/coercion
 model. `len` counts UTF-8 bytes across the pinned flattened textual view while
 preserving typed sources. `hash` uses seed-zero xxHash64 masked to 53 exact
@@ -865,6 +865,18 @@ SQLite/libSQL users have the byte-exact public-row recursive-CTE foundation in
 table or extension primitive is involved. Exact-build p95 is 3.101/36.385 ms
 narrow/wide versus 3.169/34.872 ms for identical-output, same-public-work
 controls; the bounded -2.2%/+4.3% variation follows unchanged storage reads.
+`split` produces VictoriaLogs-compatible compact JSON-array text from `_msg`
+or one exact quoted/dotted current-row field. Literal multi-byte separators
+retain leading, trailing, and consecutive empty pieces; an empty separator
+splits by Unicode scalar value. Optional `from`/`as` keywords and their
+shorthand are supported, while malformed operands and wildcards fail
+explicitly. Rich sources stay typed when written to another destination, and
+durable rows are immutable. Direct SQLite/libSQL users can run executable
+`SQL-LOG-051` over bounded public `logs` rows; Rust owns strict LogsQL grammar,
+exact VictoriaLogs JSON escaping, current-row composition, resource limits,
+cancellation, and envelopes. The same public rows have already crossed the
+storage boundary, so no split-specific extension primitive or private-table
+path is added.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,
