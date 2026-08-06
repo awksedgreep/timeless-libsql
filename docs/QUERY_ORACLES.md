@@ -687,7 +687,24 @@ lookaround, wildcard targets, nonnumeric or leading-zero limits, and trailing
 tokens fail. Source audit is against `pipe_replace_regexp.go`,
 `pipe_replace_regexp_test.go`, `pipe_extract_regexp.go`, and Go's
 `regexp.ExpandString` implementation at immutable VictoriaLogs commit
-`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 324
-row-query cases, 235 error cases, and 206 statistics/pipeline cases: 765 cases
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. After exact-result cases were
+classified under `stats_cases`, the fixture contains 298 row-query cases, 235
+error cases, and 232 statistics/pipeline cases: 765 cases total, all passing
+against the immutable image.
+
+`LQL-P32` adds twenty-three exact pipeline-result cases and fourteen error cases
+for literal `extract`. They pin named and anonymous placeholders; HTML-decoded
+delimiters; nonempty-prefix search and empty-prefix anchoring; default `_msg`
+and exact `from` sources; automatic Go double/single/raw quoted-string
+decoding and `plain:`; partial quoted matches; default empty writes;
+`keep_original_fields` and `skip_empty_results`; matching and nonmatching
+conditions; case-insensitive syntax; numeric textual projection; and
+sequential composition. Missing or literal-only patterns, adjacent fields,
+wildcard outputs/sources, missing sources, misplaced conditions, conflicting
+modifiers, unterminated fields, and trailing tokens fail. Source audit is
+against `pipe_extract.go`, `pipe_extract_test.go`, `pattern.go`, and
+`pattern_test.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 298
+row-query cases, 249 error cases, and 255 statistics/pipeline cases: 802 cases
 total, all passing against the immutable image.
-The fixture now contains 765 cases.
+The fixture now contains 802 cases.

@@ -147,6 +147,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-037`](#sql-log-037-utf-8-byte-length-of-one-exact-retained-field) | `LQL-P24` | current foundation | UTF-8/compact-JSON byte length for one exact public metadata path with explicit missing/null/object-parent behavior; API owns LogsQL grammar, canonical fields, sequential destinations, rich conflicts, limits, cancellation, and envelopes |
 | [`SQL-LOG-038`](#sql-log-038-drop-one-empty-retained-metadata-field) | `LQL-P28` | current foundation | typed removal of one exact public metadata path when it is JSON null or an empty string; API owns dynamic current-row traversal, recursive empty-parent/row pruning, canonical fields, limits, cancellation, and envelopes |
 | [`SQL-LOG-039`](#sql-log-039-literal-replacement-in-one-exact-retained-field) | `LQL-P29` | current foundation | all-occurrence literal replacement over one exact public metadata path's textual projection; API owns LogsQL grammar, conditional/limited/sequential mutation, rich-value preservation, limits, cancellation, and envelopes |
+| [`SQL-LOG-040`](#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field) | `LQL-P32` | current foundation | two unquoted captures from one exact public metadata path using fixed literal prefix/middle/suffix delimiters; API owns LogsQL patterns, quoted-string decoding, conditions, current-row mutation/preservation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6877,6 +6878,111 @@ is justified.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_replace_is_literal_typed_bounded_and_durable`.
+
+### SQL-LOG-040: two literal-delimited fields from one exact retained field
+
+Bind one exact SQLite JSON source path, fixed literal prefix, middle, and suffix
+delimiters, inclusive native timestamp bounds, and positive work/result limits.
+This ordinary statement implements the unquoted fixed-pattern foundation for
+`prefix<first>middle<second>suffix` with SQLite `instr()` and `substr()`:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), textual AS (
+  SELECT
+    ts,
+    level,
+    message,
+    CASE
+      WHEN json_type(metadata, :extract_source_path) IS NULL THEN ''
+      WHEN json_type(metadata, :extract_source_path) IN ('null', 'object') THEN ''
+      WHEN json_type(metadata, :extract_source_path) = 'text' THEN
+        json_extract(metadata, :extract_source_path)
+      WHEN json_type(metadata, :extract_source_path) = 'true' THEN 'true'
+      WHEN json_type(metadata, :extract_source_path) = 'false' THEN 'false'
+      ELSE json(metadata -> :extract_source_path)
+    END AS source_value
+  FROM bounded
+), prefix_positions AS (
+  SELECT *, instr(source_value, :extract_prefix) AS prefix_position
+  FROM textual
+), first_positions AS (
+  SELECT *,
+         prefix_position + length(:extract_prefix) AS first_start,
+         CASE
+           WHEN prefix_position = 0 OR :extract_middle = '' THEN 0
+           ELSE instr(
+             substr(source_value, prefix_position + length(:extract_prefix)),
+             :extract_middle
+           )
+         END AS middle_position
+  FROM prefix_positions
+), second_positions AS (
+  SELECT *,
+         first_start + middle_position - 1 + length(:extract_middle) AS second_start
+  FROM first_positions
+), extracted AS (
+  SELECT *,
+         CASE
+           WHEN prefix_position = 0 OR middle_position = 0 THEN ''
+           ELSE substr(source_value, first_start, middle_position - 1)
+         END AS first_value,
+         CASE
+           WHEN prefix_position = 0 OR middle_position = 0 THEN ''
+           WHEN :extract_suffix = '' THEN substr(source_value, second_start)
+           WHEN instr(substr(source_value, second_start), :extract_suffix) = 0 THEN ''
+           ELSE substr(
+             source_value,
+             second_start,
+             instr(substr(source_value, second_start), :extract_suffix) - 1
+           )
+         END AS second_value
+  FROM second_positions
+)
+SELECT ts, level, message, first_value, second_value
+FROM extracted
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, first_value, second_value
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit.
+`:extract_source_path` is one exact SQLite JSON path such as `$.client_ip` or
+`$.nested.value`. Missing, explicit null, and retained object parents project
+to empty text; strings lose JSON quotes; booleans use lowercase JSON spelling;
+numbers and arrays use compact JSON. `:extract_middle` must be nonempty,
+matching the language rule that adjacent captures require a delimiter. An
+empty prefix anchors the first capture at the start; a nonempty prefix may
+begin anywhere. A missing prefix or middle delimiter returns both captures as
+empty strings. Once the middle delimiter matches, a missing nonempty suffix
+keeps the first capture and returns an empty second capture. An empty suffix
+captures the remaining text. The statement is read-only and deterministic.
+
+The complete `LQL-P32` API additionally owns case-insensitive `extract`,
+quoted/unquoted pattern grammar, HTML-decoded delimiters, any number of named
+or anonymous placeholders, automatic Go-style double/single/raw quoted-string
+decoding, per-field `plain:`, optional arbitrary `if (...)`, default `_msg` or
+exact `from` sources, nested current-row destinations, sequential pipeline
+composition, `keep_original_fields`, and `skip_empty_results`. Timeless keeps
+explicit empty strings and native rich values distinguishable; it refuses to
+replace a retained object with a scalar capture. The API bounds source
+projection, pattern work, decoded captures, destination state, final result
+rows, response bytes, and cancellation and shapes stable HTTP errors.
+
+Every selected value already crosses the bounded public log-row interface.
+SQLite core string functions provide the useful fixed-pattern operation
+directly. General pattern parsing and request-local rich-row mutation remain
+in the Rust API; moving them into an extension primitive would not avoid a
+storage read, block decode, or row crossing.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_extract_is_literal_typed_bounded_and_durable`.
 
 ## Adding the next recipe
 

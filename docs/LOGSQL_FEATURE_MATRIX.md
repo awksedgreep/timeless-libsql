@@ -135,7 +135,7 @@ extension.
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P32` | `extract` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P34` | `pack_json` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
@@ -469,6 +469,28 @@ private table, or storage-contract change is required. Exact-build evidence
 records 3.442/40.628 ms narrow/wide p95 versus 3.391/35.822 ms for byte-
 identical same-scan controls; `QSF-181` accepts the +1.5%/+13.4% bounded
 regexp/capture-expansion cost above the unchanged public storage boundary.
+
+`LQL-P32` parses literal-delimiter patterns in the Rust logs API and applies
+them only to request-owned rows returned by the public `logs` table. It
+supports named and anonymous placeholders, HTML-decoded delimiters, nonempty
+first-prefix search and empty-prefix anchoring, default `_msg` or exact `from`
+sources, automatic Go double/single/raw quoted-string decoding, `plain:`,
+conditions, default empty writes, `keep_original_fields`,
+`skip_empty_results`, nested destinations, and sequential composition.
+Timeless retains explicit empty strings and preserved native rich values and
+rejects scalar replacement of a retained object. Work, capture state, paths,
+results, response bytes, and cancellation are bounded; durable rows remain
+immutable across optimize and reopen.
+
+Public
+[`SQL-LOG-040`](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)
+uses JSON1 and core `instr()`/`substr()` for two fixed unquoted captures.
+General LogsQL pattern grammar, quoted decoding, current-row mutation and
+preservation, limits, cancellation, and envelopes remain Rust API work. The
+complete 802-case pinned VictoriaLogs oracle and real-extension regressions
+cover the language boundary. No extension primitive, private table, durable
+mutation, or storage-contract change is required. Exact-build evidence and
+its HWM verdict remain required before this row ships.
 
 ## Statistics functions
 

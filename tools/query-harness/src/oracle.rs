@@ -1381,18 +1381,30 @@ fn comparable_victorialogs_stats_rows(
     Ok(rows)
 }
 
+fn victorialogs_stats_response_rows(
+    case: &Map<String, Value>,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> Result<Vec<Value>> {
+    if status != 200 || !content_type.starts_with("application/stream+json") {
+        return Ok(Vec::new());
+    }
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .with_context(|| format!("decode VictoriaLogs stats row for {}", case_id(case)))
+        })
+        .collect()
+}
+
 fn victorialogs_stats_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
     let mut failures = 0;
     for case in object_cases(fixture, "stats_cases")? {
         let query = string(case, "query")?;
         let (status, content_type, body) = victorialogs_request(client, base, &query)?;
-        let actual = body
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                serde_json::from_str::<Value>(line).context("decode VictoriaLogs stats row")
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let actual = victorialogs_stats_response_rows(case, status, &content_type, &body)?;
         let expected = case
             .get("expected_rows")
             .and_then(Value::as_array)
@@ -1810,6 +1822,34 @@ mod tests {
             .unwrap(),
             ["row"]
         );
+    }
+
+    #[test]
+    fn victorialogs_stats_error_response_reports_a_case_failure_instead_of_aborting_the_corpus() {
+        let case = json!({"id": "LQL-TEST"});
+        let case = case.as_object().unwrap();
+        assert!(victorialogs_stats_response_rows(
+            case,
+            400,
+            "text/plain; charset=utf-8",
+            "cannot parse query",
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            victorialogs_stats_response_rows(
+                case,
+                200,
+                "application/stream+json",
+                "{\"case\":\"row\"}\n",
+            )
+            .unwrap(),
+            [json!({"case": "row"})]
+        );
+        let error =
+            victorialogs_stats_response_rows(case, 200, "application/stream+json", "not json")
+                .unwrap_err();
+        assert!(error.to_string().contains("LQL-TEST"), "{error:#}");
     }
 
     #[test]

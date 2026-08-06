@@ -896,6 +896,41 @@ the unchanged one/four-block public scan. Responses and storage work are
 byte-identical; no public SQL recipe is claimed where SQLite has no portable
 equivalent.
 
+LogsQL `extract` performs bounded literal-delimiter extraction into named
+current-row fields:
+
+```text
+* | extract 'kind=<kind> id=<id>'
+* | extract '<left> &lt; <right>' from comparison
+* | extract if (service:=api) 'user=<user>' keep_original_fields
+* | extract 'value=<plain:raw_value>' from payload skip_empty_results
+```
+
+The case-insensitive command requires at least one named placeholder.
+`<>`, `<_>`, and `<*>` are anonymous; adjacent placeholders are invalid; and
+literal delimiters are HTML-decoded. The source defaults to `_msg` and may be
+one exact quoted or dotted `from` field. A nonempty first delimiter may begin
+anywhere, while an empty first delimiter anchors at the start.
+
+Valid Go double/single/raw quoted prefixes are decoded automatically;
+`plain:` disables decoding. Missing or partial delimiters produce empty later
+captures while retaining completed captures. Default mode writes empty
+results, `keep_original_fields` preserves every nonempty destination, and
+`skip_empty_results` preserves a nonempty destination only for an empty new
+capture. Preserved numbers, booleans, arrays, objects, and nested siblings
+remain native. Replacing a retained object with a scalar fails explicitly.
+All writes are request-local and sequential; durable metadata is unchanged.
+
+Pattern traversal, quoted decoding, source projection, captures, paths,
+work, temporary state, result/response size, and cancellation are bounded.
+Executable
+[`SQL-LOG-040`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)
+provides direct users a parameterized public JSON1/core-`instr()`/`substr()`
+foundation for two unquoted fixed-delimiter captures. General patterns,
+quoted decoding, preservation, limits, cancellation, and envelopes remain in
+the Rust API. No extension primitive, private table, or storage-format change
+is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

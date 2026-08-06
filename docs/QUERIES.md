@@ -1127,6 +1127,65 @@ and 1,600 response bytes. Byte-identical same-scan controls measure
 public rows. `QSF-181` accepts the bounded API-side regex and capture-
 expansion work above the unchanged public storage boundary.
 
+## LogsQL literal `extract` over current rows
+
+`extract` captures text between fixed literal delimiters into named fields:
+
+```text
+* | extract 'kind=<kind> id=<id>'
+* | extract '<left> &lt; <right>' from comparison
+* | extract 'ip=<ip> <_>=<method> path=<path>' from request
+* | extract if (service:=api) 'user=<user>' keep_original_fields
+* | extract 'value=<plain:raw_value>' from payload skip_empty_results
+```
+
+The command and the `if`, `from`, `keep_original_fields`, and
+`skip_empty_results` keywords are case-insensitive. The quoted or unquoted
+pattern must contain at least one named `<field>`. `<>`, `<_>`, and `<*>` are
+anonymous captures. Adjacent placeholders are invalid: every pair needs a
+nonempty literal delimiter. Literal pattern text is HTML-decoded, so `&lt;`
+matches `<`. The source defaults to `_msg` and may be one exact quoted or
+dotted current-row field. A nonempty first literal may begin anywhere in the
+source; an empty first literal anchors extraction at the start.
+
+When a capture begins with a valid Go double-quoted, single-quoted, or raw
+backtick string, `extract` decodes that quoted prefix and then requires the
+next literal immediately after it. The `plain:` field option disables this
+automatic decoding. A missing first literal leaves every named result empty.
+If a later unquoted delimiter is missing, earlier completed fields remain and
+the current/later fields are empty. A successfully decoded quoted field also
+remains available when its following delimiter is missing. Explicit empty
+result strings remain present in Timeless output rather than becoming
+indistinguishable from missing metadata.
+
+By default every named capture replaces its current-row destination, including
+an empty capture. `keep_original_fields` preserves each destination whose
+existing textual value is nonempty. `skip_empty_results` preserves a nonempty
+existing destination only when its new capture is empty; nonempty captures
+still replace it. Existing numbers, booleans, arrays, and objects count as
+nonempty and remain native whenever preserved. Source strings, lowercase
+booleans, numbers, and compact arrays use the established textual projection;
+missing, null, and exact object parents project to empty text. A capture may
+write a nested leaf while preserving its siblings, but replacing a retained
+object with a scalar fails explicitly with 422. All transformations are
+request-local; durable log metadata is unchanged, and later pipeline stages
+observe earlier results.
+
+Pattern traversal, quoted decoding, projected arrays, captures, destination
+paths, work, result rows, response bytes, and cancellation use the shared hard
+request limits. Missing/literal-only patterns, wildcard sources or outputs,
+adjacent fields, misplaced conditions, both preservation modifiers, malformed
+quotes, and trailing tokens fail instead of being ignored.
+
+Executable
+[`SQL-LOG-040`](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)
+uses only public `logs` rows, SQLite JSON1, and core `instr()`/`substr()` to
+extract two unquoted fields from a fixed prefix/middle/suffix pattern. General
+pattern parsing, Go quoted-string decoding, current-row mutation and preserve
+modes, limits, cancellation, and HTTP envelopes remain Rust API behavior. No
+extension primitive, private table, storage-format change, or durable
+mutation is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

@@ -390,6 +390,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "replace_old" => Value::Text("web".to_owned()),
         "replace_new" => Value::Text("node".to_owned()),
         "replace_enabled" => Value::Integer(1),
+        "extract_source_path" => Value::Text("$.client_ip".to_owned()),
+        "extract_prefix" => Value::Text(String::new()),
+        "extract_middle" | "extract_suffix" => Value::Text(".".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1683,6 +1686,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let len_rows = recipe_values("SQL-LOG-037", 0)?;
     let drop_empty_rows = recipe_values("SQL-LOG-038", 0)?;
     let replace_rows = recipe_values("SQL-LOG-039", 0)?;
+    let extract_rows = recipe_values("SQL-LOG-040", 0)?;
     if [
         bounded,
         substring,
@@ -2083,6 +2087,33 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if source_hosts != ["web-1", "web-2"] {
         bail!("SQL-LOG-039 mutated its public source: {source_hosts:?}");
+    }
+    if extract_rows
+        != [
+            vec![
+                Value::Integer(1000),
+                Value::Text("error".into()),
+                Value::Text("request timeout".into()),
+                Value::Text("010".into()),
+                Value::Text("000".into()),
+            ],
+            vec![
+                Value::Integer(2000),
+                Value::Text("info".into()),
+                Value::Text("request ok".into()),
+                Value::Text("10".into()),
+                Value::Text("0".into()),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-040 literal extraction changed: {extract_rows:?}");
+    }
+    let source_ips = connection
+        .prepare("SELECT json_extract(metadata, '$.client_ip') FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_ips != ["010.000.000.001", "10.0.1.1"] {
+        bail!("SQL-LOG-040 mutated its public source: {source_ips:?}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3309,13 +3340,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 105);
+        assert_eq!(recipes.len(), 106);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            135
+            136
         );
         assert_eq!(
             recipes
@@ -3323,7 +3354,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            141
+            142
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

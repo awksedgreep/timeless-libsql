@@ -4168,6 +4168,280 @@ async fn session_seventeen_replace_regexp_matches_re2_captures_and_durability() 
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_extract_is_literal_typed_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("extract-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: r#"prefix kind=admin id="a\"b" tail suffix"#.into(),
+                    metadata_json: serde_json::json!({
+                        "case":"extract-admin",
+                        "extract_group":"extract",
+                        "kind":"admin",
+                        "result":"original",
+                        "empty":"",
+                        "number":101,
+                        "flag":false,
+                        "array":["prod",1],
+                        "null_value":null,
+                        "source_html":"left < right",
+                        "source_partial":r#"begin "captured without-delimiter""#,
+                        "nested":{"value":"old", "keep":1}
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "public".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"extract-user",
+                        "extract_group":"extract",
+                        "kind":"user",
+                        "result":"original"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-admin" | extract 'kind=<parsed_kind> id=<parsed_id> tail' | fields case, parsed_kind, parsed_id"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-admin",
+            "parsed_kind":"admin",
+            "parsed_id":"a\"b"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-admin" | extract 'kind=<_> id=<plain:raw_id> tail' | fields case, raw_id"#,
+        )
+        .await,
+        [serde_json::json!({"case":"extract-admin", "raw_id":r#""a\"b""#})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-admin" | extract '<left> &lt; <right>' from source_html | fields case, left, right"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-admin",
+            "left":"left",
+            "right":"right"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-admin" | extract 'begin <captured> delimiter=<missing>' from source_partial | fields case, captured, missing"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-admin",
+            "captured":"captured without-delimiter",
+            "missing":""
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"extract_group:=extract | extract if (kind:=admin) 'kind=<parsed> id=<_>' | fields case, parsed"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"extract-admin", "parsed":"admin"}),
+            serde_json::json!({"case":"extract-user"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-admin" | extract 'missing=<result>' keep_original_fields | extract 'missing=<empty>' skip_empty_results | extract '<number_text>' from number | fields case, result, empty, number, number_text, flag, array, null_value, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-admin",
+            "result":"original",
+            "empty":"",
+            "number":101,
+            "number_text":"101",
+            "flag":false,
+            "array":["prod",1],
+            "null_value":null,
+            "nested":{"value":"old", "keep":1}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-admin" | extract 'kind=<nested.value> id=<copy>' | extract '<copied_again>' from copy | fields case, nested, copy, copied_again"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-admin",
+            "nested":{"value":"admin", "keep":1},
+            "copy":"a\"b",
+            "copied_again":"a\"b"
+        })]
+    );
+
+    for malformed in [
+        "* | extract",
+        "* | extract keep_original_fields",
+        r#"* | extract 'literal-only'"#,
+        r#"* | extract '<left><right>'"#,
+        r#"* | extract '<field*>'"#,
+        r#"* | extract '<field>' from *"#,
+        r#"* | extract 'foo=<bar>' from x*"#,
+        r#"* | extract '<*>foo<_>bar'"#,
+        "* | extract if (x:y)",
+        r#"* | extract '<field>' keep_original_fields skip_empty_results"#,
+        r#"* | extract '<field>' trailing"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="extract-admin" | extract 'kind=<nested>'"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"extract_group:=extract | extract '<captured>'"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let work_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(work_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(work_limited["reason"], "max_work_rows", "{work_limited}");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_response_bytes: 8,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="extract-admin" | extract '<captured>'"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(response_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response_limited["reason"], "max_response_bytes",
+        "{response_limited}"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="extract-admin" | fields case, _msg, kind, result, empty, number, flag, array, null_value, source_html, source_partial, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-admin",
+            "_msg":r#"prefix kind=admin id="a\"b" tail suffix"#,
+            "kind":"admin",
+            "result":"original",
+            "empty":"",
+            "number":101,
+            "flag":false,
+            "array":["prod",1],
+            "null_value":null,
+            "source_html":"left < right",
+            "source_partial":r#"begin "captured without-delimiter""#,
+            "nested":{"value":"old", "keep":1}
+        })],
+        "extract must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="extract-admin" | extract 'kind=<parsed_kind> id=<parsed_id> tail' | fields case, parsed_kind, parsed_id, number, array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"extract-admin",
+            "parsed_kind":"admin",
+            "parsed_id":"a\"b",
+            "number":101,
+            "array":["prod",1],
+            "nested":{"value":"old", "keep":1}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {

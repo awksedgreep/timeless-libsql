@@ -21,9 +21,9 @@ use serde_json::{Map, Number, Value};
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CopySpec,
-    FacetsSpec, FirstSpec, FormatSpec, LenSpec, MathBinaryOperator, MathExpression, MathFunction,
-    MathSpec, PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec,
-    ReplaceSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
+    ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep, LenSpec, MathBinaryOperator,
+    MathExpression, MathFunction, MathSpec, PipelineField, PipelineOp, RegexpReplacementStep,
+    RenameSpec, ReplaceRegexpSpec, ReplaceSpec, StatsExpression, StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -216,6 +216,13 @@ pub(crate) fn execute(
                 execution.cancelled,
             )?,
             PipelineOp::ReplaceRegexp(spec) => replace_regexp_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
+            PipelineOp::Extract(spec) => extract_fields(
                 rows,
                 spec,
                 execution.timestamp_unit,
@@ -1549,7 +1556,7 @@ fn replace_fields(
 
             let source = coalesce_exact_value(&row, field_path);
             let mut state_bytes = size_of::<Value>();
-            let projected = replace_projected_text(
+            let projected = textual_transform_projection(
                 source,
                 &mut state_bytes,
                 &mut work_items,
@@ -1604,7 +1611,7 @@ fn replace_fields(
         .collect()
 }
 
-fn replace_projected_text<'a>(
+fn textual_transform_projection<'a>(
     value: Option<&'a Value>,
     state_bytes: &mut usize,
     work_items: &mut usize,
@@ -1759,7 +1766,7 @@ fn replace_regexp_fields(
 
             let source = coalesce_exact_value(&row, field_path);
             let mut state_bytes = size_of::<Value>();
-            let projected = replace_projected_text(
+            let projected = textual_transform_projection(
                 source,
                 &mut state_bytes,
                 &mut work_items,
@@ -1929,6 +1936,494 @@ fn append_regexp_replacement(
             output.push_str(value);
         }
     }
+}
+
+fn extract_fields(
+    rows: Vec<Value>,
+    spec: &ExtractSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path, ..
+    } = &spec.source
+    else {
+        return Err("LogsQL extract source is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "extract")?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let source = coalesce_exact_value(&row, source_path);
+            let mut state_bytes = size_of::<Value>()
+                .checked_add(spec.pattern.len())
+                .ok_or_else(|| "LogsQL extract state size overflow".to_string())?;
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "extract")?;
+            let projected = textual_transform_projection(
+                source,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "extract",
+            )?;
+            let mut captures = bounded_extract_captures(
+                projected.as_ref(),
+                &spec.steps,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+
+            state_bytes = state_bytes
+                .checked_add(size_of::<Vec<Option<bool>>>())
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        spec.steps
+                            .len()
+                            .checked_mul(size_of::<Option<bool>>())?,
+                    )
+                })
+                .ok_or_else(|| "LogsQL extract state size overflow".to_string())?;
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "extract")?;
+            let preserve = spec
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| {
+                    let Some(field) = &step.field else {
+                        return None;
+                    };
+                    let original_nonempty =
+                        extract_value_is_nonempty(coalesce_exact_value(&row, &field.path));
+                    Some(
+                        (spec.keep_original_fields && original_nonempty)
+                            || (spec.skip_empty_results
+                                && captures[index].is_empty()
+                                && original_nonempty),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            for (index, step) in spec.steps.iter().enumerate() {
+                let Some(field) = &step.field else {
+                    continue;
+                };
+                if preserve[index] == Some(true) {
+                    continue;
+                }
+                charge_transfer_work(&mut work_items, limits.max_state_items, "extract")?;
+                charge_transfer_string(
+                    &field.name,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "extract",
+                )?;
+                for segment in &field.path {
+                    charge_transfer_string(
+                        segment,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                        "extract",
+                    )?;
+                }
+                let object = row
+                    .as_object_mut()
+                    .ok_or_else(|| "LogsQL extract input row is not a JSON object".to_string())?;
+                if copy_destination_replaces_object(object, &field.path) {
+                    return Err(format!(
+                        "LogsQL extract destination conflict: field {:?} would replace a retained object",
+                        field.name
+                    ));
+                }
+                insert_path(
+                    object,
+                    &field.path,
+                    Value::String(std::mem::take(&mut captures[index])),
+                )
+                .map_err(|error| format!("LogsQL extract destination conflict: {error}"))?;
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+fn extract_value_is_nonempty(value: Option<&Value>) -> bool {
+    !matches!(value, None | Some(Value::Null))
+        && !value.is_some_and(|value| value.as_str().is_some_and(str::is_empty))
+}
+
+fn bounded_extract_captures(
+    source: &str,
+    steps: &[FormatStep],
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    *state_bytes = state_bytes
+        .checked_add(size_of::<Vec<String>>())
+        .and_then(|bytes| bytes.checked_add(steps.len().checked_mul(size_of::<String>())?))
+        .ok_or_else(|| "LogsQL extract state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "extract")?;
+    let mut captures = vec![String::new(); steps.len()];
+    let Some(first) = steps.first() else {
+        return Ok(captures);
+    };
+    let Some(first_prefix) = extract_literal_index(source, &first.prefix, 0, cancelled)? else {
+        return Ok(captures);
+    };
+    let mut cursor = first_prefix
+        .checked_add(first.prefix.len())
+        .ok_or_else(|| "LogsQL extract source offset overflow".to_string())?;
+
+    for (index, step) in steps.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        charge_transfer_work(work_items, limits.max_state_items, "extract")?;
+        let next_prefix = steps.get(index + 1).map_or("", |next| next.prefix.as_str());
+        let remaining = &source[cursor..];
+        let unquoted = if step
+            .field
+            .as_ref()
+            .is_some_and(|field| field.option == "plain")
+        {
+            None
+        } else {
+            let remaining_state = limits.max_state_bytes.saturating_sub(*state_bytes);
+            try_unquote_go_prefix(
+                remaining,
+                remaining_state,
+                limits.max_state_bytes,
+                cancelled,
+            )?
+        };
+        if let Some((value, consumed)) = unquoted {
+            if step.field.is_some() {
+                store_extract_capture(&mut captures[index], value, state_bytes, limits)?;
+            }
+            cursor = cursor
+                .checked_add(consumed)
+                .ok_or_else(|| "LogsQL extract source offset overflow".to_string())?;
+            if !source[cursor..].starts_with(next_prefix) {
+                return Ok(captures);
+            }
+            cursor = cursor
+                .checked_add(next_prefix.len())
+                .ok_or_else(|| "LogsQL extract source offset overflow".to_string())?;
+            continue;
+        }
+
+        if next_prefix.is_empty() {
+            if step.field.is_some() {
+                store_extract_capture_slice(
+                    &mut captures[index],
+                    &source[cursor..],
+                    state_bytes,
+                    limits,
+                )?;
+            }
+            return Ok(captures);
+        }
+        let Some(next) = extract_literal_index(source, next_prefix, cursor, cancelled)? else {
+            return Ok(captures);
+        };
+        if step.field.is_some() {
+            store_extract_capture_slice(
+                &mut captures[index],
+                &source[cursor..next],
+                state_bytes,
+                limits,
+            )?;
+        }
+        cursor = next
+            .checked_add(next_prefix.len())
+            .ok_or_else(|| "LogsQL extract source offset overflow".to_string())?;
+    }
+    ensure_active(cancelled)?;
+    Ok(captures)
+}
+
+fn store_extract_capture(
+    destination: &mut String,
+    value: String,
+    state_bytes: &mut usize,
+    limits: PipelineLimits,
+) -> Result<(), String> {
+    *state_bytes = state_bytes
+        .checked_add(value.len())
+        .ok_or_else(|| "LogsQL extract state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "extract")?;
+    *destination = value;
+    Ok(())
+}
+
+fn store_extract_capture_slice(
+    destination: &mut String,
+    value: &str,
+    state_bytes: &mut usize,
+    limits: PipelineLimits,
+) -> Result<(), String> {
+    *state_bytes = state_bytes
+        .checked_add(value.len())
+        .ok_or_else(|| "LogsQL extract state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "extract")?;
+    destination.push_str(value);
+    Ok(())
+}
+
+fn extract_literal_index(
+    source: &str,
+    literal: &str,
+    start: usize,
+    cancelled: &AtomicBool,
+) -> Result<Option<usize>, String> {
+    if literal.is_empty() {
+        return Ok(Some(start));
+    }
+    next_literal_match(source, literal, start, cancelled)
+}
+
+fn try_unquote_go_prefix(
+    source: &str,
+    max_output_bytes: usize,
+    state_limit: usize,
+    cancelled: &AtomicBool,
+) -> Result<Option<(String, usize)>, String> {
+    match source.as_bytes().first() {
+        Some(b'"') => try_unquote_go_interpreted(
+            source,
+            b'"',
+            false,
+            max_output_bytes,
+            state_limit,
+            cancelled,
+        ),
+        Some(b'\'') => try_unquote_go_interpreted(
+            source,
+            b'\'',
+            true,
+            max_output_bytes,
+            state_limit,
+            cancelled,
+        ),
+        Some(b'`') => try_unquote_go_raw(source, max_output_bytes, state_limit, cancelled),
+        _ => Ok(None),
+    }
+}
+
+fn try_unquote_go_raw(
+    source: &str,
+    max_output_bytes: usize,
+    state_limit: usize,
+    cancelled: &AtomicBool,
+) -> Result<Option<(String, usize)>, String> {
+    let Some(relative_end) = source[1..].find('`') else {
+        return Ok(None);
+    };
+    let end = relative_end + 1;
+    let raw = &source[1..end];
+    let output_len = raw.len() - raw.bytes().filter(|byte| *byte == b'\r').count();
+    ensure_extract_unquote_bytes(output_len, max_output_bytes, state_limit)?;
+    let mut output = String::with_capacity(output_len);
+    for (index, character) in raw.char_indices() {
+        check_periodically(cancelled, index)?;
+        if character != '\r' {
+            output.push(character);
+        }
+    }
+    Ok(Some((output, end + 1)))
+}
+
+fn try_unquote_go_interpreted(
+    source: &str,
+    quote: u8,
+    single_quoted: bool,
+    max_output_bytes: usize,
+    state_limit: usize,
+    cancelled: &AtomicBool,
+) -> Result<Option<(String, usize)>, String> {
+    let bytes = source.as_bytes();
+    let mut output = Vec::new();
+    let mut cursor = 1usize;
+    while cursor < bytes.len() {
+        check_periodically(cancelled, cursor)?;
+        let byte = bytes[cursor];
+        if byte == quote {
+            let consumed = cursor + 1;
+            let output = if single_quoted {
+                String::from_utf8(output).expect("single-quoted Go output remains UTF-8")
+            } else {
+                match String::from_utf8(output) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let bytes = error.into_bytes();
+                        ensure_extract_unquote_bytes(
+                            bytes.len().saturating_mul(4),
+                            max_output_bytes,
+                            state_limit,
+                        )?;
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
+                }
+            };
+            return Ok(Some((output, consumed)));
+        }
+        if matches!(byte, b'\n' | b'\r') {
+            return Ok(None);
+        }
+        if byte == b'\\' {
+            if !append_go_escape(
+                bytes,
+                &mut cursor,
+                quote,
+                single_quoted,
+                &mut output,
+                max_output_bytes,
+                state_limit,
+            )? {
+                return Ok(None);
+            }
+            continue;
+        }
+        let Some(character) = source[cursor..].chars().next() else {
+            return Ok(None);
+        };
+        bounded_extract_push(
+            &mut output,
+            character.to_string().as_bytes(),
+            max_output_bytes,
+            state_limit,
+        )?;
+        cursor += character.len_utf8();
+    }
+    Ok(None)
+}
+
+fn append_go_escape(
+    source: &[u8],
+    cursor: &mut usize,
+    quote: u8,
+    single_quoted: bool,
+    output: &mut Vec<u8>,
+    max_output_bytes: usize,
+    state_limit: usize,
+) -> Result<bool, String> {
+    let slash = *cursor;
+    let Some(&escaped) = source.get(slash + 1) else {
+        return Ok(false);
+    };
+    let simple = match escaped {
+        b'a' => Some(0x07),
+        b'b' => Some(0x08),
+        b'f' => Some(0x0c),
+        b'n' => Some(b'\n'),
+        b'r' => Some(b'\r'),
+        b't' => Some(b'\t'),
+        b'v' => Some(0x0b),
+        b'\\' => Some(b'\\'),
+        escaped if escaped == quote => Some(escaped),
+        _ => None,
+    };
+    if let Some(byte) = simple {
+        bounded_extract_push(output, &[byte], max_output_bytes, state_limit)?;
+        *cursor += 2;
+        return Ok(true);
+    }
+
+    let (digits, radix, width, byte_escape) = match escaped {
+        b'0'..=b'7' => (slash + 1, 8, 3, true),
+        b'x' => (slash + 2, 16, 2, true),
+        b'u' => (slash + 2, 16, 4, false),
+        b'U' => (slash + 2, 16, 8, false),
+        _ => return Ok(false),
+    };
+    let Some(end) = digits.checked_add(width) else {
+        return Ok(false);
+    };
+    let Some(encoded) = source.get(digits..end) else {
+        return Ok(false);
+    };
+    let Some(value) = decode_fixed_radix(encoded, radix) else {
+        return Ok(false);
+    };
+    if byte_escape {
+        let Ok(byte) = u8::try_from(value) else {
+            return Ok(false);
+        };
+        if single_quoted {
+            let Some(character) = char::from_u32(u32::from(byte)) else {
+                return Ok(false);
+            };
+            let mut buffer = [0u8; 4];
+            bounded_extract_push(
+                output,
+                character.encode_utf8(&mut buffer).as_bytes(),
+                max_output_bytes,
+                state_limit,
+            )?;
+        } else {
+            bounded_extract_push(output, &[byte], max_output_bytes, state_limit)?;
+        }
+    } else {
+        let Some(character) = char::from_u32(value) else {
+            return Ok(false);
+        };
+        let mut buffer = [0u8; 4];
+        bounded_extract_push(
+            output,
+            character.encode_utf8(&mut buffer).as_bytes(),
+            max_output_bytes,
+            state_limit,
+        )?;
+    }
+    *cursor = end;
+    Ok(true)
+}
+
+fn decode_fixed_radix(encoded: &[u8], radix: u32) -> Option<u32> {
+    encoded.iter().try_fold(0u32, |value, byte| {
+        let digit = (*byte as char).to_digit(radix)?;
+        value.checked_mul(radix)?.checked_add(digit)
+    })
+}
+
+fn bounded_extract_push(
+    output: &mut Vec<u8>,
+    value: &[u8],
+    max_output_bytes: usize,
+    state_limit: usize,
+) -> Result<(), String> {
+    let length = output
+        .len()
+        .checked_add(value.len())
+        .ok_or_else(|| "LogsQL extract state size overflow".to_string())?;
+    ensure_extract_unquote_bytes(length, max_output_bytes, state_limit)?;
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+fn ensure_extract_unquote_bytes(
+    bytes: usize,
+    available: usize,
+    state_limit: usize,
+) -> Result<(), String> {
+    if bytes > available {
+        return Err(format!(
+            "LogsQL extract state exceeds max_response_bytes={}",
+            state_limit
+        ));
+    }
+    Ok(())
 }
 
 fn retain_nonempty_value(
@@ -6291,6 +6786,146 @@ mod tests {
             replace_regexp_fields(
                 vec![row],
                 &replace_many,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn extract_is_literal_go_quoted_typed_and_bounded() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Extract(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected extract plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "kind":"admin",
+            "_msg":r#"before key="a\n\x42\101\u03bb" tail"#,
+            "single":r#"'a\n\xFF'"#,
+            "raw":"`a\r\nb`",
+            "result":"original",
+            "empty":"",
+            "number":101,
+            "array":["prod",1],
+            "nested":{"value":"old", "keep":1}
+        });
+        let plan = crate::logsql::parse_at(
+            r#"* | extract 'key=<decoded> tail' | extract '<single_decoded>' from single | extract '<raw_decoded>' from raw | extract 'key=<plain:plain_value> tail' | extract 'missing=<result>' keep_original_fields | extract 'missing=<empty>' skip_empty_results | extract '<number_text>' from number | extract 'key=<nested.value> tail'"#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["decoded"], "a\nBAλ");
+        assert_eq!(result[0]["single_decoded"], "a\nÿ");
+        assert_eq!(result[0]["raw_decoded"], "a\nb");
+        assert_eq!(result[0]["plain_value"], r#""a\n\x42\101\u03bb""#);
+        assert_eq!(result[0]["result"], row["result"]);
+        assert_eq!(result[0]["empty"], row["empty"]);
+        assert_eq!(result[0]["number"], row["number"]);
+        assert_eq!(result[0]["number_text"], "101");
+        assert_eq!(result[0]["array"], row["array"]);
+        assert_eq!(result[0]["nested"], json!({"value":"a\nBAλ", "keep":1}));
+
+        let first_prefix = parse_spec(r#"* | extract 'key=<value> tail'"#);
+        assert_eq!(
+            extract_fields(
+                vec![json!({"_msg":"ignored key=found tail suffix"})],
+                &first_prefix,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"_msg":"ignored key=found tail suffix", "value":"found"})]
+        );
+
+        let work_error = extract_fields(
+            vec![row.clone()],
+            &first_prefix,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL extract"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = extract_fields(
+            vec![row.clone()],
+            &first_prefix,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL extract"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec(r#"* | extract 'key=<nested> tail'"#);
+        let conflict_error = extract_fields(
+            vec![row.clone()],
+            &conflict,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL extract destination conflict"),
+            "{conflict_error}"
+        );
+
+        let false_condition = parse_spec(r#"* | extract if (kind:=user) '<changed>'"#);
+        let unchanged = extract_fields(
+            vec![row.clone()],
+            &false_condition,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(unchanged.as_slice(), std::slice::from_ref(&row));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            extract_fields(
+                vec![row],
+                &first_prefix,
                 TimestampUnit::Microseconds,
                 limits,
                 &cancelled,

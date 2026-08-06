@@ -1243,6 +1243,143 @@ fn parse_replace_regexp_pipe(
     }))
 }
 
+fn parse_extract_pipe(
+    segment: &str,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<PipelineOp, LogsqlError> {
+    let operation = "extract";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL extract pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL extract pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[operation.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL extract requires whitespace before its pattern",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed("LogsQL extract requires a pattern"));
+    }
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, operation)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(
+                &expression,
+                None,
+                timestamp_unit,
+                query_now,
+            )?)
+        }
+    } else {
+        None
+    };
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL extract requires a pattern after its condition",
+        ));
+    }
+
+    let (pattern, consumed) = if let Some((pattern, consumed)) = parse_quoted_prefix(rest)? {
+        (pattern, consumed)
+    } else {
+        let consumed = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        (rest[..consumed].to_owned(), consumed)
+    };
+    let steps = parse_extract_pattern(&pattern)?;
+    rest = rest[consumed..].trim_start();
+
+    let tokens = pipeline_words(rest)?;
+    let mut cursor = 0usize;
+    let mut source = parse_delete_field("_msg")?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("from"))
+    {
+        cursor += 1;
+        let field = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL extract from requires an exact field"))?;
+        source = match parse_delete_field(field)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL extract from requires an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+
+    let mut keep_original_fields = false;
+    let mut skip_empty_results = false;
+    if let Some(modifier) = tokens.get(cursor) {
+        if modifier.eq_ignore_ascii_case("keep_original_fields") {
+            keep_original_fields = true;
+            cursor += 1;
+        } else if modifier.eq_ignore_ascii_case("skip_empty_results") {
+            skip_empty_results = true;
+            cursor += 1;
+        }
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL extract token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Extract(ExtractSpec {
+        pattern,
+        steps,
+        source,
+        keep_original_fields,
+        skip_empty_results,
+        condition,
+    }))
+}
+
+fn parse_extract_pattern(pattern: &str) -> Result<Vec<FormatStep>, LogsqlError> {
+    let steps = parse_format_pattern(pattern)?;
+    if steps.iter().all(|step| step.field.is_none()) {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL extract pattern {pattern:?} must contain a named field"
+        )));
+    }
+    for pair in steps.windows(2) {
+        if pair[1].prefix.is_empty() {
+            let left = pair[0]
+                .field
+                .as_ref()
+                .map_or("", |field| field.name.as_str());
+            let right = pair[1]
+                .field
+                .as_ref()
+                .map_or("", |field| field.name.as_str());
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL extract pattern is missing a delimiter between <{left}> and <{right}>"
+            )));
+        }
+    }
+    Ok(steps)
+}
+
 fn parse_regexp_replacement(value: &str) -> Vec<RegexpReplacementStep> {
     let mut steps = Vec::new();
     let mut cursor = 0usize;
@@ -2382,6 +2519,10 @@ fn is_replace_regexp_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "replace_regexp")
 }
 
+fn is_extract_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "extract")
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -3008,6 +3149,16 @@ pub(crate) struct ReplaceRegexpSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ExtractSpec {
+    pub pattern: String,
+    pub steps: Vec<FormatStep>,
+    pub source: PipelineField,
+    pub keep_original_fields: bool,
+    pub skip_empty_results: bool,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -3042,6 +3193,7 @@ pub(crate) enum PipelineOp {
     DropEmptyFields,
     Replace(ReplaceSpec),
     ReplaceRegexp(ReplaceRegexpSpec),
+    Extract(ExtractSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3433,6 +3585,10 @@ pub fn parse_at(
                     timestamp_unit,
                     query_now,
                 )?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_extract_pipe(segment) => {
+                pipeline.push(parse_extract_pipe(segment, timestamp_unit, query_now)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -8701,6 +8857,36 @@ mod tests {
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_extract_grammar_is_complete_and_strict() {
+        for query in [
+            r#"* | extract "kind=<kind> id=<id>""#,
+            r#"* | ExTrAcT if (kind:=admin) "kind=<kind> id=<plain:id>" from text keep_original_fields"#,
+            r#"* | extract "<left> &lt; <right>" from text skip_empty_results"#,
+            r#"* | extract "<head> <> <tail>" from "quoted field""#,
+        ] {
+            parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+
+        for query in [
+            "* | extract",
+            "* | extract keep_original_fields",
+            r#"* | extract "literal-only""#,
+            r#"* | extract "<left><right>""#,
+            r#"* | extract "<field*>""#,
+            r#"* | extract "<field>" from *"#,
+            r#"* | extract "foo=<bar>" from x*"#,
+            r#"* | extract "<*>foo<_>bar""#,
+            "* | extract if (x:y)",
+            r#"* | extract "<field>" keep_original_fields skip_empty_results"#,
+            r#"* | extract "<field>" trailing"#,
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
         }
     }
 

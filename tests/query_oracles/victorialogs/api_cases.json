@@ -3408,6 +3408,121 @@
       "id": "LQL-P30-replace-regexp-composes-sequentially",
       "query": "case:=format-row | replace_regexp (a, x) at host | replace_regexp (x, z) at host limit 1 | fields case, host",
       "expected_rows": [{"case": "format-row", "host": "zцC"}]
+    },
+    {
+      "id": "LQL-P32-extracts-literal-delimited-fields",
+      "query": "case:=format-row | format 'kind=admin id=42' as source | extract 'kind=<kind> id=<id>' from source | fields case, kind, id",
+      "expected_rows": [{"case": "format-row", "kind": "admin", "id": "42"}]
+    },
+    {
+      "id": "LQL-P32-extract-auto-unquotes-a-source-string",
+      "query": "case:=format-row | extract 'hello <word>' | fields case, word",
+      "expected_rows": [{"case": "format-row", "word": "world"}]
+    },
+    {
+      "id": "LQL-P32-extract-plain-disables-source-unquoting",
+      "query": "case:=format-row | extract 'hello <plain:rest>' | fields case, rest",
+      "expected_rows": [{"case": "format-row", "rest": "\"world\"\nnext"}]
+    },
+    {
+      "id": "LQL-P32-extract-html-decodes-literal-delimiters",
+      "query": "case:=format-row | format 'a &lt; b' as source | extract '<left> &lt; <right>' from source | fields case, left, right",
+      "expected_rows": [{"case": "format-row", "left": "a", "right": "b"}]
+    },
+    {
+      "id": "LQL-P32-extract-supports-anonymous-placeholders",
+      "query": "case:=format-row | format 'ip=1.2.3.4 method=GET path=/x' as source | extract 'ip=<ip> <_>=<method> path=<path>' from source | fields case, ip, method, path",
+      "expected_rows": [{"case": "format-row", "ip": "1.2.3.4", "method": "GET", "path": "/x"}]
+    },
+    {
+      "id": "LQL-P32-extract-partial-quoted-match-retains-earlier-capture",
+      "query": "case:=format-row | extract 'hello <word> delimiter=<missing>' | fields case, word, missing",
+      "expected_rows": [{"case": "format-row", "word": "world"}]
+    },
+    {
+      "id": "LQL-P32-extract-default-empty-overwrites-existing-field",
+      "query": "case:=format-row | format 'no match' as source | extract 'result=<result>' from source | fields case, result",
+      "expected_rows": [{"case": "format-row"}]
+    },
+    {
+      "id": "LQL-P32-extract-keep-original-preserves-nonempty-field",
+      "query": "case:=format-row | format 'result=changed' as source | extract 'result=<result>' from source keep_original_fields | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P32-extract-skip-empty-preserves-nonempty-field",
+      "query": "case:=format-row | format 'no match' as source | extract 'result=<result>' from source skip_empty_results | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P32-extract-skip-empty-allows-nonempty-overwrite",
+      "query": "case:=format-row | format 'result=changed' as source | extract 'result=<result>' from source skip_empty_results | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "changed"}]
+    },
+    {
+      "id": "LQL-P32-extract-conditional-match",
+      "query": "case:=format-row | format 'result=changed' as source | extract if (host:=aцC) 'result=<result>' from source | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "changed"}]
+    },
+    {
+      "id": "LQL-P32-extract-conditional-miss-preserves-field",
+      "query": "case:=format-row | format 'result=changed' as source | extract if (host:=other) 'result=<result>' from source | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "original"}]
+    },
+    {
+      "id": "LQL-P32-extract-textual-output-overwrites-a-number",
+      "query": "case:=state-zero | format 'probe=changed' as source | extract 'probe=<probe>' from source | fields case, probe",
+      "expected_rows": [{"case": "state-zero", "probe": "changed"}]
+    },
+    {
+      "id": "LQL-P32-extract-keywords-are-case-insensitive",
+      "query": "case:=format-row | format 'kind=admin' as source | ExTrAcT 'kind=<kind>' FrOm source SkIp_EmPtY_ReSuLtS | fields case, kind",
+      "expected_rows": [{"case": "format-row", "kind": "admin"}]
+    },
+    {
+      "id": "LQL-P32-extract-composes-sequentially",
+      "query": "case:=format-row | format 'value=first' as source | extract 'value=<first>' from source | extract '<copied>' from first | fields case, first, copied",
+      "expected_rows": [{"case": "format-row", "first": "first", "copied": "first"}]
+    },
+    {
+      "id": "LQL-P32-extract-unquotes-double-quoted-go-strings",
+      "query": "case:=quote-double | format '<q:_msg>' as source | extract '<decoded>' from source | fields case, decoded",
+      "expected_rows": [{"case": "quote-double", "decoded": "line one\nline two\t\"quoted\"\\slash"}]
+    },
+    {
+      "id": "LQL-P32-extract-unquotes-raw-go-strings",
+      "query": "case:=quote-backtick | format '`<_msg>`' as source | extract '<decoded>' from source | fields case, decoded",
+      "expected_rows": [{"case": "quote-backtick", "decoded": "raw\\n\"double\"'single\\slash"}]
+    },
+    {
+      "id": "LQL-P32-extract-unquotes-single-quoted-go-strings",
+      "query": "case:=quote-hex-unicode | format \"'<_msg>'\" as source | extract '<decoded>' from source | fields case, decoded",
+      "expected_rows": [{"case": "quote-hex-unicode", "decoded": "AλB"}]
+    },
+    {
+      "id": "LQL-P32-extract-finds-a-nonempty-first-prefix-anywhere",
+      "query": "case:=format-row | format 'before key=value tail after' as source | extract 'key=<value> tail' from source | fields case, value",
+      "expected_rows": [{"case": "format-row", "value": "value"}]
+    },
+    {
+      "id": "LQL-P32-extract-anchors-an-empty-first-prefix",
+      "query": "case:=format-row | format 'before key=value tail after' as source | extract '<head> key=<value> tail' from source | fields case, head, value",
+      "expected_rows": [{"case": "format-row", "head": "before", "value": "value"}]
+    },
+    {
+      "id": "LQL-P32-extract-keep-original-fills-an-empty-field",
+      "query": "case:=format-row | format 'value=changed' as source | extract 'value=<math_empty>' from source keep_original_fields | fields case, math_empty",
+      "expected_rows": [{"case": "format-row", "math_empty": "changed"}]
+    },
+    {
+      "id": "LQL-P32-extract-decodes-go-hex-and-unicode-escapes",
+      "query": "case:=format-row | format '\"\\\\x41\\\\u03bb\"' as source | extract '<decoded>' from source | fields case, decoded",
+      "expected_rows": [{"case": "format-row", "decoded": "Aλ"}]
+    },
+    {
+      "id": "LQL-P32-extract-decodes-single-quoted-byte-escapes-as-runes",
+      "query": "case:=format-row | format \"'\\\\xFF'\" as source | extract '<decoded>' from source | fields case, decoded",
+      "expected_rows": [{"case": "format-row", "decoded": "ÿ"}]
     }
   ],
   "error_cases": [
@@ -5052,6 +5167,104 @@
     {
       "id": "LQL-P30-replace-regexp-rejects-trailing-token",
       "query": "* | replace_regexp (foo, bar) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-requires-pattern",
+      "query": "* | extract",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-modifier-is-not-a-pattern",
+      "query": "* | extract keep_original_fields",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-requires-named-field",
+      "query": "* | extract 'literal-only'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-adjacent-fields",
+      "query": "* | extract '<left><right>'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-wildcard-output",
+      "query": "* | extract '<field*>'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-wildcard-source",
+      "query": "* | extract '<field>' from *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-requires-source-after-from",
+      "query": "* | extract '<field>' from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-condition-after-pattern",
+      "query": "* | extract '<field>' if (field:value)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-both-preservation-modifiers",
+      "query": "* | extract '<field>' keep_original_fields skip_empty_results",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-unterminated-field",
+      "query": "* | extract '<field'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-trailing-token",
+      "query": "* | extract '<field>' trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-only-anonymous-fields",
+      "query": "* | extract '<*>foo<_>bar'",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-rejects-prefix-wildcard-source",
+      "query": "* | extract 'foo=<bar>' from x*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P32-extract-condition-requires-pattern",
+      "query": "* | extract if (x:y)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
