@@ -145,7 +145,7 @@ extension.
 | `LQL-P39` | `unpack_words` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent)) | shipped | no | none | `API` | P3 |
 | `LQL-P40` | `json_array_concat` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-055-concatenate-one-json-array)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P42` | `unroll` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P42` | `unroll` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-056-unroll-one-json-array)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P43` | `join` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P44` | `union` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P45` | `running_stats` | missing | no | `SQL` | `API` | P3 |

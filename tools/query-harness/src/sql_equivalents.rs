@@ -440,6 +440,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "json_array_concat_source_path" => Value::Text("$.tags".to_owned()),
         "json_array_concat_source_override" => Value::Null,
         "json_array_concat_delimiter" => Value::Text("|".to_owned()),
+        "unroll_source_path" => Value::Text("$.tags".to_owned()),
+        "unroll_source_override" => Value::Null,
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "any_source_path" => Value::Text("$.host".to_owned()),
@@ -1766,6 +1768,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let unpack_logfmt_rows = recipe_values("SQL-LOG-053", 0)?;
     let unpack_syslog_rows = recipe_values("SQL-LOG-054", 0)?;
     let json_array_concat_rows = recipe_values("SQL-LOG-055", 0)?;
+    let unroll_rows = recipe_values("SQL-LOG-056", 0)?;
     if [
         bounded,
         substring,
@@ -1934,6 +1937,36 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     {
         bail!("SQL-LOG-055 JSON array concatenation changed: {json_array_concat_rows:?}");
     }
+    let expected_unroll_values = [
+        (1_000, 0, "prod"),
+        (1_000, 1, ""),
+        (1_000, 2, "123"),
+        (1_000, 3, "true"),
+        (1_000, 4, "false"),
+        (1_000, 5, "null"),
+        (1_000, 6, r#"{"nested":"ignored"}"#),
+        (1_000, 7, r#"["ignored"]"#),
+        (1_000, 8, "ab"),
+        (1_000, 9, "*"),
+        (2_000, 0, "dev"),
+        (2_000, 1, "1.5"),
+        (2_000, 2, "-2"),
+        (2_000, 3, "123"),
+        (2_000, 4, "a\"b"),
+        (2_000, 5, "a\nb"),
+        (2_000, 6, "a/b"),
+    ];
+    if unroll_rows.len() != expected_unroll_values.len()
+        || unroll_rows.iter().zip(expected_unroll_values).any(
+            |(row, (timestamp, item_index, value))| {
+                row.first() != Some(&Value::Integer(timestamp))
+                    || row.get(3) != Some(&Value::Integer(item_index))
+                    || row.get(4) != Some(&Value::Text(value.to_owned()))
+            },
+        )
+    {
+        bail!("SQL-LOG-056 JSON array unroll changed: {unroll_rows:?}");
+    }
     let json_array_concat_sql = recipe_sql("SQL-LOG-055", 0)?;
     let measured_json_array_concatenation =
         |source_path: &str, source_override: Option<&str>| -> Result<Vec<String>> {
@@ -1986,6 +2019,71 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         let actual = measured_json_array_concatenation(path, source_override)?;
         if actual != expected {
             bail!("SQL-LOG-055 path {path:?} override {source_override:?} changed: {actual:?}");
+        }
+    }
+    let unroll_sql = recipe_sql("SQL-LOG-056", 0)?;
+    let measured_unroll =
+        |source_path: &str, source_override: Option<&str>| -> Result<Vec<String>> {
+            let mut statement = connection.prepare(&unroll_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-056 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "unroll_source_path" => Value::Text(source_path.to_owned()),
+                    "unroll_source_override" => source_override
+                        .map(|value| Value::Text(value.to_owned()))
+                        .unwrap_or(Value::Null),
+                    _ => parameter("SQL-LOG-056", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            statement
+                .raw_query()
+                .mapped(|row| row.get::<_, String>(4))
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        };
+    for (path, source_override, expected) in [
+        (
+            "$.nested.array_text",
+            None,
+            vec![
+                "1",
+                r#"{"x":2}"#,
+                "[3]",
+                "null",
+                "1",
+                r#"{"x":2}"#,
+                "[3]",
+                "null",
+            ],
+        ),
+        ("$.missing", None, vec!["", ""]),
+        (
+            "$.ignored",
+            Some(r#"["x",2,true,{"a":1},[null],null]"#),
+            vec![
+                "x",
+                "2",
+                "true",
+                r#"{"a":1}"#,
+                "[null]",
+                "null",
+                "x",
+                "2",
+                "true",
+                r#"{"a":1}"#,
+                "[null]",
+                "null",
+            ],
+        ),
+        ("$.ignored", Some("not-an-array"), vec!["", ""]),
+    ] {
+        let actual = measured_unroll(path, source_override)?;
+        if actual != expected {
+            bail!("SQL-LOG-056 path {path:?} override {source_override:?} changed: {actual:?}");
         }
     }
     let split_sql = recipe_sql("SQL-LOG-051", 0)?;
@@ -2507,6 +2605,13 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if source_after_array_concat != source_packed_fields {
         bail!("SQL-LOG-055 mutated its public source: {source_after_array_concat:?}");
+    }
+    let source_after_unroll = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_after_unroll != source_packed_fields {
+        bail!("SQL-LOG-056 mutated its public source: {source_after_unroll:?}");
     }
     if unpack_json_rows.len() != 2 {
         bail!("SQL-LOG-042 result cardinality changed: {unpack_json_rows:?}");
@@ -4134,13 +4239,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 121);
+        assert_eq!(recipes.len(), 122);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            153
+            154
         );
         assert_eq!(
             recipes
@@ -4148,7 +4253,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            159
+            160
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

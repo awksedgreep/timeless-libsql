@@ -2118,6 +2118,123 @@ fn parse_json_array_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     )?))
 }
 
+fn parse_unroll_pipe(segment: &str, context: &mut ParseContext) -> Result<PipelineOp, LogsqlError> {
+    let operation = "unroll";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL unroll pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL unroll pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[operation.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL unroll requires whitespace before its fields",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, operation)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(&expression, None, context)?)
+        }
+    } else {
+        None
+    };
+
+    if starts_format_keyword(rest, "by") {
+        rest = rest["by".len()..].trim_start();
+    }
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL unroll requires at least one exact field",
+        ));
+    }
+
+    let tokens = lex_first_pipe(rest, operation)?;
+    let mut cursor = 0usize;
+    let parenthesized = tokens.get(cursor).is_some_and(|token| token == "(");
+    if parenthesized {
+        cursor += 1;
+    }
+    let mut fields = Vec::new();
+    loop {
+        let Some(token) = tokens.get(cursor) else {
+            return Err(LogsqlError::malformed(if parenthesized {
+                "unterminated LogsQL unroll fields"
+            } else {
+                "LogsQL unroll requires at least one exact field"
+            }));
+        };
+        if token == ")" {
+            if parenthesized && !fields.is_empty() {
+                cursor += 1;
+                break;
+            }
+            return Err(LogsqlError::malformed(
+                "LogsQL unroll requires at least one exact field",
+            ));
+        }
+        if matches!(token.as_str(), "(" | ",") {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected LogsQL unroll field token {token:?}"
+            )));
+        }
+        fields.push(parse_first_exact_field(token, "fields", operation)?);
+        cursor += 1;
+        match tokens.get(cursor).map(String::as_str) {
+            Some(",") => {
+                cursor += 1;
+                if parenthesized && tokens.get(cursor).is_some_and(|token| token == ")") {
+                    cursor += 1;
+                    break;
+                }
+                if tokens.get(cursor).is_none() {
+                    return Err(LogsqlError::malformed(if parenthesized {
+                        "unterminated LogsQL unroll fields"
+                    } else {
+                        "LogsQL unroll does not allow an unparenthesized trailing comma"
+                    }));
+                }
+            }
+            Some(")") if parenthesized => {
+                cursor += 1;
+                break;
+            }
+            None if !parenthesized => break,
+            None => {
+                return Err(LogsqlError::malformed("unterminated LogsQL unroll fields"));
+            }
+            Some(token) => {
+                return Err(LogsqlError::malformed(format!(
+                    "unexpected LogsQL unroll token {token:?}; expected ','{}",
+                    if parenthesized { " or ')'" } else { "" }
+                )));
+            }
+        }
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL unroll token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Unroll(UnrollSpec { fields, condition }))
+}
+
 fn parse_length_pipe(segment: &str, operation: &str) -> Result<UnaryFieldSpec, LogsqlError> {
     let tokens = lex_first_pipe(segment, operation)?;
     let Some(command) = tokens.first() else {
@@ -3116,6 +3233,13 @@ fn is_json_array_concat_pipe(segment: &str) -> bool {
 
 fn is_json_array_len_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "json_array_len")
+}
+
+fn is_unroll_pipe(segment: &str) -> bool {
+    let operation = "unroll";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
@@ -4525,6 +4649,12 @@ pub(crate) struct JsonArrayConcatSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct UnrollSpec {
+    pub fields: Vec<PipelineField>,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct UnpackJsonSpec {
     pub source: PipelineField,
     pub fields: Vec<PipelineField>,
@@ -4602,6 +4732,7 @@ pub(crate) enum PipelineOp {
     Split(SplitSpec),
     JsonArrayConcat(JsonArrayConcatSpec),
     JsonArrayLen(UnaryFieldSpec),
+    Unroll(UnrollSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
     ReplaceRegexp(ReplaceRegexpSpec),
@@ -5044,6 +5175,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_json_array_len_pipe(segment) => {
                 pipeline.push(parse_json_array_len_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_unroll_pipe(segment) => {
+                pipeline.push(parse_unroll_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_drop_empty_fields_pipe(segment) => {
@@ -11076,6 +11211,41 @@ mod tests {
             "* | json_array_len(source*)",
             "* | json_array_len(source) as result*",
             "* | json_array_len(source) result trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_unroll_grammar_is_complete_and_strict() {
+        for query in [
+            "* | unroll source",
+            "* | UNROLL by (source)",
+            "* | unroll source, other",
+            "* | unroll (source, other)",
+            r#"* | unroll by ("left field", nested.array)"#,
+            "* | unroll if (kind:=expand) by (source, other)",
+            "* | unroll if () source",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | unroll",
+            "* | unroll by",
+            "* | unroll ()",
+            "* | unroll by ()",
+            "* | unroll *",
+            "* | unroll source*",
+            "* | unroll (source*)",
+            "* | unroll (source,",
+            "* | unroll source,",
+            "* | unroll (source) trailing",
+            "* | unroll (source) if (kind:=expand)",
+            "* | unroll.extra",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

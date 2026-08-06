@@ -1650,6 +1650,40 @@ public storage work and emits the same 1,344 response bytes. Direct counting
 of the already-retained array plus one textual destination write is bounded
 API work and does not justify moving LogsQL syntax into the extension.
 
+LogsQL `unroll` expands request-local JSON arrays without changing durable
+log metadata:
+
+```text
+* | unroll tags
+* | unroll by (tags, zones)
+* | unroll if (service:="api") (payload.items, "left field")
+```
+
+The command is case-insensitive. Conditions and `by` are optional; exact
+fields may be bare or parenthesized, quoted, or dotted. Every source is
+snapshotted before writes. Multiple arrays zip to the longest source, with
+empty strings padding shorter, invalid, missing, scalar, or null fields. When
+all selected arrays are empty or invalid, exactly one empty-valued row is
+emitted. False conditions pass the complete rich row through once.
+
+Native arrays retain their durable types. Text arrays preserve raw number
+spelling, object order, and VictoriaLogs bare `NaN`; top-level strings are
+decoded, while nested strings are decoded and re-encoded like VictoriaLogs.
+Overlapping paths and scalar parents return HTTP 422. Cumulative source and
+output state, work, cardinality, response bytes, query-backed predicates,
+deadlines, and cancellation are bounded. Timeless explicitly returns empty
+strings that VictoriaLogs' streaming encoder omits, preserving the richer
+missing/null/empty response contract.
+
+The complete 1,223-case pinned VictoriaLogs fixture and real-extension tests
+cover grammar, values, limits, conflicts, query-backed conditions, immutable
+sources, optimize, shutdown, and reopen. Executable
+[`SQL-LOG-056`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-056-unroll-one-json-array)
+provides a read-only single-canonical-array JSON1 foundation through public
+`logs`. Multi-field zip and exact raw-token/API semantics remain bounded Rust
+composition after the same scan. No language opcode, private table, storage
+format, or authoritative 8,192-entry batching contract changes.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

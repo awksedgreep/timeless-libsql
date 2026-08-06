@@ -2051,6 +2051,56 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 128/8,192 public rows. `QSF-191` accepts the bounded direct native-array count
 and request-local write above the unchanged public storage boundary.
 
+## LogsQL JSON array row expansion
+
+`unroll` snapshots one or more exact request-owned fields and expands their
+top-level array elements into current result rows:
+
+```text
+* | unroll tags
+* | unroll source, other
+* | unroll by (source, other)
+* | unroll if (kind:="expand") (payload.items, "left field")
+```
+
+Keywords are case-insensitive. `if` and `by` are optional; fields may be bare
+or parenthesized, quoted, or dotted. Parenthesized lists accept a terminal
+comma. Empty lists, wildcards, prefixes, unparenthesized trailing commas,
+conditions after the field list, attached suffixes, and trailing tokens fail
+before storage work.
+
+All selected values are read before the first write. Multiple arrays zip by
+index and emit as many rows as the longest source. Shorter, missing, null,
+malformed, scalar, and native nonarray sources contribute `""`; if no source
+has an element, exactly one empty-valued row is emitted. A false condition
+passes the complete rich row through once without rewriting it. Dotted writes
+preserve siblings; overlapping selected paths or a scalar parent return HTTP
+422 instead of producing order-dependent output.
+
+Native retained arrays are traversed without flattening. String sources accept
+JSON arrays with surrounding whitespace. Top-level strings are decoded;
+nonstrings become compact JSON text. Raw number spellings (`1.00`, `-0`,
+`1e3`), object order, and bare `NaN` match VictoriaLogs. Unlike
+`json_array_concat`, nested JSON string escapes are decoded and re-encoded, so
+`{"a":"\\u0061"}` becomes `{"a":"a"}`. Timeless returns explicit empty
+strings where the VictoriaLogs streaming encoder omits empty-valued columns,
+preserving Timeless's missing/null/empty response model.
+
+Input and output rows, source snapshots, raw scans, normalized strings,
+result cardinality, work, response bytes, deadlines, query-backed predicates,
+and cancellation are bounded cumulatively. The reader remains reusable after
+rejection. Request-local expansion never mutates public log rows, including
+after optimize, shutdown, and reopen.
+
+Executable
+[`SQL-LOG-056`](QUERY_SQL_EQUIVALENTS.md#sql-log-056-unroll-one-json-array)
+uses only bounded public `logs` rows and JSON1 to expand one fixed canonical
+array. SQLite cannot preserve every raw numeric/`NaN` spelling, and ordinary
+SQL does not supply multi-field rich-row zip mutation or API envelopes. Those
+complete semantics stay in bounded Rust composition after the same public
+scan. No extension primitive, private table, durable format, compression,
+index, or authoritative 8,192-entry batch contract changes.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

@@ -5842,6 +5842,19 @@ async fn session_seventeen_pack_json_is_rich_bounded_and_durable() {
     )
     .unwrap();
     assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="unroll-expand" | unroll scalar.child"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
 
     let work_limited = router_with_limits(
         storage.clone(),
@@ -7871,6 +7884,257 @@ async fn session_seventeen_json_array_len_is_typed_bounded_and_durable() {
             "length":"6",
             "native_array":[null,"",0,false,[1],{"x":1}]
         })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_unroll_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("unroll-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "expand arrays".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unroll-expand",
+                        "unroll_group":"unroll",
+                        "native_array":[null,"",0,false,[1],{"x":1}],
+                        "text_array":" [\"a\",1.00,-0,1e3,{\"z\":1, \"a\":\"\\u0061\"},[NaN]] ",
+                        "short_array":["x","y"],
+                        "empty_array":[],
+                        "malformed_array":"[1,",
+                        "scalar":"not-an-array",
+                        "nested":{"array":[1,2,3],"sibling":"retained"},
+                        "left field":["quoted","path"]
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "notice".into(),
+                    message: "skip arrays".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unroll-skip",
+                        "unroll_group":"unroll",
+                        "native_array":["kept",2],
+                        "nested":{"sibling":"skip-retained"}
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let query = r#"case:="unroll-expand" | unroll by (native_array, text_array, short_array, missing) | fields case, native_array, text_array, short_array, missing, nested | limit 10000"#;
+    let rows = pipeline_rows(&app, query).await;
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[0]["native_array"], "null");
+    assert_eq!(rows[0]["text_array"], "a");
+    assert_eq!(rows[0]["short_array"], "x");
+    assert_eq!(rows[0]["missing"], "");
+    assert_eq!(rows[1]["native_array"], "");
+    assert_eq!(rows[1]["text_array"], "1.00");
+    assert_eq!(rows[1]["short_array"], "y");
+    assert_eq!(rows[2]["native_array"], "0");
+    assert_eq!(rows[2]["text_array"], "-0");
+    assert_eq!(rows[3]["native_array"], "false");
+    assert_eq!(rows[3]["text_array"], "1e3");
+    assert_eq!(rows[4]["native_array"], "[1]");
+    assert_eq!(rows[4]["text_array"], r#"{"z":1,"a":"a"}"#);
+    assert_eq!(rows[5]["native_array"], r#"{"x":1}"#);
+    assert_eq!(rows[5]["text_array"], "[NaN]");
+    assert!(rows
+        .iter()
+        .all(|row| row["nested"]["sibling"] == "retained"));
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unroll-expand" | unroll (empty_array, malformed_array, scalar, missing) | fields case, empty_array, malformed_array, scalar, missing"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unroll-expand",
+            "empty_array":"",
+            "malformed_array":"",
+            "scalar":"",
+            "missing":""
+        })],
+        "all empty or invalid arrays must still emit one row"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unroll-skip" | unroll if (case:="unroll-expand") native_array | fields case, native_array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unroll-skip",
+            "native_array":["kept",2],
+            "nested":{"sibling":"skip-retained"}
+        })],
+        "a false condition must preserve the complete rich row"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unroll-expand" | UnRoLl by ("left field", nested.array) | fields case, "left field", nested | limit 10000"#,
+        )
+        .await
+        .len(),
+        3,
+        "quoted and dotted fields must use the longest array"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unroll-expand" | unroll if (case:in(case:="unroll-expand" | fields case)) native_array | fields case, native_array | limit 10000"#,
+        )
+        .await
+        .len(),
+        6,
+        "query-backed conditions must resolve under the parent request limits"
+    );
+
+    for malformed in [
+        "* | unroll",
+        "* | unroll by",
+        "* | unroll ()",
+        "* | unroll *",
+        "* | unroll source*",
+        "* | unroll (source,",
+        "* | unroll source,",
+        "* | unroll (source) trailing",
+        "* | unroll (source) if (case:=x)",
+        "* | unroll.extra",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="unroll-expand" | unroll (nested, nested.array)"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 5,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"unroll_group:="unroll" | fields case, native_array, text_array, short_array, empty_array, malformed_array, scalar, nested, "left field""#,
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case":"unroll-expand",
+                "native_array":[null,"",0,false,[1],{"x":1}],
+                "text_array":" [\"a\",1.00,-0,1e3,{\"z\":1, \"a\":\"\\u0061\"},[NaN]] ",
+                "short_array":["x","y"],
+                "empty_array":[],
+                "malformed_array":"[1,",
+                "scalar":"not-an-array",
+                "nested":{"array":[1,2,3],"sibling":"retained"},
+                "left field":["quoted","path"]
+            }),
+            serde_json::json!({
+                "case":"unroll-skip",
+                "native_array":["kept",2],
+                "nested":{"sibling":"skip-retained"}
+            })
+        ],
+        "request-local expansion must not mutate durable rich values"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="unroll-expand" | unroll nested.array | fields case, nested | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"unroll-expand","nested":{"array":"1","sibling":"retained"}}),
+            serde_json::json!({"case":"unroll-expand","nested":{"array":"2","sibling":"retained"}}),
+            serde_json::json!({"case":"unroll-expand","nested":{"array":"3","sibling":"retained"}})
+        ]
     );
     reopened.shutdown().await.unwrap();
 }

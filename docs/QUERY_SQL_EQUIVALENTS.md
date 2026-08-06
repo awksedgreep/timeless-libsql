@@ -163,6 +163,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-053`](#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt) | `LQL-P37` | current foundation | bounded extraction of fixed keys from well-formed space-delimited unquoted logfmt in one public metadata path, with last-duplicate-wins and exact-missing empties; API owns the complete quoted/escaped grammar, dynamic selection, mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-054`](#sql-log-054-decode-one-fixed-rfc5424-header) | `LQL-P38` | current foundation | bounded decoding of PRI and the five fixed RFC5424 header fields when structured data is `-`; API owns RFC3164, structured data, CEF/CEE, timezone/year rules, mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-055`](#sql-log-055-concatenate-one-json-array) | `LQL-P40` | current foundation | ordered concatenation of one bounded canonical JSON array from a public metadata path; API owns raw token spelling, bare `NaN`, grammar, rich mutation, limits, cancellation, and envelopes |
+| [`SQL-LOG-056`](#sql-log-056-unroll-one-json-array) | `LQL-P42` | current foundation | ordered row expansion of one bounded canonical JSON array from a public metadata path, including one empty result for missing, invalid, scalar, or empty sources; API owns multi-field zip composition, raw token spelling, conditions, rich mutation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -8821,6 +8822,115 @@ primitive or private shadow-table access is warranted. Direct regression:
 `tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
 regression:
 `session_eighteen_json_array_concat_is_exact_rich_bounded_and_durable`.
+
+### SQL-LOG-056: unroll one JSON array
+
+Bind one exact metadata JSON path, inclusive native timestamp bounds, and
+positive work/source/result limits. This read-only statement emits one row per
+ordered top-level value of either a retained native array or a string
+containing a strict canonical JSON array. It emits one row with empty TEXT
+when the path is missing, null, invalid, scalar, or an empty array. String
+elements are decoded; nulls, booleans, numbers, objects, and nested arrays use
+compact JSON text.
+
+```sql
+WITH
+bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    level,
+    message,
+    metadata,
+    :unroll_source_override AS source_override,
+    json_type(metadata, :unroll_source_path) AS stored_type,
+    json_extract(metadata, :unroll_source_path) AS stored_value
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), sources AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    level,
+    message,
+    CASE
+      WHEN source_override IS NOT NULL THEN
+        CASE WHEN json_valid(source_override) THEN
+          CASE WHEN json_type(source_override) = 'array'
+            THEN source_override
+          END
+        END
+      WHEN stored_type = 'array' THEN stored_value
+      WHEN stored_type = 'text' THEN
+        CASE WHEN json_valid(stored_value) THEN
+          CASE WHEN json_type(stored_value) = 'array'
+            THEN stored_value
+          END
+        END
+    END AS source_json
+  FROM bounded
+), accepted AS MATERIALIZED (
+  SELECT row_id, ts, level, message, source_json
+  FROM sources
+  WHERE :max_source_bytes > 0
+    AND (
+      source_json IS NULL
+      OR length(CAST(source_json AS BLOB)) <= :max_source_bytes
+    )
+)
+SELECT
+  accepted.ts,
+  accepted.level,
+  accepted.message,
+  CASE WHEN item.key IS NULL THEN -1 ELSE CAST(item.key AS INTEGER) END AS item_index,
+  CASE
+    WHEN item.key IS NULL THEN ''
+    WHEN item.type = 'text' THEN CAST(item.atom AS TEXT)
+    WHEN item.type = 'null' THEN 'null'
+    WHEN item.type = 'true' THEN 'true'
+    WHEN item.type = 'false' THEN 'false'
+    ELSE CAST(item.value AS TEXT)
+  END AS unrolled_value
+FROM accepted
+LEFT JOIN json_each(accepted.source_json) AS item ON TRUE
+WHERE :max_result_rows > 0
+ORDER BY accepted.ts, accepted.row_id, item_index
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:max_work_entries` to `100000`, `:max_source_bytes` to `4096`,
+`:max_result_rows` to `100`, `:unroll_source_path` to `$.tags`, and
+`:unroll_source_override` to `NULL`. The first source emits ten rows in array
+order—`prod`, empty TEXT, `123`, `true`, `false`, `null`,
+`{"nested":"ignored"}`, `["ignored"]`, `ab`, and `*`—and the second emits
+seven. Binding a missing or non-array path emits exactly one empty-valued row
+per selected source. The public `logs` rows remain unchanged. Timestamp bounds
+use the table's native unit; this fixture uses milliseconds.
+
+This SQL foundation deliberately handles one fixed canonical array. SQLite
+JSON1 decodes numeric tokens before projection, so it cannot retain lexical
+spellings such as `1.00`, `-0`, and `1e3`, and its JSON5 `NaN` representation
+is not VictoriaLogs-compatible. Complete `LQL-P42` therefore remains bounded
+Rust API composition. The API owns case-insensitive strict grammar; optional
+conditions; quoted and dotted fields; source snapshots; longest-array zip
+across multiple fields; empty padding; rich row mutation and conflicts;
+VictoriaLogs raw number/object-order/bare-`NaN` behavior; nested JSON string
+normalization; cumulative work, state, result, response, deadline, and
+cancellation limits; and HTTP envelopes.
+
+The pinned VictoriaLogs streaming response omits empty-valued columns, while
+its processor assigns an empty string. Timeless returns that empty string to
+preserve the richer missing/null/empty distinction. Every input row already
+crosses the bounded public `logs` interface, and JSON1 provides the useful
+single-array expansion directly. Moving the language grammar or multi-field
+composition into the extension would not avoid storage reads, block decoding,
+or row crossing, so no extension primitive or private shadow-table access is
+warranted. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
+harness; HTTP/oracle/optimize/reopen regression:
+`session_eighteen_unroll_is_exact_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

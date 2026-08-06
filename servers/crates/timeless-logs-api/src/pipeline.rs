@@ -26,7 +26,7 @@ use crate::logsql::{
     JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec,
     PackLogfmtSpec, PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec,
     ReplaceRegexpSpec, ReplaceSpec, SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec,
-    UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec,
+    UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -237,6 +237,13 @@ pub(crate) fn execute(
             PipelineOp::JsonArrayLen(spec) => {
                 json_array_len_fields(rows, spec, execution.limits, execution.cancelled)?
             }
+            PipelineOp::Unroll(spec) => unroll_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
             PipelineOp::DropEmptyFields => {
                 drop_empty_fields(rows, execution.limits, execution.cancelled)?
             }
@@ -4249,8 +4256,14 @@ fn victorialogs_json_array_concat(
                 limits.max_state_bytes,
                 "json_array_concat",
             )?;
-            let elements =
-                scan_text_json_array_concat(source, state_bytes, work_items, limits, cancelled)?;
+            let elements = scan_text_json_array(
+                source,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+                "json_array_concat",
+            )?;
             bounded_text_json_array_concat(
                 source,
                 elements.as_deref().unwrap_or_default(),
@@ -4341,6 +4354,7 @@ struct JsonArrayScanner<'a, 'b> {
     work_items: &'b mut usize,
     limits: PipelineLimits,
     cancelled: &'b AtomicBool,
+    operation: &'static str,
 }
 
 impl JsonArrayScanner<'_, '_> {
@@ -4360,7 +4374,10 @@ impl JsonArrayScanner<'_, '_> {
             .state_bytes
             .checked_add(size_of::<Vec<JsonArrayConcatElement>>())
             .ok_or_else(|| {
-                JsonArrayScanError::Pipeline("LogsQL json_array_concat state size overflow".into())
+                JsonArrayScanError::Pipeline(format!(
+                    "LogsQL {} state size overflow",
+                    self.operation
+                ))
             })?;
         self.ensure_state_bytes()?;
         if self.peek() == Some(b']') {
@@ -4376,9 +4393,10 @@ impl JsonArrayScanner<'_, '_> {
                 .state_bytes
                 .checked_add(size_of::<JsonArrayConcatElement>())
                 .ok_or_else(|| {
-                    JsonArrayScanError::Pipeline(
-                        "LogsQL json_array_concat state size overflow".into(),
-                    )
+                    JsonArrayScanError::Pipeline(format!(
+                        "LogsQL {} state size overflow",
+                        self.operation
+                    ))
                 })?;
             self.ensure_state_bytes()?;
             elements.push(match decoded {
@@ -4411,8 +4429,9 @@ impl JsonArrayScanner<'_, '_> {
     ) -> Result<(usize, usize, Option<String>), JsonArrayScanError> {
         if depth > Self::MAX_JSON_NESTING {
             return Err(JsonArrayScanError::Pipeline(format!(
-                "LogsQL json_array_concat JSON nesting exceeds {}",
-                Self::MAX_JSON_NESTING
+                "LogsQL {} JSON nesting exceeds {}",
+                self.operation,
+                Self::MAX_JSON_NESTING,
             )));
         }
         self.charge_work()?;
@@ -4563,7 +4582,7 @@ impl JsonArrayScanner<'_, '_> {
             raw,
             self.state_bytes,
             self.limits.max_state_bytes,
-            "json_array_concat",
+            self.operation,
         )
         .map_err(JsonArrayScanError::Pipeline)?;
         let decoded =
@@ -4651,12 +4670,8 @@ impl JsonArrayScanner<'_, '_> {
     }
 
     fn charge_work(&mut self) -> Result<(), JsonArrayScanError> {
-        charge_transfer_work(
-            self.work_items,
-            self.limits.max_state_items,
-            "json_array_concat",
-        )
-        .map_err(JsonArrayScanError::Pipeline)?;
+        charge_transfer_work(self.work_items, self.limits.max_state_items, self.operation)
+            .map_err(JsonArrayScanError::Pipeline)?;
         check_periodically(self.cancelled, *self.work_items).map_err(JsonArrayScanError::Pipeline)
     }
 
@@ -4664,18 +4679,19 @@ impl JsonArrayScanner<'_, '_> {
         ensure_first_state_bytes(
             *self.state_bytes,
             self.limits.max_state_bytes,
-            "json_array_concat",
+            self.operation,
         )
         .map_err(JsonArrayScanError::Pipeline)
     }
 }
 
-fn scan_text_json_array_concat(
+fn scan_text_json_array(
     source: &str,
     state_bytes: &mut usize,
     work_items: &mut usize,
     limits: PipelineLimits,
     cancelled: &AtomicBool,
+    operation: &'static str,
 ) -> Result<Option<Vec<JsonArrayConcatElement>>, String> {
     match (JsonArrayScanner {
         source,
@@ -4684,6 +4700,7 @@ fn scan_text_json_array_concat(
         work_items,
         limits,
         cancelled,
+        operation,
     })
     .scan()
     {
@@ -4964,6 +4981,294 @@ fn victorialogs_json_array_len(
         }
         None | Some(Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Ok(0),
     }
+}
+
+fn unroll_fields(
+    rows: Vec<Value>,
+    spec: &UnrollSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let fields = spec
+        .fields
+        .iter()
+        .map(|field| match field {
+            PipelineField::Exact { path, name } => Ok((path.as_slice(), name.as_str())),
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                Err("LogsQL unroll field is not exact".to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (left_index, (left_path, left_name)) in fields.iter().enumerate() {
+        for (right_path, right_name) in fields.iter().skip(left_index + 1) {
+            if left_path != right_path
+                && (left_path.starts_with(right_path) || right_path.starts_with(left_path))
+            {
+                return Err(format!(
+                    "LogsQL unroll destination conflict: overlapping fields {left_name:?} and {right_name:?}"
+                ));
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    let mut work_items = 0usize;
+    let mut retained_bytes = size_of::<Vec<Value>>();
+    ensure_first_state_bytes(retained_bytes, limits.max_state_bytes, "unroll")?;
+
+    for (row_index, row) in rows.into_iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "unroll")?;
+        let should_unroll = match &spec.condition {
+            Some(condition) => predicate_matches(condition, &row, timestamp_unit, cancelled)?,
+            None => true,
+        };
+        if !should_unroll {
+            if output.len() >= limits.max_result_rows {
+                return Err(format!(
+                    "LogsQL unroll exceeds max_result_rows={}",
+                    limits.max_result_rows
+                ));
+            }
+            charge_transfer_value(
+                &row,
+                &mut retained_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                &mut work_items,
+                limits.max_state_items,
+                "unroll",
+            )?;
+            output.push(row);
+            continue;
+        }
+
+        let mut source_state_bytes = retained_bytes
+            .checked_add(size_of::<Vec<Vec<String>>>())
+            .ok_or_else(|| "LogsQL unroll state size overflow".to_string())?;
+        ensure_first_state_bytes(source_state_bytes, limits.max_state_bytes, "unroll")?;
+        let mut sources = Vec::with_capacity(fields.len());
+        for (field_index, (path, name)) in fields.iter().enumerate() {
+            check_periodically(cancelled, field_index)?;
+            charge_transfer_string(
+                name,
+                &mut source_state_bytes,
+                limits.max_state_bytes,
+                "unroll",
+            )?;
+            for segment in *path {
+                charge_transfer_string(
+                    segment,
+                    &mut source_state_bytes,
+                    limits.max_state_bytes,
+                    "unroll",
+                )?;
+            }
+            sources.push(victorialogs_unroll_values(
+                coalesce_exact_value(&row, path),
+                &mut source_state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?);
+        }
+        let row_count = sources.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        let projected_count = output
+            .len()
+            .checked_add(row_count)
+            .ok_or_else(|| "LogsQL unroll result row count overflow".to_string())?;
+        if projected_count > limits.max_result_rows {
+            return Err(format!(
+                "LogsQL unroll exceeds max_result_rows={}",
+                limits.max_result_rows
+            ));
+        }
+        let transient_bytes = source_state_bytes
+            .checked_sub(retained_bytes)
+            .ok_or_else(|| "LogsQL unroll state size accounting underflow".to_string())?;
+
+        for output_index in 0..row_count {
+            check_periodically(cancelled, output_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "unroll")?;
+            let mut expanded = row.clone();
+            let object = expanded
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL unroll input row is not a JSON object".to_string())?;
+            for ((path, _), values) in fields.iter().zip(&sources) {
+                let value = values.get(output_index).cloned().unwrap_or_default();
+                insert_path(object, path, Value::String(value))
+                    .map_err(|error| format!("LogsQL unroll destination conflict: {error}"))?;
+            }
+
+            let mut candidate_retained_bytes = retained_bytes;
+            charge_transfer_value(
+                &expanded,
+                &mut candidate_retained_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                &mut work_items,
+                limits.max_state_items,
+                "unroll",
+            )?;
+            let peak_bytes = candidate_retained_bytes
+                .checked_add(transient_bytes)
+                .ok_or_else(|| "LogsQL unroll state size overflow".to_string())?;
+            ensure_first_state_bytes(peak_bytes, limits.max_state_bytes, "unroll")?;
+            retained_bytes = candidate_retained_bytes;
+            output.push(expanded);
+        }
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+fn victorialogs_unroll_values(
+    value: Option<&Value>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    let mut output = Vec::new();
+    *state_bytes = state_bytes
+        .checked_add(size_of::<Vec<String>>())
+        .ok_or_else(|| "LogsQL unroll state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "unroll")?;
+    match value {
+        Some(Value::Array(values)) => {
+            output.reserve(values.len());
+            for (index, value) in values.iter().enumerate() {
+                check_periodically(cancelled, index)?;
+                let rendered = victorialogs_unroll_native_value(
+                    value,
+                    work_items,
+                    limits.max_state_items,
+                    cancelled,
+                )?;
+                charge_transfer_string(&rendered, state_bytes, limits.max_state_bytes, "unroll")?;
+                output.push(rendered);
+            }
+        }
+        Some(Value::String(source)) => {
+            charge_transfer_string(source, state_bytes, limits.max_state_bytes, "unroll")?;
+            let Some(elements) =
+                scan_text_json_array(source, state_bytes, work_items, limits, cancelled, "unroll")?
+            else {
+                return Ok(output);
+            };
+            output.reserve(elements.len());
+            for (index, element) in elements.iter().enumerate() {
+                check_periodically(cancelled, index)?;
+                let rendered = match element {
+                    JsonArrayConcatElement::String(value) => value.clone(),
+                    JsonArrayConcatElement::Raw { start, end } => {
+                        normalize_victorialogs_unroll_token(
+                            &source[*start..*end],
+                            state_bytes,
+                            work_items,
+                            limits,
+                            cancelled,
+                        )?
+                    }
+                };
+                charge_transfer_string(&rendered, state_bytes, limits.max_state_bytes, "unroll")?;
+                output.push(rendered);
+            }
+        }
+        None | Some(Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_)) => {}
+    }
+    Ok(output)
+}
+
+fn victorialogs_unroll_native_value(
+    value: &Value,
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    match value {
+        Value::String(value) => {
+            charge_transfer_work(work_items, max_work_items, "unroll")?;
+            Ok(value.clone())
+        }
+        value => {
+            let expected_len = compact_json_len_for_operation(
+                value,
+                0,
+                work_items,
+                max_work_items,
+                cancelled,
+                "unroll",
+            )?;
+            let rendered = serde_json::to_string(value)
+                .map_err(|error| format!("encode LogsQL unroll item: {error}"))?;
+            if rendered.len() != expected_len {
+                return Err("LogsQL unroll result length accounting mismatch".into());
+            }
+            Ok(rendered)
+        }
+    }
+}
+
+fn normalize_victorialogs_unroll_token(
+    source: &str,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let mut output = Vec::with_capacity(source.len());
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        check_periodically(cancelled, cursor)?;
+        let byte = source.as_bytes()[cursor];
+        if byte == b'"' {
+            charge_transfer_work(work_items, limits.max_state_items, "unroll")?;
+            let end = json_string_token_end(source, cursor)?;
+            let decoded = serde_json::from_str::<String>(&source[cursor..end])
+                .map_err(|_| "LogsQL unroll encountered malformed JSON string".to_string())?;
+            serde_json::to_writer(&mut output, &decoded)
+                .map_err(|error| format!("encode LogsQL unroll JSON string: {error}"))?;
+            cursor = end;
+        } else {
+            let character = source[cursor..]
+                .chars()
+                .next()
+                .ok_or_else(|| "LogsQL unroll JSON token ended unexpectedly".to_string())?;
+            if !character.is_ascii_whitespace() {
+                let mut encoded = [0u8; 4];
+                output.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            }
+            cursor += character.len_utf8();
+        }
+        let pending_bytes = state_bytes
+            .checked_add(size_of::<String>())
+            .and_then(|bytes| bytes.checked_add(output.len()))
+            .ok_or_else(|| "LogsQL unroll state size overflow".to_string())?;
+        ensure_first_state_bytes(pending_bytes, limits.max_state_bytes, "unroll")?;
+    }
+    ensure_active(cancelled)?;
+    String::from_utf8(output).map_err(|error| format!("encode LogsQL unroll result: {error}"))
+}
+
+fn json_string_token_end(source: &str, start: usize) -> Result<usize, String> {
+    if source.as_bytes().get(start) != Some(&b'"') {
+        return Err("LogsQL unroll JSON string does not start with a quote".into());
+    }
+    let mut cursor = start + 1;
+    let mut escaped = false;
+    while let Some(byte) = source.as_bytes().get(cursor).copied() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return Ok(cursor + 1);
+        }
+        cursor += 1;
+    }
+    Err("LogsQL unroll encountered an unterminated JSON string".into())
 }
 
 fn victorialogs_len(
@@ -11560,6 +11865,131 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             json_array_len_fields(vec![row], &text_spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn unroll_expands_rich_and_text_arrays_with_zip_bounds() {
+        let limits = PipelineLimits {
+            max_result_rows: 20,
+            max_state_items: 1_000,
+            max_state_bytes: 200_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "case":"expand",
+            "native":[null,"",0,false,[1],{"x":1}],
+            "text":" [\"a\",1.00,-0,1e3,{\"z\":1, \"a\":\"\\u0061\"},[NaN]] ",
+            "short":["x","y"],
+            "nested":{"array":[1,2,3],"sibling":"retained"}
+        });
+        let plan = crate::logsql::parse_at(
+            "* | unroll by (native, text, short, missing)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.len(), 6);
+        assert_eq!(result[0]["native"], "null");
+        assert_eq!(result[0]["text"], "a");
+        assert_eq!(result[0]["short"], "x");
+        assert_eq!(result[0]["missing"], "");
+        assert_eq!(result[1]["native"], "");
+        assert_eq!(result[1]["text"], "1.00");
+        assert_eq!(result[1]["short"], "y");
+        assert_eq!(result[2]["native"], "0");
+        assert_eq!(result[2]["text"], "-0");
+        assert_eq!(result[3]["native"], "false");
+        assert_eq!(result[3]["text"], "1e3");
+        assert_eq!(result[4]["native"], "[1]");
+        assert_eq!(result[4]["text"], r#"{"z":1,"a":"a"}"#);
+        assert_eq!(result[5]["native"], r#"{"x":1}"#);
+        assert_eq!(result[5]["text"], "[NaN]");
+        assert!(result
+            .iter()
+            .all(|row| row["nested"]["sibling"] == "retained"));
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Unroll(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected unroll plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let spec = parse_spec("* | unroll by (native, text, short, missing)");
+        for (limited, expected) in [
+            (
+                PipelineLimits {
+                    max_result_rows: 5,
+                    ..limits
+                },
+                "max_result_rows=5",
+            ),
+            (
+                PipelineLimits {
+                    max_state_items: 1,
+                    ..limits
+                },
+                "max_work_rows=1",
+            ),
+            (
+                PipelineLimits {
+                    max_state_bytes: 1,
+                    ..limits
+                },
+                "max_response_bytes=1",
+            ),
+        ] {
+            let error = unroll_fields(
+                vec![row.clone()],
+                &spec,
+                TimestampUnit::Microseconds,
+                limited,
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+
+        let conflict = parse_spec("* | unroll by (nested, nested.array)");
+        let conflict_error = unroll_fields(
+            vec![row.clone()],
+            &conflict,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL unroll destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            unroll_fields(
+                vec![row],
+                &spec,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

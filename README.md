@@ -982,6 +982,38 @@ Exact-build p50/p95/p99 is 3.202/3.872/4.930 ms narrow and
 +13.3%/-12.4% p95 and -1.1%/-8.4% request-attributed API mean after identical
 public reads and identical 64-row, 1,536-byte responses.
 
+`unroll` expands one or more request-local JSON arrays into rows without
+changing durable log storage:
+
+```text
+* | unroll tags
+* | unroll by (tags, zones)
+* | unroll if (service:="api") (payload.items, "left field")
+```
+
+Grammar is strict and case-insensitive. Fields are exact, may be quoted or
+dotted, and may be bare or parenthesized; `by` is optional. A parenthesized
+list may end in a comma. Every selected source is snapshotted before writes.
+Multiple arrays zip by index to the longest source and shorter, missing,
+invalid, or scalar sources contribute empty text. If every source is empty or
+invalid, one empty-valued row is still emitted. A false condition passes the
+complete rich row through unchanged.
+
+Native retained arrays are traversed directly. JSON-array strings preserve
+VictoriaLogs number spelling, object order, and bare `NaN`; top-level strings
+are decoded, and strings nested in objects or arrays are decoded and
+re-encoded like VictoriaLogs. Result rows, work, retained/transient state,
+response bytes, deadlines, query-backed conditions, cancellation, and nested
+destination conflicts are bounded. Timeless returns explicit empty strings
+where VictoriaLogs' streaming encoder omits empty columns, preserving the
+richer missing/null/empty boundary.
+
+Executable `SQL-LOG-056` gives direct SQLite/libSQL users a read-only
+single-array expansion through public `logs` and JSON1. Complete multi-field
+zip, raw token behavior, conditions, rich mutation, and HTTP semantics remain
+in the Rust API after the same public scan. No extension opcode, private table,
+storage format, or authoritative 8,192-entry batching behavior is changed.
+
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

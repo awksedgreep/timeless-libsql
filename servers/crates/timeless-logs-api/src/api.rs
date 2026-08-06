@@ -296,6 +296,11 @@ fn resolve_query_backed_plan<'a>(
                         resolve_query_backed_predicate(storage, predicate, resolution).await?;
                     }
                 }
+                crate::logsql::PipelineOp::Unroll(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -762,6 +767,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL hash destination conflict:")
         || error.starts_with("LogsQL json_array_len destination conflict:")
         || error.starts_with("LogsQL json_array_concat destination conflict:")
+        || error.starts_with("LogsQL unroll destination conflict:")
         || error.starts_with("LogsQL split destination conflict:")
         || error.starts_with("LogsQL extract destination conflict:")
         || error.starts_with("LogsQL extract_regexp destination conflict:")
@@ -935,6 +941,11 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                 }
             }
             crate::logsql::PipelineOp::UnpackSyslog(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::Unroll(spec) => {
                 if let Some(predicate) = &mut spec.condition {
                     apply_query_backed_predicate_limits(predicate, limits)?;
                 }

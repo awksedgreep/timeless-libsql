@@ -71,6 +71,7 @@
     {"case": "json-array-escaped", "_msg": "jaca escaped", "array_group": "array", "tags": ["a\"b", "a\nb", "a/b", "ab"]},
     {"case": "json-array-star", "_msg": "jaca star", "array_group": "array", "tags": ["*"]},
     {"case": "json-array-missing", "_msg": "jaca missing", "array_group": "array"},
+    {"case": "json-array-unroll-multi", "_msg": "unroll multi", "array_group": "array", "left": ["a", "b"], "right": [1], "empty": []},
     {"case": "ipv4-missing", "_msg": "ip missing", "ip_group": "ipv4"},
     {"case": "ipv4-null", "_msg": "ip null", "ip_group": "ipv4", "ip": null},
     {"case": "ipv4-numeric", "_msg": "ip numeric", "ip_group": "ipv4", "ip": 167772161},
@@ -1272,6 +1273,7 @@
         "json-array-strings", "json-array-mixed", "json-array-nested",
         "json-array-scalar", "json-array-object", "json-array-empty",
         "json-array-escaped", "json-array-star", "json-array-missing",
+        "json-array-unroll-multi",
         "ipv4-missing", "ipv4-null", "ipv4-numeric", "ipv4-network",
         "ipv4-low", "ipv4-leading-zero", "ipv4-broadcast", "ipv4-outside",
         "ipv4-invalid", "ipv4-embedded", "ipv4-service", "ipv4-message",
@@ -2666,7 +2668,7 @@
     {
       "id": "LQL-P12-query-stats-full-fixture-cardinality",
       "query": "* | query_stats | keep RowsFound",
-      "expected_rows": [{"RowsFound": "166"}]
+      "expected_rows": [{"RowsFound": "167"}]
     },
     {
       "id": "LQL-P12-query-stats-composes-after-limit",
@@ -4800,6 +4802,104 @@
       "id": "LQL-P41-json-array-len-snapshots-source-before-overwrite",
       "query": "case:=json-array-strings | json_array_len(tags) as tags | fields case, tags",
       "expected_rows": [{"case": "json-array-strings", "tags": "3"}]
+    },
+    {
+      "id": "LQL-P42-unroll-preserves-string-array-order",
+      "query": "case:=json-array-strings | unroll tags | fields case, tags",
+      "expected_rows": [
+        {"case": "json-array-strings", "tags": "prod"},
+        {"case": "json-array-strings", "tags": "canary"},
+        {"case": "json-array-strings"}
+      ]
+    },
+    {
+      "id": "LQL-P42-unroll-renders-mixed-primitives",
+      "query": "case:=json-array-mixed | unroll by (tags) | fields case, tags",
+      "expected_rows": [
+        {"case": "json-array-mixed", "tags": "123"},
+        {"case": "json-array-mixed", "tags": "1.5"},
+        {"case": "json-array-mixed", "tags": "-2"},
+        {"case": "json-array-mixed", "tags": "true"},
+        {"case": "json-array-mixed", "tags": "false"},
+        {"case": "json-array-mixed", "tags": "null"},
+        {"case": "json-array-mixed", "tags": "123"}
+      ]
+    },
+    {
+      "id": "LQL-P42-unroll-renders-nested-json",
+      "query": "case:=json-array-nested | unroll (tags) | fields case, tags",
+      "expected_rows": [
+        {"case": "json-array-nested", "tags": "{\"a\":\"b\"}"},
+        {"case": "json-array-nested", "tags": "[\"a\"]"},
+        {"case": "json-array-nested", "tags": "leaf"}
+      ]
+    },
+    {
+      "id": "LQL-P42-unroll-empty-array-emits-one-empty-row",
+      "query": "case:=json-array-empty | unroll tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-empty"}]
+    },
+    {
+      "id": "LQL-P42-unroll-non-array-emits-one-empty-row",
+      "query": "case:=json-array-scalar | unroll tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-scalar"}]
+    },
+    {
+      "id": "LQL-P42-unroll-missing-emits-one-empty-row",
+      "query": "case:=json-array-missing | unroll tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-missing"}]
+    },
+    {
+      "id": "LQL-P42-unroll-multiple-fields-use-longest-array",
+      "query": "case:=json-array-unroll-multi | unroll (left, right) | fields case, left, right",
+      "expected_rows": [
+        {"case": "json-array-unroll-multi", "left": "a", "right": "1"},
+        {"case": "json-array-unroll-multi", "left": "b"}
+      ]
+    },
+    {
+      "id": "LQL-P42-unroll-false-condition-preserves-source",
+      "query": "case:=json-array-unroll-multi | unroll if (case:=other) (left) | fields case, left",
+      "expected_rows": [{"case": "json-array-unroll-multi", "left": "[\"a\",\"b\"]"}]
+    },
+    {
+      "id": "LQL-P42-unroll-true-condition-expands-source",
+      "query": "case:=json-array-unroll-multi | unroll if (case:=json-array-unroll-multi) by left | fields case, left",
+      "expected_rows": [
+        {"case": "json-array-unroll-multi", "left": "a"},
+        {"case": "json-array-unroll-multi", "left": "b"}
+      ]
+    },
+    {
+      "id": "LQL-P42-unroll-preserves-json-token-spelling-and-object-order",
+      "query": "case:=format-row | format '[{\"z\":1, \"a\":\"\\u0061\"},1.00,-0,1e3,[NaN]]' as source | unroll source | fields source",
+      "expected_rows": [
+        {"source": "{\"z\":1,\"a\":\"a\"}"},
+        {"source": "1.00"},
+        {"source": "-0"},
+        {"source": "1e3"},
+        {"source": "[NaN]"}
+      ]
+    },
+    {
+      "id": "LQL-P42-unroll-keywords-and-quoted-fields-are-case-insensitive",
+      "query": "case:=format-row | format '[\"x\",\"y\"]' as \"left field\" | UnRoLl By (\"left field\") | fields \"left field\"",
+      "expected_rows": [{"left field": "x"}, {"left field": "y"}]
+    },
+    {
+      "id": "LQL-P42-unroll-parenthesized-trailing-comma-is-accepted",
+      "query": "case:=json-array-unroll-multi | unroll (left,) | fields left",
+      "expected_rows": [{"left": "a"}, {"left": "b"}]
+    },
+    {
+      "id": "LQL-P42-unroll-all-invalid-fields-emit-one-row",
+      "query": "case:=json-array-unroll-multi | unroll (empty, missing) | fields case, empty, missing",
+      "expected_rows": [{"case": "json-array-unroll-multi"}]
+    },
+    {
+      "id": "LQL-P42-unroll-composes-with-statistics",
+      "query": "case:=json-array-strings | unroll tags | stats count() as rows",
+      "expected_rows": [{"rows": "3"}]
     }
   ],
   "sample_cases": [
@@ -7602,6 +7702,76 @@
     {
       "id": "LQL-P41-json-array-len-rejects-trailing-token",
       "query": "* | json_array_len(source) result trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-requires-a-field",
+      "query": "* | unroll",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-by-requires-a-field",
+      "query": "* | unroll by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-rejects-empty-fields",
+      "query": "* | unroll by ()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-rejects-wildcard-field",
+      "query": "* | unroll by (*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-rejects-prefix-field",
+      "query": "* | unroll by (source*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-rejects-unparenthesized-trailing-comma",
+      "query": "* | unroll source,",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-rejects-trailing-token",
+      "query": "* | unroll (source) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-rejects-condition-after-fields",
+      "query": "* | unroll (source) if (case:=x)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-condition-requires-parentheses",
+      "query": "* | unroll if case:=x source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P42-unroll-rejects-attached-suffix",
+      "query": "* | unroll.extra",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

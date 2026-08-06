@@ -1064,3 +1064,20 @@ string to preserve its richer missing/null/empty model. The fixture now
 contains 166 source rows, 346 row-query cases, one stochastic case, 415 error
 cases, and 437 statistics/pipeline cases: 1,199 cases total, all passing
 against the immutable image. The fixture now contains 1199 cases.
+
+`LQL-P42` adds fourteen exact pipeline/statistics cases and ten error cases
+for `unroll`. They pin case-insensitive optional `if`/`by` grammar; bare,
+parenthesized, quoted, and dotted exact fields; parenthesized trailing commas;
+decoded top-level strings; compact nested values; longest-array zip with
+empty padding; one empty row for empty, missing, malformed, and scalar input;
+false-condition pass-through; and later statistics composition. Raw number
+spelling, object order, and bare `NaN` survive, while nested JSON string
+escapes are decoded and re-encoded (`"\\u0061"` becomes `"a"`), which is an
+intentional difference from `json_array_concat`. Missing fields, wildcards,
+prefixes, unparenthesized trailing commas, malformed conditions, attached
+suffixes, and trailing tokens fail. Source audit covers `pipe_unroll.go` and
+`pipe_unroll_test.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 167
+source rows, 346 row-query cases, one stochastic case, 425 error cases, and
+451 statistics/pipeline cases: 1,223 cases total, all passing against the
+immutable image. The fixture now contains 1223 cases.

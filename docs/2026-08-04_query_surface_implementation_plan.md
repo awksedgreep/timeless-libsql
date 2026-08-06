@@ -1184,6 +1184,23 @@ responses. All 8,192 entries complete durably; storage remains four raw
 blocks; queues and in-flight cancellation are zero. No extension primitive,
 private table, storage contract, or authoritative batching behavior changed.
 
+Session 18's `LQL-P42` semantic implementation is complete as API-owned
+`unroll` over public `logs` rows with canonical single-array `SQL-LOG-056`.
+Pinned VictoriaLogs source plus the complete 1,223-case live oracle establish
+strict optional condition/`by` grammar, exact field lists, source snapshots,
+longest-array zip, empty padding, one-row invalid/empty behavior, raw numeric
+spelling, object order, bare `NaN`, nested JSON string normalization, and
+strict errors. Timeless traverses retained native arrays without flattening
+their durable representation and returns explicit empty strings where the
+VictoriaLogs streaming encoder omits empty columns.
+
+The bounded Rust evaluator enforces cumulative work, state, result,
+response, deadline, and cancellation limits; query-backed conditions inherit
+the parent request limits; overlapping destinations fail actionably; and
+optimize, shutdown, and reopen leave source rows unchanged. `QSF-230` records
+the semantic/storage boundary. Exact release performance, storage-work, HWM,
+and final row disposition remain required before this row closes.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,
