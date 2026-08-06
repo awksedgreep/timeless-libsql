@@ -1151,9 +1151,15 @@ categories portably, so the row's inferred `SQL` foundation is corrected to
 `none`; the unchanged public scan provides no evidence for an extension
 scalar. `QSF-225` records the semantic/storage boundary, and `QSF-226` records
 the adjacent shared-boundary correction from Rust's broader
-`is_alphanumeric()` to the pinned category rule. Exact-build performance/HWM
-capture and the complete final gates remain before the row can become
-`shipped`.
+`is_alphanumeric()` to the pinned category rule. Exact release build
+`d3c0884cccf4896864b59ad447f7f2f0c59d6040` measures 3.740/38.564 ms
+narrow/wide p95 versus 3.493/35.662 ms equal-storage-work copy controls.
+`QSF-227` accepts the +7.0%/+8.1% p95, +0.8%/+4.5% request-attributed API
+mean, and 640-byte response expansion after identical public block, decode,
+payload, sort, limit, and row work. All 8,192 entries complete durably; storage
+remains four raw blocks; queues and in-flight cancellation are zero. The
+complete local gates close the shipped row without an extension primitive or
+storage-contract change.
 
 ### Session 19: experimental and data-model dispositions
 

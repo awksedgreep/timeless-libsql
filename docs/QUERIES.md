@@ -1932,6 +1932,14 @@ would not avoid block reads, decode, payload transfer, or required response
 materialization. The Rust logs API owns this transform without a private table,
 language opcode, or storage-format change.
 
+Exact-build p50/p95/p99 is 3.225/3.740/4.877 ms narrow and
+36.912/38.564/39.308 ms wide, versus 3.250/3.493/3.534 and
+34.241/35.662/36.075 ms for equal-storage-work copies. The +7.0%/+8.1% p95
+includes Unicode classification, deduplication, compact-array creation, and a
+640-byte larger response after byte-identical public storage work.
+`QSF-227` accepts the bounded Rust API cost and preserves the no-extension
+verdict.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level

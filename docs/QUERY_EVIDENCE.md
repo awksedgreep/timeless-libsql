@@ -4352,6 +4352,62 @@ transactions, migrations, and public batch/SQL contracts are unchanged. No
 private shadow table, Elixir/BEAM/NIF/process fallback, CI workflow or
 invocation, tag, release, or downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `unpack_words`
+
+The checked-in
+[`2026-08-06_session18_lql_p39_unpack_words.json`](evidence/2026-08-06_session18_lql_p39_unpack_words.json)
+was captured from exact release extension and server build
+`d3c0884cccf4896864b59ad447f7f2f0c59d6040` and has SHA-256
+`fb5500640ac3b7418dc41acd67f6e802083a246f37ed32c045cb5602c82a8fe6`.
+Each shape sorts and materializes the full public candidate set, applies a
+deterministic 64-row limit, projects `range_key`, then either extracts its
+ordered distinct words into `words` or copies it unchanged to that
+destination. This isolates exact word classification, first-seen duplicate
+state, compact JSON-array encoding, destination construction, and the larger
+response after identical public storage, sort, limit, and source projection.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `unpack_words`, indexed host | 64 | 1,984 | 3.225 | 3.740 | 4.877 | 1 | 1,024 | 235,778 | 128 |
+| `unpack_words`, full fixture | 64 | 1,984 | 36.912 | 38.564 | 39.308 | 4 | 8,192 | 1,914,055 | 8,192 |
+| copy control, indexed host | 64 | 1,344 | 3.250 | 3.493 | 3.534 | 1 | 1,024 | 235,778 | 128 |
+| copy control, full fixture | 64 | 1,344 | 34.241 | 35.662 | 36.075 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 7.0%/8.1% above its narrow/wide same-run control. Its
+request-attributed API timer averages 2.498/34.612 ms versus
+2.479/33.106 ms, or 0.8%/4.5% above. Every equal-width pair performs
+byte-identical public block selection, decode, payload reads, row
+materialization, deterministic sorting/limiting, and source projection. The
+candidate's 640 extra response bytes honestly remain part of the endpoint
+measurement. Exact Unicode Letter/Decimal_Number/underscore classification,
+first-seen byte-identical deduplication, compact JSON-array allocation,
+destination writes, limits, cancellation, and errors are bounded Rust API
+work. Core SQLite cannot express the exact category split portably; an
+extension scalar would still receive the same already-decoded public rows and
+would avoid none of the measured storage work.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+14.426 ms and the explicit durability barrier took 35.198 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 98,328 KiB, 1,916 KiB below
+LQL-P38 after four additional repeated shapes; metrics HWM was 51,004 KiB,
+1,796 KiB below it. Each maximum is retained as whole-process workload
+variation. Cancellation ended with zero requests in flight; direct evaluator
+and HTTP deadline regressions pin character/token/state/result/response
+bounds, rejection, cancellation, and reader reuse.
+
+All 1,175 pinned VictoriaLogs v1.52.0 cases pass live. The final 66-test logs
+real-extension suite, 134 logs library tests, 90-test metrics
+real-extension suite, complete root and server workspaces, 45-section
+CLI/crash/transaction suite, six focused extension correctness sections,
+standalone dbhealth lifecycle gate, 33-test Rust query harness, documentation
+contracts, Clippy with warnings denied, formatting, and all 120 SQL recipes
+(158 statements) pass locally. The extension's authoritative 8,192-entry
+batching, storage formats, compression, indexes, retention, optimize,
+transactions, migrations, and public batch/SQL contracts are unchanged. No
+private shadow table, Elixir/BEAM/NIF/process fallback, CI workflow or
+invocation, tag, release, or downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

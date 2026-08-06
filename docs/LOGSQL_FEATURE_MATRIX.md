@@ -142,7 +142,7 @@ extension.
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P39` | `unpack_words` | in progress | no | none | `API` | P3 |
+| `LQL-P39` | `unpack_words` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent)) | shipped | no | none | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P42` | `unroll` | missing | no | `SQL` | `API` | P3 |
@@ -902,8 +902,16 @@ so a new extension scalar would not avoid block reads, decode, payload
 transfer, or required response-row materialization. Complete semantics remain
 bounded Rust API composition with no language opcode, private-table access,
 durable mutation, storage-format change, or batching/index/compression change.
-Exact-build performance and HWM evidence will determine the final row
-disposition without changing that ownership boundary.
+Exact-build `QSF-227` measures ordered word extraction on 64 returned rows at
+3.225/3.740/4.877 ms narrow and 36.912/38.564/39.308 ms wide p50/p95/p99.
+Equal-storage-work copies measure 3.250/3.493/3.534 and
+34.241/35.662/36.075 ms. The +7.0%/+8.1% p95 includes exact Unicode category
+testing, first-seen deduplication, compact JSON-array encoding, and 640 extra
+response bytes after byte-identical public work: one/four candidate blocks,
+1,024/8,192 decoded entries, 128/8,192 returned public rows, and
+235,778/1,914,055 payload bytes per query. Request-attributed API means are
+2.498/34.612 ms versus 2.479/33.106 ms, or +0.8%/+4.5%. The bounded
+post-scan cost is accepted and does not justify storage pushdown.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare

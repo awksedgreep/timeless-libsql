@@ -167,6 +167,8 @@ language/value-envelope semantics belong to the Rust API.
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
 still correctly marked `missing`.
 
+## Rows without an honest SQL equivalent
+
 `LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
 optional terminal semicolon are LogsQL source grammar owned by the Rust API;
 direct SQLite/libSQL users already write ordinary parameterized SQL and do not
@@ -213,9 +215,10 @@ predicate that can reproduce this split, and a recursive ASCII CTE would
 silently change non-ASCII results. An application can register its own
 tokenizer UDF and apply it to bounded public `logs` rows, but that UDF is not a
 `timeless-libsql` public contract. The Rust logs API performs the bounded
-row-local transform after the required public scan and decode. Exact evidence
-must show material avoidable storage, allocation, copy, or row-crossing cost
-before adding a general extension scalar solely for this pipe.
+row-local transform after the required public scan and decode. Exact-build
+`QSF-227` shows equal block, decode, payload, sort, limit, and public-row work
+versus the control; the measured tokenization, JSON allocation, and response
+expansion happen after that boundary and do not justify an extension scalar.
 
 `LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
 known phrase in their application and bind the resulting strings to an `IN`

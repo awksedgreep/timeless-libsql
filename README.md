@@ -953,6 +953,15 @@ row scan is required either way, so this pipe intentionally has no inexact SQL
 recipe or new extension scalar. The Rust API owns the transform over public
 `logs`; storage formats, authoritative 8,192-entry batching, compression,
 indexes, and maintenance remain unchanged.
+
+Exact-build p50/p95/p99 is 3.225/3.740/4.877 ms narrow and
+36.912/38.564/39.308 ms wide, versus 3.250/3.493/3.534 and
+34.241/35.662/36.075 ms for equal-storage-work copies. `QSF-227` accepts the
++7.0%/+8.1% p95 and +0.8%/+4.5% request-attributed API mean. The candidate's
+compact arrays add 640 response bytes; both pairs retain byte-identical public
+block, decode, payload, sort, limit, and row work, so no extension primitive
+is warranted.
+
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,
