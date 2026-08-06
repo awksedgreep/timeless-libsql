@@ -1681,6 +1681,15 @@ fields, current-row writes, errors, limits, cancellation, and HTTP envelopes
 remain Rust API composition. No extension primitive, private table, or
 storage-format change is involved.
 
+Exact-build logfmt evidence measures 3.459/3.805/4.335 ms narrow and
+37.975/39.144/42.387 ms wide p50/p95/p99 while returning 64 rows and 2,048
+bytes. Identical-output `format` controls measure 3.506/3.769/3.924 and
+34.373/38.212/38.572 ms. The +1.0%/+2.4% p95 and -0.2%/+8.2% internal API
+mean follows exactly the same one/four candidate blocks, 1,024/8,192 decoded
+entries, 235,778/1,914,055 payload bytes, and 128/8,192 public rows.
+`QSF-218` accepts the bounded dynamic selection/encoding cost above the
+unchanged public storage boundary.
+
 ## LogsQL typed `unpack_json` over current rows
 
 `unpack_json` snapshots one request-owned field, parses a JSON object, and

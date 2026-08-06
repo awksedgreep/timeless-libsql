@@ -896,6 +896,12 @@ bounded Rust API contracts over public `logs` rows. Direct SQLite/libSQL users
 can run executable `SQL-LOG-052` for a fixed ordered list of exact public
 metadata paths. Because all values have already crossed the public storage
 boundary, no LogsQL opcode or private-table path is added to the extension.
+Exact-build p50/p95/p99 is 3.459/3.805/4.335 ms narrow and
+37.975/39.144/42.387 ms wide, versus 3.506/3.769/3.924 and
+34.373/38.212/38.572 ms for identical-output `format` controls. `QSF-218`
+accepts the +1.0%/+2.4% p95 and -0.2%/+8.2% request-attributed API mean as
+bounded row-local selection/encoding after byte-identical public storage work;
+storage remains four raw blocks with no new extension primitive.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

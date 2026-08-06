@@ -1065,8 +1065,8 @@ pushdown. The full 1,091-case oracle, executable SQL, documentation contracts,
 real-extension/API suites, formatting, lint, crash/transaction, and lifecycle
 gates pass.
 
-Session 18's `LQL-P35` row is semantically complete and awaiting exact-build
-performance/HWM evidence. Pinned VictoriaLogs source plus the complete
+Session 18's `LQL-P35` row is closed as an API-owned `pack_logfmt` pipe over
+the public logs surface. Pinned VictoriaLogs source and the complete
 1,111-case live oracle establish optional exact/prefix/all selectors, default
 and explicit destinations, source snapshots, current-column ordering,
 overlapping-selector duplication, textual projection, conditional quoting,
@@ -1075,9 +1075,18 @@ union, recursively flattens retained objects to dotted leaves, keeps arrays
 atomic, and preserves explicit empty-state visibility. The bounded Rust
 evaluator changes no extension or durable storage contract. Executable
 `SQL-LOG-052` gives direct SQLite/libSQL users the fixed exact-path
-core-SQL/JSON1 foundation. Parser, evaluator, real-extension, optimize,
-shutdown/reopen, immutable-source, SQL, and oracle regressions pass; the row
-remains in progress until exact-build evidence and the full local gates close.
+core-SQL/JSON1 foundation.
+
+Exact-build commit `fd723df39e72500f6e80126131f4e5a9bf0763a8` measures
+3.459/3.805/4.335 ms narrow and 37.975/39.144/42.387 ms wide p50/p95/p99.
+Identical-output controls measure 3.506/3.769/3.924 and
+34.373/38.212/38.572 ms. Every pair returns the same 64 rows and 2,048 bytes
+while reading the same one/four candidate blocks, decoding 1,024/8,192
+entries, and transferring 235,778/1,914,055 extension payload bytes per query.
+`QSF-218` accepts the +1.0%/+2.4% p95 and -0.2%/+8.2% request-attributed
+mean as bounded current-row selection and encoding. The full oracle,
+executable SQL, documentation contracts, real-extension/API suites,
+formatting, lint, crash/transaction, and lifecycle gates pass.
 
 ### Session 19: experimental and data-model dispositions
 

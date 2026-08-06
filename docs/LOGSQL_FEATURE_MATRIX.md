@@ -138,7 +138,7 @@ extension.
 | `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P35` | `pack_logfmt` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P35` | `pack_logfmt` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
@@ -697,6 +697,16 @@ gives direct SQLite/libSQL users the fixed exact-path core-SQL/JSON1
 foundation. Since all selected rows already cross the public `logs` surface,
 no extension primitive, private table, codec, format, or storage-contract
 change is justified.
+
+Exact-build `QSF-218` measures `pack_logfmt` at 3.459/3.805/4.335 ms narrow
+and 37.975/39.144/42.387 ms wide p50/p95/p99. Identical-output `format`
+controls measure 3.506/3.769/3.924 and 34.373/38.212/38.572 ms. The
++1.0%/+2.4% p95 and -0.2%/+8.2% request-attributed API mean occurs after
+identical public work: one/four candidate blocks, 1,024/8,192 decoded entries,
+128/8,192 returned public rows, and 235,778/1,914,055 payload bytes per query.
+The wide API mean is retained honestly as bounded current-row traversal,
+selection, quoting, and response construction; it does not justify storage
+pushdown.
 
 `LQL-P36` parses one exact current-row field as a JSON object and writes the
 selected values back into that request-owned row. The Rust logs API accepts

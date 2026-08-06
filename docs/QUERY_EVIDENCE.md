@@ -4182,6 +4182,57 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: deterministic `pack_logfmt`
+
+The checked-in
+[`2026-08-06_session18_lql_p35_pack_logfmt.json`](evidence/2026-08-06_session18_lql_p35_pack_logfmt.json)
+was captured from exact release extension and server build
+`fd723df39e72500f6e80126131f4e5a9bf0763a8` and has SHA-256
+`9ec0ff4b3c3c6939a0e834f5193955309915d39fe141847c10f1356ce3256e20`.
+The narrow shape selects one indexed host, packs `range_key` into one
+`range_key=value` destination, and returns 64 rows. The wide shape applies the
+same operation to all 8,192 entries before its 64-row limit. Same-run controls
+use `format` to produce byte-identical destinations and responses.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `pack_logfmt`, indexed host | 64 | 2,048 | 3.459 | 3.805 | 4.335 | 1 | 1,024 | 235,778 | 128 |
+| `pack_logfmt`, full fixture | 64 | 2,048 | 37.975 | 39.144 | 42.387 | 4 | 8,192 | 1,914,055 | 8,192 |
+| identical-output `format`, indexed host | 64 | 2,048 | 3.506 | 3.769 | 3.924 | 1 | 1,024 | 235,778 | 128 |
+| identical-output `format`, full fixture | 64 | 2,048 | 34.373 | 38.212 | 38.572 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 1.0%/2.4% above its narrow/wide same-run control. Its
+internal API timer averages 2.695/36.696 ms versus 2.701/33.927 ms, or 0.2%
+below/8.2% above. Every equal-width pair performs byte-identical public
+storage scans, block decodes, payload reads, row materialization, and response
+encoding. Dynamic selector traversal, deterministic union/order, textual
+projection, conditional quoting, and destination writes are bounded Rust API
+work. `SQL-LOG-052` already gives direct SQLite/libSQL users the fixed-schema
+core-SQL/JSON1 foundation, so an extension primitive would not avoid storage
+reads, decode, allocation, or row crossing. The wide API mean is retained
+honestly.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+14.621 ms and the explicit durability barrier took 36.633 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 100,608 KiB, 1,320 KiB above
+LQL-P31; metrics HWM was 50,900 KiB, 568 KiB below it. Each maximum spans the
+enlarged complete workload and is retained as whole-process variation.
+Cancellation ended with zero requests in flight; direct evaluator and HTTP
+deadline regressions pin work/state/result/response bounds, rejection,
+cancellation, and reader reuse.
+
+All 1,111 pinned VictoriaLogs v1.52.0 cases pass live. The final 63-test logs
+real-extension suite, 122 logs library tests, 90-test metrics real-extension
+suite, complete 45-section CLI/crash/transaction suite, standalone dbhealth
+lifecycle gate, 32-test Rust query harness, documentation contracts, Clippy
+with warnings denied, formatting, and all 118 SQL recipes (156 statements)
+pass locally. The extension's authoritative 8,192-entry batching, storage
+formats, compression, indexes, retention, optimize, transactions, migrations,
+and public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in
