@@ -4946,3 +4946,55 @@ formats, compression, indexes, retention, optimize, transactions, migrations,
 and public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
+
+## Session 17 LogsQL P2: top-level `json_array_len`
+
+The checked-in
+[`2026-08-06_session17_lql_p41_json_array_len.json`](evidence/2026-08-06_session17_lql_p41_json_array_len.json)
+was captured from exact release extension and server build
+`745eb01b059b3c0dd6b7b62d152bd23a423f0f00` and has SHA-256
+`be29595859bbd3b277b79aab5f4c28b5fa71e7cd2d397b6b76dd3825151c2f0c`.
+The narrow shape selects one indexed host, counts the retained native `tags`
+array, and returns 64 textual lengths. The wide shape applies the same
+operation to all 8,192 entries before its 64-row limit. Same-run controls
+write the known textual length through `format` and return byte-identical
+responses.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `json_array_len`, indexed host | 64 | 1,344 | 3.285 | 3.558 | 3.788 | 1 | 1,024 | 235,778 | 128 |
+| `json_array_len`, full fixture | 64 | 1,344 | 39.914 | 41.563 | 44.668 | 4 | 8,192 | 1,914,055 | 8,192 |
+| constant-format control, indexed host | 64 | 1,344 | 3.276 | 3.454 | 3.514 | 1 | 1,024 | 235,778 | 128 |
+| constant-format control, full fixture | 64 | 1,344 | 39.836 | 40.607 | 43.555 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 3.0%/2.4% above its narrow/wide same-run control. Its
+internal API timer averages 2.794/39.027 ms versus 2.729/39.039 ms, or 2.4%
+above/0.0% below. Every equal-width pair performs byte-identical public
+storage scans, block decodes, payload reads, row materialization, and response
+encoding. Reading the length of a native retained array is O(1); source
+snapshotting, optional bounded JSON-text parsing, destination writes, limits,
+cancellation, and errors remain bounded Rust API work. `SQL-LOG-043` already
+gives direct SQLite/libSQL users public JSON1 composition for bounded fixed
+paths, so a new extension primitive would not avoid storage reads, decode,
+allocation, or row crossing.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.119 ms and the explicit durability barrier took 35.315 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 94,660 KiB, 1,380 KiB above
+LQL-P36; metrics HWM was 53,328 KiB, 2,384 KiB above it. Each maximum spans
+the enlarged complete workload and is retained as whole-process variation.
+Cancellation ended with zero requests in flight; direct evaluator and HTTP
+deadline regressions pin parse/work/state/result/response bounds, rejection,
+cancellation, and reader reuse.
+
+All 897 pinned VictoriaLogs v1.52.0 cases pass live. The final 49-test logs
+real-extension suite, 104 logs library tests, 90-test metrics real-extension
+suite, complete 45-section CLI/crash/transaction suite, standalone dbhealth
+lifecycle gate, 31-test Rust query harness, documentation contracts, Clippy
+with warnings denied, formatting, and all 109 SQL recipes (145 statements)
+pass locally. The extension's authoritative 8,192-entry batching, storage
+formats, compression, indexes, retention, optimize, transactions, migrations,
+and public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.

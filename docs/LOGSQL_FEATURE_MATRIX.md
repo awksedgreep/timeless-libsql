@@ -144,7 +144,7 @@ extension.
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P42` | `unroll` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P43` | `join` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P44` | `union` | missing | no | `SQL` | `API` | P3 |
@@ -641,6 +641,14 @@ private table, durable mutation, or storage-contract change is required. The
 complete 897-case pinned oracle records upstream grammar and scalar/malformed
 behavior; Timeless additionally pins native rich-array fidelity through the
 real extension.
+
+Exact-build native-array evidence records 3.558/41.563 ms narrow/wide p95
+versus 3.454/40.607 ms for equal-output constant-format controls. The
++3.0%/+2.4% p95 and +2.4%/-0.0% internal API variation follows exactly the
+same one/four candidate blocks, 1,024/8,192 decoded entries,
+235,778/1,914,055 payload bytes, 128/8,192 public rows, and 1,344-byte
+responses. `QSF-191` accepts the bounded O(1) native-array count and
+current-row write above the unchanged public storage boundary.
 
 ## Statistics functions
 

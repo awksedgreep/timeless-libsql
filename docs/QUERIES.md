@@ -1414,6 +1414,15 @@ VictoriaLogs bare-`NaN` compatibility, limits, cancellation, and envelopes
 remain Rust API composition. No extension primitive or private storage access
 is involved.
 
+Exact-build native-array evidence measures 3.285/3.558/3.788 ms narrow and
+39.914/41.563/44.668 ms wide p50/p95/p99 while returning 64 rows and 1,344
+response bytes. Equal-output constant-format controls measure
+3.276/3.454/3.514 and 39.836/40.607/43.555 ms. The +3.0%/+2.4% p95 and
++2.4%/-0.0% internal API variation follows the same one/four candidate
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. `QSF-191` accepts the bounded direct native-array count
+and request-local write above the unchanged public storage boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

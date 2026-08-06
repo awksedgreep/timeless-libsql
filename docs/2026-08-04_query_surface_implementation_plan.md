@@ -850,6 +850,21 @@ accepts the -16.3%/+3.5% bounded parse/select/write variation, retains the
 verdict, and closes `LQL-P36`. Session 17 continues with `LQL-P41`; its
 remaining declared P2 rows must not be skipped before Session 18 begins.
 
+`LQL-P41` now has strict case-insensitive `json_array_len` grammar; exact
+parenthesized/bare/quoted/dotted sources and destinations; native-array and
+JSON-array-text counts; pinned bare-`NaN` and nonarray behavior; deterministic
+source snapshots; sequential textual writes; explicit conflicts; work/state/
+result/response limits; cancellation; optimize/reopen coverage; and immutable
+durable rich sources. Twelve exact-result/statistics and ten error cases pass
+the complete 897-case pinned VictoriaLogs oracle. Executable `SQL-LOG-043`
+gives direct users the fixed-path JSON1 foundation. Exact-build commit
+`745eb01b059b3c0dd6b7b62d152bd23a423f0f00` measures 3.558/41.563 ms
+narrow/wide p95 versus 3.454/40.607 ms for equal-output controls. `QSF-191`
+accepts the +3.0%/+2.4% bounded native-array count/current-row-write
+variation, records unchanged four-block storage and the HWM verdict, and
+closes `LQL-P41`. Session 17 continues with `LQL-S07`; none of its remaining
+declared P2 rows may be skipped before Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,
