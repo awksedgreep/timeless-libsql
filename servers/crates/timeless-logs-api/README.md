@@ -127,7 +127,8 @@ the same public decode.
 
 The shipped statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
-`median`, `rate`, and `rate_sum`. Missing, null, and empty remain distinct;
+`median`, `quantile`, `stddev`, `rate`, and `rate_sum`. Missing, null, and
+empty remain distinct;
 `count_empty` deliberately counts all three for compatibility. Exact unique
 counts use complete typed tuples, while `count_uniq_hash` uses a documented
 stable 64-bit FNV-1a key hash and claims cardinality—not VictoriaLogs hash-bit
@@ -139,6 +140,16 @@ and max preserve the chosen JSON number, and fractional/mixed sums, averages,
 medians, and rates use finite binary64. `rate` and `rate_sum` divide by the
 explicit query interval in seconds; without a finite two-sided time interval
 they return the undivided count or sum.
+
+`quantile(phi[, fields...])` uses VictoriaLogs textual projection and
+signed/unsigned/timestamp/math/natural ordering, then selects
+`min(floor(phi*N), N-1)` without interpolation. Phi must be in `[0,1]`.
+`stddev(fields...)` is Welford population deviation over native JSON numbers;
+numeric strings are not coerced, a singleton is zero, and an empty numeric
+selection is JSON null. Exact quantile state and both traversals are bounded
+and cancellable. Timeless fails above its configured exact-state limit rather
+than copying VictoriaLogs' randomized reservoir. Direct users have the finite
+native-number public SQL foundation in `SQL-LOG-044`.
 
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.

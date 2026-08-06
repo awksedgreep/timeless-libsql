@@ -61,6 +61,8 @@ pub(crate) enum StatsKind {
     Min,
     Max,
     Median,
+    Quantile,
+    Stddev,
     Rate,
     RateSum,
 }
@@ -292,14 +294,15 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         ))
     })?;
     let close = matching_parenthesis(expression, open)?;
-    let function = expression[..open].trim();
-    if function.is_empty() {
+    let function_source = expression[..open].trim();
+    if function_source.is_empty() {
         return Err(LogsqlError::malformed(
             "LogsQL stats function name is empty",
         ));
     }
+    let function = function_source.to_ascii_lowercase();
     let args = &expression[open + 1..close];
-    let kind = match function {
+    let kind = match function.as_str() {
         "count" => StatsKind::Count,
         "count_empty" => StatsKind::CountEmpty,
         "count_uniq" => StatsKind::CountUniq,
@@ -311,22 +314,46 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         "min" => StatsKind::Min,
         "max" => StatsKind::Max,
         "median" => StatsKind::Median,
+        "quantile" => StatsKind::Quantile,
+        "stddev" => StatsKind::Stddev,
         "rate" => StatsKind::Rate,
         "rate_sum" => StatsKind::RateSum,
         _ => {
             return Err(LogsqlError::unsupported(format!(
-                "unsupported LogsQL stats function {function:?}"
+                "unsupported LogsQL stats function {function_source:?}"
             )))
         }
     };
-    let mut fields = if args.trim().is_empty() {
+    let mut arguments = if args.trim().is_empty() {
         Vec::new()
     } else {
         split_top_level(args, ',')?
-            .into_iter()
-            .map(|field| parse_pipeline_field(field.trim(), true))
-            .collect::<Result<Vec<_>, _>>()?
     };
+    let quantile = if kind == StatsKind::Quantile {
+        let Some(phi_source) = arguments.first().map(String::as_str) else {
+            return Err(LogsqlError::malformed(
+                "LogsQL quantile requires a phi argument",
+            ));
+        };
+        let phi = parse_victorialogs_decimal(phi_source).ok_or_else(|| {
+            LogsqlError::malformed(format!(
+                "LogsQL quantile phi must be a decimal number; got {phi_source:?}"
+            ))
+        })?;
+        if !(0.0..=1.0).contains(&phi) {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL quantile phi must be in [0,1]; got {phi_source:?}"
+            )));
+        }
+        arguments.remove(0);
+        Some(phi)
+    } else {
+        None
+    };
+    let mut fields = arguments
+        .into_iter()
+        .map(|field| parse_pipeline_field(field.trim(), true))
+        .collect::<Result<Vec<_>, _>>()?;
     match kind {
         StatsKind::Rate if !fields.is_empty() => {
             return Err(LogsqlError::malformed(
@@ -363,7 +390,7 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
                 let value = words.get(index + 1).ok_or_else(|| {
                     LogsqlError::malformed(format!("LogsQL {function} limit requires a value"))
                 })?;
-                limit = Some(parse_pipeline_usize(function, value)?);
+                limit = Some(parse_pipeline_usize(&function, value)?);
                 index += 2;
             }
             "as" if alias.is_none() => {
@@ -398,6 +425,7 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         fields,
         alias: alias.unwrap_or(canonical),
         limit,
+        quantile,
     })
 }
 
@@ -3425,6 +3453,7 @@ pub(crate) struct StatsExpression {
     pub fields: Vec<PipelineField>,
     pub alias: String,
     pub limit: Option<usize>,
+    pub quantile: Option<f64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4013,6 +4042,7 @@ pub fn parse_at(
                     fields: vec![PipelineField::All],
                     alias: "total".into(),
                     limit: None,
+                    quantile: None,
                 }]));
             }
             ["stats", function @ ("count(*)" | "count()"), "as", "total"]
@@ -4027,6 +4057,7 @@ pub fn parse_at(
                     fields: vec![PipelineField::All],
                     alias: "total".into(),
                     limit: None,
+                    quantile: None,
                 }]));
             }
             _ if segment.starts_with("field_values ") => {
@@ -9704,6 +9735,8 @@ mod tests {
             r#"* | stats count_uniq(probe) limit 10 as exact, count_uniq_hash(probe) as hashed"#,
             r#"* | stats uniq_values(probe) limit 10 as unique, values(probe) as values"#,
             r#"* | stats sum(n) as sum, avg(n) as avg, min(n) as min, max(n) as max, median(n) as median"#,
+            r#"* | stats quantile(0.5, n) as p50, stddev(n) as sigma"#,
+            r#"* | fields n | stats QuAnTiLe(1) as maximum, StDdEv(*) as sigma"#,
             r#"_time:1h | stats rate() as rate, rate_sum(n) as rate_sum"#,
         ] {
             let plan = parse_at(query, TimestampUnit::Microseconds, 1_800_000_000_000_000);
@@ -9721,6 +9754,12 @@ mod tests {
             "* | stats count_uniq(pro*)",
             "* | stats rate(n)",
             "* | stats sum(n) limit 2",
+            "* | stats quantile()",
+            "* | stats quantile(a, n)",
+            "* | stats quantile(-0.1, n)",
+            "* | stats quantile(1.1, n)",
+            "* | stats quantile(0.5, n) limit 2",
+            "* | stats stddev",
             "* | stats sum(n) as value, avg(n) as value",
         ] {
             assert!(

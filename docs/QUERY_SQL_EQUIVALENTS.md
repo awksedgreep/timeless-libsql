@@ -151,6 +151,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-041`](#sql-log-041-pack-selected-rich-metadata-fields-as-json) | `LQL-P34` | current foundation | bounded packing of a fixed list of exact public metadata paths into one typed nested JSON object; API owns current-row/canonical fields, prefix selection, destination mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-042`](#sql-log-042-unpack-selected-rich-fields-from-a-json-object) | `LQL-P36` | current foundation | bounded unpacking of fixed exact paths from one public native-object or JSON-text metadata field into a typed nested JSON object; API owns LogsQL grammar, dynamic selection, current-row mutation/preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-043`](#sql-log-043-top-level-json-array-length) | `LQL-P41` | current foundation | bounded top-level element count for one exact public native-array or JSON-array-text metadata path; API owns LogsQL grammar, current-row mutation, bare-`NaN` compatibility, limits, cancellation, and envelopes |
+| [`SQL-LOG-044`](#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation) | `LQL-S07` | current foundation | bounded upper-step quantile and one-pass population deviation for one exact finite native-number path; API owns textual natural order, rich projection, grammar, state limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7280,6 +7281,113 @@ is warranted.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_json_array_len_is_typed_bounded_and_durable`.
+
+### SQL-LOG-044: upper-step numeric quantile and population standard deviation
+
+Bind one exact SQLite JSON path, a quantile in `[0,1]`, inclusive native
+timestamp bounds, and positive work/result limits. This statement computes an
+upper-step quantile and population standard deviation over finite native JSON
+numbers from the public `logs` table:
+
+```sql
+WITH RECURSIVE bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), numeric_values AS MATERIALIZED (
+  SELECT
+    ROW_NUMBER() OVER (ORDER BY ts, level, message, metadata) - 1 AS sequence,
+    CAST(json_extract(metadata, :stats_source_path) AS REAL) AS value
+  FROM bounded
+  WHERE json_type(metadata, :stats_source_path) IN ('integer', 'real')
+    AND ABS(CAST(json_extract(metadata, :stats_source_path) AS REAL))
+          <= 1.7976931348623157e308
+), ranked AS MATERIALIZED (
+  SELECT
+    value,
+    ROW_NUMBER() OVER (ORDER BY value, sequence) - 1 AS value_rank,
+    COUNT(*) OVER () AS value_count
+  FROM numeric_values
+), welford(step, sample_count, mean, squared_deviations) AS (
+  SELECT 0, 0, 0.0, 0.0
+  UNION ALL
+  SELECT
+    w.step + 1,
+    w.sample_count + 1,
+    w.mean + (n.value - w.mean) / (w.sample_count + 1),
+    w.squared_deviations
+      + (n.value - w.mean)
+      * (n.value - (w.mean + (n.value - w.mean) / (w.sample_count + 1)))
+  FROM welford AS w
+  JOIN numeric_values AS n ON n.sequence = w.step
+), final AS (
+  SELECT sample_count, mean, squared_deviations
+  FROM welford
+  ORDER BY step DESC
+  LIMIT 1
+)
+SELECT
+  sample_count,
+  CASE
+    WHEN sample_count = 0 OR :quantile < 0 OR :quantile > 1 THEN NULL
+    ELSE (
+      SELECT value
+      FROM ranked
+      WHERE value_rank = MIN(
+        CAST(:quantile * value_count AS INTEGER),
+        value_count - 1
+      )
+      LIMIT 1
+    )
+  END AS quantile_value,
+  CASE
+    WHEN sample_count = 0 THEN NULL
+    ELSE SQRT(squared_deviations / sample_count)
+  END AS population_stddev
+FROM final
+WHERE :max_result_rows > 0
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit.
+`:stats_source_path` is an exact metadata path such as `$.duration_ms`.
+Only JSON `integer` and `real` values participate; missing paths, explicit
+nulls, strings (including numeric-looking strings), booleans, arrays, and
+objects are ignored. `sample_count` zero returns SQL NULL for both statistics;
+a singleton deviation is zero. Quantile rank is
+`min(floor(phi * N), N - 1)`, so this is the same upper-step selection used by
+LogsQL for a finite native-number domain. Welford's one-pass population state
+divides by `N`, not `N - 1`. Ordering by the public row identity makes the
+floating-point update deterministic. The statement is read-only.
+
+The complete `LQL-S07` API additionally owns case-insensitive `quantile` and
+`stddev` grammar; exact, prefix, and all-current-field selection; formatted
+`_time`; compact textual projection of retained booleans, arrays, and objects;
+VictoriaLogs signed/unsigned/timestamp/math/natural text ordering; exact empty
+results; strict phi errors; stable aliases; hard work/state/response limits;
+deadline cancellation; and HTTP envelopes. `stddev` deliberately follows the
+established Timeless typed-statistics policy and never coerces a stored string
+to a number.
+
+VictoriaLogs uses randomized reservoir sampling above 10,000 quantile values.
+Timeless instead returns an explicit limit error when exact deterministic
+state would exceed `max_work_rows` or `max_response_bytes`. SQLite's ordinary
+numeric ordering also cannot claim the full mixed textual comparator, and a
+REAL cast cannot preserve integers beyond binary64 precision. This recipe is
+therefore an honest finite native-number foundation, not a claim that core
+SQLite reproduces every language-owned edge.
+
+All selected values already cross the bounded public `logs` row interface.
+Sorting and Welford composition do not avoid a block read or decode when moved
+into an extension opcode, so no new extension primitive, private shadow-table
+access, or storage-format change is warranted.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regressions:
+`session_seventeen_quantile_and_stddev_match_retained_semantics_and_reopen`
+and `session_seventeen_quantile_state_is_bounded_and_reader_remains_reusable`.
 
 ## Adding the next recipe
 

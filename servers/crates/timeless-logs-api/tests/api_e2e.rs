@@ -10393,6 +10393,200 @@ async fn session_thirteen_median_state_is_bounded_and_reader_remains_reusable() 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_quantile_and_stddev_match_retained_semantics_and_reopen() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("quantile-stddev-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let body = [
+        r#"{"_time":1800000000000001,"_msg":"s07 one","level":"info","stats_group":"s07","q":"1","n":0}"#,
+        r#"{"_time":1800000000000002,"_msg":"s07 ten","level":"info","stats_group":"s07","q":"10","n":2}"#,
+        r#"{"_time":1800000000000003,"_msg":"s07 two","level":"info","stats_group":"s07","q":"2","n":4}"#,
+        r#"{"_time":1800000000000004,"_msg":"s07 alpha ten","level":"info","stats_group":"s07","q":"a10","n":6}"#,
+        r#"{"_time":1800000000000005,"_msg":"s07 alpha two","level":"info","stats_group":"s07","q":"a2","n":"8"}"#,
+        r#"{"_time":1800000000000006,"_msg":"s07 null","level":"info","stats_group":"s07","q":null,"n":null}"#,
+        r#"{"_time":1800000000000007,"_msg":"s07 missing","level":"info","stats_group":"s07"}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn assert_stats(app: &axum::Router) {
+        let rows = pipeline_rows(
+            app,
+            r#"stats_group:="s07" | stats quantile(0, q) as minimum, quantile(0.5, q) as p50, quantile(1, q) as maximum, stddev(n) as sigma"#,
+        )
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["minimum"], "");
+        assert_eq!(rows[0]["p50"], "2");
+        assert_eq!(rows[0]["maximum"], "a10");
+        assert!((rows[0]["sigma"].as_f64().unwrap() - 5.0_f64.sqrt()).abs() < 1e-12);
+
+        assert_eq!(
+            pipeline_rows(
+                app,
+                r#"stats_group:="s07" | fields q | stats QuAnTiLe(0.5) as p50"#,
+            )
+            .await,
+            [serde_json::json!({"p50": "10"})]
+        );
+        assert_eq!(
+            pipeline_rows(
+                app,
+                r#"stats_group:="s07" | stats quantile(0.5, never_present) as p50"#,
+            )
+            .await,
+            [serde_json::json!({"p50": ""})]
+        );
+        assert_eq!(
+            pipeline_rows(
+                app,
+                r#"stats_group:="s07" | stats StDdEv(never_present) as sigma"#,
+            )
+            .await,
+            [serde_json::json!({"sigma": null})]
+        );
+    }
+
+    let app = router(storage.clone());
+    assert_stats(&app).await;
+    for malformed in [
+        r#"stats_group:="s07" | stats quantile()"#,
+        r#"stats_group:="s07" | stats quantile(word, q)"#,
+        r#"stats_group:="s07" | stats quantile(-0.1, q)"#,
+        r#"stats_group:="s07" | stats quantile(1.1, q)"#,
+        r#"stats_group:="s07" | stats quantile(0.5, q) tail"#,
+        r#"stats_group:="s07" | stats stddev"#,
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(logsql_request(malformed))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{malformed}"
+        );
+    }
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_stats(&router(reopened.clone())).await;
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_quantile_state_is_bounded_and_reader_remains_reusable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start_with_timestamp_unit(
+        temp.path().join("quantile-limit-logsql.db"),
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(
+                r#"{"_time":1,"_msg":"wide quantile","level":"info","a":1,"b":"2","c":"3"}"#
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    let app = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    );
+    let limited = app
+        .clone()
+        .oneshot(logsql_request(
+            "_time:[1,2) | stats quantile(0.5, a, b, c) as value",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_work_rows",
+            "limit": 1
+        })
+    );
+    assert_eq!(
+        pipeline_rows(&app, "_time:[1,2) | stats stddev(a) as sigma").await,
+        [serde_json::json!({"sigma": 0.0})]
+    );
+    let stddev_limited = app
+        .clone()
+        .oneshot(logsql_request("_time:[1,2) | stats stddev(a, b) as sigma"))
+        .await
+        .unwrap();
+    assert_eq!(stddev_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(stddev_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_work_rows",
+            "limit": 1
+        })
+    );
+    assert_eq!(
+        pipeline_rows(&app, "_time:[1,2) | stats count() as total").await,
+        [serde_json::json!({"total": 1})]
+    );
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

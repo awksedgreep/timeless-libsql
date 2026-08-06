@@ -4914,6 +4914,18 @@ fn stats(
             StatsKind::Median => {
                 median(rows, &expression.fields, limits.max_state_items, cancelled)?
             }
+            StatsKind::Quantile => textual_quantile(
+                rows,
+                &expression.fields,
+                expression
+                    .quantile
+                    .ok_or_else(|| "LogsQL quantile plan is missing phi".to_string())?,
+                limits,
+                cancelled,
+            )?,
+            StatsKind::Stddev => {
+                population_stddev(rows, &expression.fields, limits.max_state_items, cancelled)?
+            }
             StatsKind::Rate => {
                 let value = rate_window_seconds
                     .filter(|duration| *duration > 0.0)
@@ -5189,6 +5201,82 @@ fn median(
     } else {
         left / 2.0 + right / 2.0
     }))
+}
+
+fn textual_quantile(
+    rows: &[Value],
+    fields: &[PipelineField],
+    phi: f64,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    let mut values = Vec::<String>::new();
+    let mut state_bytes = size_of::<Vec<String>>();
+    ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "quantile")?;
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        for value in selected_values(row, fields) {
+            if values.len() == limits.max_state_items {
+                return Err(format!(
+                    "LogsQL quantile state exceeds max_work_rows={}",
+                    limits.max_state_items
+                ));
+            }
+            let value = projected_text(value).into_owned();
+            charge_transfer_string(&value, &mut state_bytes, limits.max_state_bytes, "quantile")?;
+            values.push(value);
+        }
+    }
+    if values.is_empty() {
+        return Ok(Value::String(String::new()));
+    }
+    let cancelled_during_sort = Cell::new(false);
+    values.sort_by(|left, right| {
+        if cancelled.load(AtomicOrdering::Relaxed) {
+            cancelled_during_sort.set(true);
+            Ordering::Equal
+        } else {
+            logsql_sort_comparison(left, right)
+        }
+    });
+    if cancelled_during_sort.get() {
+        return Err("LogsQL pipeline cancelled".into());
+    }
+    ensure_active(cancelled)?;
+    let index = ((phi * values.len() as f64) as usize).min(values.len() - 1);
+    Ok(Value::String(values.swap_remove(index)))
+}
+
+fn population_stddev(
+    rows: &[Value],
+    fields: &[PipelineField],
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    let mut mean = 0.0f64;
+    let mut squared_deviations = 0.0f64;
+    let mut count = 0u64;
+    let mut work_items = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        for value in selected_values(row, fields) {
+            charge_transfer_work(&mut work_items, max_work_items, "stddev")?;
+            let Some(value) = value else {
+                continue;
+            };
+            let Some(value) = value.as_f64().filter(|_| value.is_number()) else {
+                continue;
+            };
+            count = count.saturating_add(1);
+            let delta = value - mean;
+            mean += delta / count as f64;
+            squared_deviations += delta * (value - mean);
+        }
+    }
+    if count == 0 {
+        return Ok(Value::Null);
+    }
+    Ok(finite_number((squared_deviations / count as f64).sqrt()))
 }
 
 fn finite_number(value: f64) -> Value {
@@ -6078,6 +6166,117 @@ mod tests {
         assert!(median(&rows, &[field], 1, &cancelled)
             .unwrap_err()
             .contains("max_work_rows=1"));
+    }
+
+    #[test]
+    fn quantile_and_stddev_pin_order_types_bounds_and_cancellation() {
+        let field = PipelineField::Exact {
+            path: vec!["n".into()],
+            name: "n".into(),
+        };
+        let rows = [
+            json!({"n": "1"}),
+            json!({"n": "10"}),
+            json!({"n": "2"}),
+            json!({"n": "a10"}),
+            json!({"n": "a2"}),
+            json!({"n": null}),
+            json!({}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            textual_quantile(&rows, std::slice::from_ref(&field), 0.5, limits, &cancelled).unwrap(),
+            json!("2")
+        );
+        assert_eq!(
+            textual_quantile(&rows, std::slice::from_ref(&field), 0.0, limits, &cancelled).unwrap(),
+            json!("")
+        );
+        assert_eq!(
+            textual_quantile(&rows, std::slice::from_ref(&field), 1.0, limits, &cancelled).unwrap(),
+            json!("a10")
+        );
+        assert!(textual_quantile(
+            &rows,
+            std::slice::from_ref(&field),
+            0.5,
+            PipelineLimits {
+                max_state_items: 6,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_work_rows=6"));
+        assert!(textual_quantile(
+            &rows,
+            std::slice::from_ref(&field),
+            0.5,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_response_bytes=1"));
+
+        let numeric = [
+            json!({"n": 0}),
+            json!({"n": 2}),
+            json!({"n": 4}),
+            json!({"n": 6}),
+            json!({"n": "8"}),
+            json!({"n": null}),
+            json!({}),
+        ];
+        let sigma = population_stddev(
+            &numeric,
+            std::slice::from_ref(&field),
+            numeric.len(),
+            &cancelled,
+        )
+        .unwrap()
+        .as_f64()
+        .unwrap();
+        assert!((sigma - 5.0_f64.sqrt()).abs() < 1e-12);
+        assert_eq!(
+            population_stddev(
+                &[json!({"n": "8"}), json!({})],
+                std::slice::from_ref(&field),
+                2,
+                &cancelled
+            )
+            .unwrap(),
+            Value::Null
+        );
+        assert!(
+            population_stddev(&numeric, std::slice::from_ref(&field), 1, &cancelled)
+                .unwrap_err()
+                .contains("max_work_rows=1")
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            textual_quantile(&rows, std::slice::from_ref(&field), 0.5, limits, &cancelled)
+                .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+        assert_eq!(
+            population_stddev(
+                &numeric,
+                std::slice::from_ref(&field),
+                numeric.len(),
+                &cancelled,
+            )
+            .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
     }
 
     #[test]

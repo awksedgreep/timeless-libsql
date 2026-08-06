@@ -1423,6 +1423,57 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 128/8,192 public rows. `QSF-191` accepts the bounded direct native-array count
 and request-local write above the unchanged public storage boundary.
 
+## LogsQL upper-step quantiles and population deviation
+
+The bounded `stats` pipeline supports textual upper-step `quantile` and
+numeric population `stddev`:
+
+```text
+* | stats quantile(0.5, duration_ms) as p50
+* | stats quantile(0, duration_ms) as minimum, quantile(1, duration_ms) as maximum
+* | fields duration_ms | stats quantile(0.95) as p95
+* | stats stddev(duration_ms) as sigma
+```
+
+Function names are case-insensitive. `quantile` requires a decimal rank in
+the inclusive range `[0,1]`; its fields follow the existing exact, prefix,
+and all-current-field selectors, and omitted fields mean all current fields.
+Selected values use the LogsQL textual projection: missing and JSON null are
+empty, strings retain their contents, and other rich values use compact JSON.
+Ordering follows VictoriaLogs signed integer, unsigned integer, RFC3339
+timestamp, general math-number, and natural UTF-8 comparisons. For `N`
+values, the selected zero-based rank is `min(floor(phi * N), N - 1)` with no
+interpolation. An empty selection is the explicit empty string.
+
+`stddev` uses Welford's one-pass population algorithm and divides by `N`, not
+`N - 1`. In the retained Timeless typed-statistics profile, only native JSON
+numbers participate. Numeric-looking strings, booleans, nulls, missing paths,
+arrays, and objects are ignored. A singleton returns zero and an empty numeric
+selection returns JSON null.
+
+Every selected quantile value counts against `max_work_rows`; its exact text
+state also counts against `max_response_bytes`. Every visited deviation value
+counts against `max_work_rows`. Both operations are deadline-cancellable and
+leave the SQLite reader reusable after cancellation or limit rejection.
+Unlike VictoriaLogs' random reservoir above 10,000 values, Timeless never
+silently makes an exact result nondeterministic: it fails with the stable
+query-limit envelope.
+
+The complete pinned VictoriaLogs fixture records four intentional retained-
+model wire differences: Timeless preserves rich types, does not coerce numeric
+strings for deviation, represents empty deviation as JSON null rather than a
+textual `NaN`, and preserves an explicitly requested empty quantile field
+instead of dropping it from stream JSON.
+
+Executable
+[`SQL-LOG-044`](QUERY_SQL_EQUIVALENTS.md#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation)
+uses only public `logs`, JSON1, window functions, and a recursive Welford CTE
+for one finite native-number path. Core SQLite has no honest equivalent for
+the complete mixed textual natural comparator, so the full language grammar,
+projection, ordering, exact state bounds, cancellation, and HTTP envelopes
+remain Rust API composition. The required public scan already crosses every
+selected row; no extension primitive or private storage access is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

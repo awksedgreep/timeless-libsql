@@ -777,3 +777,20 @@ total, all passing against the immutable image. Timeless also accepts retained
 native arrays and preserves their rich values rather than requiring a
 flattened textual source.
 The fixture now contains 897 cases.
+
+`LQL-S07` adds five exact statistics cases and five error cases for
+`quantile` and `stddev`. They pin required decimal quantile ranks, inclusive
+`[0,1]` bounds, upper-step selection, signed/unsigned/timestamp/math/natural
+text ordering, default current-field selection, case-insensitive function
+names, population deviation, empty input, and strict malformed grammar.
+Source audit is against `stats_quantile.go`, `stats_stddev.go`,
+`pipe_sort_topk.go`, and `block_result.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. VictoriaLogs flattens values,
+coerces numeric strings for deviation, emits textual `NaN` for empty
+deviation, omits an empty quantile field from stream JSON, and randomly
+reservoir-samples quantiles above 10,000 values. Timeless deliberately retains
+rich JSON types, ignores numeric strings in numeric statistics, returns JSON
+null for an empty deviation, preserves an explicit empty quantile string, and
+fails a deterministic exact quantile when its configured state limit is
+exceeded. The fixture now contains 298 row-query cases, 290 error cases, and
+319 statistics/pipeline cases; the fixture now contains 907 cases in total.

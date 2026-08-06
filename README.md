@@ -729,6 +729,15 @@ logical post-filter cardinality and actual Timeless block/entry/payload work;
 it does not fabricate unavailable per-column storage files. Executable
 `SQL-LOG-026` documents every native counter, concurrency and invalidation
 rule, and the complete LogsQL mapping.
+The `stats` pipeline also includes bounded `quantile(phi[, fields...])` and
+`stddev(fields...)`. Quantile uses VictoriaLogs textual natural ordering and
+upper-step selection; standard deviation uses one-pass population state over
+native JSON numbers without coercing strings. Timeless preserves explicit
+empty/null/type distinctions and fails exact quantiles at configured state
+limits instead of randomly sampling them. Embedded SQLite/libSQL users can
+run the executable finite-number public-row equivalent in `SQL-LOG-044`;
+mixed textual ordering, grammar, limits, cancellation, and envelopes remain
+Rust logs API behavior.
 The bounded `first` pipeline selects an optional positive number of rows by
 exact fields with per-field direction, optional partitioning, and an optional
 one-based string rank. Its coercion chain covers exact signed/unsigned

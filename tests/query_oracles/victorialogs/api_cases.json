@@ -2116,6 +2116,38 @@
       }]
     },
     {
+      "id": "LQL-S07-quantile-uses-upper-step-natural-order",
+      "query": "case:in(numeric-zero,numeric-two,numeric-decimal,numeric-ten) | stats quantile(0, n) as minimum, quantile(0.5, n) as p50, quantile(1, n) as maximum",
+      "expected_rows": [{
+        "minimum": "0",
+        "p50": "2.5",
+        "maximum": "10"
+      }]
+    },
+    {
+      "id": "LQL-S07-quantile-defaults-to-current-fields",
+      "query": "case:in(numeric-zero,numeric-two,numeric-decimal,numeric-ten) | fields n | stats quantile(0.5) as p50",
+      "expected_rows": [{"p50": "2.5"}]
+    },
+    {
+      "id": "LQL-S07-quantile-function-is-case-insensitive",
+      "query": "case:in(numeric-zero,numeric-two,numeric-decimal,numeric-ten) | stats QuAnTiLe(0.5, n) as p50",
+      "expected_rows": [{"p50": "2.5"}]
+    },
+    {
+      "id": "LQL-S07-quantile-missing-field-is-empty",
+      "query": "state_group:=\"state\" | stats quantile(0.5, never_present) as p50",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-S07-stddev-is-population-deviation",
+      "query": "case:in(numeric-zero,numeric-two,numeric-decimal,numeric-ten) | stats StDdEv(n) as sigma, stddev(never_present) as empty_sigma",
+      "expected_rows": [{
+        "sigma": "3.797614382740828",
+        "empty_sigma": "NaN"
+      }]
+    },
+    {
       "id": "LQL-S08-rate-and-rate-sum-use-global-window",
       "query": "_time:30s numeric_group:=\"numeric\" | stats rate() as rate, rate_sum(n) as rate_sum",
       "expected_rows": [{
@@ -5742,6 +5774,41 @@
     {
       "id": "LQL-P36-unpack-json-rejects-both-preservation-modifiers",
       "query": "* | unpack_json keep_original_fields skip_empty_results",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S07-quantile-requires-phi",
+      "query": "* | stats quantile()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S07-quantile-rejects-nonnumeric-phi",
+      "query": "* | stats quantile(word, n)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S07-quantile-rejects-low-phi",
+      "query": "* | stats quantile(-0.1, n)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S07-quantile-rejects-high-phi",
+      "query": "* | stats quantile(1.1, n)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S07-stddev-requires-parentheses",
+      "query": "* | stats stddev",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
