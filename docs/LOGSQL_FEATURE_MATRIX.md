@@ -135,7 +135,7 @@ extension.
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P34` | `pack_json` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
@@ -489,8 +489,11 @@ General LogsQL pattern grammar, quoted decoding, current-row mutation and
 preservation, limits, cancellation, and envelopes remain Rust API work. The
 complete 802-case pinned VictoriaLogs oracle and real-extension regressions
 cover the language boundary. No extension primitive, private table, durable
-mutation, or storage-contract change is required. Exact-build evidence and
-its HWM verdict remain required before this row ships.
+mutation, or storage-contract change is required. Exact-build evidence
+records 3.269/39.052 ms narrow/wide p95 versus 3.201/33.944 ms for byte-
+identical same-scan controls; `QSF-183` accepts the +2.1%/+15.0% bounded
+literal extraction/field-write cost above the unchanged public storage
+boundary.
 
 ## Statistics functions
 

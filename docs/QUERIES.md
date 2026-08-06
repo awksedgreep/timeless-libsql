@@ -1186,6 +1186,16 @@ modes, limits, cancellation, and HTTP envelopes remain Rust API behavior. No
 extension primitive, private table, storage-format change, or durable
 mutation is involved.
 
+Exact-build literal-extraction evidence measures 2.977/3.269/3.673 ms narrow
+and 37.121/39.052/43.064 ms wide p50/p95/p99 while returning 64 rows and
+1,600 response bytes. Byte-identical same-scan controls measure
+2.925/3.201/3.315 and 32.704/33.944/34.306 ms. The +2.1%/+15.0% p95 and
+-1.7%/+12.2% internal API variation follows the same one/four candidate
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. `QSF-183` accepts this bounded API-side literal scan,
+quoted decoding, and field-write work above the unchanged public storage
+boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

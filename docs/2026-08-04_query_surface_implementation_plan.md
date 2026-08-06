@@ -784,6 +784,23 @@ expansion cost, records unchanged four-block storage and the HWM verdict, and
 closes `LQL-P30`. Session 17 continues with its remaining declared P2 rows;
 none may be skipped before Session 18 begins.
 
+`LQL-P32` now has strict case-insensitive literal `extract` grammar; required
+named and optional anonymous captures; HTML-decoded delimiters; nonempty-
+prefix search and empty-prefix anchoring; bounded Go double/single/raw quoted
+decoding plus `plain:`; default `_msg` and exact quoted/dotted sources;
+conditions; default, keep-original, and skip-empty write policies; explicit
+empty and native rich-value fidelity; hard work/state/result/response limits;
+cancellation; optimize/reopen coverage; immutable durable sources; and
+executable public `SQL-LOG-040`. Twenty-three exact-result and fourteen error
+cases pass the complete 802-case pinned VictoriaLogs oracle. `QSF-182`
+records the retained-model and parser-diagnostic boundaries. Exact-build
+commit `0656dcf0c752729a2dfa755d322e6de281a8b007` measures 3.269/39.052 ms
+narrow/wide p95 versus 3.201/33.944 ms for byte-identical same-scan controls.
+`QSF-183` accepts the +2.1%/+15.0% bounded literal extraction/current-row
+write cost, records unchanged four-block storage and the HWM verdict, and
+closes `LQL-P32`. Session 17 continues with its remaining declared P2 rows;
+none may be skipped before Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,
