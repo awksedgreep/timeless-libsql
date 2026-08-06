@@ -756,6 +756,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL extract_regexp destination conflict:")
         || error.starts_with("LogsQL pack_json destination conflict:")
         || error.starts_with("LogsQL pack_json field selection conflict:")
+        || error.starts_with("LogsQL pack_logfmt destination conflict:")
         || error.starts_with("LogsQL unpack_json destination conflict:")
         || error.starts_with("LogsQL unpack_json field selection conflict:")
     {

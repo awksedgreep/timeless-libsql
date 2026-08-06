@@ -971,3 +971,20 @@ VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture
 now contains 344 row-query cases, one stochastic case, 370 error cases, and
 376 statistics/pipeline cases: 1,091 cases total, all passing against the
 immutable image. The fixture now contains 1091 cases.
+
+`LQL-P35` adds twelve exact pipeline-result cases and eight error cases for
+`pack_logfmt`. They pin default `_msg`, explicit and bare destinations,
+terminal `as`, pre-write destination snapshots, exact/prefix/empty/all field
+selection, missing/null/empty/number/boolean/array/nested textual projection,
+whitespace/quote/backslash/control escaping, exact `\u003c` and `\u0027`
+wire spelling, case-insensitive keywords, flattened nested prefixes, and
+upstream repeated output for overlapping selectors. Error cases pin required
+parentheses and comma separation, leading empty fields, second destinations,
+wildcard/prefix destinations, and attached suffixes. Source audit covers
+`pipe_pack_logfmt.go`, `pipe_pack_logfmt_test.go`, `pipe_pack.go`, `rows.go`,
+`rows_test.go`, `parser_utils.go`, and public LogsQL documentation at
+immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 344
+row-query cases, one stochastic case, 378 error cases, and 388
+statistics/pipeline cases: 1,111 cases total, all passing against the immutable
+image. The fixture now contains 1111 cases.

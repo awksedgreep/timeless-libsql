@@ -138,7 +138,7 @@ extension.
 | `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P35` | `pack_logfmt` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
@@ -669,6 +669,34 @@ Exact-build evidence records 3.146/37.921 ms narrow/wide p95 versus
 plain-field controls because every selected value is wrapped in a JSON object
 string. `QSF-187` accepts the bounded rich selection/serialization cost above
 the unchanged public storage boundary.
+
+`LQL-P35` snapshots exact, prefix, empty-list, or all-current-field
+selections and writes deterministic logfmt text to `_msg` or one explicit
+exact destination. Grammar is case-insensitive; destinations may follow
+`as` or appear bare; terminal `as` keeps `_msg`; selectors may be quoted;
+and malformed lists, wildcards in destinations, attached suffixes, and
+trailing tokens fail before storage work. Selection precedes mutation, so an
+overwritten destination contributes its old value.
+
+Timeless emits raw `name=value` pairs in bytewise field-name order. Exact
+missing, null, empty, and object-parent values emit empty text. Recursive
+prefix/all traversal flattens objects to dotted leaves, arrays remain atomic
+compact JSON, and values containing runes through U+0020, quotes, or
+backslashes use VictoriaLogs-compatible JSON-string quoting with exact
+`\u003c` and `\u0027` spellings. Overlapping selectors form an idempotent
+union. This deliberately differs from VictoriaLogs v1.52.0 current-column
+ordering and repeated fields for overlaps; the complete 1,111-case pinned
+oracle records both the upstream behavior and the retained-model decision.
+
+The bounded Rust evaluator owns language parsing, recursive current-row
+selection, destination mutation/conflicts, work/state/result/response limits,
+deadline cancellation, and HTTP envelopes. Durable source rows remain
+unchanged through optimize, shutdown, and reopen. Executable
+[`SQL-LOG-052`](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)
+gives direct SQLite/libSQL users the fixed exact-path core-SQL/JSON1
+foundation. Since all selected rows already cross the public `logs` surface,
+no extension primitive, private table, codec, format, or storage-contract
+change is justified.
 
 `LQL-P36` parses one exact current-row field as a JSON object and writes the
 selected values back into that request-owned row. The Rust logs API accepts

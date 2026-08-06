@@ -4315,6 +4315,73 @@
       "expected_rows": [{"case": "format-row", "packed": "{\"math_a\":\"2\",\"math_a\":\"2\"}"}]
     },
     {
+      "id": "LQL-P35-pack-logfmt-defaults-to-message-and-snapshots-source",
+      "query": "case:=state-zero | fields case, _msg | pack_logfmt | fields case, _msg",
+      "expected_rows": [{"case": "state-zero", "_msg": "case=state-zero _msg=\"state zero\""}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-includes-empty-and-flattened-typed-values",
+      "query": "state_group:=state | fields case, probe | pack_logfmt fields (case, probe) as packed | fields case, packed | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty", "packed": "case=state-empty probe="},
+        {"case": "state-false", "packed": "case=state-false probe=false"},
+        {"case": "state-missing", "packed": "case=state-missing probe="},
+        {"case": "state-null", "packed": "case=state-null probe="},
+        {"case": "state-string", "packed": "case=state-string probe=value"},
+        {"case": "state-zero", "packed": "case=state-zero probe=0"}
+      ]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-quotes-message-whitespace-and-json-punctuation",
+      "query": "case:=format-row | fields case, _msg, url, math_array | pack_logfmt fields (_msg, url, math_array) as packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "_msg=\"hello \\\"world\\\"\\nnext\" url=\"a b+ц\" math_array=[1,2]"}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-matches-victorialogs-json-escaping-when-quoted",
+      "query": "case:=format-row | format \"a&lt;' b\" as source | fields case, source | pack_logfmt fields (source) as packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "source=\"a\\u003c\\u0027 b\""}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-supports-prefix-selectors",
+      "query": "case:=format-row | fields case, math_a, math_b, host | PaCk_LoGfMt FiElDs (math_*) As packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "math_a=2 math_b=3"}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-preserves-overlapping-selector-duplicates",
+      "query": "case:=format-row | fields case, math_a | pack_logfmt fields (math_*, math_a) as packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "math_a=2 math_a=2"}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-supports-flattened-nested-prefixes",
+      "query": "case:=format-row | fields case, math_nested.value | pack_logfmt fields (math_nested.*) packed | fields case, packed",
+      "expected_rows": [{"case": "format-row", "packed": "math_nested.value=4"}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-exact-missing-selection-emits-an-empty-value",
+      "query": "case:=state-zero | pack_logfmt fields (missing) packed | fields case, packed",
+      "expected_rows": [{"case": "state-zero", "packed": "missing="}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-empty-fields-list-means-all",
+      "query": "case:=state-zero | fields case, probe | pack_logfmt fields () as packed | fields case, packed",
+      "expected_rows": [{"case": "state-zero", "packed": "case=state-zero probe=0"}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-star-among-selectors-means-all",
+      "query": "case:=state-zero | fields case, probe | pack_logfmt fields (missing, *,) as packed | fields case, packed",
+      "expected_rows": [{"case": "state-zero", "packed": "case=state-zero probe=0"}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-includes-old-destination-value",
+      "query": "case:=format-row | fields case, result | pack_logfmt fields (result) as result | fields case, result",
+      "expected_rows": [{"case": "format-row", "result": "result=original"}]
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-terminal-as-keeps-default-message",
+      "query": "case:=state-zero | fields case | pack_logfmt as | fields case, _msg",
+      "expected_rows": [{"case": "state-zero", "_msg": "case=state-zero"}]
+    },
+    {
       "id": "LQL-P36-unpack-json-defaults-to-message-and-textualizes-values",
       "query": "case:=format-row | format '{\"foo\":\"bar\",\"n\":2,\"flag\":true,\"empty\":\"\",\"none\":null,\"nested\":{\"x\":\"y\"},\"arr\":[1,true]}' | unpack_json | fields case, foo, n, flag, empty, none, nested.x, arr",
       "expected_rows": [{"case": "format-row", "foo": "bar", "n": "2", "flag": "true", "nested.x": "y", "arr": "[1,true]"}]
@@ -6658,6 +6725,62 @@
     {
       "id": "LQL-P34-pack-json-rejects-prefix-result",
       "query": "* | pack_json as x*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-rejects-second-result-field",
+      "query": "* | pack_logfmt foo bar",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-requires-parenthesized-fields",
+      "query": "* | pack_logfmt fields",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-rejects-unparenthesized-fields",
+      "query": "* | pack_logfmt fields case",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-requires-comma-separated-fields",
+      "query": "* | pack_logfmt fields (case probe)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-rejects-leading-empty-field",
+      "query": "* | pack_logfmt fields (, case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-rejects-wildcard-result",
+      "query": "* | pack_logfmt as *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-rejects-prefix-result",
+      "query": "* | pack_logfmt as x*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P35-pack-logfmt-rejects-attached-suffix",
+      "query": "* | pack_logfmt.extra",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

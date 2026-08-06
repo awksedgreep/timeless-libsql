@@ -159,6 +159,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-049`](#sql-log-049-bounded-random-log-sample) | `LQL-P17` | current foundation | bounded independent `1/N` random selection over public log rows; API owns LogsQL unsigned grammar, exponential-gap compatibility, limits, cancellation, and envelopes |
 | [`SQL-LOG-050`](#sql-log-050-strip-csi-color-sequences-from-one-exact-field) | `LQL-P27` | current foundation | exact byte-state removal of CSI sequences from one bounded public row field; API owns LogsQL grammar, current-row composition, rich no-op preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-051`](#sql-log-051-literal-split-of-one-exact-field) | `LQL-P31` | current foundation | literal non-overlapping split of one bounded public row field into a JSON array, including Unicode-scalar empty-separator behavior; API owns LogsQL grammar, current-row mutation, exact wire spelling, limits, cancellation, and envelopes |
+| [`SQL-LOG-052`](#sql-log-052-pack-fixed-exact-fields-as-logfmt) | `LQL-P35` | current foundation | deterministic logfmt packing of a fixed ordered list of exact public metadata paths with missing/null/object-parent textualization and Victoria-compatible quoting; API owns dynamic selectors, canonical/current fields, rich flattening, mutation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -8209,6 +8210,126 @@ an extension split primitive would add API surface without reducing storage
 work. Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_eighteen_split_is_exact_rich_bounded_and_durable`.
+
+### SQL-LOG-052: pack fixed exact fields as logfmt
+
+Bind an ordered, fixed list of exact metadata field names and SQLite JSON
+paths, inclusive native timestamp bounds, and positive work/result limits.
+This statement emits one deterministic `name=value` string per bounded public
+log row. Values containing a space, another ASCII control byte, a double
+quote, or a backslash receive the same JSON-string quoting used by the Rust
+API; quoted less-than signs and apostrophes use VictoriaLogs' exact escape
+spelling.
+
+```sql
+WITH
+bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    level,
+    message,
+    metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), selected(position, name, path) AS (
+  VALUES
+    (1, :logfmt_name_1, :logfmt_path_1),
+    (2, :logfmt_name_2, :logfmt_path_2),
+    (3, :logfmt_name_3, :logfmt_path_3),
+    (4, :logfmt_name_4, :logfmt_path_4)
+), projected AS MATERIALIZED (
+  SELECT
+    bounded.row_id,
+    bounded.ts,
+    selected.position,
+    selected.name,
+    CAST(CASE
+      WHEN json_type(bounded.metadata, selected.path) IS NULL THEN ''
+      ELSE CASE json_type(bounded.metadata, selected.path)
+        WHEN 'true' THEN 'true'
+        WHEN 'false' THEN 'false'
+        WHEN 'array' THEN json(json_extract(bounded.metadata, selected.path))
+        WHEN 'object' THEN ''
+        WHEN 'null' THEN ''
+        ELSE json_extract(bounded.metadata, selected.path)
+      END
+    END AS TEXT) AS value
+  FROM bounded
+  CROSS JOIN selected
+), encoded AS MATERIALIZED (
+  SELECT
+    row_id,
+    ts,
+    position,
+    name || '=' || CASE
+      WHEN instr(value, ' ') > 0
+        OR json_quote(value) <> ('"' || value || '"')
+      THEN replace(
+        replace(json_quote(value), '<', '\u003c'),
+        '''',
+        '\u0027'
+      )
+      ELSE value
+    END AS piece
+  FROM projected
+)
+SELECT
+  bounded.ts,
+  (
+    SELECT group_concat(piece, ' ')
+    FROM (
+      SELECT piece
+      FROM encoded
+      WHERE encoded.row_id = bounded.row_id
+      ORDER BY position
+    )
+  ) AS packed_logfmt
+FROM bounded
+WHERE :max_result_rows > 0
+ORDER BY bounded.ts, bounded.row_id
+LIMIT :max_result_rows;
+```
+
+For the executable public-row fixture, bind `:start_ts`/`:end_ts` to
+`1000`/`2000`, `:max_work_entries` to `100000`, and `:max_result_rows` to
+`100`. The four `(name,path)` pairs are `host`/`$.host`, `nested.none`/
+`$.nested.none`, `nested.array_text`/`$.nested.array_text`, and `tags`/
+`$.tags`. Extend or shorten the `selected` values for an application's fixed
+schema. Names are trusted fixed schema identifiers and are emitted literally,
+matching LogsQL rather than inventing a second key-quoting grammar.
+
+Missing paths, JSON null, and an exact retained object parent become empty
+text. Strings and numbers use their SQLite textual representation, booleans
+use lowercase `true`/`false`, and arrays use compact JSON. Empty values are
+retained as `name=`. `json_quote()` detects every JSON-escaped control,
+double quote, and backslash; the explicit space check completes LogsQL's
+quote condition. Replacing `<` and `'` only inside quoted JSON strings matches
+VictoriaLogs' `\u003c` and `\u0027` wire spelling. Output order is the bound
+field order, source rows are explicitly ordered, and the statement is
+read-only.
+
+The complete `LQL-P35` API additionally owns case-insensitive `pack_logfmt`
+grammar; optional exact, prefix, empty-list, and all-current-field selectors;
+default `_msg`, explicit `as`, bare, quoted, and dotted destinations;
+canonical fields; recursive retained-row flattening; pre-write snapshots;
+sequential mutation; conflict errors; and cumulative work, state, result,
+response, deadline, and cancellation limits. Timeless selects an idempotent
+union in deterministic bytewise field order and recursively flattens retained
+objects, while VictoriaLogs preserves current column order and repeats fields
+when selectors overlap. Arrays remain atomic compact JSON; exact missing,
+null, and object-parent selections emit an empty value. This is the explicit
+retained-model compatibility policy, not a claim that dynamic LogsQL grammar
+is ordinary SQL.
+
+Every selected value already crosses the bounded public `logs` interface.
+The fixed-schema operation is expressible with core SQLite and JSON1, so an
+extension opcode would not eliminate a block read, decode, allocation, or row
+crossing. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
+harness; HTTP/oracle/optimize/reopen regression:
+`session_eighteen_pack_logfmt_is_exact_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

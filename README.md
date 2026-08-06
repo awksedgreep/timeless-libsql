@@ -883,6 +883,19 @@ Exact-build p50/p95/p99 is 3.219/3.481/4.063 ms narrow and
 `QSF-216` records the 27.3%/3.5% lower p95 alongside the more stable +3.1%/
 -1.4% request-attributed mean differences as bounded whole-run/API variation,
 not storage pushdown.
+`pack_logfmt` snapshots exact, prefix, empty-list, or all-current-field
+selections and writes deterministic `name=value` text to `_msg` or one exact
+destination. Missing, null, and exact object-parent values remain visible as
+empty values; arrays stay atomic compact JSON; nested objects flatten to
+dotted leaves; spaces/control bytes/quotes/backslashes receive the pinned
+VictoriaLogs JSON-string quoting. Timeless intentionally deduplicates
+overlapping selectors and sorts retained field names bytewise instead of
+repeating merge-order-dependent upstream columns. Work, state, results,
+response bytes, cancellation, conflicts, and durable-row immutability remain
+bounded Rust API contracts over public `logs` rows. Direct SQLite/libSQL users
+can run executable `SQL-LOG-052` for a fixed ordered list of exact public
+metadata paths. Because all values have already crossed the public storage
+boundary, no LogsQL opcode or private-table path is added to the extension.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

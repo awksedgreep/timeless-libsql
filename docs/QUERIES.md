@@ -1631,6 +1631,56 @@ one/four candidate blocks, 1,024/8,192 decoded entries,
 accepts the bounded rich selection and serialization cost above the unchanged
 public storage boundary.
 
+## LogsQL deterministic `pack_logfmt` over current rows
+
+`pack_logfmt` snapshots selected request-owned fields and writes one logfmt
+string to a current-row destination:
+
+```text
+* | pack_logfmt
+* | pack_logfmt as packed
+* | pack_logfmt packed
+* | pack_logfmt fields (host, status, context.*) as packed
+* | pack_logfmt fields (missing, *,) as "packed field"
+```
+
+The command, `fields`, and `as` are case-insensitive. The destination defaults
+to `_msg`; it may follow `as` or be bare, and terminal `as` keeps the default.
+Omitted or empty `fields (...)` selects all current fields, as does `*`
+anywhere in the list. Exact and suffix-wildcard prefix selectors may be
+quoted. Selection snapshots the row before writing, so replacing `_msg` or an
+existing destination includes its prior value. Later stages observe the new
+text.
+
+Output is a space-separated sequence of raw `name=value` pairs in
+deterministic bytewise field-name order. Missing exact fields, explicit null,
+empty strings, and exact object parents emit empty values. All/prefix
+selection recursively flattens objects to dotted leaves; arrays stay atomic
+compact JSON. A value is quoted exactly when it contains a rune through
+U+0020, a double quote, or a backslash. Quoted values use the pinned
+VictoriaLogs JSON spelling, including `\u003c` and `\u0027`; otherwise they
+remain unquoted.
+
+VictoriaLogs v1.52.0 preserves current column order and repeats fields for
+overlapping selectors. Timeless intentionally forms an idempotent selector
+union and orders retained field names deterministically. This avoids unstable
+duplicates while preserving the richer nested model. The 1,111-case pinned
+oracle records upstream behavior, and the real-extension regression pins the
+selected retained-model policy through optimize and reopen.
+
+Recursive traversal, names, textual projections, output bytes, work, result
+rows, response bytes, deadlines, and cancellation are bounded. A destination
+that would replace an object or descend through a scalar fails with HTTP 422.
+The operation mutates only request-owned rows, never public durable `logs`.
+
+Executable
+[`SQL-LOG-052`](QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)
+uses public `logs`, JSON1, `json_quote`, and deterministic aggregation for a
+fixed ordered list of exact metadata paths. Dynamic selectors, canonical
+fields, current-row writes, errors, limits, cancellation, and HTTP envelopes
+remain Rust API composition. No extension primitive, private table, or
+storage-format change is involved.
+
 ## LogsQL typed `unpack_json` over current rows
 
 `unpack_json` snapshots one request-owned field, parses a JSON object, and

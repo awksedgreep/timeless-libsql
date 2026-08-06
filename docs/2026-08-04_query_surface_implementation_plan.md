@@ -1065,6 +1065,20 @@ pushdown. The full 1,091-case oracle, executable SQL, documentation contracts,
 real-extension/API suites, formatting, lint, crash/transaction, and lifecycle
 gates pass.
 
+Session 18's `LQL-P35` row is semantically complete and awaiting exact-build
+performance/HWM evidence. Pinned VictoriaLogs source plus the complete
+1,111-case live oracle establish optional exact/prefix/all selectors, default
+and explicit destinations, source snapshots, current-column ordering,
+overlapping-selector duplication, textual projection, conditional quoting,
+and strict errors. Timeless deliberately selects a deterministic idempotent
+union, recursively flattens retained objects to dotted leaves, keeps arrays
+atomic, and preserves explicit empty-state visibility. The bounded Rust
+evaluator changes no extension or durable storage contract. Executable
+`SQL-LOG-052` gives direct SQLite/libSQL users the fixed exact-path
+core-SQL/JSON1 foundation. Parser, evaluator, real-extension, optimize,
+shutdown/reopen, immutable-source, SQL, and oracle regressions pass; the row
+remains in progress until exact-build evidence and the full local gates close.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

@@ -1320,6 +1320,52 @@ public storage work. Packed results are 2,688 bytes versus 1,600 because they
 contain the requested JSON object strings. This bounded rich selection and
 serialization cost does not justify moving LogsQL syntax into the extension.
 
+LogsQL `pack_logfmt` serializes selected current-row fields into deterministic
+logfmt text without changing durable log metadata:
+
+```text
+* | pack_logfmt
+* | pack_logfmt as packed
+* | pack_logfmt packed
+* | pack_logfmt fields (host, status, context.*) as packed
+* | pack_logfmt fields (missing, *,) as "packed field"
+```
+
+The command is case-insensitive. Its destination defaults to `_msg` and may
+follow `as` or appear bare; terminal `as` retains the default. Omitted or
+empty `fields (...)` selects all current fields, as does `*` anywhere in the
+list. Exact and suffix-wildcard prefix selectors may be quoted. Sources are
+snapshotted before the destination write, so default packing includes the old
+`_msg`; later pipes see the packed text.
+
+Fields are emitted as raw `name=value` pairs in deterministic bytewise-name
+order. Missing exact fields, explicit nulls, empty strings, and exact retained
+object parents emit an empty value. Recursive all/prefix selection flattens
+objects to dotted leaves; arrays remain atomic compact JSON. Values containing
+any rune through U+0020, `"`, or `\` use VictoriaLogs-compatible JSON-string
+quoting, including `\u003c` and `\u0027` inside quoted values. Other values
+remain unquoted.
+
+VictoriaLogs v1.52.0 follows current column order and repeats a field when
+selectors overlap. Timeless deliberately uses an idempotent selector union
+and deterministic order because its retained rich model has nested objects
+and promises stable output. The pinned 1,111-case oracle records upstream
+grammar, projection, quoting, and duplicate behavior; direct evaluator and
+real-extension tests pin the selected Timeless policy.
+
+Traversal, selected names/values, encoded output, work, results, response
+bytes, deadlines, and cancellation use the shared limits. Object-replacing or
+scalar-crossing destinations return HTTP 422. Request-local writes never
+mutate durable storage and survive optimize, shutdown, and reopen.
+
+Direct SQLite/libSQL users can use executable
+[`SQL-LOG-052`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-052-pack-fixed-exact-fields-as-logfmt)
+to pack a fixed ordered list of exact public metadata paths with core SQLite
+and JSON1, including the same conditional quoting. Dynamic selectors,
+canonical/current fields, row mutation, limits, cancellation, and envelopes
+remain Rust API behavior. Every value already crossed public `logs`, so no
+language-specific extension primitive or private storage access is involved.
+
 LogsQL `unpack_json` parses one current-row JSON object without changing
 durable log metadata:
 

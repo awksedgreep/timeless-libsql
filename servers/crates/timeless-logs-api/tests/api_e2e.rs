@@ -5927,6 +5927,249 @@ async fn session_seventeen_pack_json_is_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_pack_logfmt_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("pack-logfmt-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: "original message".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"pack-logfmt",
+                        "pack_logfmt_group":"pack-logfmt",
+                        "number":101,
+                        "zero":0,
+                        "flag":false,
+                        "empty":"",
+                        "null_value":null,
+                        "array":["prod",1],
+                        "nested":{"keep":"yes", "drop":"no"},
+                        "spaced field":"two words",
+                        "escape":"line one\n\"two\"\\tail<'",
+                        "old_destination":"old"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "second message".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"pack-logfmt-secondary",
+                        "pack_logfmt_group":"pack-logfmt",
+                        "number":202
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="pack-logfmt" | pack_logfmt fields (case, number, zero, flag, empty, null_value, array, nested.*, "spaced field", escape, missing) as packed | fields case, packed"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"pack-logfmt",
+            "packed":r#"array="[\"prod\",1]" case=pack-logfmt empty= escape="line one\n\"two\"\\tail\u003c\u0027" flag=false missing= nested.drop=no nested.keep=yes null_value= number=101 spaced field="two words" zero=0"#
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="pack-logfmt" | fields case, _msg, level, _time | pack_logfmt | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"pack-logfmt",
+            "_msg":r#"_msg="original message" _time=2027-01-15T08:00:00.000001Z case=pack-logfmt level=warning"#
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="pack-logfmt" | PaCk_LoGfMt FiElDs ("nested."*, flag, missing) As "packed field" | fields case, "packed field""#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"pack-logfmt",
+            "packed field":"flag=false missing= nested.drop=no nested.keep=yes"
+        })]
+    );
+
+    let rows = pipeline_rows(
+        &app,
+        r#"case:="pack-logfmt" | fields case, number | pack_logfmt fields (missing, *,) packed | len(packed) as packed_len | fields case, packed, packed_len"#,
+    )
+    .await;
+    assert_eq!(rows[0]["packed"], "case=pack-logfmt number=101");
+    assert_eq!(
+        rows[0]["packed_len"],
+        rows[0]["packed"].as_str().unwrap().len().to_string()
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="pack-logfmt" | pack_logfmt fields (old_destination) as old_destination | fields case, old_destination"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"pack-logfmt",
+            "old_destination":"old_destination=old"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="pack-logfmt" | pack_logfmt fields (nested) as packed | fields case, packed"#,
+        )
+        .await,
+        [serde_json::json!({"case":"pack-logfmt", "packed":"nested="})]
+    );
+
+    for malformed in [
+        "* | pack_logfmt foo bar",
+        "* | pack_logfmt fields",
+        "* | pack_logfmt fields case",
+        "* | pack_logfmt fields (case number)",
+        "* | pack_logfmt fields (, case)",
+        "* | pack_logfmt as *",
+        "* | pack_logfmt as x*",
+        "* | pack_logfmt.extra",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="pack-logfmt" | pack_logfmt as nested"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                r#"pack_logfmt_group:="pack-logfmt" | pack_logfmt as packed | limit 10000"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="pack-logfmt" | fields case, _msg, number, zero, flag, empty, null_value, array, nested, "spaced field", escape, old_destination"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"pack-logfmt",
+            "_msg":"original message",
+            "number":101,
+            "zero":0,
+            "flag":false,
+            "empty":"",
+            "null_value":null,
+            "array":["prod",1],
+            "nested":{"keep":"yes", "drop":"no"},
+            "spaced field":"two words",
+            "escape":"line one\n\"two\"\\tail<'",
+            "old_destination":"old"
+        })],
+        "pack_logfmt must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="pack-logfmt" | pack_logfmt fields (case, number, flag, null_value, array, nested.*) as packed | fields case, packed"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"pack-logfmt",
+            "packed":r#"array="[\"prod\",1]" case=pack-logfmt flag=false nested.drop=no nested.keep=yes null_value= number=101"#
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_seventeen_unpack_json_is_rich_bounded_and_durable() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

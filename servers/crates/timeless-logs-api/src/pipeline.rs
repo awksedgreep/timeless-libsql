@@ -22,9 +22,9 @@ use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CollapseNumsSpec,
     CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
-    MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PipelineField,
-    PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, SplitSpec,
-    StatsExpression, StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
+    MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec,
+    PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
+    SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -265,6 +265,9 @@ pub(crate) fn execute(
             PipelineOp::PackJson(spec) => {
                 pack_json_fields(rows, spec, execution.limits, execution.cancelled)?
             }
+            PipelineOp::PackLogfmt(spec) => {
+                pack_logfmt_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
             PipelineOp::UnpackJson(spec) => unpack_json_fields(
                 rows,
                 spec,
@@ -402,6 +405,282 @@ fn pack_json_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn pack_logfmt_fields(
+    rows: Vec<Value>,
+    spec: &PackLogfmtSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL pack_logfmt result is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "pack_logfmt")?;
+            let mut state_bytes = size_of::<BTreeMap<String, String>>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "pack_logfmt")?;
+            let fields = select_logfmt_fields(
+                &row,
+                &spec.fields,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            let encoded = bounded_logfmt(
+                &fields,
+                &mut state_bytes,
+                cancelled,
+                limits.max_state_bytes,
+            )?;
+
+            charge_transfer_string(
+                destination_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "pack_logfmt",
+            )?;
+            for segment in destination_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "pack_logfmt",
+                )?;
+            }
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL pack_logfmt input row is not a JSON object".to_string())?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL pack_logfmt destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(encoded))
+                .map_err(|error| format!("LogsQL pack_logfmt destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn select_logfmt_fields(
+    row: &Value,
+    selectors: &[PipelineField],
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<BTreeMap<String, String>, String> {
+    if !row.is_object() {
+        return Err("LogsQL pack_logfmt input row is not a JSON object".into());
+    }
+    let mut selected = BTreeMap::new();
+    if selectors.is_empty()
+        || selectors
+            .iter()
+            .any(|selector| matches!(selector, PipelineField::All))
+    {
+        let mut path = String::new();
+        collect_logfmt_leaves(
+            row,
+            &mut path,
+            "",
+            &mut selected,
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+        )?;
+        return Ok(selected);
+    }
+
+    for selector in selectors {
+        ensure_active(cancelled)?;
+        match selector {
+            PipelineField::Exact { path, name } => {
+                charge_transfer_work(work_items, limits.max_state_items, "pack_logfmt")?;
+                check_periodically(cancelled, *work_items)?;
+                let value = field_value(row, path).filter(|value| !value.is_object());
+                insert_logfmt_field(
+                    &mut selected,
+                    name,
+                    value,
+                    state_bytes,
+                    work_items,
+                    limits,
+                    cancelled,
+                )?;
+            }
+            PipelineField::Prefix { prefix } => {
+                let mut path = String::new();
+                collect_logfmt_leaves(
+                    row,
+                    &mut path,
+                    prefix,
+                    &mut selected,
+                    state_bytes,
+                    work_items,
+                    limits,
+                    cancelled,
+                )?;
+            }
+            PipelineField::All => unreachable!("all-fields selection handled above"),
+        }
+    }
+    Ok(selected)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_logfmt_leaves(
+    value: &Value,
+    path: &mut String,
+    prefix: &str,
+    selected: &mut BTreeMap<String, String>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, limits.max_state_items, "pack_logfmt")?;
+    check_periodically(cancelled, *work_items)?;
+    if let Value::Object(object) = value {
+        for (name, child) in object {
+            charge_transfer_string(name, state_bytes, limits.max_state_bytes, "pack_logfmt")?;
+            let original_length = path.len();
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(name);
+            collect_logfmt_leaves(
+                child,
+                path,
+                prefix,
+                selected,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?;
+            path.truncate(original_length);
+        }
+        return Ok(());
+    }
+    if path.starts_with(prefix) {
+        insert_logfmt_field(
+            selected,
+            path,
+            Some(value),
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_logfmt_field(
+    selected: &mut BTreeMap<String, String>,
+    name: &str,
+    value: Option<&Value>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    if selected.contains_key(name) {
+        return Ok(());
+    }
+    let projected = textual_transform_projection(
+        value,
+        state_bytes,
+        work_items,
+        limits,
+        cancelled,
+        "pack_logfmt",
+    )?
+    .into_owned();
+    *state_bytes = state_bytes
+        .checked_add(size_of::<(String, String)>())
+        .ok_or_else(|| "LogsQL pack_logfmt state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "pack_logfmt")?;
+    charge_transfer_string(name, state_bytes, limits.max_state_bytes, "pack_logfmt")?;
+    charge_transfer_string(
+        &projected,
+        state_bytes,
+        limits.max_state_bytes,
+        "pack_logfmt",
+    )?;
+    selected.insert(name.to_owned(), projected);
+    Ok(())
+}
+
+fn bounded_logfmt(
+    fields: &BTreeMap<String, String>,
+    state_bytes: &mut usize,
+    cancelled: &AtomicBool,
+    max_state_bytes: usize,
+) -> Result<String, String> {
+    let mut output_len = 0usize;
+    for (index, (name, value)) in fields.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index != 0 {
+            output_len = output_len
+                .checked_add(1)
+                .ok_or_else(|| "LogsQL pack_logfmt result size overflow".to_string())?;
+        }
+        let value_len = if logfmt_needs_quote(value) {
+            victorialogs_json_string_len(value, cancelled)?
+        } else {
+            value.len()
+        };
+        output_len = output_len
+            .checked_add(name.len())
+            .and_then(|length| length.checked_add(1))
+            .and_then(|length| length.checked_add(value_len))
+            .ok_or_else(|| "LogsQL pack_logfmt result size overflow".to_string())?;
+    }
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL pack_logfmt state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, max_state_bytes, "pack_logfmt")?;
+
+    let mut output = Vec::with_capacity(output_len);
+    for (index, (name, value)) in fields.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index != 0 {
+            output.push(b' ');
+        }
+        output.extend_from_slice(name.as_bytes());
+        output.push(b'=');
+        if logfmt_needs_quote(value) {
+            append_victorialogs_json_string(&mut output, value, cancelled)?;
+        } else {
+            output.extend_from_slice(value.as_bytes());
+        }
+    }
+    if output.len() != output_len {
+        return Err("LogsQL pack_logfmt result length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    String::from_utf8(output).map_err(|error| format!("encode LogsQL pack_logfmt result: {error}"))
+}
+
+fn logfmt_needs_quote(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character <= '\u{20}' || matches!(character, '"' | '\\'))
 }
 
 fn unpack_json_fields(
@@ -10412,6 +10691,124 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             pack_json_fields(vec![row], &all, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn pack_logfmt_is_deterministic_rich_exact_and_bounded() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::PackLogfmt(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected pack_logfmt plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 500,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "_msg":"original message",
+            "case":"typed",
+            "zero":0,
+            "flag":false,
+            "empty":"",
+            "null_value":null,
+            "array":["prod",1],
+            "nested":{"keep":"yes", "drop":"no"},
+            "empty_object":{},
+            "escape":"line one\n\"two\"\\tail<'",
+            "plain_escape":"<'",
+            "old_destination":"old"
+        });
+
+        let selected = parse_spec(
+            r#"* | pack_logfmt fields (case, zero, flag, empty, null_value, array, nested.*, empty_object, escape, plain_escape, missing) as packed"#,
+        );
+        let selected_rows =
+            pack_logfmt_fields(vec![row.clone()], &selected, limits, &cancelled).unwrap();
+        assert_eq!(
+            selected_rows[0]["packed"],
+            r#"array="[\"prod\",1]" case=typed empty= empty_object= escape="line one\n\"two\"\\tail\u003c\u0027" flag=false missing= nested.drop=no nested.keep=yes null_value= plain_escape=<' zero=0"#
+        );
+        assert_eq!(selected_rows[0]["array"], row["array"]);
+        assert_eq!(selected_rows[0]["nested"], row["nested"]);
+        assert_eq!(selected_rows[0]["null_value"], Value::Null);
+
+        let object_parent = parse_spec("* | pack_logfmt fields (nested) as packed");
+        assert_eq!(
+            pack_logfmt_fields(vec![row.clone()], &object_parent, limits, &cancelled).unwrap()[0]
+                ["packed"],
+            "nested="
+        );
+
+        let overlap = parse_spec("* | pack_logfmt fields (nested.*, nested.keep) packed");
+        assert_eq!(
+            pack_logfmt_fields(vec![row.clone()], &overlap, limits, &cancelled).unwrap()[0]
+                ["packed"],
+            "nested.drop=no nested.keep=yes"
+        );
+
+        let snapshot = parse_spec("* | pack_logfmt fields (old_destination) as old_destination");
+        assert_eq!(
+            pack_logfmt_fields(vec![row.clone()], &snapshot, limits, &cancelled).unwrap()[0]
+                ["old_destination"],
+            "old_destination=old"
+        );
+
+        let all = parse_spec("* | pack_logfmt");
+        let all_value = pack_logfmt_fields(vec![row.clone()], &all, limits, &cancelled).unwrap()[0]
+            ["_msg"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(all_value.contains("array=\"[\\\"prod\\\",1]\""));
+        assert!(all_value.contains("nested.drop=no nested.keep=yes"));
+        assert!(all_value.contains("null_value="));
+
+        let work_error = pack_logfmt_fields(
+            vec![row.clone()],
+            &all,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL pack_logfmt"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = pack_logfmt_fields(
+            vec![row.clone()],
+            &selected,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL pack_logfmt"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | pack_logfmt as nested");
+        let conflict_error =
+            pack_logfmt_fields(vec![row.clone()], &conflict, limits, &cancelled).unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL pack_logfmt destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            pack_logfmt_fields(vec![row], &all, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }
