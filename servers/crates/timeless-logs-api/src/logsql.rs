@@ -1790,6 +1790,89 @@ fn parse_hash_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Hash(parse_length_pipe(segment, "hash")?))
 }
 
+fn parse_collapse_nums_pipe(
+    segment: &str,
+    context: &mut ParseContext,
+) -> Result<PipelineOp, LogsqlError> {
+    let operation = "collapse_nums";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL collapse_nums pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL collapse_nums pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[operation.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL collapse_nums requires whitespace before its modifiers",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, operation)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(&expression, None, context)?)
+        }
+    } else {
+        None
+    };
+
+    let tokens = pipeline_words(rest)?;
+    let mut cursor = 0usize;
+    let mut field = parse_delete_field("_msg")?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("at"))
+    {
+        cursor += 1;
+        let value = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL collapse_nums at requires an exact field")
+        })?;
+        field = match parse_delete_field(value)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL collapse_nums at requires an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+
+    let mut prettify = false;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("prettify"))
+    {
+        prettify = true;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL collapse_nums token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::CollapseNums(CollapseNumsSpec {
+        field,
+        prettify,
+        condition,
+    }))
+}
+
 fn parse_json_array_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::JsonArrayLen(parse_length_pipe(
         segment,
@@ -2765,6 +2848,13 @@ fn is_hash_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "hash")
 }
 
+fn is_collapse_nums_pipe(segment: &str) -> bool {
+    let operation = "collapse_nums";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_json_array_len_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "json_array_len")
 }
@@ -3714,6 +3804,13 @@ pub(crate) struct UnaryFieldSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct CollapseNumsSpec {
+    pub field: PipelineField,
+    pub prettify: bool,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ReplaceSpec {
     pub old_substring: String,
     pub new_substring: String,
@@ -3819,6 +3916,7 @@ pub(crate) enum PipelineOp {
     Math(MathSpec),
     Len(UnaryFieldSpec),
     Hash(UnaryFieldSpec),
+    CollapseNums(CollapseNumsSpec),
     JsonArrayLen(UnaryFieldSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
@@ -4238,6 +4336,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_hash_pipe(segment) => {
                 pipeline.push(parse_hash_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_collapse_nums_pipe(segment) => {
+                pipeline.push(parse_collapse_nums_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_json_array_len_pipe(segment) => {
@@ -10101,6 +10203,40 @@ mod tests {
             "* | hash(source*)",
             "* | hash(source) as result*",
             "* | hash(source) result trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_collapse_nums_grammar_is_complete_and_strict() {
+        for query in [
+            "* | collapse_nums",
+            "* | COLLAPSE_NUMS",
+            "* | collapse_nums at source",
+            r#"* | collapse_nums at "source field""#,
+            "* | collapse_nums prettify",
+            "* | collapse_nums at source prettify",
+            "* | collapse_nums if ()",
+            "* | collapse_nums if (kind:=admin) at source prettify",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | collapse_nums foo",
+            "* | collapse_nums()",
+            "* | collapse_nums at",
+            "* | collapse_nums at source*",
+            "* | collapse_nums if",
+            "* | collapse_nums if (kind:=admin",
+            "* | collapse_nums prettify at source",
+            "* | collapse_nums prettify if ()",
+            "* | collapse_nums at source trailing",
+            "* | collapse_nums.at source",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

@@ -3738,6 +3738,243 @@ async fn session_eighteen_hash_matches_xxhash53_and_preserves_rich_sources() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_collapse_nums_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("collapse-nums-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "request 123".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"collapse-rich",
+                        "collapse_group":"collapse",
+                        "kind":"admin",
+                        "text":"a b c d e f ad be:eac,dead beef ab",
+                        "unicode":"a1foo2bar34 ЫВА123bar45.78",
+                        "duration":"0x1234 0XFEAD12 123ms 2us 3h5m6s43ms43μs324ns",
+                        "pretty":"35.191.193.225:51648 - 2edfed59-3e98-4073-bbb2-28d321ca71a7 - - [2024/12/08 15:21:02] 10.71.20.32 GET /foo 200",
+                        "number":9007199254740993u64,
+                        "flag":false,
+                        "array":["item",1,false],
+                        "empty":"",
+                        "null_value":null,
+                        "nested":{"child":"leaf123"},
+                        "conditional":"value 456",
+                        "skipped":"value 789",
+                        "result":"original"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 3,
+                    severity: "emergency".into(),
+                    message: "no numbers".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"collapse-missing",
+                        "collapse_group":"collapse",
+                        "flag":false,
+                        "null_value":null,
+                        "nested":{"child":"unchanged"}
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="collapse-rich" | collapse_nums at text | collapse_nums at unicode | collapse_nums at duration | collapse_nums at pretty prettify | collapse_nums at number | collapse_nums at flag | collapse_nums at array | collapse_nums at empty | collapse_nums at null_value | collapse_nums at nested | collapse_nums at missing | collapse_nums if (kind:=admin) at conditional | collapse_nums if (kind:=other) at skipped | fields case, text, unicode, duration, pretty, number, flag, array, empty, null_value, nested, missing, conditional, skipped"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"collapse-rich",
+            "text":"a b c d e f ad be:eac,<N> <N> ab",
+            "unicode":"a1foo2bar34 ЫВА123bar45.<N>",
+            "duration":"0x<N> 0X<N> <N>ms <N>us <N>h<N>m<N>s<N>ms<N>μs<N>ns",
+            "pretty":"<IP4>:<N> - <UUID> - - [<DATETIME>] <IP4> GET /foo <N>",
+            "number":"<N>",
+            "flag":false,
+            "array":r#"["item",<N>,false]"#,
+            "empty":"",
+            "null_value":null,
+            "nested":{"child":"leaf123"},
+            "conditional":"value <N>",
+            "skipped":"value 789"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="collapse-rich" | COLLAPSE_NUMS | collapse_nums at _msg prettify | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({"case":"collapse-rich","_msg":"request <N>"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="collapse-missing" | collapse_nums if () at missing | fields case, missing, flag, null_value, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"collapse-missing",
+            "flag":false,
+            "null_value":null,
+            "nested":{"child":"unchanged"}
+        })],
+        "no-op projections preserve missing, null, bool, and rich-object states"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="collapse-rich" | collapse_nums at conditional | format '<conditional>' as rendered | fields case, conditional, rendered"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"collapse-rich",
+            "conditional":"value <N>",
+            "rendered":"value <N>"
+        })]
+    );
+
+    for malformed in [
+        "* | collapse_nums foo",
+        "* | collapse_nums()",
+        "* | collapse_nums at",
+        "* | collapse_nums at source*",
+        "* | collapse_nums if",
+        "* | collapse_nums if (kind:=admin",
+        "* | collapse_nums prettify at source",
+        "* | collapse_nums prettify if ()",
+        "* | collapse_nums at source trailing",
+        "* | collapse_nums.at source",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"collapse_group:="collapse" | collapse_nums | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="collapse-rich" | collapse_nums at text | fields text"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="collapse-rich" | collapse_nums at array | fields array"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{query}: {body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="collapse-rich" | fields case, _msg, text, unicode, duration, pretty, number, flag, array, empty, null_value, nested, conditional, skipped, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"collapse-rich",
+            "_msg":"request 123",
+            "text":"a b c d e f ad be:eac,dead beef ab",
+            "unicode":"a1foo2bar34 ЫВА123bar45.78",
+            "duration":"0x1234 0XFEAD12 123ms 2us 3h5m6s43ms43μs324ns",
+            "pretty":"35.191.193.225:51648 - 2edfed59-3e98-4073-bbb2-28d321ca71a7 - - [2024/12/08 15:21:02] 10.71.20.32 GET /foo 200",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["item",1,false],
+            "empty":"",
+            "null_value":null,
+            "nested":{"child":"leaf123"},
+            "conditional":"value 456",
+            "skipped":"value 789",
+            "result":"original"
+        })],
+        "collapse_nums must not mutate durable rich source values and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="collapse-rich" | collapse_nums at pretty prettify | fields case, pretty, array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"collapse-rich",
+            "pretty":"<IP4>:<N> - <UUID> - - [<DATETIME>] <IP4> GET /foo <N>",
+            "array":["item",1,false],
+            "nested":{"child":"leaf123"}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_seventeen_drop_empty_fields_is_typed_bounded_and_durable() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

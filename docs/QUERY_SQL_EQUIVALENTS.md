@@ -188,6 +188,18 @@ row-local transform after the already-required public scan and decode. Exact
 evidence must demonstrate a material avoidable storage or row-crossing cost
 before this project adds an extension scalar solely for this pipe.
 
+`LQL-P26` intentionally has no SQL recipe. VictoriaLogs `collapse_nums` uses
+an exact ASCII token-boundary scanner, special version/time/duration/underscore
+boundaries, even-length hexadecimal heuristics, and an ordered UUID/IPv4/time/
+date/datetime prettification pass. Core SQLite and libSQL provide neither that
+tokenizer nor an equivalent regular-expression replacement scalar. A recursive
+character CTE or `replace()` chain would be substantially different and would
+silently misclassify valid inputs, so neither is published as an equivalent.
+Applications can compose a deliberately narrower transformation over bounded
+public `logs` rows, but complete LogsQL semantics remain bounded Rust API work
+after the required public scan and decode. Exact evidence must show avoidable
+storage or row-crossing cost before adding a general extension primitive.
+
 `LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
 known phrase in their application and bind the resulting strings to an `IN`
 predicate for `equals_common_case`, but core SQLite `upper()`/`lower()` do not

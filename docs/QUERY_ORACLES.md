@@ -922,3 +922,19 @@ VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture
 now contains 344 row-query cases, one stochastic case, 343 error cases, and
 345 statistics/pipeline cases: 1,033 cases total, all passing against the
 immutable image. The fixture now contains 1033 cases.
+
+`LQL-P26` adds twelve exact pipeline-result cases and ten error cases for
+`collapse_nums`. They pin the default and exact quoted target fields;
+case-insensitive keywords; optional empty or logical conditions; strict
+condition/target/prettify order; decimal, hexadecimal, underscore, version,
+duration, embedded-token, and non-ASCII boundary behavior; ordered UUID,
+IPv4, time, date, datetime, fractional-second, and timezone prettification;
+typed number/boolean/compact-array projection; sequential composition; and
+strict attached-suffix, wildcard, missing-argument, and trailing-token errors.
+Source audit covers `pipe_collapse_nums.go`, `pipe_collapse_nums_test.go`,
+`pipe_update.go`, `if_filter.go`, `tokenizer.go`, parser tests, and public
+documentation at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 344
+row-query cases, one stochastic case, 353 error cases, and 357
+statistics/pipeline cases: 1,055 cases total, all passing against the immutable
+image. The fixture now contains 1055 cases.

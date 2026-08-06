@@ -2396,6 +2396,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "collapse_nums_narrow",
+                "logs-collapse-nums-narrow",
+                "host:=\"h00\" AND query | fields range_key | collapse_nums at range_key | limit 64 | fields range_key",
+                64,
+                None,
+            ),
+            (
+                "collapse_nums_wide",
+                "logs-collapse-nums-wide",
+                "query | fields range_key | collapse_nums at range_key | limit 64 | fields range_key",
+                64,
+                None,
+            ),
+            (
+                "collapse_nums_control_narrow",
+                "logs-collapse-nums-control-narrow",
+                "host:=\"h00\" AND query | fields range_key | format 'key-&lt;N&gt;' as range_key | limit 64 | fields range_key",
+                64,
+                None,
+            ),
+            (
+                "collapse_nums_control_wide",
+                "logs-collapse-nums-control-wide",
+                "query | fields range_key | format 'key-&lt;N&gt;' as range_key | limit 64 | fields range_key",
+                64,
+                None,
+            ),
+            (
                 "drop_empty_fields_narrow",
                 "logs-drop-empty-fields-narrow",
                 "host:=\"h00\" AND query | fields context, status | drop_empty_fields | limit 64 | fields context, status",
@@ -3074,6 +3102,16 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         require_same_public_query_work(&queries, "sample_control_wide", "sample_wide")?;
         require_same_public_query_work(&queries, "hash_control_narrow", "hash_narrow")?;
         require_same_public_query_work(&queries, "hash_control_wide", "hash_wide")?;
+        require_same_public_query_work(
+            &queries,
+            "collapse_nums_control_narrow",
+            "collapse_nums_narrow",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "collapse_nums_control_wide",
+            "collapse_nums_wide",
+        )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({

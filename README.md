@@ -829,8 +829,8 @@ Frequency `top` measures 3.385/35.948 ms narrow/wide p95 versus
 not justify an extension primitive; executable public SQL remains the direct
 SQLite/libSQL path.
 The ordered LogsQL pipeline also supports bounded rich-row `coalesce`,
-`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, `len`, and `hash`
-composition.
+`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, `len`, `hash`, and
+`collapse_nums` composition.
 Math provides the pinned VictoriaLogs binary64 operator/function/coercion
 model. `len` counts UTF-8 bytes across the pinned flattened textual view while
 preserving typed sources. `hash` uses seed-zero xxHash64 masked to 53 exact
@@ -847,6 +847,11 @@ not justify another storage primitive.
 Exact-build `hash` p95 is 3.455/36.785 ms versus 3.481/36.223 ms for
 same-public-work controls. The -0.7%/+1.6% variation and larger decimal result
 remain bounded API/wire costs; no extension hash primitive is justified.
+`collapse_nums` follows VictoriaLogs' conditional exact-field decimal/hex
+token boundaries and optional UUID/IP/time/date/datetime prettification while
+preserving native rich values on no-op paths. Core SQLite/libSQL has no
+portable equivalent tokenizer, so the SQL cookbook records an explicit
+no-recipe disposition; exact-build evidence remains pending.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

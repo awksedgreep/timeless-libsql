@@ -994,7 +994,18 @@ records that no extension primitive or storage-contract change is justified.
 The real-extension regression, all 1,033 pinned VictoriaLogs cases, explicit
 no-SQL disposition, documentation contracts, and complete local gates pass.
 
-Session 18 next implements `LQL-P26` as the next declared P3 row.
+Session 18 is implementing `LQL-P26` as an API-owned `collapse_nums` pipe.
+Pinned VictoriaLogs source and the complete 1,055-case live oracle establish
+optional condition, exact target, terminal prettify, token-boundary,
+hexadecimal, underscore/version/duration, Unicode-delimiter, UUID/IPv4/time/
+date/datetime, fractional-second, timezone, typed textual projection,
+sequential-composition, and strict-error behavior. The bounded Rust evaluator
+preserves native values on no-op projections and changes no extension or
+storage contract. Core SQLite/libSQL has no portable equivalent tokenizer, so
+the SQL cookbook records an explicit no-recipe disposition. Focused parser,
+evaluator, and real-extension ingest/flush/optimize/shutdown/reopen regressions
+pass. Exact-build evidence and complete local gates remain required before the
+row closes.
 
 ### Session 19: experimental and data-model dispositions
 

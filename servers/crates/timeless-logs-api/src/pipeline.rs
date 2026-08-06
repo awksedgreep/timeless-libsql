@@ -20,8 +20,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CopySpec,
-    ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
+    parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CollapseNumsSpec,
+    CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
     MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PipelineField,
     PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, StatsExpression,
     StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
@@ -215,6 +215,13 @@ pub(crate) fn execute(
             PipelineOp::Hash(spec) => {
                 hash_fields(rows, spec, execution.limits, execution.cancelled)?
             }
+            PipelineOp::CollapseNums(spec) => collapse_nums_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
             PipelineOp::JsonArrayLen(spec) => {
                 json_array_len_fields(rows, spec, execution.limits, execution.cancelled)?
             }
@@ -2310,6 +2317,364 @@ fn victorialogs_hash(
     };
     check_periodically(cancelled, *work_items)?;
     Ok(hash & FLOAT64_EXACT_MASK)
+}
+
+fn collapse_nums_fields(
+    rows: Vec<Value>,
+    spec: &CollapseNumsSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: field_path,
+        name: field_name,
+    } = &spec.field
+    else {
+        return Err("LogsQL collapse_nums target is not exact".into());
+    };
+
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(
+                &mut work_items,
+                limits.max_state_items,
+                "collapse_nums",
+            )?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let mut state_bytes = size_of::<Value>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "collapse_nums")?;
+            let projected = textual_transform_projection(
+                coalesce_exact_value(&row, field_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "collapse_nums",
+            )?;
+            let Some(collapsed) = bounded_collapse_nums(
+                projected.as_ref(),
+                spec.prettify,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?
+            else {
+                // Timeless retains typed and missing/null/empty source states.
+                // VictoriaLogs stores only their flattened textual projection,
+                // so preserving a native value when that text is unchanged is
+                // strictly more faithful without changing language output.
+                return Ok(row);
+            };
+
+            charge_transfer_string(
+                field_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "collapse_nums",
+            )?;
+            for segment in field_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "collapse_nums",
+                )?;
+            }
+            let object = row.as_object_mut().ok_or_else(|| {
+                "LogsQL collapse_nums input row is not a JSON object".to_string()
+            })?;
+            if copy_destination_replaces_object(object, field_path) {
+                return Err(format!(
+                    "LogsQL collapse_nums target conflict: field {field_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, field_path, Value::String(collapsed))
+                .map_err(|error| format!("LogsQL collapse_nums target conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn bounded_collapse_nums(
+    source: &str,
+    prettify: bool,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Option<String>, String> {
+    let (collapsed_len, collapsed_changed) =
+        collapse_nums_output_len(source, work_items, limits.max_state_items, cancelled)?;
+    let prettify_candidate = prettify
+        && [
+            "<N>-<N>-<N>-<N>-<N>",
+            "<N>.<N>.<N>.<N>",
+            "<N>:<N>:<N>",
+            "<N>-<N>-<N>",
+            "<N>/<N>/<N>",
+            "<DATE>T<TIME>",
+            "<DATE> <TIME>",
+        ]
+        .iter()
+        .any(|pattern| source.contains(pattern));
+    if !collapsed_changed && !prettify_candidate {
+        return Ok(None);
+    }
+
+    let base_state_bytes = *state_bytes;
+    let collapsed_state_bytes = base_state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(collapsed_len))
+        .ok_or_else(|| "LogsQL collapse_nums state size overflow".to_string())?;
+    ensure_first_state_bytes(
+        collapsed_state_bytes,
+        limits.max_state_bytes,
+        "collapse_nums",
+    )?;
+    let mut collapsed = if collapsed_changed {
+        render_collapsed_nums(source, collapsed_len, cancelled)?
+    } else {
+        source.to_owned()
+    };
+
+    if prettify {
+        for (old, replacement, skip_tail) in [
+            (
+                "<N>-<N>-<N>-<N>-<N>",
+                "<UUID>",
+                None as Option<fn(&str) -> usize>,
+            ),
+            ("<N>.<N>.<N>.<N>", "<IP4>", None),
+            (
+                "<N>:<N>:<N>",
+                "<TIME>",
+                Some(skip_collapse_nums_subseconds as fn(&str) -> usize),
+            ),
+            ("<N>-<N>-<N>", "<DATE>", None),
+            ("<N>/<N>/<N>", "<DATE>", None),
+            (
+                "<DATE>T<TIME>",
+                "<DATETIME>",
+                Some(skip_collapse_nums_timezone as fn(&str) -> usize),
+            ),
+            (
+                "<DATE> <TIME>",
+                "<DATETIME>",
+                Some(skip_collapse_nums_timezone as fn(&str) -> usize),
+            ),
+        ] {
+            if !collapsed.contains(old) {
+                continue;
+            }
+            let peak_state_bytes = base_state_bytes
+                .checked_add(size_of::<String>())
+                .and_then(|bytes| bytes.checked_add(collapsed.capacity()))
+                .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+                .and_then(|bytes| bytes.checked_add(collapsed.len()))
+                .ok_or_else(|| "LogsQL collapse_nums state size overflow".to_string())?;
+            ensure_first_state_bytes(peak_state_bytes, limits.max_state_bytes, "collapse_nums")?;
+            if let Some(next) = replace_collapsed_pattern(
+                &collapsed,
+                old,
+                replacement,
+                skip_tail,
+                work_items,
+                limits.max_state_items,
+                cancelled,
+            )? {
+                collapsed = next;
+            }
+        }
+    }
+
+    *state_bytes = base_state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(collapsed.capacity()))
+        .ok_or_else(|| "LogsQL collapse_nums state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "collapse_nums")?;
+    if collapsed == source {
+        Ok(None)
+    } else {
+        Ok(Some(collapsed))
+    }
+}
+
+fn collapse_nums_output_len(
+    source: &str,
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<(usize, bool), String> {
+    let mut output_len = source.len();
+    let mut offset = 0usize;
+    let mut changed = false;
+    while let Some(start) = collapse_num_start(source.as_bytes(), offset, cancelled)? {
+        let end = collapse_num_end(source.as_bytes(), start);
+        charge_transfer_work(work_items, max_work_items, "collapse_nums")?;
+        if collapse_num_is_valid(source.as_bytes(), start, end) {
+            output_len = output_len
+                .checked_sub(end - start)
+                .and_then(|length| length.checked_add("<N>".len()))
+                .ok_or_else(|| "LogsQL collapse_nums output size overflow".to_string())?;
+            changed = true;
+        }
+        offset = end;
+    }
+    ensure_active(cancelled)?;
+    Ok((output_len, changed))
+}
+
+fn render_collapsed_nums(
+    source: &str,
+    output_len: usize,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let bytes = source.as_bytes();
+    let mut output = String::with_capacity(output_len);
+    let mut copied = 0usize;
+    let mut offset = 0usize;
+    while let Some(start) = collapse_num_start(bytes, offset, cancelled)? {
+        let end = collapse_num_end(bytes, start);
+        if collapse_num_is_valid(bytes, start, end) {
+            output.push_str(&source[copied..start]);
+            output.push_str("<N>");
+            copied = end;
+        }
+        offset = end;
+    }
+    output.push_str(&source[copied..]);
+    if output.len() != output_len {
+        return Err("LogsQL collapse_nums output length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+fn collapse_num_start(
+    source: &[u8],
+    offset: usize,
+    cancelled: &AtomicBool,
+) -> Result<Option<usize>, String> {
+    for index in offset..source.len() {
+        check_periodically(cancelled, index)?;
+        if !collapse_decimal_or_hex(source[index]) {
+            continue;
+        }
+        if index == 0
+            || !collapse_token_byte(source[index - 1])
+            || collapse_special_num_start(source[index - 1])
+        {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn collapse_num_end(source: &[u8], offset: usize) -> usize {
+    let mut end = offset;
+    while end < source.len() && collapse_decimal_or_hex(source[end]) {
+        end += 1;
+    }
+    end
+}
+
+fn collapse_num_is_valid(source: &[u8], start: usize, end: usize) -> bool {
+    if end < source.len()
+        && collapse_token_byte(source[end])
+        && !collapse_special_num_end(source[end])
+    {
+        return false;
+    }
+    let candidate = &source[start..end];
+    if candidate.is_empty() {
+        return false;
+    }
+    let has_hex_letters = candidate.iter().copied().any(collapse_hex_letter);
+    !has_hex_letters || (candidate.len() >= 4 && candidate.len().is_multiple_of(2))
+}
+
+fn collapse_decimal_or_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || collapse_hex_letter(byte)
+}
+
+fn collapse_hex_letter(byte: u8) -> bool {
+    matches!(byte, b'a'..=b'f' | b'A'..=b'F')
+}
+
+fn collapse_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn collapse_special_num_start(byte: u8) -> bool {
+    matches!(byte, b'_' | b'T' | b'X' | b'x' | b'v' | b's' | b'h' | b'm')
+}
+
+fn collapse_special_num_end(byte: u8) -> bool {
+    matches!(byte, b'_' | b'T' | b'Z' | b's' | b'm' | b'h' | b'u' | b'n')
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_collapsed_pattern(
+    source: &str,
+    old: &str,
+    replacement: &str,
+    skip_tail: Option<fn(&str) -> usize>,
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<Option<String>, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut offset = 0usize;
+    let mut changed = false;
+    while offset < source.len() {
+        check_periodically(cancelled, offset)?;
+        let Some(relative) = source[offset..].find(old) else {
+            break;
+        };
+        charge_transfer_work(work_items, max_work_items, "collapse_nums")?;
+        let start = offset + relative;
+        output.push_str(&source[offset..start]);
+        output.push_str(replacement);
+        offset = start + old.len();
+        if let Some(skip_tail) = skip_tail {
+            offset += skip_tail(&source[offset..]);
+        }
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
+    output.push_str(&source[offset..]);
+    ensure_active(cancelled)?;
+    Ok(Some(output))
+}
+
+fn skip_collapse_nums_subseconds(source: &str) -> usize {
+    if source.starts_with(".<N>") || source.starts_with(",<N>") {
+        ".<N>".len()
+    } else {
+        0
+    }
+}
+
+fn skip_collapse_nums_timezone(source: &str) -> usize {
+    if source.starts_with('Z') {
+        1
+    } else if source.starts_with("-<N>:<N>") || source.starts_with("+<N>:<N>") {
+        "-<N>:<N>".len()
+    } else {
+        0
+    }
 }
 
 fn json_array_len_fields(
@@ -8462,6 +8827,129 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             hash_fields(vec![row], &array_spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn collapse_nums_matches_token_prettify_rich_and_bound_semantics() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 1_000,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "_msg":"request 123",
+            "kind":"admin",
+            "text":"a b c d e f ad be:eac,dead beef ab",
+            "unicode":"a1foo2bar34 ЫВА123bar45.78",
+            "duration":"0x1234 0XFEAD12 123ms 2us 3h5m6s43ms43μs324ns",
+            "pretty":"35.191.193.225:51648 - 2edfed59-3e98-4073-bbb2-28d321ca71a7 - - [2024/12/08 15:21:02] 10.71.20.32 GET /foo 200",
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["item",1,false],
+            "empty":"",
+            "null_value":null,
+            "object":{"child":"leaf123"},
+            "conditional":"value 456",
+            "skipped":"value 789",
+            "sequential":"value 321"
+        });
+        let plan = crate::logsql::parse_at(
+            "* | collapse_nums at text | collapse_nums at unicode | collapse_nums at duration | collapse_nums at pretty prettify | collapse_nums at number | collapse_nums at flag | collapse_nums at array | collapse_nums at empty | collapse_nums at null_value | collapse_nums at object | collapse_nums at missing | collapse_nums if (kind:=admin) at conditional | collapse_nums if (kind:=other) at skipped | collapse_nums at sequential | format '<sequential>' as rendered",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["text"], "a b c d e f ad be:eac,<N> <N> ab");
+        assert_eq!(result[0]["unicode"], "a1foo2bar34 ЫВА123bar45.<N>");
+        assert_eq!(
+            result[0]["duration"],
+            "0x<N> 0X<N> <N>ms <N>us <N>h<N>m<N>s<N>ms<N>μs<N>ns"
+        );
+        assert_eq!(
+            result[0]["pretty"],
+            "<IP4>:<N> - <UUID> - - [<DATETIME>] <IP4> GET /foo <N>"
+        );
+        assert_eq!(result[0]["number"], "<N>");
+        assert_eq!(result[0]["flag"], false);
+        assert_eq!(result[0]["array"], r#"["item",<N>,false]"#);
+        assert_eq!(result[0]["empty"], row["empty"]);
+        assert_eq!(result[0]["null_value"], row["null_value"]);
+        assert_eq!(result[0]["object"], row["object"]);
+        assert!(result[0].get("missing").is_none());
+        assert_eq!(result[0]["conditional"], "value <N>");
+        assert_eq!(result[0]["skipped"], row["skipped"]);
+        assert_eq!(result[0]["sequential"], "value <N>");
+        assert_eq!(result[0]["rendered"], "value <N>");
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::CollapseNums(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected collapse_nums plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let many = parse_spec("* | collapse_nums at many");
+        let work_error = collapse_nums_fields(
+            vec![json!({"many":"1 2"})],
+            &many,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL collapse_nums"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=2"), "{work_error}");
+
+        let state_error = collapse_nums_fields(
+            vec![json!({"many":"1"})],
+            &many,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("LogsQL collapse_nums"),
+            "{state_error}"
+        );
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            collapse_nums_fields(
+                vec![json!({"many":"1"})],
+                &many,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

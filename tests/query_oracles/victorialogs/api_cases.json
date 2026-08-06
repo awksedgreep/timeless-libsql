@@ -3701,6 +3701,70 @@
       "expected_rows": [{"case": "format-row", "hash_source": "7930733036767641", "second": "6103900670196684"}]
     },
     {
+      "id": "LQL-P26-collapse-nums-defaults-to-message",
+      "query": "case:=format-row | format '2024-10-20T12:34:56Z request duration 1.34s' | collapse_nums | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "<N>-<N>-<N>T<N>:<N>:<N>Z request duration <N>.<N>s"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-supports-exact-quoted-fields-and-case-insensitive-keywords",
+      "query": "case:=format-row | format 'temp_23_175863242537_93_98_ abc 123 test' as 'source field' | COLLAPSE_NUMS AT 'source field' | fields case, 'source field'",
+      "expected_rows": [{"case": "format-row", "source field": "temp_<N>_<N>_<N>_<N>_ abc <N> test"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-distinguishes-eligible-hex-from-short-words",
+      "query": "case:=format-row | format 'a b c d e f ad be:eac,dead beef ab' | collapse_nums | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "a b c d e f ad be:eac,<N> <N> ab"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-observes-token-boundaries-and-unicode-separators",
+      "query": "case:=format-row | format 'a1foo2bar34 ЫВА123bar45.78' | collapse_nums | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "a1foo2bar34 ЫВА123bar45.<N>"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-handles-hex-prefixes-and-duration-suffixes",
+      "query": "case:=format-row | format '0x1234 0XFEAD12 123ms 2us 3h5m6s43ms43μs324ns' | collapse_nums | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "0x<N> 0X<N> <N>ms <N>us <N>h<N>m<N>s<N>ms<N>μs<N>ns"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-prettifies-common-patterns",
+      "query": "case:=format-row | format '35.191.193.225:51648 - 2edfed59-3e98-4073-bbb2-28d321ca71a7 - - [2024/12/08 15:21:02] 10.71.20.32 GET /foo 200' | collapse_nums prettify | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "<IP4>:<N> - <UUID> - - [<DATETIME>] <IP4> GET /foo <N>"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-prettifies-fractions-and-timezones",
+      "query": "case:=format-row | format '2024-12-08 15:22:32,123 2024-12-08T15:22:32.123-10:30' | collapse_nums prettify | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "<DATETIME> <DATETIME>"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-applies-a-matching-condition",
+      "query": "case:=format-row | format 'request 123' | collapse_nums if (case:=format-row) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "request <N>"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-skips-a-nonmatching-condition",
+      "query": "case:=format-row | format 'request 123' | collapse_nums if (case:=other) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "request 123"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-empty-condition-matches",
+      "query": "case:=format-row | format 'request 123' | collapse_nums if () | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "request <N>"}]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-textualizes-numbers-booleans-and-arrays",
+      "query": "case:in(numeric-huge, state-false, delete-row) | collapse_nums at n | collapse_nums at probe | collapse_nums at array | fields case, n, probe, array | sort by (case)",
+      "expected_rows": [
+        {"case": "delete-row", "array": "[\"x\",<N>]"},
+        {"case": "numeric-huge", "n": "<N>"},
+        {"case": "state-false", "probe": "false"}
+      ]
+    },
+    {
+      "id": "LQL-P26-collapse-nums-composes-sequentially",
+      "query": "case:=format-row | format 'request 123' as source | collapse_nums at source | format '<source>' as rendered | fields case, source, rendered",
+      "expected_rows": [{"case": "format-row", "source": "request <N>", "rendered": "request <N>"}]
+    },
+    {
       "id": "LQL-P28-drop-empty-fields-removes-null-and-empty-but-retains-rich-values",
       "query": "case:=delete-row | drop_empty_fields | fields case, keep, empty_value, null_value, nested.drop, nested.keep, array",
       "expected_rows": [{"case": "delete-row", "keep": "kept", "nested.drop": "nested-gone", "nested.keep": "nested-kept", "array": "[\"x\",1]"}]
@@ -4298,6 +4362,76 @@
     }
   ],
   "error_cases": [
+    {
+      "id": "LQL-P26-collapse-nums-rejects-an-unknown-token",
+      "query": "* | collapse_nums foo",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-rejects-parentheses",
+      "query": "* | collapse_nums()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-requires-a-field-after-at",
+      "query": "* | collapse_nums at",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-rejects-a-wildcard-field",
+      "query": "* | collapse_nums at source*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-requires-a-condition",
+      "query": "* | collapse_nums if",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-requires-a-closed-condition",
+      "query": "* | collapse_nums if (case:=format-row",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-rejects-at-after-prettify",
+      "query": "* | collapse_nums prettify at source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-rejects-if-after-prettify",
+      "query": "* | collapse_nums prettify if ()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-rejects-a-trailing-token",
+      "query": "* | collapse_nums at source trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P26-collapse-nums-rejects-an-attached-suffix",
+      "query": "* | collapse_nums.at source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
     {
       "id": "LQL-Q08-empty-query",
       "query": "",

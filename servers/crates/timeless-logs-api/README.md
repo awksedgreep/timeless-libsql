@@ -974,6 +974,32 @@ one/four blocks, decodes 1,024/8,192 entries, and transfers
 additional response bytes keep the operation as bounded API/wire work above
 the unchanged storage boundary; `QSF-210` records the verdict.
 
+LogsQL `collapse_nums` replaces eligible decimal and hexadecimal tokens in the
+current `_msg` or one exact `at` field with `<N>`:
+
+```text
+* | collapse_nums
+* | collapse_nums at message_template
+* | collapse_nums if (service:=api) at message_template prettify
+```
+
+The optional condition is evaluated against the current row, and `prettify`
+recognizes the pinned UUID, IPv4, time, date, and datetime shapes after number
+collapse. Keyword/order, token-boundary, even-length hexadecimal,
+underscore/version/duration, fractional-second, and timezone behavior match
+the immutable VictoriaLogs oracle. Invalid modifiers, wildcards, attached
+syntax, and tails fail explicitly.
+
+Typed numbers, booleans, and arrays use their flattened textual projection;
+missing, null, and object parents project as empty. A no-op preserves the
+native Timeless value, while a real transform writes a current-row string.
+Sequential composition, cumulative work, temporary state, response size,
+deadline, cancellation, immutable storage, optimize, and reopen are bounded
+and covered by the real-extension regression. Core SQLite/libSQL has no
+portable equivalent tokenizer, so the SQL cookbook records an explicit
+no-recipe disposition. No private table, extension primitive, or durable
+format changes. Exact-build performance evidence remains pending.
+
 LogsQL `drop_empty_fields` removes null and empty-string fields from the
 current rich row:
 

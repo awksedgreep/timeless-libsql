@@ -1136,6 +1136,46 @@ read one/four blocks, decode 1,024/8,192 entries, and read
 response 502/506 bytes larger. `QSF-210` accepts the -0.7%/+1.6% p95
 variation and keeps hashing above the unchanged public storage boundary.
 
+## LogsQL `collapse_nums` over rich current rows
+
+`collapse_nums` normalizes eligible decimal and hexadecimal tokens in one
+current-row field to `<N>`:
+
+```text
+* | collapse_nums
+* | collapse_nums at message_template
+* | collapse_nums if (service:=api) at message_template prettify
+```
+
+The default target is `_msg`. `if (...)` is optional and evaluated against the
+current row; `at` accepts one exact quoted or dotted field; and `prettify` must
+be the terminal modifier. Keywords are case-insensitive. Invalid ordering,
+wildcards, attached suffixes, missing arguments, and trailing syntax fail
+explicitly.
+
+The scanner follows VictoriaLogs' byte-exact boundaries. Decimal runs may have
+any length. Hexadecimal candidates containing `a`–`f` must be at least four
+bytes and even-length, avoiding common short words. ASCII letters, digits, and
+underscore delimit tokens except for the pinned underscore, version, time,
+duration, and unit boundary characters; non-ASCII bytes delimit candidates.
+`prettify` then recognizes collapsed UUID, IPv4, time, date, and datetime
+shapes, including fractional seconds and numeric or `Z` timezones.
+
+Strings are transformed directly; numbers and booleans use their textual
+spelling; arrays use compact JSON; and missing, null, and exact object parents
+project as empty text. Timeless preserves a native typed value when the
+projected text does not change, while an actual transformation writes a string
+to the same current-row field. Sequential pipes see the updated string. Stored
+rows remain immutable, and work, temporary bytes, output, nesting, deadline,
+and cancellation remain under the shared query limits.
+
+There is deliberately no claimed portable SQL equivalent. Core SQLite/libSQL
+has no tokenizer or replacement scalar with the exact boundary, hexadecimal,
+and ordered prettification behavior. A recursive character CTE or ordinary
+`replace()` chain would be a different language. The Rust logs API owns this
+bounded row-local transform; no private table, extension primitive, or storage
+format is involved. Exact-build performance evidence remains pending.
+
 ## LogsQL `drop_empty_fields` over current rows
 
 `drop_empty_fields` removes empty fields from each current pipeline row:
