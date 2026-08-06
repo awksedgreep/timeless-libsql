@@ -48,7 +48,7 @@ pub(crate) struct PipelineExecution<'a> {
 }
 
 pub(crate) fn execute_query_rows(
-    rows: Vec<QueryRow>,
+    mut rows: Vec<QueryRow>,
     mut execution: PipelineExecution<'_>,
 ) -> Result<Vec<Value>, String> {
     if matches!(execution.operations.first(), Some(PipelineOp::QueryStats)) {
@@ -63,6 +63,10 @@ pub(crate) fn execute_query_rows(
         ))];
         execution.operations = &execution.operations[1..];
         return execute(rows, execution);
+    }
+    if let Some(PipelineOp::Sample(sample)) = execution.operations.first() {
+        rows = sample_rows(rows, *sample, execution.cancelled)?;
+        execution.operations = &execution.operations[1..];
     }
     let rows = rows
         .into_iter()
@@ -136,6 +140,7 @@ pub(crate) fn execute(
                 rows.truncate(*limit);
                 rows
             }
+            PipelineOp::Sample(sample) => sample_rows(rows, *sample, execution.cancelled)?,
             PipelineOp::FieldValues {
                 field,
                 filter,
@@ -263,6 +268,49 @@ pub(crate) fn execute(
     }
     ensure_active(execution.cancelled)?;
     Ok(rows)
+}
+
+fn sample_rows<T>(mut rows: Vec<T>, sample: u64, cancelled: &AtomicBool) -> Result<Vec<T>, String> {
+    ensure_active(cancelled)?;
+    if sample == 1 || rows.is_empty() {
+        return Ok(rows);
+    }
+
+    // VictoriaLogs selects random rows by drawing exponentially distributed
+    // skip lengths with mean N-1. Keep that statistical contract while
+    // compacting in place, so sampling cannot allocate a second full rowset.
+    let mut rng = fastrand::Rng::new();
+    let mean_skip = sample as f64 - 1.0;
+    let mut next = sample_next_step(&mut rng, mean_skip).saturating_sub(1);
+    let mut index = 0_u64;
+    let mut cancelled_during_sample = false;
+    rows.retain(|_| {
+        if cancelled_during_sample {
+            return false;
+        }
+        if index & 0xff == 0 && cancelled.load(AtomicOrdering::Relaxed) {
+            cancelled_during_sample = true;
+            return false;
+        }
+        let keep = index == next;
+        if keep {
+            next = next.saturating_add(sample_next_step(&mut rng, mean_skip));
+        }
+        index = index.saturating_add(1);
+        keep
+    });
+    if cancelled_during_sample {
+        return Err("query cancelled".into());
+    }
+    Ok(rows)
+}
+
+fn sample_next_step(rng: &mut fastrand::Rng, mean_skip: f64) -> u64 {
+    // fastrand yields U in [0,1). -ln(1-U) is Exp(1), including the exact
+    // zero edge without producing an infinity. Rust's saturating float-to-int
+    // cast also leaves `sample inf` bounded and selects no finite input row.
+    let exponential = -(-rng.f64()).ln_1p();
+    1_u64.saturating_add((mean_skip * exponential).round() as u64)
 }
 
 fn pack_json_fields(

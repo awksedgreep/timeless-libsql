@@ -705,6 +705,44 @@ Executable
 provides the corresponding descending window-rank statement and documents the
 same boundary.
 
+## Bounded LogsQL `sample`
+
+The Rust logs API implements VictoriaLogs-compatible random row sampling at
+the current pipeline position:
+
+```text
+* | sample 4
+service:="api" | fields service, context | sample 100
+* | sample 1 | stats count() as total
+```
+
+`sample N` retains approximately one of every `N` input rows. `N` uses the
+pinned VictoriaLogs positive-unsigned grammar: decimal and base-zero integers,
+quoted values, byte-size and duration suffixes, and `inf`/`+inf` are accepted;
+zero, negative, invalid-octal, unsuffixed fractional, missing, extra, and
+parenthesized values fail before storage work. Commands are case-insensitive.
+`sample 1` is an exact no-op.
+
+Every request owns a fresh random generator. Like VictoriaLogs, the evaluator
+draws exponentially distributed gaps whose mean yields a `1/N` selection rate;
+it does not choose deterministic every-Nth rows. Retained rows remain in input
+order and preserve their complete current rich JSON values. When sampling is
+the first pipeline stage, discarded public rows are removed before metadata
+JSON materialization. At later positions it samples the already transformed
+current rows, preserving ordered pipeline composition.
+
+The required public scan remains bounded by `max_work_rows`. Sampled output is
+bounded by `max_result_rows` and `max_response_bytes`, and cancellation is
+checked while rows are compacted in place. Sampling changes no stored row,
+block, batch, index, compression, or durability contract.
+
+Executable
+[`SQL-LOG-049`](QUERY_SQL_EQUIVALENTS.md#sql-log-049-bounded-random-log-sample)
+provides a parameterized public-row SQLite/libSQL equivalent using independent
+Bernoulli draws. It implements the public `1/N` random-subset contract without
+claiming VictoriaLogs' private exponential-gap RNG sequence. Ordinary SQL is
+sufficient, so no extension primitive or private storage access is used.
+
 ## Bounded LogsQL `top`
 
 The Rust logs API implements frequency ranking over the current pipeline row:

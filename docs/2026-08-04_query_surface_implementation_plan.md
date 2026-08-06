@@ -948,6 +948,25 @@ deferred with a concrete prerequisite. Stateful and multi-query constructs
 prove strict memory/cardinality limits; partial responses remain opt-in and
 unmistakable.
 
+Session 18 continues with `LQL-P17`.
+
+`LQL-P17` implements VictoriaLogs-compatible `sample N` in the Rust logs API.
+The parser accepts exactly one positive unsigned base-zero/byte/duration/
+infinite value and rejects malformed syntax before storage work. The evaluator
+uses request-local exponentially distributed gaps, compacts retained rows in
+place, preserves rich values and input order, supports first-stage
+pre-materialization and later current-row composition, and observes the
+existing work/result/response/deadline/cancellation limits. Executable
+`SQL-LOG-049` gives direct SQLite/libSQL users the bounded public-row `1/N`
+Bernoulli equivalent. Because neither implementation can avoid the required
+public block scan and decode, no extension primitive or storage change is
+warranted.
+
+The row may close only after the real-extension grammar/fidelity/limit/
+cancellation/optimize/flush/reopen regression, complete 1,015-case pinned
+VictoriaLogs oracle, executable SQL harness, exact-build narrow/wide evidence,
+storage/HWM verdict, documentation contracts, and complete local gates pass.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

@@ -2296,6 +2296,24 @@
       "query": "common_group:=common common_value:EqUaLs_CoMmOn_CaSe(VictoriaMetrics)",
       "status": 200,
       "expected_cases": ["common-original", "common-lower", "common-upper", "common-lower-first", "common-lower-second"]
+    },
+    {
+      "id": "LQL-P17-sample-one-preserves-every-row",
+      "query": "page_group:=page | sample 1",
+      "status": 200,
+      "expected_cases": ["page-0", "page-1", "page-2", "page-3"]
+    },
+    {
+      "id": "LQL-P17-sample-accepts-a-quoted-one-and-composes",
+      "query": "state_group:=state | sample \"1\" | fields case",
+      "status": 200,
+      "expected_cases": ["state-missing", "state-null", "state-empty", "state-string", "state-zero", "state-false"]
+    },
+    {
+      "id": "LQL-P17-sample-is-case-insensitive-and-accepts-base-zero-uints",
+      "query": "page_group:=page | SaMpLe 0x1 | fields case",
+      "status": 200,
+      "expected_cases": ["page-0", "page-1", "page-2", "page-3"]
     }
   ],
   "stats_cases": [
@@ -4210,6 +4228,16 @@
       "id": "LQL-P41-json-array-len-snapshots-source-before-overwrite",
       "query": "case:=json-array-strings | json_array_len(tags) as tags | fields case, tags",
       "expected_rows": [{"case": "json-array-strings", "tags": "3"}]
+    }
+  ],
+  "sample_cases": [
+    {
+      "id": "LQL-P17-sample-four-is-a-varying-random-subset",
+      "query": "* | sample 4",
+      "iterations": 96,
+      "minimum_ratio": 0.18,
+      "maximum_ratio": 0.32,
+      "minimum_distinct_counts": 6
     }
   ],
   "error_cases": [
@@ -6442,6 +6470,62 @@
     {
       "id": "LQL-P41-json-array-len-rejects-trailing-token",
       "query": "* | json_array_len(source) result trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-requires-a-value",
+      "query": "* | sample",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-rejects-zero",
+      "query": "* | sample 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-rejects-negative-values",
+      "query": "* | sample -1",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-rejects-non-numeric-values",
+      "query": "* | sample nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-rejects-an-unsuffixed-fraction",
+      "query": "* | sample 1.5",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-rejects-invalid-base-zero-octal",
+      "query": "* | sample 08",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-rejects-a-second-value",
+      "query": "* | sample 1 2",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P17-sample-rejects-parenthesized-values",
+      "query": "* | sample(2)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

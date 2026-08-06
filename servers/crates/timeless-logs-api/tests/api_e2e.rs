@@ -12827,6 +12827,296 @@ async fn session_eighteen_common_case_filters_are_unicode_rich_bounded_and_reope
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_sample_is_random_bounded_durable_and_row_preserving() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("sample-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let severities = [
+        "debug",
+        "info",
+        "notice",
+        "warning",
+        "error",
+        "critical",
+        "alert",
+        "emergency",
+    ];
+    let body = (0..8_192)
+        .map(|index| {
+            serde_json::json!({
+                "_time": 1_815_000_000_000_000_i64 + index,
+                "_msg": format!("sample row {index}"),
+                "level": severities[index as usize % severities.len()],
+                "case": format!("row-{index}"),
+                "sample_group": "sample",
+                "nested": {"index": index, "even": index % 2 == 0},
+                "array": [index, true, null, "value"],
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(format!("{body}\n")))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"sample_group:="sample" | sample 1 | stats count() as total"#,
+        )
+        .await,
+        [serde_json::json!({"total": 8192})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="row-0" | sample 1 | fields case, level, nested, array"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case": "row-0",
+            "level": "debug",
+            "nested": {"index": 0, "even": true},
+            "array": [0, true, null, "value"],
+        })],
+        "sample must preserve all selected rich values without rewriting storage"
+    );
+
+    let selected = pipeline_rows(
+        &app,
+        r#"sample_group:="sample" | sample 4 | fields case | limit 10000"#,
+    )
+    .await;
+    assert!(
+        (1_500..=2_600).contains(&selected.len()),
+        "{}",
+        selected.len()
+    );
+    let selected_indices = selected
+        .iter()
+        .map(|row| {
+            row["case"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("row-")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(selected_indices.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let projected = pipeline_rows(
+        &app,
+        r#"sample_group:="sample" | fields case, nested | sample 4 | limit 10000"#,
+    )
+    .await;
+    assert!(
+        (1_500..=2_600).contains(&projected.len()),
+        "{}",
+        projected.len()
+    );
+    assert!(projected.iter().all(|row| {
+        let Some(object) = row.as_object() else {
+            return false;
+        };
+        object.len() == 2 && object.contains_key("case") && object.contains_key("nested")
+    }));
+    let projected_indices = projected
+        .iter()
+        .map(|row| {
+            row["case"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("row-")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(projected_indices.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let mut sampled_total = 0_u64;
+    let mut sampled_counts = std::collections::BTreeSet::new();
+    for _ in 0..24 {
+        let rows = pipeline_rows(
+            &app,
+            r#"sample_group:="sample" | sample 4 | stats count() as total"#,
+        )
+        .await;
+        let count = rows[0]["total"].as_u64().unwrap();
+        sampled_total += count;
+        sampled_counts.insert(count);
+    }
+    assert!(
+        (41_000..=57_000).contains(&sampled_total),
+        "sample 4 selected {sampled_total} of 196608 rows"
+    );
+    assert!(
+        sampled_counts.len() > 4,
+        "sample must draw request-local random selections: {sampled_counts:?}"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"sample_group:="sample" | sample inf | stats count() as total"#,
+        )
+        .await,
+        [serde_json::json!({"total": 0})]
+    );
+
+    for malformed in [
+        "* | sample",
+        "* | sample 0",
+        "* | sample -1",
+        "* | sample nope",
+        "* | sample 08",
+        "* | sample 1.5",
+        "* | sample 1 2",
+        "* | sample(2)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"sample_group:="sample" | sample 4 | stats count() as total"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"sample_group:="sample" | sample 1 | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 10_000,
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"sample_group:="sample" | sample 1 | fields case | limit 10000"#,
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{query}: {body}");
+    }
+
+    let cancelled_before = storage.stats().await.unwrap().api_query_cancelled;
+    let timed_out = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"sample_group:="sample" | sample 2 | fields case | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(timed_out.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before);
+    assert_eq!(stats.api_query_in_flight, 0);
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"sample_group:="sample" | sample 1 | stats count() as total"#,
+        )
+        .await,
+        [serde_json::json!({"total": 8192})]
+    );
+    storage.flush().await.unwrap();
+
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        pipeline_rows(
+            &reopened_app,
+            r#"sample_group:="sample" | sample 1 | stats count() as total"#,
+        )
+        .await,
+        [serde_json::json!({"total": 8192})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &reopened_app,
+            r#"case:="row-8191" | sample 1 | fields case, level, nested, array"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case": "row-8191",
+            "level": "emergency",
+            "nested": {"index": 8191, "even": false},
+            "array": [8191, true, null, "value"],
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 fn make_evidence_rich_lines(count: usize) -> String {
     const BASE_TS: i64 = 1_800_000_000_000_000;
     const SEVERITIES: [&str; 8] = [

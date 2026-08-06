@@ -718,6 +718,14 @@ Query-backed exact membership measures 5.849/7.341/7.440 ms narrow and
 doubles narrow decoded work and adds one indexed block to the wide scan;
 storage remains byte-identical. `SQL-LOG-048` gives direct SQLite/libSQL users
 the same bounded two-scan retained-string foundation.
+The ordered pipeline also implements VictoriaLogs-compatible `sample N` with
+strict positive-unsigned grammar, request-local random exponential gaps,
+unchanged rich selected rows, in-place bounded compaction, limits, and
+cancellation. A first-stage sample discards rows before metadata JSON
+materialization; it cannot avoid the required public block read and decode.
+`SQL-LOG-049` gives direct SQLite/libSQL users a parameterized bounded `1/N`
+random-subset recipe using ordinary SQLite randomness, so no sampling opcode
+or private storage access is added to the extension.
 LogsQL source also accepts VictoriaLogs-compatible `#` line comments, LF/CRLF
 multiline composition, literal hashes inside all three quoted forms, and one
 optional terminal semicolon. Malformed tails fail explicitly with lexical

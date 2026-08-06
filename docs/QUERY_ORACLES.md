@@ -892,3 +892,20 @@ immutable VictoriaLogs commit
 `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 341
 row-query cases, 327 error cases, and 335 statistics/pipeline cases: 1,003
 cases total, all passing against the immutable image. The fixture now contains 1003 cases.
+
+`LQL-P17` adds three exact row-query cases, one repeated stochastic case, and
+eight error cases for `sample N`. The exact cases pin `sample 1`, quoted
+unsigned values, base-zero integers, case-insensitive syntax, field
+composition, and unchanged selected rows. The stochastic case performs 96
+independent `sample 4` requests and requires valid duplicate-free source
+subsets, request-to-request cardinality variation, and an aggregate selection
+rate within the deliberately broad `[0.18,0.32]` non-flaky envelope around
+`1/4`; random row identity is not falsely represented as a fixed oracle
+result. Error cases pin missing, zero, negative, fractional, invalid-octal,
+non-numeric, extra, and parenthesized values. Source audit covers
+`pipe_sample.go`, `pipe_sample_test.go`, `parser.go`, and the public LogsQL
+documentation at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture now contains 344
+row-query cases, one stochastic case, 335 error cases, and 335
+statistics/pipeline cases: 1,015 cases total, all passing against the immutable
+image. The fixture now contains 1015 cases.

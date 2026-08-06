@@ -1327,6 +1327,72 @@ fn victorialogs_cases(client: &Client, base: &str, fixture: &Value, base_us: i64
     Ok(failures)
 }
 
+fn victorialogs_sample_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
+    let source_cases = fixture
+        .get("rows")
+        .and_then(Value::as_array)
+        .context("VictoriaLogs rows must be an array")?
+        .iter()
+        .map(|row| {
+            row.get("case")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .context("VictoriaLogs source row is missing case")
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    let source_len = source_cases.len();
+    let mut failures = 0;
+    for case in object_cases(fixture, "sample_cases")? {
+        let query = string(case, "query")?;
+        let iterations = case
+            .get("iterations")
+            .and_then(Value::as_u64)
+            .context("sample case iterations")? as usize;
+        let minimum_ratio = case
+            .get("minimum_ratio")
+            .and_then(Value::as_f64)
+            .context("sample case minimum_ratio")?;
+        let maximum_ratio = case
+            .get("maximum_ratio")
+            .and_then(Value::as_f64)
+            .context("sample case maximum_ratio")?;
+        let minimum_distinct_counts =
+            case.get("minimum_distinct_counts")
+                .and_then(Value::as_u64)
+                .context("sample case minimum_distinct_counts")? as usize;
+
+        let mut selected_total = 0usize;
+        let mut distinct_counts = BTreeSet::new();
+        let mut valid_responses = true;
+        for _ in 0..iterations {
+            let (status, content_type, body) = victorialogs_request(client, base, &query)?;
+            let selected = victorialogs_response_cases(case, status, 200, &content_type, &body)?;
+            let unique = selected.iter().collect::<BTreeSet<_>>();
+            valid_responses &= status == 200
+                && content_type.starts_with("application/stream+json")
+                && unique.len() == selected.len()
+                && selected.iter().all(|value| source_cases.contains(value));
+            selected_total = selected_total.saturating_add(selected.len());
+            distinct_counts.insert(selected.len());
+        }
+        let denominator = source_len.saturating_mul(iterations);
+        let ratio = if denominator == 0 {
+            0.0
+        } else {
+            selected_total as f64 / denominator as f64
+        };
+        let valid = valid_responses
+            && (minimum_ratio..=maximum_ratio).contains(&ratio)
+            && distinct_counts.len() >= minimum_distinct_counts;
+        failures += print_verdict(case, valid, || {
+            format!(
+                "expected {iterations} valid random subsets with ratio in [{minimum_ratio},{maximum_ratio}] and at least {minimum_distinct_counts} distinct counts; got ratio={ratio}, selected_total={selected_total}, distinct_counts={distinct_counts:?}"
+            )
+        });
+    }
+    Ok(failures)
+}
+
 fn victorialogs_error_cases(client: &Client, base: &str, fixture: &Value) -> Result<usize> {
     let mut failures = 0;
     for case in object_cases(fixture, "error_cases")? {
@@ -1581,6 +1647,7 @@ fn victorialogs_api(root: &Path, runtime: &str, oracle: &OracleDefinition) -> Re
     }
 
     let failures = victorialogs_cases(&client, &base, &fixture, base_us)?
+        + victorialogs_sample_cases(&client, &base, &fixture)?
         + victorialogs_stats_cases(&client, &base, &fixture)?
         + victorialogs_error_cases(&client, &base, &fixture)?;
     if failures != 0 {
@@ -1744,7 +1811,7 @@ mod tests {
         assert_eq!(fixture.get("schema_version"), Some(&json!(1)));
 
         let mut identifiers = BTreeSet::new();
-        for name in ["query_cases", "stats_cases", "error_cases"] {
+        for name in ["query_cases", "sample_cases", "stats_cases", "error_cases"] {
             for case in object_cases(&fixture, name).unwrap() {
                 let identifier = case_id(case);
                 assert!(identifier.starts_with("LQL-"), "{identifier}");
@@ -1759,6 +1826,27 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{identifier}: {error}"));
                 if !unordered_fields.is_empty() {
                     assert_eq!(name, "stats_cases", "{identifier}");
+                }
+                if name == "sample_cases" {
+                    let iterations = case
+                        .get("iterations")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    let minimum = case
+                        .get("minimum_ratio")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(-1.0);
+                    let maximum = case
+                        .get("maximum_ratio")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(2.0);
+                    let distinct = case
+                        .get("minimum_distinct_counts")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    assert!(iterations > 1, "{identifier}");
+                    assert!(0.0 <= minimum && minimum < maximum && maximum <= 1.0);
+                    assert!(distinct > 1 && distinct <= iterations, "{identifier}");
                 }
                 let query = case
                     .get("query")
@@ -1786,7 +1874,7 @@ mod tests {
         let root = repository_root();
         let fixture: Value =
             load_json(&root.join("tests/query_oracles/victorialogs/api_cases.json")).unwrap();
-        let count = ["query_cases", "stats_cases", "error_cases"]
+        let count = ["query_cases", "sample_cases", "stats_cases", "error_cases"]
             .into_iter()
             .map(|name| fixture.get(name).and_then(Value::as_array).unwrap().len())
             .sum::<usize>();

@@ -156,6 +156,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-046`](#sql-log-046-deterministic-any-and-numeric-companion-field-extrema) | `LQL-S10` | current foundation | deterministic first nonempty rich JSON value plus finite native-number companion-field minima/maxima over exact public metadata paths; API owns complete natural ordering, canonical fields, typed results, state limits, cancellation, and envelopes |
 | [`SQL-LOG-047`](#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema) | `LQL-S11` | current foundation | deterministic first qualifying rich row plus finite native-number row minima/maxima for two fixed exact public metadata paths; API owns dynamic selectors, complete natural ordering, canonical fields, state limits, cancellation, and envelopes |
 | [`SQL-LOG-048`](#sql-log-048-query-backed-exact-membership) | `LQL-F38` | current foundation | bounded two-scan exact membership for retained strings through public rows; API owns subquery grammar, rich projection, phrase variants, cumulative limits, cancellation, caching, and envelopes |
+| [`SQL-LOG-049`](#sql-log-049-bounded-random-log-sample) | `LQL-P17` | current foundation | bounded independent `1/N` random selection over public log rows; API owns LogsQL unsigned grammar, exponential-gap compatibility, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7867,6 +7868,59 @@ allocation, or row crossing. No extension primitive or storage-format change
 is warranted. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
 harness; HTTP/oracle/optimize/flush/reopen regression:
 `session_eighteen_query_backed_lists_are_rich_cumulative_cached_and_reopenable`.
+
+### SQL-LOG-049: bounded random log sample
+
+Bind a positive signed 64-bit `:sample`, inclusive native timestamp bounds,
+and positive work/result limits. This read-only statement returns an
+independent random sample of bounded public log rows with probability `1/N`
+per row:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+)
+SELECT ts, level, message, metadata
+FROM bounded
+WHERE :sample > 0
+  AND (random() % :sample) = 0
+ORDER BY ts, level, message, metadata
+LIMIT :max_result_rows;
+```
+
+For the copyable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:max_work_entries` to `100000`, `:max_result_rows` to `100`, and `:sample`
+to `1`; both fixture rows are returned in explicit ascending order. Values
+greater than one select each bounded row independently with probability
+approximately `1/:sample`. SQLite's signed remainder is safe here: negative
+random values still have remainder zero exactly when divisible, without the
+`abs(INT64_MIN)` overflow edge. A caller must reject `:sample <= 0`; the
+defensive predicate returns no rows for such a binding. The virtual table's
+configured timestamp unit is authoritative.
+
+The complete `LQL-P17` API accepts VictoriaLogs positive unsigned syntax,
+including quoted, base-zero, byte-size, duration, and infinite spellings. It
+uses VictoriaLogs-compatible exponentially distributed skip lengths, keeps
+selected rows and their native rich values unchanged, preserves input order,
+composes at the current pipeline position, and enforces request work, result,
+response, deadline, and cancellation limits. The SQL statement uses ordinary
+SQLite independent Bernoulli draws instead; it implements the public `1/N`
+random-sample contract but deliberately does not claim the same private RNG
+sequence or gap distribution. SQLite parameters are signed, so the direct
+recipe supports `1..=9223372036854775807`; larger Rust API values are valid
+but practically select no bounded row.
+
+Sampling happens after the required bounded public scan. Moving its language
+syntax or RNG into the extension would not eliminate a block read, decode, or
+row crossing for direct users, while ordinary SQL already supplies a bounded
+random predicate. No extension primitive, private shadow-table access, or
+storage-format change is warranted. Direct regression: `tests/cli.sh` section
+45 and the Rust SQL harness; HTTP/oracle/optimize/flush/reopen regression:
+`session_eighteen_sample_is_random_bounded_durable_and_row_preserving`.
 
 ## Adding the next recipe
 

@@ -106,7 +106,7 @@ run variation; source preprocessing neither amplifies nor reduces storage work.
 
 The ordered pipeline also accepts `field_values`, `field_names`,
 `fields`/`keep`, `filter`/`where`, `stats`, `query_stats`, and bounded
-`first`/`last`/`top`.
+`first`/`last`/`top`/`sample`.
 Projection
 accepts exact dotted paths, top-level prefixes, and `*`; a later filter
 observes the projected row, not the original one. Field discovery is
@@ -628,6 +628,39 @@ gives direct users the exact bounded numeric window-rank foundation and
 documents why default SQLite collation is not full LogsQL natural ordering.
 [`SQL-LOG-028`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)
 is the executable reverse-order counterpart.
+
+LogsQL `sample N` retains a random `1/N` subset at its current ordered
+pipeline position:
+
+```text
+service:="api" | sample 4
+* | fields service, context | sample 100
+* | sample 1 | stats count() as total
+```
+
+`N` follows pinned VictoriaLogs positive-unsigned parsing: decimal and
+base-zero integers, quoted values, byte-size and duration suffixes, and
+`inf`/`+inf` are accepted. Zero, negative, invalid-octal, unsuffixed
+fractional, missing, extra, and parenthesized values are explicit HTTP 400
+errors. Commands are case-insensitive and `sample 1` preserves every row
+exactly.
+
+Each request uses a fresh random generator and VictoriaLogs-compatible
+exponentially distributed gaps rather than deterministic every-Nth selection.
+Retained rows stay in input order with all current strings, numbers, booleans,
+arrays, objects, nulls, and nested fields unchanged. A first-stage sample
+compacts public `QueryRow` values before metadata JSON materialization; a later
+sample operates on preceding projections or transforms. Both paths compact in
+place and check cancellation without allocating a second full rowset.
+
+The public scan remains bounded by `max_work_rows`; sampled output remains
+subject to `max_result_rows`, `max_response_bytes`, the request deadline, and
+cooperative cancellation. Executable
+[`SQL-LOG-049`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-049-bounded-random-log-sample)
+provides the public SQLite/libSQL `1/N` Bernoulli-sample equivalent. Its random
+sequence is intentionally not presented as the upstream exponential-gap RNG.
+No extension primitive, private table, storage-format change, or mutation is
+used.
 
 LogsQL `top` groups one or more exact fields from the current pipeline row,
 orders groups by hit count descending and textual key ascending, and emits

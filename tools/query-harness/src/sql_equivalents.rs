@@ -420,6 +420,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "row_result_path_2" => Value::Text("$.nested".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
+        "sample" => Value::Integer(1),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
         "output_labels_json" => Value::Text(r#"{"case":"late","service":"api"}"#.to_owned()),
@@ -1726,6 +1727,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let row_any_rows = recipe_values("SQL-LOG-047", 0)?;
     let row_extrema_rows = recipe_values("SQL-LOG-047", 1)?;
     let query_backed_rows = recipe_values("SQL-LOG-048", 0)?;
+    let sample_one_rows = recipe_values("SQL-LOG-049", 0)?;
     if [
         bounded,
         substring,
@@ -1785,6 +1787,39 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<Vec<_>>();
     if query_backed_timestamps != [Some(Value::Integer(1000))] {
         bail!("SQL-LOG-048 query-backed membership changed: {query_backed_rows:?}");
+    }
+    let sample_one_timestamps = sample_one_rows
+        .iter()
+        .map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    if sample_one_timestamps != [Some(Value::Integer(1000)), Some(Value::Integer(2000))] {
+        bail!("SQL-LOG-049 sample-one rows changed: {sample_one_rows:?}");
+    }
+    let sample_sql = recipe_sql("SQL-LOG-049", 0)?;
+    let mut sample_statement = connection.prepare(&sample_sql)?;
+    for index in 1..=sample_statement.parameter_count() {
+        let name = sample_statement
+            .parameter_name(index)
+            .context("SQL-LOG-049 parameter must be named")?
+            .trim_start_matches(':');
+        let value = if name == "sample" {
+            Value::Integer(2)
+        } else {
+            parameter("SQL-LOG-049", name)
+        };
+        sample_statement.raw_bind_parameter(index, value)?;
+    }
+    let mut selected_total = 0usize;
+    let mut distinct_counts = BTreeSet::new();
+    for _ in 0..2_048 {
+        let count = sample_statement.raw_query().mapped(|_| Ok(())).count();
+        selected_total = selected_total.saturating_add(count);
+        distinct_counts.insert(count);
+    }
+    if !(1_700..=2_400).contains(&selected_total) || distinct_counts.len() != 3 {
+        bail!(
+            "SQL-LOG-049 sample-two distribution changed: total={selected_total} counts={distinct_counts:?}"
+        );
     }
     let field_noop_timestamps = field_noop_rows
         .iter()
@@ -3824,13 +3859,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 114);
+        assert_eq!(recipes.len(), 115);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            146
+            147
         );
         assert_eq!(
             recipes
@@ -3838,7 +3873,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            152
+            153
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

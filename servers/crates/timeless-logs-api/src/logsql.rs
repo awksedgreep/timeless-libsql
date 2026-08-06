@@ -222,6 +222,32 @@ fn parse_delete_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Delete(fields))
 }
 
+fn parse_sample_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "sample")?;
+    let [command, value] = tokens.as_slice() else {
+        return Err(LogsqlError::malformed(
+            "LogsQL sample requires exactly one positive unsigned value",
+        ));
+    };
+    if !command.eq_ignore_ascii_case("sample") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL sample pipe, not {command:?}"
+        )));
+    }
+    let value = quoted_value(value)?.unwrap_or_else(|| value.clone());
+    let sample = parse_len_range_bound(&value).ok_or_else(|| {
+        LogsqlError::malformed(format!(
+            "LogsQL sample requires a positive unsigned value, not {value:?}"
+        ))
+    })?;
+    if sample == 0 {
+        return Err(LogsqlError::malformed(
+            "LogsQL sample value must be greater than zero",
+        ));
+    }
+    Ok(PipelineOp::Sample(sample))
+}
+
 fn parse_delete_field(value: &str) -> Result<PipelineField, LogsqlError> {
     if value == "*" {
         return Ok(PipelineField::All);
@@ -2703,6 +2729,10 @@ fn is_facets_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "facets")
 }
 
+fn is_sample_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "sample")
+}
+
 fn is_coalesce_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "coalesce")
 }
@@ -3754,6 +3784,7 @@ pub(crate) enum PipelineOp {
     },
     Offset(usize),
     Limit(usize),
+    Sample(u64),
     FieldValues {
         field: PipelineField,
         filter: Option<String>,
@@ -4166,6 +4197,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_facets_pipe(segment) => {
                 pipeline.push(parse_facets_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_sample_pipe(segment) => {
+                pipeline.push(parse_sample_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_coalesce_pipe(segment) => {
@@ -4629,18 +4664,17 @@ fn common_case_values(
                     "LogsQL common-case expansion exceeds {MAX_COMMON_CASE_VALUES} values"
                 )));
             }
-            let value_bytes = value.len().checked_add(64).ok_or_else(|| {
-                LogsqlError::malformed("LogsQL common-case state size overflow")
-            })?;
-            let next_state_bytes = state_bytes.checked_add(value_bytes).ok_or_else(|| {
-                LogsqlError::malformed("LogsQL common-case state size overflow")
-            })?;
+            let value_bytes = value
+                .len()
+                .checked_add(64)
+                .ok_or_else(|| LogsqlError::malformed("LogsQL common-case state size overflow"))?;
+            let next_state_bytes = state_bytes
+                .checked_add(value_bytes)
+                .ok_or_else(|| LogsqlError::malformed("LogsQL common-case state size overflow"))?;
             let total_bytes = context
                 .common_case_state_bytes
                 .checked_add(next_state_bytes)
-                .ok_or_else(|| {
-                    LogsqlError::malformed("LogsQL common-case state size overflow")
-                })?;
+                .ok_or_else(|| LogsqlError::malformed("LogsQL common-case state size overflow"))?;
             if total_bytes > MAX_COMMON_CASE_STATE_BYTES {
                 return Err(LogsqlError::malformed(format!(
                     "LogsQL common-case expansion exceeds {MAX_COMMON_CASE_STATE_BYTES} state bytes"
@@ -8834,6 +8868,53 @@ mod tests {
             "contains_any(,alpha)",
             "contains_any(alpha beta)",
             "contains_any(alpha*)",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_sample_grammar_is_positive_unsigned_and_strict() {
+        let sample = |query: &str| {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let values = plan
+                .pipeline
+                .iter()
+                .filter_map(|operation| match operation {
+                    PipelineOp::Sample(value) => Some(*value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [value] = values.as_slice() else {
+                panic!("unexpected sample plan: {plan:?}");
+            };
+            *value
+        };
+
+        assert_eq!(sample("* | sample 1"), 1);
+        assert_eq!(sample("* | SaMpLe +2"), 2);
+        assert_eq!(sample("* | sample \"2\""), 2);
+        assert_eq!(sample("* | sample 0x10"), 16);
+        assert_eq!(sample("* | sample 010"), 8);
+        assert_eq!(sample("* | sample 1.5KiB"), 1_536);
+        assert_eq!(sample("* | sample 1s"), 1_000_000_000);
+        assert_eq!(sample("* | sample +Inf"), u64::MAX);
+        assert_eq!(
+            sample("* | fields case | sample 2 | stats count() as total"),
+            2
+        );
+
+        for malformed in [
+            "* | sample",
+            "* | sample 0",
+            "* | sample -1",
+            "* | sample nope",
+            "* | sample 08",
+            "* | sample 1.5",
+            "* | sample 1 2",
+            "* | sample(2)",
+            "* | sample \"0\"",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed}");
