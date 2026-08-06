@@ -2764,6 +2764,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "json_array_concat_narrow",
+                "logs-json-array-concat-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields tags | json_array_concat "," tags joined | fields joined"#,
+                64,
+                None,
+            ),
+            (
+                "json_array_concat_wide",
+                "logs-json-array-concat-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields tags | json_array_concat "," tags joined | fields joined"#,
+                64,
+                None,
+            ),
+            (
+                "json_array_concat_control_narrow",
+                "logs-json-array-concat-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields tags | format 'query,true' as joined | fields joined"#,
+                64,
+                None,
+            ),
+            (
+                "json_array_concat_control_wide",
+                "logs-json-array-concat-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields tags | format 'query,true' as joined | fields joined"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3320,6 +3348,16 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "unpack_words_narrow",
         )?;
         require_same_public_query_work(&queries, "unpack_words_control_wide", "unpack_words_wide")?;
+        require_same_public_query_work(
+            &queries,
+            "json_array_concat_control_narrow",
+            "json_array_concat_narrow",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "json_array_concat_control_wide",
+            "json_array_concat_wide",
+        )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
