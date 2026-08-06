@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::rejection::QueryRejection;
@@ -141,7 +141,7 @@ async fn query_get(
     if let Err((reason, limit)) = apply_query_limits(&mut spec, limit_explicit, limits) {
         return query_limit_error(reason, limit);
     }
-    query_response(&storage, spec, limits).await
+    query_response(&storage, spec, limits, limits.deadline).await
 }
 
 #[derive(Deserialize, Default)]
@@ -205,7 +205,7 @@ async fn field_values(
     )
     .await
     {
-        Err(_) => timeout_error(limits),
+        Err(_) => timeout_error(limits.deadline),
         Ok(Err(error)) => query_execution_error(error),
         Ok(Ok(values)) => {
             let row_count = values.len();
@@ -516,7 +516,7 @@ async fn query_post(
     )
     .await
     {
-        Err(_) => return timeout_error(limits),
+        Err(_) => return timeout_error(limits.deadline),
         Ok(Err(error)) => return query_execution_error(error),
         Ok(Ok(())) => {}
     }
@@ -525,7 +525,7 @@ async fn query_post(
     drop(resolution);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
-        return timeout_error(limits);
+        return timeout_error(limits.deadline);
     }
     let execution_limits = LogsQueryLimits {
         deadline: remaining,
@@ -533,7 +533,7 @@ async fn query_post(
     };
     if plan.output == LogsqlOutput::Count {
         match tokio::time::timeout(execution_limits.deadline, storage.count(plan.spec)).await {
-            Err(_) => timeout_error(execution_limits),
+            Err(_) => timeout_error(limits.deadline),
             Ok(Err(error)) => query_execution_error(error),
             Ok(Ok(total)) => {
                 match bounded_json_line(
@@ -552,9 +552,9 @@ async fn query_post(
             }
         }
     } else if plan.output == LogsqlOutput::Pipeline {
-        pipeline_response(&storage, plan, execution_limits).await
+        pipeline_response(&storage, plan, execution_limits, limits.deadline).await
     } else {
-        query_response(&storage, plan.spec, execution_limits).await
+        query_response(&storage, plan.spec, execution_limits, limits.deadline).await
     }
 }
 
@@ -562,6 +562,7 @@ async fn pipeline_response(
     storage: &Storage,
     plan: LogsqlPlan,
     limits: LogsQueryLimits,
+    reported_deadline: Duration,
 ) -> Response<Body> {
     let rate_window_seconds = rate_window_seconds(&plan.spec, storage.timestamp_unit());
     let rows = match tokio::time::timeout(
@@ -580,7 +581,7 @@ async fn pipeline_response(
     )
     .await
     {
-        Err(_) => return timeout_error(limits),
+        Err(_) => return timeout_error(reported_deadline),
         Ok(Err(error)) => return query_execution_error(error),
         Ok(Ok(rows)) => rows,
     };
@@ -616,9 +617,10 @@ async fn query_response(
     storage: &Storage,
     spec: QuerySpec,
     limits: LogsQueryLimits,
+    reported_deadline: Duration,
 ) -> Response<Body> {
     match tokio::time::timeout(limits.deadline, storage.query(spec)).await {
-        Err(_) => timeout_error(limits),
+        Err(_) => timeout_error(reported_deadline),
         Ok(Err(error)) => query_execution_error(error),
         Ok(Ok(rows)) => {
             let row_count = rows.len();
@@ -728,13 +730,13 @@ fn query_limit_error(reason: &str, limit: usize) -> Response<Body> {
         .into_response()
 }
 
-fn timeout_error(limits: LogsQueryLimits) -> Response<Body> {
+fn timeout_error(reported_deadline: Duration) -> Response<Body> {
     (
         StatusCode::GATEWAY_TIMEOUT,
         Json(json!({
             "error": "timeout",
             "reason": "query_deadline",
-            "deadline_ms": limits.deadline.as_millis()
+            "deadline_ms": reported_deadline.as_millis()
         })),
     )
         .into_response()

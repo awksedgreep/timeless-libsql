@@ -6537,42 +6537,27 @@ async fn session_sixteen_multi_exact_matches_rich_fields_and_reopens() {
             "{malformed}"
         );
     }
-    let subquery = app
-        .clone()
-        .oneshot(logsql_request("case:in(value | fields case)"))
-        .await
-        .unwrap();
-    assert_eq!(subquery.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(
-            &to_bytes(subquery.into_body(), usize::MAX).await.unwrap()
-        )
-        .unwrap()["reason"],
-        "unsupported_logsql"
-    );
+    let query_backed_cases = pipeline_rows(
+        &app,
+        "case:in(case:string | fields case) | fields case | limit 100",
+    )
+    .await
+    .into_iter()
+    .map(|row| row["case"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+    assert_eq!(query_backed_cases, ["string"]);
 
-    for unsupported in [
+    for query_backed in [
         "case:contains_all(missing | fields case)",
         "case:contains_any(missing | fields case)",
     ] {
-        let response = app
-            .clone()
-            .oneshot(logsql_request(unsupported))
+        let query = format!("{query_backed} | fields case | limit 100");
+        let cases = pipeline_rows(&app, &query)
             .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{unsupported}"
-        );
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(
-                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
-            )
-            .unwrap()["reason"],
-            "unsupported_logsql",
-            "{unsupported}"
-        );
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(cases, ["missing"], "{query_backed}");
     }
 
     let limited = router_with_limits(

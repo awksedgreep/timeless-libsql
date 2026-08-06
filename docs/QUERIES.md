@@ -240,8 +240,8 @@ projection used by exact-prefix filters. `in()` matches nothing, a trailing
 comma is accepted, and a quoted `"*"` is literal. Any standalone unquoted `*`
 inside `in`, `contains_any`, or `contains_all` is instead a field-independent
 no-op: it matches every bounded row even when the named field is absent.
-Query-backed lists remain explicitly unsupported rather than silently
-approximated.
+The query-backed forms documented below use the same projection after their
+bounded source query materializes exact values.
 
 `contains_all(v1, ..., vN)` requires every non-empty static argument to match
 the same field as a case-sensitive VictoriaLogs phrase. Letter, digit, and
@@ -301,8 +301,10 @@ Every subquery and the outer query executes sequentially through the public
 are evaluated once per request. The parser accepts at most eight nested levels
 and 32 query-backed lists; materialized values, result cardinality, cumulative
 decoded work, response/state bytes, and the complete request deadline remain
-bounded. The cache is released before the outer scan. No LogsQL syntax,
-nested cursor, or private shadow table enters the extension.
+bounded. Internal execution uses the time remaining after parsing and source
+resolution; a timeout envelope reports the configured request deadline rather
+than that rounded remainder. The cache is released before the outer scan. No
+LogsQL syntax, nested cursor, or private shadow table enters the extension.
 
 `field:json_array_contains_any(v1, ..., vN)` selects only a retained JSON
 array and succeeds when any top-level primitive element has the same exact
