@@ -915,6 +915,19 @@ identical public reads, unchanged four-block storage, and the HWM verdict, and
 closes `LQL-S10`. Session 17 continues with `LQL-S11`; its remaining declared
 P2 rows must not be skipped before Session 18 begins.
 
+`LQL-S11` now has strict case-insensitive `row_any`, `row_min`, and `row_max`
+grammar; upstream `as` and implicit aliases; exact/flattened-prefix/all-current
+result selection; deterministic first qualifying `row_any`; the complete
+VictoriaLogs text comparator and strict first ties for extrema; native nested
+JSON fidelity; explicit missing/null/empty behavior; bounded recursive prefix
+traversal and retained state; cancellation; immutable source rows; and
+optimize/reopen durability. Six exact statistics cases and seven errors pass
+the complete 941-case pinned VictoriaLogs oracle. Executable `SQL-LOG-047`
+gives direct users deterministic fixed-path and finite-native-number row
+foundations without a new extension primitive. Exact-build performance,
+storage work, HWM, and the final row disposition remain required before
+`LQL-S11` closes and Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

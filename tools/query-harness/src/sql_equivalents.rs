@@ -411,6 +411,11 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "any_source_path" => Value::Text("$.host".to_owned()),
         "extreme_source_path" => Value::Text("$.duration_ms".to_owned()),
         "extreme_result_path" => Value::Text("$.host".to_owned()),
+        "row_any_path_1" => Value::Text("$.nested.ok".to_owned()),
+        "row_any_path_2" => Value::Text("$.nested.none".to_owned()),
+        "row_extreme_source_path" => Value::Text("$.duration_ms".to_owned()),
+        "row_result_path_1" => Value::Text("$.host".to_owned()),
+        "row_result_path_2" => Value::Text("$.nested".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1712,6 +1717,8 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let sum_len_rows = recipe_values("SQL-LOG-045", 0)?;
     let any_rows = recipe_values("SQL-LOG-046", 0)?;
     let field_extrema_rows = recipe_values("SQL-LOG-046", 1)?;
+    let row_any_rows = recipe_values("SQL-LOG-047", 0)?;
+    let row_extrema_rows = recipe_values("SQL-LOG-047", 1)?;
     if [
         bounded,
         substring,
@@ -2455,6 +2462,128 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if source_after_any_extrema != source_packed_fields {
         bail!("SQL-LOG-046 mutated its public source: {source_after_any_extrema:?}");
+    }
+    let [row_any_result] = row_any_rows.as_slice() else {
+        bail!("SQL-LOG-047 row_any cardinality changed: {row_any_rows:?}");
+    };
+    let Some(Value::Text(row_any_json)) = row_any_result.first() else {
+        bail!("SQL-LOG-047 row_any type changed: {row_any_rows:?}");
+    };
+    if serde_json::from_str::<serde_json::Value>(row_any_json)?
+        != serde_json::json!({"nested": {"ok": true, "none": null}})
+    {
+        bail!("SQL-LOG-047 row_any rich result changed: {row_any_rows:?}");
+    }
+    let [row_extrema_result] = row_extrema_rows.as_slice() else {
+        bail!("SQL-LOG-047 row extrema cardinality changed: {row_extrema_rows:?}");
+    };
+    let [Value::Text(minimum_json), Value::Text(maximum_json)] = row_extrema_result.as_slice()
+    else {
+        bail!("SQL-LOG-047 row extrema types changed: {row_extrema_rows:?}");
+    };
+    let minimum = serde_json::from_str::<serde_json::Value>(minimum_json)?;
+    let maximum = serde_json::from_str::<serde_json::Value>(maximum_json)?;
+    if minimum.get("host") != Some(&serde_json::json!("web-2"))
+        || minimum.pointer("/nested/ok") != Some(&serde_json::json!("true"))
+        || maximum.get("host") != Some(&serde_json::json!("web-1"))
+        || maximum.pointer("/nested/ok") != Some(&serde_json::json!(true))
+        || maximum.pointer("/nested/none") != Some(&serde_json::Value::Null)
+    {
+        bail!("SQL-LOG-047 row extrema rich results changed: {row_extrema_rows:?}");
+    }
+    let row_any_sql = recipe_sql("SQL-LOG-047", 0)?;
+    let measured_row_any = |path_1: &str, path_2: &str| -> Result<Vec<Vec<Value>>> {
+        let mut statement = connection.prepare(&row_any_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-047 row_any parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "row_any_path_1" => Value::Text(path_1.to_owned()),
+                "row_any_path_2" => Value::Text(path_2.to_owned()),
+                _ => parameter("SQL-LOG-047", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let columns = statement.column_count();
+        statement
+            .raw_query()
+            .mapped(|row| {
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<Value>>>()
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    let typed_row_any = measured_row_any("$.nested.ok", "$.tags")?;
+    let [typed_row] = typed_row_any.as_slice() else {
+        bail!("SQL-LOG-047 typed row_any cardinality changed: {typed_row_any:?}");
+    };
+    let Some(Value::Text(typed_json)) = typed_row.first() else {
+        bail!("SQL-LOG-047 typed row_any type changed: {typed_row_any:?}");
+    };
+    let typed = serde_json::from_str::<serde_json::Value>(typed_json)?;
+    if typed.pointer("/nested/ok") != Some(&serde_json::json!(true))
+        || !typed.get("tags").is_some_and(serde_json::Value::is_array)
+        || !measured_row_any("$.missing", "$.also_missing")?.is_empty()
+    {
+        bail!("SQL-LOG-047 typed or missing row_any behavior changed: {typed_row_any:?}");
+    }
+    let row_extrema_sql = recipe_sql("SQL-LOG-047", 1)?;
+    let measured_row_extrema =
+        |source_path: &str, result_path_1: &str, result_path_2: &str| -> Result<Vec<Vec<Value>>> {
+            let mut statement = connection.prepare(&row_extrema_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-047 row extrema parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "row_extreme_source_path" => Value::Text(source_path.to_owned()),
+                    "row_result_path_1" => Value::Text(result_path_1.to_owned()),
+                    "row_result_path_2" => Value::Text(result_path_2.to_owned()),
+                    _ => parameter("SQL-LOG-047", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            let columns = statement.column_count();
+            statement
+                .raw_query()
+                .mapped(|row| {
+                    (0..columns)
+                        .map(|column| row.get(column))
+                        .collect::<rusqlite::Result<Vec<Value>>>()
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        };
+    let empty_extrema = measured_row_extrema("$.missing", "$.host", "$.tags")?;
+    if empty_extrema
+        != [vec![
+            Value::Text("{}".to_owned()),
+            Value::Text("{}".to_owned()),
+        ]]
+    {
+        bail!("SQL-LOG-047 empty row extrema changed: {empty_extrema:?}");
+    }
+    let array_extrema = measured_row_extrema("$.duration_ms", "$.missing", "$.tags")?;
+    let [array_row] = array_extrema.as_slice() else {
+        bail!("SQL-LOG-047 array row extrema cardinality changed: {array_extrema:?}");
+    };
+    if array_row.iter().any(|value| {
+        !matches!(value, Value::Text(json) if serde_json::from_str::<serde_json::Value>(json)
+            .is_ok_and(|value| value.get("tags").is_some_and(serde_json::Value::is_array)))
+    }) {
+        bail!("SQL-LOG-047 array or missing result behavior changed: {array_extrema:?}");
+    }
+    let source_after_row_selection = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_after_row_selection != source_packed_fields {
+        bail!("SQL-LOG-047 mutated its public source: {source_after_row_selection:?}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3681,13 +3810,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 112);
+        assert_eq!(recipes.len(), 113);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            143
+            145
         );
         assert_eq!(
             recipes
@@ -3695,7 +3824,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            149
+            151
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

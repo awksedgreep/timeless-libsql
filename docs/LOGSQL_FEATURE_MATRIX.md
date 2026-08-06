@@ -668,7 +668,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S08` | `rate` / `rate_sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
 | `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-S11` | `row_any` / `row_min` / `row_max` | missing | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | in progress | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -733,6 +733,22 @@ blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
 128/8,192 materialized rows. `QSF-197` accepts the bounded deterministic/rich
 Rust reductions above the unchanged public storage boundary and retains the
 42.084 ms wide companion-extrema p99 honestly.
+
+`row_any(fields...)` selects the first current row where any exact, flattened-
+prefix, or all-current field is nonempty, then returns every selected existing
+field from that same row as one native nested JSON object. Missing fields are
+omitted; selected null, empty strings, false, zero, arrays, and objects remain
+typed. `row_min(source[, fields...])` and `row_max` require one exact nonempty
+comparison field, use the complete VictoriaLogs signed/unsigned/timestamp/
+math/natural text comparator, keep the first strict tie, and default the
+result selection to all current fields. Empty selection returns `{}`.
+Function names are case-insensitive; result aliases may use `as name` or the
+upstream implicit `name` form. Candidate traversal, flattened-prefix descent,
+comparison keys, and complete selected objects are work/byte bounded and
+deadline-cancellable. `SQL-LOG-047` gives direct users deterministic fixed-
+path rich selection and finite-native-number row extrema through public
+`logs`; dynamic selectors, canonical fields, complete comparison, limits,
+cancellation, grammar, and envelopes remain Rust API composition.
 
 ## Query options and HTTP behavior
 

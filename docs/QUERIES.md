@@ -1584,6 +1584,50 @@ retained honestly. The checked evidence artifact is
 with SHA-256
 `711d80e590550a2e4655103a60b7ec3da0c9fda84fb2f9dcdd1500428c674d2f`.
 
+## LogsQL rich row selection and row extrema
+
+The bounded `stats` pipeline can return a complete selected field set from
+one qualifying row:
+
+```text
+* | stats row_any(service, payload*) as representative
+* | stats row_min(duration_ms) as fastest_row
+* | stats row_max(duration_ms, service, payload) slowest_row
+```
+
+Function names are case-insensitive. `row_any(fields...)` accepts exact,
+flattened-prefix, or all-field selectors; empty parentheses select all current
+fields. It returns the first current row where at least one selected field is
+nonempty, projected to the complete selected object. Prefixes recursively
+match flattened leaf paths and reconstruct nesting. Missing selected paths are
+omitted, while selected JSON null, empty strings, false, zero, arrays, empty
+objects, and other objects keep their native types. If no row qualifies, the
+result is `{}`. VictoriaLogs permits merge-order-dependent selection; Timeless
+documents deterministic current-pipeline order instead.
+
+`row_min(source[, fields...])` and `row_max` require one exact comparison
+field. With no result selectors they return all current fields. Otherwise the
+result selectors may be exact, flattened-prefix, or all fields. Empty source
+values are skipped; comparison follows VictoriaLogs' signed integer, unsigned
+integer, RFC3339 timestamp, general math-number, and natural UTF-8 chain.
+Equal comparison values retain the first current row. Empty input returns
+`{}`. An alias may be written as either `as result` or the upstream shorthand
+`result`; additional trailing tokens fail explicitly.
+
+Every candidate, selected traversal, flattened-prefix node, retained
+comparison key, and cloned rich result counts against the query work/state
+limits. Deadline cancellation, limit errors, and malformed syntax leave the
+public SQLite reader reusable. Source rows remain immutable across flush,
+optimize, shutdown, and reopen.
+
+Executable
+[`SQL-LOG-047`](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)
+uses only public `logs`, JSON1, fixed exact paths, and explicit row ordering
+for a deterministic rich-row selection and finite-native-number row extrema.
+Dynamic selectors and the complete LogsQL comparator remain bounded Rust API
+composition after the same required public scan; no private table or language-
+specific extension primitive is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

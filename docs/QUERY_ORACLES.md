@@ -828,3 +828,22 @@ objects, null, empty, and missing states, with a missing companion represented
 by the stable empty string. The fixture now contains 298 row-query cases, 301
 error cases, and 329 statistics/pipeline cases: 928 cases total, all passing
 against the immutable image. The fixture now contains 928 cases.
+
+`LQL-S11` adds six exact statistics cases and seven error cases for `row_any`,
+`row_min`, and `row_max`. They pin complete same-row field selection, empty
+`{}` output, flattened-prefix selection, signed/unsigned/math/natural source
+comparison, case-insensitive function names, optional implicit result aliases,
+required exact extrema sources, and strict malformed grammar. Source audit is
+against `stats_row_any.go`, `stats_row_min.go`, `stats_row_max.go`, their
+tests, `pipe_stats.go`, and the shared string comparator at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+VictoriaLogs returns flattened string fields and lets `row_any` choose a row
+according to parallel merge order. Timeless deliberately chooses the first
+qualifying current row and returns a native nested JSON object; missing
+selected paths are omitted while null, empty, false, zero, arrays, and objects
+remain distinct. Extrema preserve upstream comparison and strict first-tie
+behavior. The live audit also proved that `stats row_max(a,b) result` is a
+valid implicit alias, so two trailing words—not one—form the malformed case.
+The fixture now contains 298 row-query cases, 308 error cases, and 335
+statistics/pipeline cases: 941 cases total, all passing against the immutable
+image. The fixture now contains 941 cases.

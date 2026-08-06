@@ -753,6 +753,15 @@ Exact-build p95 is 3.293/33.764 ms for narrow/wide `any` and
 3.306/36.738 ms for companion extrema, respectively 26.4%/10.0% and
 10.7%/4.0% below equal-output controls with byte-identical public storage
 work.
+`row_any(fields...)`, `row_min(source[, fields...])`, and `row_max` add
+deterministic complete-row selection with native nested JSON fidelity,
+flattened-prefix/all-current selectors, the complete LogsQL natural
+comparator, strict first-tie behavior, empty `{}` results, and bounded
+cancellation. Result aliases accept both `as name` and VictoriaLogs' implicit
+`name` form. Direct SQLite/libSQL users have the executable fixed-path and
+finite-native-number public-row foundation in `SQL-LOG-047`; dynamic language
+semantics stay in the standalone Rust logs API without an Elixir, NIF, HTTP,
+or private-storage fallback.
 The bounded `first` pipeline selects an optional positive number of rows by
 exact fields with per-field direction, optional partitioning, and an optional
 one-based string rank. Its coercion chain covers exact signed/unsigned

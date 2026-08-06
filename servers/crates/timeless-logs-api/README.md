@@ -128,7 +128,8 @@ the same public decode.
 The implemented statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
 `median`, `quantile`, `stddev`, `sum_len`, `any`, `field_min`, `field_max`,
-`rate`, and `rate_sum`. Missing, null, and empty remain distinct;
+`row_any`, `row_min`, `row_max`, `rate`, and `rate_sum`. Missing, null, and
+empty remain distinct;
 `count_empty` deliberately counts all three for compatibility. Exact unique
 counts use complete typed tuples, while `count_uniq_hash` uses a documented
 stable 64-bit FNV-1a key hash and claims cardinality—not VictoriaLogs hash-bit
@@ -178,6 +179,19 @@ controls. Every comparison scans one/four blocks, decodes 1,024/8,192 entries,
 reads 235,778/1,914,055 payload bytes, and materializes 128/8,192 public rows.
 The bounded deterministic/rich reductions therefore stay in this Rust API;
 `QSF-197` records the complete tails, HWM, and unchanged storage verdict.
+
+`row_any(fields...)` selects the first current row with any nonempty exact,
+flattened-prefix, or all-current field and returns the complete selected native
+JSON object. Prefixes descend through nested objects and reconstruct their
+shape. `row_min(source[,fields...])` and `row_max` require an exact comparison
+source, use the complete VictoriaLogs natural comparator, retain the first
+tie, and default to all current result fields. Missing selected paths are
+omitted; null, empty, false, zero, arrays, and objects remain typed; no match
+returns `{}`. Function names are case-insensitive and aliases accept `as name`
+or the implicit `name` form. Work, deep traversal, selected state, response
+bytes, and cancellation are bounded. `SQL-LOG-047` provides direct users the
+fixed-path rich-row and finite-number public SQL foundation; no extension
+primitive or private storage access is used.
 
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.

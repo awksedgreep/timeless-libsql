@@ -67,6 +67,9 @@ pub(crate) enum StatsKind {
     Any,
     FieldMin,
     FieldMax,
+    RowAny,
+    RowMin,
+    RowMax,
     Rate,
     RateSum,
 }
@@ -324,6 +327,9 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         "any" => StatsKind::Any,
         "field_min" => StatsKind::FieldMin,
         "field_max" => StatsKind::FieldMax,
+        "row_any" => StatsKind::RowAny,
+        "row_min" => StatsKind::RowMin,
+        "row_max" => StatsKind::RowMax,
         "rate" => StatsKind::Rate,
         "rate_sum" => StatsKind::RateSum,
         _ => {
@@ -363,6 +369,21 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         .map(|field| parse_pipeline_field(field.trim(), true))
         .collect::<Result<Vec<_>, _>>()?;
     match kind {
+        StatsKind::RowMin | StatsKind::RowMax if fields.is_empty() => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function} requires a comparison field"
+            )))
+        }
+        StatsKind::RowMin | StatsKind::RowMax
+            if !matches!(fields.first(), Some(PipelineField::Exact { .. })) =>
+        {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {function} comparison field must be exact"
+            )))
+        }
+        StatsKind::RowMin | StatsKind::RowMax if fields.len() == 1 => {
+            fields.push(PipelineField::All);
+        }
         StatsKind::Any if fields.len() != 1 => {
             return Err(LogsqlError::malformed(format!(
                 "LogsQL any requires exactly one field; got {}",
@@ -428,6 +449,10 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
                 })?;
                 alias = Some(pipeline_field_name(&parse_pipeline_field(value, false)?)?);
                 index += 2;
+            }
+            token if alias.is_none() && index + 1 == words.len() => {
+                alias = Some(pipeline_field_name(&parse_pipeline_field(token, false)?)?);
+                index += 1;
             }
             token => {
                 return Err(LogsqlError::malformed(format!(
@@ -9769,6 +9794,9 @@ mod tests {
             r#"* | stats SuM_LeN(text, nested*) as bytes"#,
             r#"* | fields text, n | stats sum_len() as bytes"#,
             r#"* | stats AnY(probe) as selected, field_min(rank, payload) as low, field_max(rank, payload) as high"#,
+            r#"* | stats RoW_AnY(probe, payload*) as selected, row_min(rank) as low, row_max(rank, payload, nested*) as high"#,
+            r#"* | fields probe, payload | stats row_any() as selected"#,
+            r#"* | stats row_max(rank, payload) selected"#,
             r#"_time:1h | stats rate() as rate, rate_sum(n) as rate_sum"#,
         ] {
             let plan = parse_at(query, TimestampUnit::Microseconds, 1_800_000_000_000_000);
@@ -9801,6 +9829,13 @@ mod tests {
             "* | stats field_min(left)",
             "* | stats field_min(left, right, extra)",
             "* | stats field_max(left*, right)",
+            "* | stats row_any",
+            "* | stats row_any(left right)",
+            "* | stats row_any(left**)",
+            "* | stats row_min()",
+            "* | stats row_min(left*, right)",
+            "* | stats row_max(*, right)",
+            "* | stats row_max(left, right) tail extra",
             "* | stats sum(n) as value, avg(n) as value",
         ] {
             assert!(

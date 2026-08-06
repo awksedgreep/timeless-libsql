@@ -154,6 +154,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-044`](#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation) | `LQL-S07` | current foundation | bounded upper-step quantile and one-pass population deviation for one exact finite native-number path; API owns textual natural order, rich projection, grammar, state limits, cancellation, and envelopes |
 | [`SQL-LOG-045`](#sql-log-045-summed-utf-8-byte-length-of-one-exact-field) | `LQL-S09` | current foundation | summed UTF-8/compact-JSON byte length for one exact public metadata path; API owns dynamic field selection, canonical fields, checked unsigned overflow, limits, cancellation, and envelopes |
 | [`SQL-LOG-046`](#sql-log-046-deterministic-any-and-numeric-companion-field-extrema) | `LQL-S10` | current foundation | deterministic first nonempty rich JSON value plus finite native-number companion-field minima/maxima over exact public metadata paths; API owns complete natural ordering, canonical fields, typed results, state limits, cancellation, and envelopes |
+| [`SQL-LOG-047`](#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema) | `LQL-S11` | current foundation | deterministic first qualifying rich row plus finite native-number row minima/maxima for two fixed exact public metadata paths; API owns dynamic selectors, complete natural ordering, canonical fields, state limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7577,6 +7578,184 @@ private shadow-table access, or storage-format change is warranted.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_any_and_field_extrema_preserve_rich_rows_and_reopen`.
+
+### SQL-LOG-047: deterministic rich row selection and numeric row extrema
+
+For deterministic `row_any`, bind two exact SQLite JSON paths, inclusive
+native timestamp bounds, and positive work/result limits. This read-only
+statement finds the first public row where either selected value is nonempty,
+then returns both existing values from that same row as one compact, typed
+JSON object:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), typed AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    json_type(metadata, :row_any_path_1) AS type_1,
+    json_type(metadata, :row_any_path_2) AS type_2
+  FROM bounded
+), eligible AS (
+  SELECT
+    *,
+    CASE
+      WHEN type_1 IS NULL THEN 0
+      WHEN type_1 = 'null' THEN 0
+      WHEN type_1 = 'text' THEN json_extract(metadata, :row_any_path_1) <> ''
+      ELSE 1
+    END OR CASE
+      WHEN type_2 IS NULL THEN 0
+      WHEN type_2 = 'null' THEN 0
+      WHEN type_2 = 'text' THEN json_extract(metadata, :row_any_path_2) <> ''
+      ELSE 1
+    END AS qualifies,
+    CASE
+      WHEN type_1 IS NULL THEN json('{}')
+      ELSE json_set(
+        json('{}'),
+        :row_any_path_1,
+        json(metadata -> :row_any_path_1)
+      )
+    END AS selected_1
+  FROM typed
+), selected AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN type_2 IS NULL THEN selected_1
+      ELSE json_set(
+        selected_1,
+        :row_any_path_2,
+        json(metadata -> :row_any_path_2)
+      )
+    END AS selected_json
+  FROM eligible
+  WHERE qualifies
+)
+SELECT selected_json
+FROM selected
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, metadata
+LIMIT MIN(:max_result_rows, 1);
+```
+
+`:row_any_path_1` and `:row_any_path_2` are exact paths such as `$.host`,
+`$.nested.ok`, or `$.payload`. A selected missing path is omitted; selected
+JSON null, empty string, false, zero, arrays, and objects retain their native
+JSON types in the result. Missing, null, and empty strings do not make a row
+qualify, while false, zero, arrays, and objects do. If no row qualifies, the
+statement returns no row. Explicit public-row ordering makes the selection
+stable instead of copying VictoriaLogs' merge-order-dependent `row_any`
+choice.
+
+For `row_min` and `row_max` over a finite native-number comparison field,
+bind one exact comparison path, two exact result paths, and the same bounds.
+This statement returns the two selected rich objects in one row:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), typed AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CAST(json_extract(metadata, :row_extreme_source_path) AS REAL) AS source_value,
+    json_type(metadata, :row_result_path_1) AS result_type_1,
+    json_type(metadata, :row_result_path_2) AS result_type_2
+  FROM bounded
+  WHERE json_type(metadata, :row_extreme_source_path) IN ('integer', 'real')
+    AND ABS(CAST(json_extract(metadata, :row_extreme_source_path) AS REAL))
+          <= 1.7976931348623157e308
+), selected_1 AS (
+  SELECT
+    *,
+    CASE
+      WHEN result_type_1 IS NULL THEN json('{}')
+      ELSE json_set(
+        json('{}'),
+        :row_result_path_1,
+        json(metadata -> :row_result_path_1)
+      )
+    END AS selected_json_1
+  FROM typed
+), candidates AS MATERIALIZED (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    source_value,
+    CASE
+      WHEN result_type_2 IS NULL THEN selected_json_1
+      ELSE json_set(
+        selected_json_1,
+        :row_result_path_2,
+        json(metadata -> :row_result_path_2)
+      )
+    END AS selected_json
+  FROM selected_1
+)
+SELECT
+  COALESCE((
+    SELECT selected_json
+    FROM candidates
+    ORDER BY source_value, ts, level, message, metadata
+    LIMIT 1
+  ), '{}') AS minimum_row_json,
+  COALESCE((
+    SELECT selected_json
+    FROM candidates
+    ORDER BY source_value DESC, ts, level, message, metadata
+    LIMIT 1
+  ), '{}') AS maximum_row_json
+WHERE :max_result_rows > 0
+LIMIT :max_result_rows;
+```
+
+`:row_extreme_source_path` is the comparison path. `:row_result_path_1` and
+`:row_result_path_2` select the result object. Only native JSON integers/reals
+participate in this SQL foundation; missing, null, strings, booleans, arrays,
+objects, and nonfinite REAL casts are ignored. Selected missing paths are
+omitted, while every existing selected value keeps its JSON type. Ties select
+the first explicit public-row identity. Empty input returns one row containing
+`{}` for both extrema.
+
+The complete `LQL-S11` API owns case-insensitive `row_any`, `row_min`, and
+`row_max` grammar; optional `as` and implicit result aliases; exact, prefix,
+all-current-field, canonical, and nested selectors; deterministic current-
+pipeline order; VictoriaLogs signed/unsigned/timestamp/math/natural text
+ordering; strict first-tie behavior; native rich object results; empty `{}`
+results; strict work/state/result/response limits; cooperative deadline
+cancellation; and HTTP envelopes. It does not narrow extrema to native
+numbers or cast integers through binary64. These statements are honest fixed-
+path public-row foundations, not claims that ordinary SQLite implements the
+dynamic language surface.
+
+Every selected row already crosses the bounded public `logs` interface. Row
+selection does not avoid a block read, decode, allocation, or row crossing
+when moved into an extension opcode, so no new primitive, private shadow-table
+access, or storage-format change is warranted.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_row_selection_stats_are_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

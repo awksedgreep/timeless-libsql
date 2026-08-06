@@ -10462,6 +10462,10 @@ async fn session_seventeen_quantile_and_stddev_match_retained_semantics_and_reop
             .await,
             [serde_json::json!({"sigma": null})]
         );
+        assert_eq!(
+            pipeline_rows(app, r#"stats_group:="s07" | stats quantile(0.5, q) median"#,).await,
+            [serde_json::json!({"median": "2"})]
+        );
     }
 
     let app = router(storage.clone());
@@ -10471,7 +10475,7 @@ async fn session_seventeen_quantile_and_stddev_match_retained_semantics_and_reop
         r#"stats_group:="s07" | stats quantile(word, q)"#,
         r#"stats_group:="s07" | stats quantile(-0.1, q)"#,
         r#"stats_group:="s07" | stats quantile(1.1, q)"#,
-        r#"stats_group:="s07" | stats quantile(0.5, q) tail"#,
+        r#"stats_group:="s07" | stats quantile(0.5, q) tail extra"#,
         r#"stats_group:="s07" | stats stddev"#,
     ] {
         assert_eq!(
@@ -10816,6 +10820,136 @@ async fn session_seventeen_any_and_field_extrema_preserve_rich_rows_and_reopen()
     );
     assert_eq!(
         pipeline_rows(&app, r#"stats_group:="s10" | stats count() as total"#).await,
+        [serde_json::json!({"total": 6})]
+    );
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_stats(&router(reopened.clone())).await;
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_row_selection_stats_are_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("row-selection-stats-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let body = [
+        r#"{"_time":1,"_msg":"missing","level":"info","stats_group":"s11"}"#,
+        r#"{"_time":2,"_msg":"null","level":"info","stats_group":"s11","key":null,"any_src":null,"payload":null}"#,
+        r#"{"_time":3,"_msg":"empty","level":"info","stats_group":"s11","key":"","any_src":"","payload":""}"#,
+        r#"{"_time":4,"_msg":"ten","level":"info","stats_group":"s11","key":10,"any_src":false,"payload":{"rank":"ten"}}"#,
+        r#"{"_time":5,"_msg":"two","level":"info","stats_group":"s11","key":2,"any_src":"later","payload":[1,"λ"],"null_target":null}"#,
+        r#"{"_time":6,"_msg":"tie","level":"info","stats_group":"s11","key":2,"any_src":true,"payload":"tie-later"}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn assert_stats(app: &axum::Router) {
+        assert_eq!(
+            pipeline_rows(
+                app,
+                r#"stats_group:="s11" | fields key, any_src, payload, null_target | stats RoW_AnY(any_src, payload) as any_row, row_min(key) as minimum_row, row_max(key, payload, null_target) as maximum_row, row_min(never_present) as empty_row"#,
+            )
+            .await,
+            [serde_json::json!({
+                "any_row": {"any_src": false, "payload": {"rank": "ten"}},
+                "minimum_row": {"key": 2, "any_src": "later", "payload": [1, "λ"], "null_target": null},
+                "maximum_row": {"payload": {"rank": "ten"}},
+                "empty_row": {}
+            })]
+        );
+        assert_eq!(
+            pipeline_rows(
+                app,
+                r#"stats_group:="s11" | fields any_src, payload | stats row_any() as all_row, row_any(payload*) as prefix_row, row_any(payload.r*) nested_prefix_row"#,
+            )
+            .await,
+            [serde_json::json!({
+                "all_row": {"any_src": false, "payload": {"rank": "ten"}},
+                "prefix_row": {"payload": {"rank": "ten"}},
+                "nested_prefix_row": {"payload": {"rank": "ten"}}
+            })]
+        );
+    }
+
+    let app = router(storage.clone());
+    assert_stats(&app).await;
+    for malformed in [
+        r#"stats_group:="s11" | stats row_any"#,
+        r#"stats_group:="s11" | stats row_any(left right)"#,
+        r#"stats_group:="s11" | stats row_any(left**)"#,
+        r#"stats_group:="s11" | stats row_min()"#,
+        r#"stats_group:="s11" | stats row_min(key*, payload)"#,
+        r#"stats_group:="s11" | stats row_max(*, payload)"#,
+        r#"stats_group:="s11" | stats row_max(key, payload) tail extra"#,
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(logsql_request(malformed))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{malformed}"
+        );
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"stats_group:="s11" | fields any_src, payload | stats row_any() as selected"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(limited.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "error": "query_limit",
+            "reason": "max_work_rows",
+            "limit": 1
+        })
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"stats_group:="s11" | stats count() as total"#).await,
         [serde_json::json!({"total": 6})]
     );
 

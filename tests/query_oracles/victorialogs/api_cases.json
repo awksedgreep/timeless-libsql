@@ -2206,6 +2206,36 @@
       "expected_rows": [{"minimum": "numeric two", "maximum": "b"}]
     },
     {
+      "id": "LQL-S11-row-any-selects-a-complete-field-set",
+      "query": "case:=\"state-string\" | stats row_any(probe, case) as selected",
+      "expected_rows": [{"selected": "{\"case\":\"state-string\",\"probe\":\"value\"}"}]
+    },
+    {
+      "id": "LQL-S11-row-any-empty-selection-is-an-empty-object",
+      "query": "case:=\"state-missing\" | stats row_any(probe) as selected",
+      "expected_rows": [{"selected": "{}"}]
+    },
+    {
+      "id": "LQL-S11-row-any-supports-prefix-fields",
+      "query": "case:=\"numeric-two\" | stats row_any(first_*) as selected",
+      "expected_rows": [{"selected": "{\"first_partition\":\"a\"}"}]
+    },
+    {
+      "id": "LQL-S11-row-min-selects-fields-from-the-minimum-row",
+      "query": "case:in(numeric-two,numeric-ten) | stats row_min(n, case) as selected",
+      "expected_rows": [{"selected": "{\"case\":\"numeric-two\"}"}]
+    },
+    {
+      "id": "LQL-S11-row-max-and-function-names-are-case-insensitive",
+      "query": "case:in(numeric-two,numeric-ten) | stats RoW_MaX(n, case, first_partition) as selected",
+      "expected_rows": [{"selected": "{\"case\":\"numeric-ten\",\"first_partition\":\"b\"}"}]
+    },
+    {
+      "id": "LQL-S11-row-max-supports-an-implicit-result-alias",
+      "query": "case:in(numeric-two,numeric-ten) | stats row_max(n, case) selected",
+      "expected_rows": [{"selected": "{\"case\":\"numeric-ten\"}"}]
+    },
+    {
       "id": "LQL-P07-delete-exact-list",
       "query": "delete_group:=\"delete\" | delete drop_exact, drop_prefix_a | fields case, keep, drop_exact, drop_prefix_a, drop_prefix_b",
       "expected_rows": [{"case": "delete-row", "keep": "kept", "drop_prefix_b": "two"}]
@@ -5936,6 +5966,55 @@
     {
       "id": "LQL-S10-field-max-requires-two-fields",
       "query": "* | stats field_max(x)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S11-row-any-requires-parentheses",
+      "query": "* | stats row_any",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S11-row-any-rejects-interior-wildcards",
+      "query": "* | stats row_any(a*b)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S11-row-min-requires-a-source",
+      "query": "* | stats row_min()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S11-row-min-rejects-a-wildcard-source",
+      "query": "* | stats row_min(a*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S11-row-max-requires-a-source",
+      "query": "* | stats row_max()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S11-row-max-rejects-a-wildcard-source",
+      "query": "* | stats row_max(*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S11-row-extrema-reject-trailing-tokens",
+      "query": "* | stats row_max(a, b) tail extra",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
