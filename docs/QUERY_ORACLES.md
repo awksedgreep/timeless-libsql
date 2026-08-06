@@ -909,3 +909,16 @@ documentation at immutable VictoriaLogs commit
 row-query cases, one stochastic case, 335 error cases, and 335
 statistics/pipeline cases: 1,015 cases total, all passing against the immutable
 image. The fixture now contains 1015 cases.
+
+`LQL-P25` adds ten exact pipeline-result cases and eight error cases for
+`hash`. They pin seed-zero xxHash64 masked to 53 exact float bits; decimal
+string output; optional parentheses and `as`; default and empty-alias `_msg`;
+case-insensitive syntax; sequential overwrite; quoted fields; missing, null,
+empty, numeric, boolean, compact-array, and flattened object-parent textual
+projection; and strict source, wildcard, arity, closing-parenthesis, and tail
+errors. Source audit covers `pipe_hash.go`, `pipe_hash_test.go`,
+`pipe_len.go`'s shared field parser, and parser tests at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture
+now contains 344 row-query cases, one stochastic case, 343 error cases, and
+345 statistics/pipeline cases: 1,033 cases total, all passing against the
+immutable image. The fixture now contains 1033 cases.

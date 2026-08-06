@@ -128,7 +128,7 @@ extension.
 | `LQL-P22` | `format` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-036-arithmetic-over-exact-retained-numeric-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-037-utf-8-byte-length-of-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P25` | `hash` | in progress | no | none | `API` | P3 |
 | `LQL-P26` | `collapse_nums` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
@@ -417,6 +417,25 @@ table, or storage-contract change is required.
 Exact-build evidence records 3.785/40.724 ms narrow/wide p95 versus
 3.620/36.622 ms for byte-identical same-scan controls; `QSF-175` accepts the
 +4.6%/+11.2% bounded byte-length cost.
+
+`LQL-P25` hashes one exact current-row field with seed-zero xxHash64, masks the
+result to 53 bits so every value is exactly representable as a binary64
+integer, and writes its decimal string to one exact destination. Parentheses
+and `as` are optional; the default and empty quoted aliases are `_msg`; names
+are case-insensitive; and later pipes observe the written value. Strings use
+their decoded bytes, numbers and booleans their textual spelling, and arrays
+compact JSON. Missing, null, empty, and exact retained object parents use the
+empty byte string under the pinned flattened-view policy; dotted leaves and
+canonical current `_msg`, `_time`, and `level` fields remain addressable.
+
+The Rust API streams arrays into the hasher after a bounded/cancellable
+traversal, caps cumulative work and temporary state, preserves native rich
+sources, and returns HTTP 422 `field_conflict` for unsafe destinations. Core
+SQLite/libSQL has no portable exact xxHash64 expression, so this row has an
+explicit no-SQL disposition rather than a misleading recipe. The complete
+1,033-case pinned oracle and `QSF-209` record the language and retained-model
+boundary. The required public scan and decode are unchanged; exact evidence
+must justify any future extension scalar.
 
 `LQL-P28` removes every empty field from the current row. Empty means an
 explicit JSON null or a zero-byte string under the pinned VictoriaLogs

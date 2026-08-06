@@ -177,6 +177,17 @@ users may deliberately write such a byte-substring chain when that weaker
 contract is wanted, but it is not an honest LogsQL equivalent. The matrix
 therefore keeps this row `ROWS`/`API`, not `SQL` or `EXT`.
 
+`LQL-P25` intentionally has no SQL recipe. VictoriaLogs `hash` is specifically
+seed-zero xxHash64 masked to 53 bits and rendered as an exact decimal integer.
+Core SQLite and libSQL expose no portable xxHash64 scalar, and an expression
+assembled from signed SQL integers cannot preserve the required unsigned
+wrapping arithmetic honestly. An application may register its own xxHash64
+UDF and apply it to bounded public `logs` rows, but that is not a
+`timeless-libsql` public SQL contract. The Rust logs API performs the bounded
+row-local transform after the already-required public scan and decode. Exact
+evidence must demonstrate a material avoidable storage or row-crossing cost
+before this project adds an extension scalar solely for this pipe.
+
 `LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
 known phrase in their application and bind the resulting strings to an `IN`
 predicate for `equals_common_case`, but core SQLite `upper()`/`lower()` do not

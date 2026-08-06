@@ -21,13 +21,14 @@ use serde_json::{Map, Number, Value};
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CopySpec,
-    ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep, LenSpec,
+    ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
     MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PipelineField,
     PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, StatsExpression,
-    StatsKind, TopSpec, UniqSpec, UnpackJsonSpec,
+    StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
+use xxhash_rust::xxh64::{xxh64, Xxh64};
 
 #[derive(Clone, Copy)]
 pub(crate) struct PipelineLimits {
@@ -211,6 +212,9 @@ pub(crate) fn execute(
                 math_fields(rows, spec, execution.limits, execution.cancelled)?
             }
             PipelineOp::Len(spec) => len_fields(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::Hash(spec) => {
+                hash_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
             PipelineOp::JsonArrayLen(spec) => {
                 json_array_len_fields(rows, spec, execution.limits, execution.cancelled)?
             }
@@ -2106,7 +2110,7 @@ fn math_fields(
 
 fn len_fields(
     rows: Vec<Value>,
-    spec: &LenSpec,
+    spec: &UnaryFieldSpec,
     limits: PipelineLimits,
     cancelled: &AtomicBool,
 ) -> Result<Vec<Value>, String> {
@@ -2173,9 +2177,144 @@ fn len_fields(
         .collect()
 }
 
+fn hash_fields(
+    rows: Vec<Value>,
+    spec: &UnaryFieldSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path, ..
+    } = &spec.source
+    else {
+        return Err("LogsQL hash source is not exact".into());
+    };
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL hash destination is not exact".into());
+    };
+
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            let mut state_bytes = size_of::<Value>()
+                .checked_add(size_of::<Xxh64>())
+                .ok_or_else(|| "LogsQL hash state size overflow".to_string())?;
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "hash")?;
+            let hash = victorialogs_hash(
+                coalesce_exact_value(&row, source_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            let rendered = hash.to_string();
+            charge_transfer_string(
+                &rendered,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "hash",
+            )?;
+            charge_transfer_string(
+                destination_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "hash",
+            )?;
+            for segment in destination_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "hash",
+                )?;
+            }
+
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL hash input row is not a JSON object".to_string())?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL hash destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(rendered))
+                .map_err(|error| format!("LogsQL hash destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn victorialogs_hash(
+    value: Option<&Value>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<u64, String> {
+    const FLOAT64_EXACT_MASK: u64 = (1_u64 << 53) - 1;
+
+    ensure_active(cancelled)?;
+    let hash = match value {
+        None | Some(Value::Null | Value::Object(_)) => {
+            charge_transfer_work(work_items, limits.max_state_items, "hash")?;
+            xxh64(b"", 0)
+        }
+        Some(Value::String(value)) => {
+            charge_transfer_work(work_items, limits.max_state_items, "hash")?;
+            charge_transfer_string(value, state_bytes, limits.max_state_bytes, "hash")?;
+            xxh64(value.as_bytes(), 0)
+        }
+        Some(Value::Bool(value)) => {
+            charge_transfer_work(work_items, limits.max_state_items, "hash")?;
+            let value = if *value {
+                b"true".as_slice()
+            } else {
+                b"false".as_slice()
+            };
+            *state_bytes = state_bytes
+                .checked_add(value.len())
+                .ok_or_else(|| "LogsQL hash state size overflow".to_string())?;
+            ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "hash")?;
+            xxh64(value, 0)
+        }
+        Some(Value::Number(value)) => {
+            charge_transfer_work(work_items, limits.max_state_items, "hash")?;
+            let value = value.to_string();
+            charge_transfer_string(&value, state_bytes, limits.max_state_bytes, "hash")?;
+            xxh64(value.as_bytes(), 0)
+        }
+        Some(value @ Value::Array(_)) => {
+            let encoded_len = compact_json_len_for_operation(
+                value,
+                0,
+                work_items,
+                limits.max_state_items,
+                cancelled,
+                "hash",
+            )?;
+            *state_bytes = state_bytes
+                .checked_add(encoded_len)
+                .ok_or_else(|| "LogsQL hash state size overflow".to_string())?;
+            ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "hash")?;
+            let mut hasher = Xxh64::new(0);
+            serde_json::to_writer(&mut hasher, value)
+                .map_err(|error| format!("encode LogsQL hash source: {error}"))?;
+            hasher.digest()
+        }
+    };
+    check_periodically(cancelled, *work_items)?;
+    Ok(hash & FLOAT64_EXACT_MASK)
+}
+
 fn json_array_len_fields(
     rows: Vec<Value>,
-    spec: &LenSpec,
+    spec: &UnaryFieldSpec,
     limits: PipelineLimits,
     cancelled: &AtomicBool,
 ) -> Result<Vec<Value>, String> {
@@ -8217,6 +8356,112 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             len_fields(vec![row], &array_spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn hash_matches_xxhash53_sequentially_preserves_rich_values_and_observes_bounds() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "_msg":"abc",
+            "source":"abcde",
+            "empty":"",
+            "null_value":null,
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["x",1],
+            "object":{"child":"leaf"}
+        });
+        let plan = crate::logsql::parse_at(
+            "* | hash(source) source_hash | hash(empty) empty_hash | hash(null_value) null_hash | hash(missing) missing_hash | hash(number) number_hash | hash(flag) flag_hash | hash(array) array_hash | hash(object) parent_hash | hash(object.child) child_hash | hash(source_hash) second_hash",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let result = execute(
+            vec![row.clone()],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result[0]["source_hash"], "957726378018795");
+        assert_eq!(result[0]["empty_hash"], "1929880503118233");
+        assert_eq!(result[0]["null_hash"], "1929880503118233");
+        assert_eq!(result[0]["missing_hash"], "1929880503118233");
+        assert_eq!(result[0]["number_hash"], "2140486140596034");
+        assert_eq!(result[0]["flag_hash"], "8894828964231802");
+        assert_eq!(result[0]["array_hash"], "7056501881616813");
+        assert_eq!(result[0]["parent_hash"], "1929880503118233");
+        assert_eq!(result[0]["child_hash"], "6957220181421943");
+        assert_eq!(result[0]["second_hash"], "4466219754490411");
+        assert_eq!(result[0]["source"], row["source"]);
+        assert_eq!(result[0]["number"], row["number"]);
+        assert_eq!(result[0]["flag"], row["flag"]);
+        assert_eq!(result[0]["array"], row["array"]);
+        assert_eq!(result[0]["object"], row["object"]);
+
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Hash(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected hash plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let array_spec = parse_spec("* | hash(array) as result");
+        let work_error = hash_fields(
+            vec![row.clone()],
+            &array_spec,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL hash"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = hash_fields(
+            vec![row.clone()],
+            &array_spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL hash"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | hash(source) as object");
+        let conflict_error =
+            hash_fields(vec![row.clone()], &conflict, limits, &cancelled).unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL hash destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            hash_fields(vec![row], &array_spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

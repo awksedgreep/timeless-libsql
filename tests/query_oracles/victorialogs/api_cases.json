@@ -3644,6 +3644,63 @@
       "expected_rows": [{"case": "format-row", "time_len": "27"}]
     },
     {
+      "id": "LQL-P25-hash-is-xxhash64-masked-to-53-bits",
+      "query": "case:=format-row | format \"abcde\" as hash_source | hash(hash_source) as value | fields case, value",
+      "expected_rows": [{"case": "format-row", "value": "957726378018795"}]
+    },
+    {
+      "id": "LQL-P25-hash-defaults-to-message",
+      "query": "case:=format-row | format \"abc\" as hash_source | hash(hash_source) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "7930733036767641"}]
+    },
+    {
+      "id": "LQL-P25-hash-allows-unparenthesized-source-and-optional-as",
+      "query": "case:=format-row | format \"abc\" as hash_source | hash hash_source value | fields case, value",
+      "expected_rows": [{"case": "format-row", "value": "7930733036767641"}]
+    },
+    {
+      "id": "LQL-P25-hash-is-case-insensitive",
+      "query": "case:=format-row | format \"abc\" as hash_source | HASH ( hash_source ) AS value | fields case, value",
+      "expected_rows": [{"case": "format-row", "value": "7930733036767641"}]
+    },
+    {
+      "id": "LQL-P25-hash-empty-as-retains-default-destination",
+      "query": "case:=format-row | format \"abc\" as hash_source | hash(hash_source) as | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "7930733036767641"}]
+    },
+    {
+      "id": "LQL-P25-hash-missing-null-and-empty-share-the-empty-text-hash",
+      "query": "case:in(state-missing, state-null, state-empty) | hash(probe) as value | fields case, value | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty", "value": "1929880503118233"},
+        {"case": "state-missing", "value": "1929880503118233"},
+        {"case": "state-null", "value": "1929880503118233"}
+      ]
+    },
+    {
+      "id": "LQL-P25-hash-textualizes-numbers-and-booleans",
+      "query": "case:in(numeric-huge, state-false) | hash(n) as number_hash | hash(probe) as probe_hash | fields case, number_hash, probe_hash | sort by (case)",
+      "expected_rows": [
+        {"case": "numeric-huge", "number_hash": "2140486140596034", "probe_hash": "1929880503118233"},
+        {"case": "state-false", "number_hash": "1929880503118233", "probe_hash": "8894828964231802"}
+      ]
+    },
+    {
+      "id": "LQL-P25-hash-textualizes-arrays-and-flattens-object-parents",
+      "query": "case:=delete-row | hash(array) as array_hash | hash(nested) as parent_hash | fields case, array_hash, parent_hash",
+      "expected_rows": [{"case": "delete-row", "array_hash": "7056501881616813", "parent_hash": "1929880503118233"}]
+    },
+    {
+      "id": "LQL-P25-hash-supports-quoted-fields",
+      "query": "case:=format-row | format \"abc\" as \"left field\" | hash(\"left field\") as \"hash value\" | fields case, \"hash value\"",
+      "expected_rows": [{"case": "format-row", "hash value": "7930733036767641"}]
+    },
+    {
+      "id": "LQL-P25-hash-observes-sequential-overwrite",
+      "query": "case:=format-row | format \"abc\" as hash_source | hash(hash_source) as hash_source | hash(hash_source) as second | fields case, hash_source, second",
+      "expected_rows": [{"case": "format-row", "hash_source": "7930733036767641", "second": "6103900670196684"}]
+    },
+    {
       "id": "LQL-P28-drop-empty-fields-removes-null-and-empty-but-retains-rich-values",
       "query": "case:=delete-row | drop_empty_fields | fields case, keep, empty_value, null_value, nested.drop, nested.keep, array",
       "expected_rows": [{"case": "delete-row", "keep": "kept", "nested.drop": "nested-gone", "nested.keep": "nested-kept", "array": "[\"x\",1]"}]
@@ -5812,6 +5869,62 @@
     {
       "id": "LQL-P24-len-rejects-trailing-token",
       "query": "* | len(source) result trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-requires-source",
+      "query": "* | hash",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-rejects-open-parenthesis-only",
+      "query": "* | hash(",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-rejects-empty-parentheses",
+      "query": "* | hash()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-requires-closing-parenthesis",
+      "query": "* | hash(source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-rejects-multiple-sources",
+      "query": "* | hash(source, other)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-rejects-source-wildcard",
+      "query": "* | hash(source*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-rejects-destination-wildcard",
+      "query": "* | hash(source) as result*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P25-hash-rejects-trailing-token",
+      "query": "* | hash(source) result trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -2368,6 +2368,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "hash_narrow",
+                "logs-hash-narrow",
+                "host:=\"h00\" AND query | fields range_key | hash(range_key) as computed | limit 64 | fields computed",
+                64,
+                None,
+            ),
+            (
+                "hash_wide",
+                "logs-hash-wide",
+                "query | fields range_key | hash(range_key) as computed | limit 64 | fields computed",
+                64,
+                None,
+            ),
+            (
+                "hash_control_narrow",
+                "logs-hash-control-narrow",
+                "host:=\"h00\" AND query | fields range_key | copy range_key as computed | limit 64 | fields computed",
+                64,
+                None,
+            ),
+            (
+                "hash_control_wide",
+                "logs-hash-control-wide",
+                "query | fields range_key | copy range_key as computed | limit 64 | fields computed",
+                64,
+                None,
+            ),
+            (
                 "drop_empty_fields_narrow",
                 "logs-drop-empty-fields-narrow",
                 "host:=\"h00\" AND query | fields context, status | drop_empty_fields | limit 64 | fields context, status",
@@ -3044,6 +3072,8 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         }
         require_same_public_query_work(&queries, "sample_control_narrow", "sample_narrow")?;
         require_same_public_query_work(&queries, "sample_control_wide", "sample_wide")?;
+        require_same_public_query_work(&queries, "hash_control_narrow", "hash_narrow")?;
+        require_same_public_query_work(&queries, "hash_control_wide", "hash_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({

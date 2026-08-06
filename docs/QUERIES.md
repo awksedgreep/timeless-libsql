@@ -1093,6 +1093,42 @@ follows the same one/four candidate blocks, 1,024/8,192 decoded entries, and
 235,778/1,914,055 payload bytes. `QSF-175` accepts the bounded row-local byte-
 length work above the unchanged public storage boundary.
 
+## LogsQL `hash` over rich current rows
+
+`hash` computes the VictoriaLogs-compatible integer hash of one current-row
+field and writes the decimal result as a string:
+
+```text
+* | hash(user_id) as user_hash
+* | hash nested.value value_hash
+* | hash(_msg)
+```
+
+The command and `as` are case-insensitive. Parentheses and `as` are optional;
+the destination defaults to `_msg`, and empty quoted source or destination
+names alias `_msg`. Only exact quoted or dotted fields are accepted. Later
+pipeline stages see earlier hash destinations.
+
+The algorithm is seed-zero xxHash64 with the result masked by `(1 << 53) - 1`,
+matching VictoriaLogs' exactly representable binary64 integer domain. Strings
+use their decoded bytes; booleans and numbers use their textual spelling;
+arrays use compact JSON. Missing fields, explicit null, empty strings, and
+exact retained object parents hash the empty byte string. Nested object leaves
+and canonical current `_msg`, `_time`, and `level` values remain addressable.
+Native rich sources and durable storage are not changed.
+
+Compact arrays are traversed under the request work/nesting allowance and
+streamed directly into xxHash64. Temporary state, result rows, response bytes,
+and cancellation use the shared hard limits. Replacing a retained object or
+descending through a scalar fails with HTTP 422 reason `field_conflict`.
+
+There is deliberately no claimed portable SQL equivalent: core SQLite/libSQL
+does not provide xxHash64, and signed-integer SQL expressions cannot reproduce
+its unsigned wrapping operations honestly. Applications may register an
+xxHash64 UDF for their own bounded public `logs` queries, but that is not a
+`timeless-libsql` contract. The Rust logs API owns this row-local transform;
+no extension primitive, private table, or storage-format change is involved.
+
 ## LogsQL `drop_empty_fields` over current rows
 
 `drop_empty_fields` removes empty fields from each current pipeline row:

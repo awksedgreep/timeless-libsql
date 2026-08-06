@@ -1786,6 +1786,10 @@ fn parse_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Len(parse_length_pipe(segment, "len")?))
 }
 
+fn parse_hash_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    Ok(PipelineOp::Hash(parse_length_pipe(segment, "hash")?))
+}
+
 fn parse_json_array_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::JsonArrayLen(parse_length_pipe(
         segment,
@@ -1793,7 +1797,7 @@ fn parse_json_array_len_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     )?))
 }
 
-fn parse_length_pipe(segment: &str, operation: &str) -> Result<LenSpec, LogsqlError> {
+fn parse_length_pipe(segment: &str, operation: &str) -> Result<UnaryFieldSpec, LogsqlError> {
     let tokens = lex_first_pipe(segment, operation)?;
     let Some(command) = tokens.first() else {
         return Err(LogsqlError::malformed(format!(
@@ -1848,7 +1852,7 @@ fn parse_length_pipe(segment: &str, operation: &str) -> Result<LenSpec, LogsqlEr
         )));
     }
 
-    Ok(LenSpec {
+    Ok(UnaryFieldSpec {
         source,
         destination,
     })
@@ -2755,6 +2759,10 @@ fn is_math_pipe(segment: &str) -> bool {
 
 fn is_len_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "len")
+}
+
+fn is_hash_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "hash")
 }
 
 fn is_json_array_len_pipe(segment: &str) -> bool {
@@ -3700,7 +3708,7 @@ pub(crate) struct MathSpec {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct LenSpec {
+pub(crate) struct UnaryFieldSpec {
     pub source: PipelineField,
     pub destination: PipelineField,
 }
@@ -3809,8 +3817,9 @@ pub(crate) enum PipelineOp {
     Rename(RenameSpec),
     Format(FormatSpec),
     Math(MathSpec),
-    Len(LenSpec),
-    JsonArrayLen(LenSpec),
+    Len(UnaryFieldSpec),
+    Hash(UnaryFieldSpec),
+    JsonArrayLen(UnaryFieldSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
     ReplaceRegexp(ReplaceRegexpSpec),
@@ -4225,6 +4234,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_len_pipe(segment) => {
                 pipeline.push(parse_len_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_hash_pipe(segment) => {
+                pipeline.push(parse_hash_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_json_array_len_pipe(segment) => {
@@ -10056,6 +10069,38 @@ mod tests {
             "* | len(source*)",
             "* | len(source) as result*",
             "* | len(source) result trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_hash_grammar_is_complete_and_strict() {
+        for query in [
+            "* | hash(source)",
+            "* | hash source result",
+            "* | hash(source) as result",
+            "* | HASH ( source ) AS result",
+            "* | hash(\"left field\") as \"hash value\"",
+            "* | hash(nested.value) result",
+            "* | hash(source) as",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | hash",
+            "* | hash(",
+            "* | hash()",
+            "* | hash(source",
+            "* | hash(source, other)",
+            "* | hash(*)",
+            "* | hash(source*)",
+            "* | hash(source) as result*",
+            "* | hash(source) result trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

@@ -829,14 +829,18 @@ Frequency `top` measures 3.385/35.948 ms narrow/wide p95 versus
 not justify an extension primitive; executable public SQL remains the direct
 SQLite/libSQL path.
 The ordered LogsQL pipeline also supports bounded rich-row `coalesce`,
-`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, and `len` composition.
+`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, `len`, and `hash`
+composition.
 Math provides the pinned VictoriaLogs binary64 operator/function/coercion
 model. `len` counts UTF-8 bytes across the pinned flattened textual view while
-preserving typed sources. Both support sequential destinations, strict errors,
-cancellation, and immutable stored rows. Direct SQLite/libSQL users can use
+preserving typed sources. `hash` uses seed-zero xxHash64 masked to 53 exact
+bits across the same view. These pipes support sequential destinations,
+strict errors, cancellation, and immutable stored rows. Direct SQLite/libSQL users can use
 the parameterized public JSON1 arithmetic and byte-length foundations in
 `SQL-LOG-036` and `SQL-LOG-037`; complete LogsQL parsing and expression
-semantics stay in the Rust logs API rather than the extension.
+semantics stay in the Rust logs API rather than the extension. Core SQLite and
+libSQL have no portable exact xxHash64 scalar, so `hash` has an explicit
+no-SQL-recipe disposition instead of an inexact claim or storage primitive.
 Exact-build `len` p95 is 3.785/40.724 ms narrow/wide versus 3.620/36.622 ms
 for byte-identical same-scan controls; the bounded +4.6%/+11.2% variation does
 not justify another storage primitive.

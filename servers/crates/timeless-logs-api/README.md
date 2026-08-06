@@ -942,6 +942,31 @@ Exact-build `len` evidence measures 3.785/40.724 ms narrow/wide p95 versus
 work after the unchanged one/four-block public scan; `SQL-LOG-037` remains
 the direct-user path.
 
+LogsQL `hash` computes the VictoriaLogs-compatible hash of one exact
+current-row field:
+
+```text
+* | hash(user_id) as user_hash
+* | hash nested.value value_hash
+* | hash(_msg)
+```
+
+The command is case-insensitive; parentheses and `as` are optional; and the
+destination defaults to `_msg`, including empty quoted source/destination
+aliases. The result is seed-zero xxHash64 masked to 53 bits and rendered as a
+decimal string. Strings use decoded bytes, numbers and booleans use their
+textual spelling, and arrays use compact JSON. Missing, null, empty, and exact
+rich-object parents hash the empty byte string under the pinned flattened-view
+policy; dotted leaves remain addressable. Sequential pipes observe earlier
+results without mutating stored rich values.
+
+Array encoding streams into the hasher after a bounded, cancellable traversal.
+Work, temporary state, result/response size, and unsafe destination conflicts
+use the normal hard query limits and HTTP 422 `field_conflict` envelope. Core
+SQLite/libSQL has no portable exact xxHash64 scalar, so the public SQL cookbook
+records an explicit no-recipe disposition. No extension primitive, private
+storage table, or durable format changes.
+
 LogsQL `drop_empty_fields` removes null and empty-string fields from the
 current rich row:
 

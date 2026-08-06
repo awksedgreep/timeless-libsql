@@ -972,6 +972,18 @@ The real-extension grammar/fidelity/limit/cancellation/optimize/flush/reopen
 regression, all 1,015 pinned VictoriaLogs cases, executable `SQL-LOG-049`,
 documentation contracts, and complete local gates pass.
 
+Session 18 next implements `LQL-P25` as an API-owned `hash` pipe. Pinned
+VictoriaLogs source and live probes establish seed-zero xxHash64 masked to 53
+bits, decimal-string output, optional parentheses/aliases, current-row
+sequential behavior, and flattened textual field projection. Ten exact and
+eight error cases expand the immutable live oracle to 1,033 cases. The Rust
+evaluator streams compact arrays through the hasher, bounds traversal/state,
+preserves rich sources, and changes no extension or storage contract. Core
+SQLite/libSQL has no portable exact xxHash64 expression, so the SQL cookbook
+records an explicit no-recipe disposition rather than inventing an extension
+scalar without measured avoidable storage work. Exact-build evidence and the
+complete local gates remain required before the row closes.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

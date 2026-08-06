@@ -3510,6 +3510,234 @@ async fn session_seventeen_len_counts_textual_bytes_and_preserves_rich_sources()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_hash_matches_xxhash53_and_preserves_rich_sources() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("hash-pipe-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "abc".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"hash-rich",
+                        "hash_group":"hash",
+                        "source":"abcde",
+                        "empty":"",
+                        "null_value":null,
+                        "number":9007199254740993u64,
+                        "flag":false,
+                        "array":["x",1],
+                        "nested":{"child":"leaf"},
+                        "result":"original"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "missing".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"hash-missing",
+                        "hash_group":"hash"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="hash-rich" | hash(source) source_hash | hash(empty) empty_hash | hash(null_value) null_hash | hash(missing) missing_hash | hash(number) number_hash | hash(flag) flag_hash | hash(array) array_hash | hash(nested) parent_hash | hash(nested.child) child_hash | fields case, source_hash, empty_hash, null_hash, missing_hash, number_hash, flag_hash, array_hash, parent_hash, child_hash"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"hash-rich",
+            "source_hash":"957726378018795",
+            "empty_hash":"1929880503118233",
+            "null_hash":"1929880503118233",
+            "missing_hash":"1929880503118233",
+            "number_hash":"2140486140596034",
+            "flag_hash":"8894828964231802",
+            "array_hash":"7056501881616813",
+            "parent_hash":"1929880503118233",
+            "child_hash":"6957220181421943"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="hash-rich" | HASH ( source ) AS source | math source + 1 as adjusted | hash("") as message_hash | fields case, source, adjusted, message_hash"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"hash-rich",
+            "source":"957726378018795",
+            "adjusted":"957726378018796",
+            "message_hash":"7930733036767641"
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="hash-missing" | hash(missing) as computed.value | fields case, computed.value"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"hash-missing",
+            "computed":{"value":"1929880503118233"}
+        })]
+    );
+
+    for malformed in [
+        "* | hash",
+        "* | hash(",
+        "* | hash()",
+        "* | hash(source",
+        "* | hash(source, other)",
+        "* | hash(*)",
+        "* | hash(source*)",
+        "* | hash(source) as result*",
+        "* | hash(source) result trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="hash-rich" | hash(source) as nested"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["error"], "query_execution");
+    assert_eq!(conflict["reason"], "field_conflict");
+    assert!(conflict["message"]
+        .as_str()
+        .unwrap()
+        .contains("LogsQL hash destination conflict"));
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"hash_group:="hash" | hash(_msg) result | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="hash-rich" | hash(source) result | fields result"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="hash-rich" | hash(array) result | fields result"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{query}: {body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="hash-rich" | fields case, source, empty, null_value, number, flag, array, nested, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"hash-rich",
+            "source":"abcde",
+            "empty":"",
+            "null_value":null,
+            "number":9007199254740993u64,
+            "flag":false,
+            "array":["x",1],
+            "nested":{"child":"leaf"},
+            "result":"original"
+        })],
+        "hash must not mutate durable rich source values and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="hash-rich" | hash(source) as source_hash | fields case, source_hash, source, array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"hash-rich",
+            "source_hash":"957726378018795",
+            "source":"abcde",
+            "array":["x",1],
+            "nested":{"child":"leaf"}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_seventeen_drop_empty_fields_is_typed_bounded_and_durable() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
