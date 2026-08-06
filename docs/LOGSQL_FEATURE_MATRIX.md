@@ -136,7 +136,7 @@ extension.
 | `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P33` | `extract_regexp` | in progress | no | none | `API` | P2 |
+| `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P34` | `pack_json` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` | missing | no | `SQL` | `API` | P2 |
@@ -517,6 +517,13 @@ host or deliberately load a separate general regexp extension. The language
 operation remains API composition over public rows. It does not justify
 LogsQL syntax, private-table access, or a language-specific primitive in the
 storage extension.
+
+Exact-build evidence records 3.154/35.517 ms narrow/wide p95 versus
+3.922/33.808 ms for byte-identical same-scan controls. The -19.6%/+5.1% p95
+and -1.6%/+6.1% internal API variation follows exactly the same one/four
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. `QSF-185` accepts the bounded first-match capture/write
+cost above the unchanged public storage boundary.
 
 ## Statistics functions
 

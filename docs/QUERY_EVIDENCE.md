@@ -4788,3 +4788,56 @@ storage formats, compression, indexes, retention, optimize, transactions,
 migrations, and public batch/SQL contracts are unchanged. No private shadow
 table, Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or
 downstream repository was used or modified.
+
+## Session 17 LogsQL P2: bounded RE2 `extract_regexp`
+
+The checked-in
+[`2026-08-06_session17_lql_p33_extract_regexp.json`](evidence/2026-08-06_session17_lql_p33_extract_regexp.json)
+was captured from exact release extension and server build
+`5bb72dafd2d93209c686e89f8ed03361b06ed425` and has SHA-256
+`9118bc5d9b1e76b388dd6011595de98753e2f5c05fd2b903611318f81087493a`.
+The narrow shape scans one indexed host, projects `range_key`, captures its
+suffix with `^key-(?P<extracted_key>[0-9a-f]+)$`, and returns 64 rows. The
+wide shape performs the same transform across all 8,192 entries before its
+64-row limit. Same-run controls scan the identical source rowsets, sort by
+time, and project the unchanged `range_key`. Responses are byte-identical
+because the captured value loses the four-byte `key-` prefix while the
+destination field name adds four bytes.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `extract_regexp`, indexed host | 64 | 1,600 | 3.027 | 3.154 | 4.780 | 1 | 1,024 | 235,778 | 128 |
+| `extract_regexp`, full fixture | 64 | 1,600 | 34.890 | 35.517 | 37.085 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 64 | 1,600 | 3.034 | 3.922 | 4.296 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 64 | 1,600 | 32.696 | 33.808 | 38.479 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 19.6% below/5.1% above its narrow/wide same-run control.
+Its internal API timer averages 2.490/34.052 ms versus 2.530/32.089 ms, or
+1.6% below/6.1% above. Every equal-width pair performs byte-identical public
+storage scans, block decodes, payload reads, row materialization, and response
+encoding. Request-once pattern compilation, first-match automata execution,
+named-capture sizing, preservation decisions, exact current-row writes,
+limits, cancellation, and errors remain bounded Rust API work. Core SQLite
+and the public extension have no portable RE2 named-capture extraction
+scalar, so no false SQL recipe is claimed; the measured post-scan API cost
+does not justify a LogsQL-specific extension primitive.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.781 ms and the explicit durability barrier took 34.762 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 95,424 KiB, 2,900 KiB above
+LQL-P32; metrics HWM was 53,124 KiB, 1,484 KiB above it. Each maximum spans
+the enlarged complete workload and is retained as whole-process variation.
+Cancellation ended with zero requests in flight; direct evaluator and HTTP
+deadline regressions pin compiled-pattern/work/state/result/response bounds,
+rejection, cancellation, and reader reuse.
+
+All 835 pinned VictoriaLogs v1.52.0 cases pass live. The final 46-test logs
+real-extension suite, 98 logs library tests, complete 45-section CLI/crash/
+transaction suite, standalone dbhealth lifecycle gate, 31-test Rust query
+harness, documentation contracts, Clippy with warnings denied, formatting,
+and all 106 SQL recipes (142 statements) pass locally. The extension's
+authoritative 8,192-entry batching, storage formats, compression, indexes,
+retention, optimize, transactions, migrations, and public batch/SQL contracts
+are unchanged. No private shadow table, Elixir/BEAM/NIF/process fallback, CI
+workflow, tag, release, or downstream repository was used or modified.

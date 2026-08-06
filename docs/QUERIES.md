@@ -1240,6 +1240,15 @@ host regex or load a separate general regexp extension; timeless-libsql does
 not claim that as ordinary SQL support. No private table, extension storage
 primitive, or durable-format change is involved.
 
+Exact-build regexp-extraction evidence measures 3.027/3.154/4.780 ms narrow
+and 34.890/35.517/37.085 ms wide p50/p95/p99 while returning 64 rows and
+1,600 response bytes. Byte-identical same-scan controls measure
+3.034/3.922/4.296 and 32.696/33.808/38.479 ms. The -19.6%/+5.1% p95 and
+-1.6%/+6.1% internal API variation follows the same one/four candidate
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. `QSF-185` accepts the bounded API-side first-match
+capture and field-write work above the unchanged public storage boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the
