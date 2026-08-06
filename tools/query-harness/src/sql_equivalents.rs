@@ -363,6 +363,13 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "last_count" => Value::Integer(1),
         "top_count" => Value::Integer(10),
         "uniq_limit" => Value::Integer(10),
+        "facets_limit" => Value::Integer(10),
+        "max_values_per_field" => Value::Integer(1_000),
+        "max_value_len" => Value::Integer(128),
+        "keep_const_fields" => Value::Integer(0),
+        "timestamp_units_per_second" => Value::Integer(1_000),
+        "start_ts" => Value::Integer(1_000),
+        "end_ts" => Value::Integer(2_000),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1647,6 +1654,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let last_rows = recipe_values("SQL-LOG-028", 0)?;
     let top_rows = recipe_values("SQL-LOG-029", 0)?;
     let uniq_rows = recipe_values("SQL-LOG-030", 0)?;
+    let facet_rows = recipe_values("SQL-LOG-031", 0)?;
     if [
         bounded,
         substring,
@@ -1891,6 +1899,87 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-030 unique result changed: {uniq_rows:?}");
+    }
+    if facet_rows.len() != 16
+        || !facet_rows.contains(&vec![
+            Value::Text("host".into()),
+            Value::Text("web-1".into()),
+            Value::Text("1".into()),
+        ])
+        || facet_rows
+            .iter()
+            .any(|row| matches!(row.first(), Some(Value::Text(name)) if name == "service" || name == "nested.ok" || name == "nested.count"))
+    {
+        bail!("SQL-LOG-031 facets result changed: {facet_rows:?}");
+    }
+    let facets_sql = recipe_sql("SQL-LOG-031", 0)?;
+    let facet_values = |max_values_per_field: i64,
+                        max_value_len: i64,
+                        keep_const_fields: i64,
+                        max_result_rows: i64|
+     -> Result<Vec<Vec<Value>>> {
+        let mut statement = connection.prepare(&facets_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-031 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "max_values_per_field" => Value::Integer(max_values_per_field),
+                "max_value_len" => Value::Integer(max_value_len),
+                "keep_const_fields" => Value::Integer(keep_const_fields),
+                "max_result_rows" => Value::Integer(max_result_rows),
+                _ => parameter("SQL-LOG-031", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let columns = statement.column_count();
+        let mut query = statement.raw_query();
+        let mut output = Vec::new();
+        while let Some(row) = query.next()? {
+            output.push(
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<Value>>>()?,
+            );
+        }
+        Ok(output)
+    };
+    let constants = facet_values(1_000, 128, 1, 100)?;
+    for expected in [
+        vec![
+            Value::Text("service".into()),
+            Value::Text("api".into()),
+            Value::Text("2".into()),
+        ],
+        vec![
+            Value::Text("nested.ok".into()),
+            Value::Text("true".into()),
+            Value::Text("2".into()),
+        ],
+        vec![
+            Value::Text("nested.count".into()),
+            Value::Text("2".into()),
+            Value::Text("2".into()),
+        ],
+    ] {
+        if !constants.contains(&expected) {
+            bail!("SQL-LOG-031 keep-constant result changed: {constants:?}");
+        }
+    }
+    if !facet_values(1, 128, 0, 100)?.is_empty() {
+        bail!("SQL-LOG-031 must drop high-cardinality and constant fields");
+    }
+    let short = facet_values(1_000, 5, 0, 100)?;
+    if short.len() != 6
+        || short
+            .iter()
+            .any(|row| !matches!(row.first(), Some(Value::Text(name)) if name == "duration_ms" || name == "host" || name == "level"))
+    {
+        bail!("SQL-LOG-031 byte-length filtering changed: {short:?}");
+    }
+    if !facet_values(1_000, 128, 0, 2)?.is_empty() {
+        bail!("SQL-LOG-031 must fail closed when the result limit is exceeded");
     }
     let uniq_sql = recipe_sql("SQL-LOG-030", 0)?;
     let uniq_values =
@@ -2706,6 +2795,43 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             bail!("SQL-LOG-024 week range {start}..{end} offset {offset} changed: {actual:?}");
         }
     }
+
+    connection.execute(
+        "INSERT INTO logs(ts,level,message,metadata) VALUES(-1,'info','pre epoch','{}')",
+        [],
+    )?;
+    connection.execute("INSERT INTO logs(logs) VALUES ('flush')", [])?;
+    let mut pre_epoch_facets = connection.prepare(&facets_sql)?;
+    for index in 1..=pre_epoch_facets.parameter_count() {
+        let name = pre_epoch_facets
+            .parameter_name(index)
+            .context("SQL-LOG-031 pre-epoch parameter must be named")?
+            .trim_start_matches(':');
+        let value = match name {
+            "start_ts" | "end_ts" => Value::Integer(-1),
+            "timestamp_units_per_second" => Value::Integer(1_000_000),
+            "keep_const_fields" => Value::Integer(1),
+            _ => parameter("SQL-LOG-031", name),
+        };
+        pre_epoch_facets.raw_bind_parameter(index, value)?;
+    }
+    let pre_epoch_rows = pre_epoch_facets
+        .raw_query()
+        .mapped(|row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !pre_epoch_rows.contains(&(
+        "_time".into(),
+        "1969-12-31T23:59:59.999999Z".into(),
+        "1".into(),
+    )) {
+        bail!("SQL-LOG-031 pre-epoch microsecond rendering changed: {pre_epoch_rows:?}");
+    }
     Ok(())
 }
 
@@ -2747,13 +2873,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 96);
+        assert_eq!(recipes.len(), 97);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            126
+            127
         );
         assert_eq!(
             recipes
@@ -2761,7 +2887,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            132
+            133
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

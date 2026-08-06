@@ -1716,6 +1716,208 @@ async fn session_seventeen_uniq_is_textual_bounded_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_facets_are_flattened_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("facets-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let mut entries = numeric_pipeline_entries();
+    for (index, (case, probe)) in [
+        ("state-missing", None),
+        ("state-null", Some(serde_json::Value::Null)),
+        ("state-empty", Some(serde_json::json!(""))),
+        ("state-string", Some(serde_json::json!("value"))),
+        ("state-zero", Some(serde_json::json!(0))),
+        ("state-false", Some(serde_json::json!(false))),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut metadata = serde_json::json!({"case":case,"state_group":"state"});
+        if let Some(probe) = probe {
+            metadata["probe"] = probe;
+        }
+        entries.push(LogEntry {
+            ts: 1_800_000_000_001_000 + index as i64,
+            level: 1,
+            severity: "info".into(),
+            message: case.replace('-', " "),
+            metadata_json: serde_json::to_string(&metadata).unwrap(),
+        });
+    }
+    storage.ingest(entries).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | fields first_partition, n | facets 2"#,
+        )
+        .await,
+        [
+            serde_json::json!({"field_name":"first_partition","field_value":"a","hits":"5"}),
+            serde_json::json!({"field_name":"first_partition","field_value":"b","hits":"4"}),
+            serde_json::json!({"field_name":"n","field_value":"-2","hits":"1"}),
+            serde_json::json!({"field_name":"n","field_value":"0","hits":"1"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | fields numeric_group, first_partition | facets 1 keep_const_fields"#,
+        )
+        .await,
+        [
+            serde_json::json!({"field_name":"first_partition","field_value":"a","hits":"5"}),
+            serde_json::json!({"field_name":"numeric_group","field_value":"numeric","hits":"9"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | fields first_partition, n | facets max_values_per_field 2"#,
+        )
+        .await,
+        [
+            serde_json::json!({"field_name":"first_partition","field_value":"a","hits":"5"}),
+            serde_json::json!({"field_name":"first_partition","field_value":"b","hits":"4"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"state_group:="state" | fields case, probe | facets max_value_len 5"#,
+        )
+        .await,
+        [
+            serde_json::json!({"field_name":"probe","field_value":"0","hits":"1"}),
+            serde_json::json!({"field_name":"probe","field_value":"false","hits":"1"}),
+            serde_json::json!({"field_name":"probe","field_value":"value","hits":"1"}),
+        ]
+    );
+    let nested = pipeline_rows(
+        &app,
+        r#"case:in(numeric-two,numeric-ten) | fields nested.case | facets keep_const_fields"#,
+    )
+    .await;
+    assert_eq!(
+        nested,
+        [
+            serde_json::json!({"field_name":"nested.case","field_value":"numeric-ten","hits":"1"}),
+            serde_json::json!({"field_name":"nested.case","field_value":"numeric-two","hits":"1"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"numeric_group:="numeric" | fields first_partition | facets 1.9"#,
+        )
+        .await,
+        [serde_json::json!({"field_name":"first_partition","field_value":"a","hits":"5"})]
+    );
+    assert!(pipeline_rows(&app, r#"case:="facets-missing" | facets"#)
+        .await
+        .is_empty());
+
+    for malformed in [
+        "* | facets 0",
+        "* | facets -1",
+        "* | facets nope",
+        "* | facets max_values_per_field",
+        "* | facets max_values_per_field 0",
+        "* | facets max_values_per_field nope",
+        "* | facets max_value_len",
+        "* | facets max_value_len 0",
+        "* | facets max_value_len nope",
+        "* | facets keep_const_fields trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 4,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | facets"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | fields first_partition, n | facets"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | fields first_partition | facets"#,
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason);
+    }
+    assert_eq!(
+        pipeline_rows(&app, r#"case:="numeric-two" | fields nested, n"#,).await,
+        [serde_json::json!({"n":2,"nested":{"case":"numeric-two"}})],
+        "faceting must not mutate retained rich metadata and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"numeric_group:="numeric" | fields numeric_group, first_partition | FACETS 1 KEEP_CONST_FIELDS"#,
+        )
+        .await,
+        [
+            serde_json::json!({"field_name":"first_partition","field_value":"a","hits":"5"}),
+            serde_json::json!({"field_name":"numeric_group","field_value":"numeric","hits":"9"}),
+        ]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -6953,10 +7155,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_uniq);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_uniq_cancel = default_app
+        .clone()
         .oneshot(logsql_request("level:error | uniq by (level) with hits"))
         .await
         .unwrap();
     assert_eq!(reused_after_uniq_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_facets = storage.stats().await.unwrap().api_query_cancelled;
+    let facets_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | fields _msg, context | facets max_values_per_field 20000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(facets_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_facets && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_facets);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_facets_cancel = default_app
+        .oneshot(logsql_request("level:error | facets 1"))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_facets_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

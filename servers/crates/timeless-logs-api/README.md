@@ -562,6 +562,41 @@ limits. Executable
 provides the public single-field `GROUP BY` foundation and matching
 deterministic policy. No extension primitive or private table is used.
 
+LogsQL `facets` finds the most frequent nonempty textual values across every
+field in the current pipeline row:
+
+```text
+service:="api" | facets
+* | fields service, level, context | facets 5 max_values_per_field 1000 max_value_len 128
+* | facets keep_const_fields
+```
+
+The defaults are ten returned values per field, 1,000 tracked unique values
+per field, and 128 UTF-8 bytes per value. A field is omitted entirely when any
+nonempty value exceeds the byte limit or when its textual cardinality exceeds
+the configured maximum. Missing fields, JSON null, and empty strings do not
+contribute a facet. Constant fields are omitted by default and retained by
+`keep_const_fields` only when their sole nonempty value occurs in every input
+row. Numbers and booleans are textual; arrays remain atomic JSON text; rich
+objects are exposed as dotted leaves without mutating the stored source.
+
+Commands and modifiers are case-insensitive and modifiers may be reordered or
+repeated; the last numeric value wins. VictoriaLogs v1.52.0 parses the
+nominally integer arguments through `float64`, so positive fractions are
+truncated. Timeless preserves that pinned behavior and rejects zero, negative,
+non-finite, missing, nonnumeric, and trailing syntax. Results order by field
+name, hit count descending, and bytewise value. The final value tie break is a
+Timeless determinism guarantee because the local upstream implementation does
+not define equal-hit order.
+
+Input, field/value state, sorting, output allocation, result cardinality,
+response bytes, and cancellation use the existing hard query limits. The
+operation reads only public rows. Executable
+[`SQL-LOG-031`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)
+provides the recursive public JSON1/window-function equivalent, including
+native timestamp units and canonical special fields. No extension primitive
+or private table is used.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

@@ -528,3 +528,19 @@ as an upstream promise. Source audit is against `pipe_uniq.go` and
 row-query cases, 140 error cases, and 80 statistics/pipeline cases: 516 cases
 total.
 The fixture now contains 516 cases.
+
+`LQL-P18` adds eleven successful statistics/pipeline cases and ten error cases
+for default and per-field limits, empty/null/missing exclusion, textual
+projection, constant-field suppression and retention, high-cardinality and
+long-value field exclusion, modifier reordering/repetition/case, recursively
+flattened rich fields, positive fractional-number truncation, empty input, and
+strict missing/zero/nonnumeric/trailing syntax. Facet rows are explicitly
+compared as an unordered set because the local pinned processor sorts only by
+hits within a field, while its distributed rewrite adds a field-value tie
+break. Timeless deliberately adds that bytewise tie break everywhere. Source
+audit is against `pipe_facets.go`, `pipe_facets_test.go`, and the distributed
+rewrite at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 296
+row-query cases, 150 error cases, and 91 statistics/pipeline cases: 537 cases
+total.
+The fixture now contains 537 cases.

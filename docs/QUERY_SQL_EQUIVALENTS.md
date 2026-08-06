@@ -138,6 +138,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-028`](#sql-log-028-last-numeric-rows-per-partition) | `LQL-P14` | current foundation | bounded reverse numeric top-k per textual partition through a window rank; API owns LogsQL direction inversion, natural coercions, current-schema all-field order, rich paths, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-029`](#sql-log-029-top-values-by-hit-count) | `LQL-P15` | current foundation | bounded frequency groups and deterministic string hits/rank over one public JSON path; API owns multi-field/current-row grammar, collision naming, limits, cancellation, and envelopes |
 | [`SQL-LOG-030`](#sql-log-030-unique-textual-values) | `LQL-P16` | current foundation | bounded unique textual groups, optional case-sensitive filtering, deterministic limiting, and optional hits over one public JSON path; API owns multi-field/current-row grammar, omitted empty fields, collision naming, strict limits, cancellation, and envelopes |
+| [`SQL-LOG-031`](#sql-log-031-bounded-facets-over-public-log-fields) | `LQL-P18` | current foundation | recursive rich-field flattening, textual nonempty frequencies, per-field limits, constant/high-cardinality/long-value exclusion, and deterministic ordering; API owns grammar, pipeline composition, hard state limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6101,6 +6102,175 @@ avoid a storage read, decode, or row crossing.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_uniq_is_textual_bounded_and_durable`.
+
+### SQL-LOG-031: bounded facets over public log fields
+
+Bind `:start_ts` and `:end_ts` in the table's native timestamp unit and set
+`:timestamp_units_per_second` to `1000` for millisecond tables or `1000000`
+for microsecond tables. `:facets_limit`, `:max_values_per_field`, and
+`:max_value_len` are positive values; direct callers normalize a positive
+fraction by truncating it before binding, matching the pinned LogsQL grammar.
+`:keep_const_fields` is zero or one. This statement uses only the public logs
+virtual table plus SQLite JSON1 and window functions:
+
+```sql
+WITH RECURSIVE bounded AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS row_id,
+    ts,
+    level,
+    message,
+    metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), raw_fields(row_id, field_name, raw_value, field_type) AS (
+  SELECT b.row_id, CAST(j.key AS TEXT), j.value, j.type
+  FROM bounded AS b, json_each(b.metadata) AS j
+  WHERE j.key NOT IN ('_time', '_msg', 'level')
+
+  UNION ALL
+
+  SELECT
+    f.row_id,
+    f.field_name || '.' || CAST(j.key AS TEXT),
+    j.value,
+    j.type
+  FROM raw_fields AS f, json_each(f.raw_value) AS j
+  WHERE f.field_type = 'object'
+), current_fields AS (
+  SELECT
+    row_id,
+    field_name,
+    CASE field_type
+      WHEN 'null' THEN ''
+      WHEN 'true' THEN 'true'
+      WHEN 'false' THEN 'false'
+      ELSE CAST(raw_value AS TEXT)
+    END AS field_value
+  FROM raw_fields
+  WHERE field_type <> 'object'
+
+  UNION ALL
+
+  SELECT
+    row_id,
+    '_time',
+    strftime(
+      '%Y-%m-%dT%H:%M:%S',
+      (
+        ts
+        - ((ts % :timestamp_units_per_second)
+           + :timestamp_units_per_second)
+          % :timestamp_units_per_second
+      ) / :timestamp_units_per_second,
+      'unixepoch'
+    ) || CASE :timestamp_units_per_second
+      WHEN 1000 THEN printf(
+        '.%03dZ',
+        ((ts % :timestamp_units_per_second)
+         + :timestamp_units_per_second)
+        % :timestamp_units_per_second
+      )
+      WHEN 1000000 THEN printf(
+        '.%06dZ',
+        ((ts % :timestamp_units_per_second)
+         + :timestamp_units_per_second)
+        % :timestamp_units_per_second
+      )
+    END
+  FROM bounded
+
+  UNION ALL
+
+  SELECT row_id, 'level', CAST(level AS TEXT) FROM bounded
+
+  UNION ALL
+
+  SELECT row_id, '_msg', message FROM bounded
+), nonempty AS (
+  SELECT row_id, field_name, field_value
+  FROM current_fields
+  WHERE field_value <> ''
+), grouped AS (
+  SELECT field_name, field_value, count(*) AS hits
+  FROM nonempty
+  GROUP BY field_name, field_value
+), ranked AS (
+  SELECT
+    field_name,
+    field_value,
+    hits,
+    count(*) OVER (PARTITION BY field_name) AS unique_values,
+    max(length(CAST(field_value AS BLOB)))
+      OVER (PARTITION BY field_name) AS longest_value_bytes,
+    row_number() OVER (
+      PARTITION BY field_name
+      ORDER BY hits DESC, field_value COLLATE BINARY ASC
+    ) AS position
+  FROM grouped
+), selected AS (
+  SELECT field_name, field_value, hits, position
+  FROM ranked
+  WHERE unique_values <= CAST(:max_values_per_field AS INTEGER)
+    AND longest_value_bytes <= CAST(:max_value_len AS INTEGER)
+    AND (
+      :keep_const_fields = 1
+      OR unique_values <> 1
+      OR hits <> (SELECT count(*) FROM bounded)
+    )
+    AND position <= CAST(:facets_limit AS INTEGER)
+), bounded_result AS (
+  SELECT
+    field_name,
+    field_value,
+    CAST(hits AS TEXT) AS hits,
+    position,
+    count(*) OVER () AS result_rows
+  FROM selected
+)
+SELECT field_name, field_value, hits
+FROM bounded_result
+WHERE :timestamp_units_per_second IN (1000, 1000000)
+  AND :facets_limit >= 1
+  AND :max_values_per_field >= 1
+  AND :max_value_len >= 1
+  AND :keep_const_fields IN (0, 1)
+  AND :max_work_entries > 0
+  AND :max_result_rows > 0
+  AND result_rows <= :max_result_rows
+ORDER BY field_name COLLATE BINARY ASC, position ASC;
+```
+
+Objects are recursively exposed as dotted leaf names, while arrays remain one
+atomic JSON-text value. Missing fields, JSON null, and empty strings do not
+contribute facet values. Numbers and booleans use the same textual projection
+as LogsQL. `length(CAST(field_value AS BLOB))` makes `max_value_len` a UTF-8
+byte limit rather than a character limit. If any nonempty value for a field is
+too long, or its distinct textual cardinality exceeds the configured maximum,
+the entire field is excluded. A field is constant only when one nonempty value
+appears in every selected row.
+
+The explicit `_time` branch reproduces the Rust API's RFC3339 millisecond or
+microsecond rendering, including pre-epoch Euclidean remainders. Top-level
+metadata keys named `_time`, `_msg`, or `level` are excluded because the public
+API replaces them with canonical values. SQLite's binary tie break makes the
+direct result repeatable; VictoriaLogs only promises descending hits within a
+field and does not define equal-hit order.
+
+The statement returns no rows when the final cardinality exceeds
+`:max_result_rows`; the Rust API instead returns an explicit HTTP 422 envelope.
+The API also owns case-insensitive/reorderable/repeated modifier grammar,
+current-pipeline composition, collision handling for flattened paths,
+per-request row/item/byte limits, cancellation, and response encoding. Every
+required value already crosses the public bounded row interface, so a new
+extension primitive would not reduce storage reads, block decode, or row
+crossing.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_facets_are_flattened_bounded_and_durable`.
 
 ## Adding the next recipe
 

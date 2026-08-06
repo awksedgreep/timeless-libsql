@@ -665,6 +665,45 @@ window-rank equivalent. Multi-field query grammar, current-row composition,
 name collision policy, limits, cancellation, and HTTP envelopes remain API
 behavior. No new extension primitive or private storage access is required.
 
+## Bounded LogsQL `uniq` and `facets`
+
+`uniq` emits one textual row for each structural key selected from exact
+current-row fields. `facets` instead discovers every current-row field and
+emits its most frequent nonempty textual values:
+
+```text
+* | uniq service, level with hits limit 20
+* | fields service, level, context | facets 5
+* | facets max_values_per_field 1000 max_value_len 128 keep_const_fields
+```
+
+For `uniq`, optional `filter` is a case-sensitive single-field substring,
+`hits` is optional, zero means no language-specific limit, and positive-limit
+overflow resets retained hits to string `"0"`. Missing, null, and empty share
+one empty key component; the empty response field is omitted. Timeless selects
+structural keys bytewise so tuples cannot collide and results are repeatable
+even though VictoriaLogs does not promise its hash-map subset or order.
+
+For `facets`, the defaults are ten results per field, at most 1,000 unique
+textual values tracked per field, and at most 128 UTF-8 bytes per value. Empty
+values are ignored. A field with any longer value or excessive cardinality is
+omitted entirely. A single value appearing in every selected row is omitted
+unless `keep_const_fields` is present. Objects become dotted leaves and arrays
+remain atomic JSON text. Results are deterministic by field name, hits
+descending, and bytewise value. Modifiers are case-insensitive, reorderable,
+and repeatable; matching VictoriaLogs v1.52.0, positive fractions are
+truncated before use.
+
+Both operations preserve rich stored rows and enforce hard input/state/result/
+response limits plus cancellation. Executable
+[`SQL-LOG-030`](QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)
+provides direct SQLite/libSQL grouping for `uniq`.
+[`SQL-LOG-031`](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)
+provides recursive JSON1 field discovery, canonical `_time`/`_msg`/`level`
+projection, cardinality/length/constant exclusion, and per-field window ranks
+for `facets`. Neither operation requires a new extension primitive or private
+storage access.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

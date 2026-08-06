@@ -17,7 +17,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind, TopSpec, UniqSpec,
+    FacetsSpec, FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind, TopSpec,
+    UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -178,6 +179,7 @@ pub(crate) fn execute(
             PipelineOp::Last(spec) => last(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Top(spec) => top(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Uniq(spec) => uniq(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::Facets(spec) => facets(rows, spec, execution.limits, execution.cancelled)?,
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -639,6 +641,242 @@ fn uniq(
             Ok(Value::Object(row))
         })
         .collect()
+}
+
+#[derive(Default)]
+struct FacetFieldState {
+    values: BTreeMap<String, u64>,
+    ignored: bool,
+}
+
+fn facets(
+    rows: Vec<Value>,
+    spec: &FacetsSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    if rows.len() > limits.max_state_items {
+        return Err(format!(
+            "LogsQL facets exceeds max_work_rows={}",
+            limits.max_state_items
+        ));
+    }
+    ensure_active(cancelled)?;
+
+    let rows_total = rows.len() as u64;
+    let mut fields = BTreeMap::<String, FacetFieldState>::new();
+    let mut group_slots = 0usize;
+    let mut state_bytes = size_of::<BTreeMap<String, FacetFieldState>>();
+    let mut visits = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        let object = row
+            .as_object()
+            .ok_or_else(|| "LogsQL facets input row is not a JSON object".to_string())?;
+        let mut path = String::new();
+        let mut seen_fields = BTreeSet::new();
+        let mut seen_bytes = size_of::<BTreeSet<String>>();
+        for (name, value) in object {
+            let original_len = path.len();
+            path.push_str(name);
+            visit_facet_leaves(
+                value,
+                &mut path,
+                cancelled,
+                &mut visits,
+                &mut |field_name, value| {
+                    if !seen_fields.insert(field_name.to_owned()) {
+                        // A retained literal dotted key can collide with a
+                        // recursively flattened path. VictoriaLogs has one
+                        // flattened column in this situation; count it once.
+                        return Ok(());
+                    }
+                    seen_bytes = seen_bytes
+                        .checked_add(size_of::<String>())
+                        .and_then(|bytes| bytes.checked_add(field_name.len()))
+                        .ok_or_else(|| "LogsQL facets row state size overflow".to_string())?;
+                    let peak_bytes = state_bytes
+                        .checked_add(seen_bytes)
+                        .ok_or_else(|| "LogsQL facets state size overflow".to_string())?;
+                    ensure_first_state_bytes(peak_bytes, limits.max_state_bytes, "facets")?;
+                    update_facet_state(
+                        &mut fields,
+                        &mut group_slots,
+                        &mut state_bytes,
+                        field_name,
+                        value,
+                        spec,
+                        limits,
+                    )
+                },
+            )?;
+            path.truncate(original_len);
+        }
+    }
+
+    let mut output = Vec::new();
+    let mut output_state_bytes = size_of::<Vec<Value>>();
+    for (field_index, (field_name, field_state)) in fields.into_iter().enumerate() {
+        check_periodically(cancelled, field_index)?;
+        if field_state.ignored || field_state.values.is_empty() {
+            continue;
+        }
+        if !spec.keep_const_fields
+            && field_state.values.len() == 1
+            && field_state.values.values().next() == Some(&rows_total)
+        {
+            continue;
+        }
+
+        state_bytes = state_bytes
+            .checked_add(
+                field_state
+                    .values
+                    .len()
+                    .checked_mul(size_of::<(String, u64)>())
+                    .ok_or_else(|| "LogsQL facets sort state size overflow".to_string())?,
+            )
+            .ok_or_else(|| "LogsQL facets sort state size overflow".to_string())?;
+        ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "facets")?;
+        let mut values = field_state.values.into_iter().collect::<Vec<_>>();
+        let comparisons = Cell::new(0usize);
+        let cancelled_during_sort = Cell::new(false);
+        values.sort_by(|(left_value, left_hits), (right_value, right_hits)| {
+            let count = comparisons.get().wrapping_add(1);
+            comparisons.set(count);
+            if count & 255 == 0 && cancelled.load(AtomicOrdering::Acquire) {
+                cancelled_during_sort.set(true);
+                return left_value.cmp(right_value);
+            }
+            right_hits
+                .cmp(left_hits)
+                .then_with(|| left_value.as_bytes().cmp(right_value.as_bytes()))
+        });
+        if cancelled_during_sort.get() {
+            return Err("LogsQL pipeline cancelled".into());
+        }
+        values.truncate(spec.limit);
+        if output.len().saturating_add(values.len()) > limits.max_result_rows {
+            return Err(format!(
+                "LogsQL facets exceeds max_result_rows={}",
+                limits.max_result_rows
+            ));
+        }
+        for (value_index, (field_value, hits)) in values.into_iter().enumerate() {
+            check_periodically(cancelled, value_index)?;
+            let hits = hits.to_string();
+            output_state_bytes = output_state_bytes
+                .checked_add(size_of::<Value>())
+                .and_then(|bytes| bytes.checked_add(3 * size_of::<String>()))
+                .and_then(|bytes| bytes.checked_add(field_name.len()))
+                .and_then(|bytes| bytes.checked_add(field_value.len()))
+                .and_then(|bytes| bytes.checked_add(hits.len()))
+                .ok_or_else(|| "LogsQL facets output state size overflow".to_string())?;
+            ensure_first_state_bytes(
+                state_bytes
+                    .checked_add(output_state_bytes)
+                    .ok_or_else(|| "LogsQL facets output state size overflow".to_string())?,
+                limits.max_state_bytes,
+                "facets",
+            )?;
+            output.push(Value::Object(Map::from_iter([
+                ("field_name".into(), Value::String(field_name.clone())),
+                ("field_value".into(), Value::String(field_value)),
+                ("hits".into(), Value::String(hits)),
+            ])));
+        }
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+fn visit_facet_leaves(
+    value: &Value,
+    path: &mut String,
+    cancelled: &AtomicBool,
+    visits: &mut usize,
+    callback: &mut impl FnMut(&str, &Value) -> Result<(), String>,
+) -> Result<(), String> {
+    *visits = visits.saturating_add(1);
+    check_periodically(cancelled, *visits)?;
+    let Value::Object(object) = value else {
+        return callback(path, value);
+    };
+    for (name, child) in object {
+        let original_len = path.len();
+        if !path.is_empty() {
+            path.push('.');
+        }
+        path.push_str(name);
+        visit_facet_leaves(child, path, cancelled, visits, callback)?;
+        path.truncate(original_len);
+    }
+    Ok(())
+}
+
+fn update_facet_state(
+    fields: &mut BTreeMap<String, FacetFieldState>,
+    group_slots: &mut usize,
+    state_bytes: &mut usize,
+    field_name: &str,
+    value: &Value,
+    spec: &FacetsSpec,
+    limits: PipelineLimits,
+) -> Result<(), String> {
+    let value = projected_text(Some(value));
+    if value.is_empty() {
+        return Ok(());
+    }
+    if !fields.contains_key(field_name) {
+        if fields.len() == limits.max_state_items {
+            return Err(format!(
+                "LogsQL facets field state exceeds max_work_rows={}",
+                limits.max_state_items
+            ));
+        }
+        *state_bytes = state_bytes
+            .checked_add(size_of::<String>())
+            .and_then(|bytes| bytes.checked_add(size_of::<FacetFieldState>()))
+            .and_then(|bytes| bytes.checked_add(field_name.len()))
+            .ok_or_else(|| "LogsQL facets state size overflow".to_string())?;
+        ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "facets")?;
+        fields.insert(field_name.to_owned(), FacetFieldState::default());
+    }
+    let field = fields
+        .get_mut(field_name)
+        .expect("facets field inserted above");
+    if field.ignored {
+        return Ok(());
+    }
+    if value.len() > spec.max_value_len {
+        field.values.clear();
+        field.ignored = true;
+        return Ok(());
+    }
+    if let Some(hits) = field.values.get_mut(value.as_ref()) {
+        *hits = hits.saturating_add(1);
+        return Ok(());
+    }
+    if field.values.len() == spec.max_values_per_field {
+        field.values.clear();
+        field.ignored = true;
+        return Ok(());
+    }
+    if *group_slots == limits.max_state_items {
+        return Err(format!(
+            "LogsQL facets value state exceeds max_work_rows={}",
+            limits.max_state_items
+        ));
+    }
+    *group_slots = group_slots.saturating_add(1);
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(size_of::<u64>()))
+        .and_then(|bytes| bytes.checked_add(value.len()))
+        .ok_or_else(|| "LogsQL facets state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "facets")?;
+    field.values.insert(value.into_owned(), 1);
+    Ok(())
 }
 
 fn first_row_comparison(
@@ -2628,6 +2866,98 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             uniq(Vec::new(), &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn facets_flattens_counts_filters_and_bounds_state() {
+        let rows = vec![
+            json!({
+                "constant":"same",
+                "group":"a",
+                "probe":null,
+                "nested":{"leaf":"x"},
+                "long":"short"
+            }),
+            json!({
+                "constant":"same",
+                "group":"a",
+                "probe":"",
+                "nested":{"leaf":"x"},
+                "long":"too-long"
+            }),
+            json!({"constant":"same","group":"b","probe":0}),
+        ];
+        let spec = FacetsSpec {
+            limit: 1,
+            max_values_per_field: 2,
+            max_value_len: 5,
+            keep_const_fields: false,
+        };
+        let cancelled = AtomicBool::new(false);
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        assert_eq!(
+            facets(rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [
+                json!({"field_name":"group","field_value":"a","hits":"2"}),
+                json!({"field_name":"nested.leaf","field_value":"x","hits":"2"}),
+                json!({"field_name":"probe","field_value":"0","hits":"1"}),
+            ]
+        );
+        assert!(facets(
+            rows.clone(),
+            &FacetsSpec {
+                keep_const_fields: true,
+                ..spec.clone()
+            },
+            limits,
+            &cancelled,
+        )
+        .unwrap()
+        .contains(&json!({"field_name":"constant","field_value":"same","hits":"3"})));
+
+        assert!(facets(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_items: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_work_rows=2"));
+        assert!(facets(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_result_rows: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_result_rows=2"));
+        assert!(facets(
+            rows,
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_response_bytes=1"));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            facets(Vec::new(), &spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

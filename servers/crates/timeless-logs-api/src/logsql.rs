@@ -613,6 +613,87 @@ fn parse_uniq_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     }))
 }
 
+const FACETS_DEFAULT_LIMIT: usize = 10;
+const FACETS_DEFAULT_MAX_VALUES_PER_FIELD: usize = 1_000;
+const FACETS_DEFAULT_MAX_VALUE_LEN: usize = 128;
+
+fn parse_facets_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "facets")?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL facets pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("facets") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL facets pipe, not {command:?}"
+        )));
+    }
+
+    let mut cursor = 1usize;
+    let mut limit = FACETS_DEFAULT_LIMIT;
+    if tokens.get(cursor).is_some_and(|token| {
+        token.chars().next().is_some_and(|character| {
+            character.is_ascii_digit() || matches!(character, '+' | '-' | '.')
+        })
+    }) {
+        limit = parse_facets_positive_number("limit", &tokens[cursor])?;
+        cursor += 1;
+    }
+
+    let mut max_values_per_field = FACETS_DEFAULT_MAX_VALUES_PER_FIELD;
+    let mut max_value_len = FACETS_DEFAULT_MAX_VALUE_LEN;
+    let mut keep_const_fields = false;
+    while let Some(token) = tokens.get(cursor) {
+        if token.eq_ignore_ascii_case("max_values_per_field") {
+            cursor += 1;
+            let value = tokens.get(cursor).ok_or_else(|| {
+                LogsqlError::malformed(
+                    "LogsQL facets max_values_per_field requires a positive number",
+                )
+            })?;
+            max_values_per_field = parse_facets_positive_number("max_values_per_field", value)?;
+            cursor += 1;
+        } else if token.eq_ignore_ascii_case("max_value_len") {
+            cursor += 1;
+            let value = tokens.get(cursor).ok_or_else(|| {
+                LogsqlError::malformed("LogsQL facets max_value_len requires a positive number")
+            })?;
+            max_value_len = parse_facets_positive_number("max_value_len", value)?;
+            cursor += 1;
+        } else if token.eq_ignore_ascii_case("keep_const_fields") {
+            keep_const_fields = true;
+            cursor += 1;
+        } else {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected LogsQL facets token {token:?}"
+            )));
+        }
+    }
+
+    Ok(PipelineOp::Facets(FacetsSpec {
+        limit,
+        max_values_per_field,
+        max_value_len,
+        keep_const_fields,
+    }))
+}
+
+fn parse_facets_positive_number(name: &str, value: &str) -> Result<usize, LogsqlError> {
+    let parsed = value.parse::<f64>().map_err(|_| {
+        LogsqlError::malformed(format!(
+            "LogsQL facets {name} requires a positive number, not {value:?}"
+        ))
+    })?;
+    if !parsed.is_finite() || parsed < 1.0 || parsed > usize::MAX as f64 {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL facets {name} requires a finite number of at least one, not {value:?}"
+        )));
+    }
+    // VictoriaLogs v1.52.0 parses these nominally integer arguments as
+    // float64 and truncates positive fractional values during uint64
+    // conversion. Preserve that pinned language behavior explicitly.
+    Ok(parsed as usize)
+}
+
 fn parse_uniq_fields(
     tokens: &[String],
     cursor: &mut usize,
@@ -841,6 +922,10 @@ fn is_top_pipe(segment: &str) -> bool {
 
 fn is_uniq_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "uniq")
+}
+
+fn is_facets_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "facets")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -1278,6 +1363,14 @@ pub(crate) struct UniqSpec {
     pub limit: Option<usize>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FacetsSpec {
+    pub limit: usize,
+    pub max_values_per_field: usize,
+    pub max_value_len: usize,
+    pub keep_const_fields: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -1303,6 +1396,7 @@ pub(crate) enum PipelineOp {
     Last(FirstSpec),
     Top(TopSpec),
     Uniq(UniqSpec),
+    Facets(FacetsSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1652,6 +1746,10 @@ pub fn parse_at(
                 pipeline.push(parse_uniq_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
+            _ if is_facets_pipe(segment) => {
+                pipeline.push(parse_facets_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
             _ => {
                 return Err(LogsqlError::unsupported(format!(
@@ -1682,6 +1780,7 @@ pub fn parse_at(
                 | PipelineOp::Last(_)
                 | PipelineOp::Top(_)
                 | PipelineOp::Uniq(_)
+                | PipelineOp::Facets(_)
         )
     });
     let implicit_result_limit =
@@ -6339,6 +6438,20 @@ mod tests {
             assert_eq!(plan.implicit_result_limit, None, "{query:?}");
         }
 
+        let plan = parse_at(
+            "* | facets 1.9 max_value_len 5.9 keep_const_fields max_values_per_field 3.9",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::Facets(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected facets plan: {plan:?}");
+        };
+        assert_eq!(spec.limit, 1);
+        assert_eq!(spec.max_value_len, 5);
+        assert_eq!(spec.max_values_per_field, 3);
+        assert!(spec.keep_const_fields);
+
         for malformed in [
             "* | last 0",
             "* | last nope",
@@ -6477,6 +6590,42 @@ mod tests {
             "* | uniq by (case) limit -1",
             "* | uniq by (case) limit nope",
             "* | uniq by (case) with hits trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_facets_grammar_is_complete_and_strict() {
+        for query in [
+            "* | facets",
+            "* | facets 15",
+            "* | facets max_values_per_field 20",
+            "* | facets max_value_len 123",
+            "* | facets 34 max_values_per_field 20 max_value_len 30",
+            "* | facets keep_const_fields",
+            "* | FACETS MAX_VALUE_LEN 5 KEEP_CONST_FIELDS MAX_VALUES_PER_FIELD 3",
+            "* | facets max_values_per_field 2 max_values_per_field 8",
+            "* | facets 1.9",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+        }
+
+        for malformed in [
+            "* | facets 0",
+            "* | facets -1",
+            "* | facets nope",
+            "* | facets max_values_per_field",
+            "* | facets max_values_per_field 0",
+            "* | facets max_values_per_field nope",
+            "* | facets max_value_len",
+            "* | facets max_value_len 0",
+            "* | facets max_value_len nope",
+            "* | facets keep_const_fields trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

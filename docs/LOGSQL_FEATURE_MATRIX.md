@@ -121,7 +121,7 @@ extension.
 | `LQL-P15` | `top` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-029-top-values-by-hit-count)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P16` | `uniq` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)) | shipped | no | `VALUES`, `SQL` | `API` | P2 |
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P18` | `facets` | missing | no | `VALUES`, `COUNT` | `API` | P2 |
+| `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | in progress | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
 | `LQL-P19` | `coalesce` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` | missing | no | `SQL` | `API` | P2 |
@@ -224,6 +224,26 @@ order. Work, unique groups, retained key state, results, response bytes, and
 cancellation are bounded over public rows. Executable `SQL-LOG-030` provides
 the direct SQLite/libSQL single-field foundation; no extension primitive or
 private storage access is used.
+
+`LQL-P18` emits the most frequent nonempty textual values for every recursively
+flattened field in the current pipeline row. The default per-field result
+limit is ten, with default exclusion thresholds of 1,000 unique values and
+128 UTF-8 bytes. `keep_const_fields` retains a field only otherwise omitted
+because one value appears in every selected row. Modifiers are
+case-insensitive, reorderable, and repeatable with the last numeric value
+winning. The pinned upstream parser accepts positive fractional numbers and
+truncates them; Timeless preserves that compatibility quirk explicitly while
+rejecting zero, negative, non-finite, missing, and malformed values.
+
+Arrays remain one atomic JSON-text facet and objects become dotted leaves.
+Any overlong value or excessive textual cardinality excludes the entire
+field. Timeless orders field names bytewise, then values by hits descending
+and value bytewise; the value tie break is deliberately deterministic because
+the local upstream processor does not promise one. Input rows, field/value
+state, sort/output allocations, result rows, response bytes, and cancellation
+use existing request limits. Executable `SQL-LOG-031` exposes the complete
+public JSON1/window-function foundation, including canonical special fields
+and native timestamp units. No storage primitive or private table is used.
 
 ## Statistics functions
 

@@ -2550,6 +2550,108 @@
       "id": "LQL-P16-uniq-empty-input",
       "query": "case:=uniq-missing | uniq by (case) with hits",
       "expected_rows": []
+    },
+    {
+      "id": "LQL-P18-facets-ignore-empty-states-and-stringify-types",
+      "query": "state_group:=state | fields probe | facets",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "probe", "field_value": "0", "hits": "1"},
+        {"field_name": "probe", "field_value": "false", "hits": "1"},
+        {"field_name": "probe", "field_value": "value", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-limit-is-per-field",
+      "query": "numeric_group:=numeric | fields first_partition | facets 1",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "first_partition", "field_value": "a", "hits": "5"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-skip-constant-fields-by-default",
+      "query": "numeric_group:=numeric | fields numeric_group, first_partition | facets 2",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "first_partition", "field_value": "a", "hits": "5"},
+        {"field_name": "first_partition", "field_value": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-keep-constant-fields",
+      "query": "numeric_group:=numeric | fields numeric_group, first_partition | facets 1 keep_const_fields",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "first_partition", "field_value": "a", "hits": "5"},
+        {"field_name": "numeric_group", "field_value": "numeric", "hits": "9"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-drop-high-cardinality-fields",
+      "query": "numeric_group:=numeric | fields first_partition, n | facets max_values_per_field 2",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "first_partition", "field_value": "a", "hits": "5"},
+        {"field_name": "first_partition", "field_value": "b", "hits": "4"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-drop-fields-with-any-long-value",
+      "query": "state_group:=state | fields case, probe | facets max_value_len 5",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "probe", "field_value": "0", "hits": "1"},
+        {"field_name": "probe", "field_value": "false", "hits": "1"},
+        {"field_name": "probe", "field_value": "value", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-modifiers-are-case-insensitive-and-reorderable",
+      "query": "state_group:=state | fields state_group, probe | FACETS MAX_VALUE_LEN 5 KEEP_CONST_FIELDS MAX_VALUES_PER_FIELD 3",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "probe", "field_value": "0", "hits": "1"},
+        {"field_name": "probe", "field_value": "false", "hits": "1"},
+        {"field_name": "probe", "field_value": "value", "hits": "1"},
+        {"field_name": "state_group", "field_value": "state", "hits": "6"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-observe-recursively-flattened-current-fields",
+      "query": "case:=delete-row | fields nested.drop, nested.keep | facets keep_const_fields",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "nested.drop", "field_value": "nested-gone", "hits": "1"},
+        {"field_name": "nested.keep", "field_value": "nested-kept", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-repeat-modifiers-use-the-last-value",
+      "query": "numeric_group:=numeric | fields n | facets max_values_per_field 2 max_values_per_field 8",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "n", "field_value": "-2", "hits": "1"},
+        {"field_name": "n", "field_value": "0", "hits": "1"},
+        {"field_name": "n", "field_value": "2", "hits": "1"},
+        {"field_name": "n", "field_value": "2.5", "hits": "1"},
+        {"field_name": "n", "field_value": "3", "hits": "1"},
+        {"field_name": "n", "field_value": "10", "hits": "1"},
+        {"field_name": "n", "field_value": "9007199254740993", "hits": "1"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-fractional-limit-truncates-like-upstream",
+      "query": "numeric_group:=numeric | fields first_partition | facets 1.9",
+      "result_order": "unordered",
+      "expected_rows": [
+        {"field_name": "first_partition", "field_value": "a", "hits": "5"}
+      ]
+    },
+    {
+      "id": "LQL-P18-facets-empty-input",
+      "query": "case:=facets-missing | facets",
+      "expected_rows": []
     }
   ],
   "error_cases": [
@@ -3529,6 +3631,76 @@
     {
       "id": "LQL-P16-uniq-rejects-trailing-token",
       "query": "* | uniq by (case) with hits trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-zero-limit",
+      "query": "* | facets 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-negative-limit",
+      "query": "* | facets -1",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-nonnumeric-limit",
+      "query": "* | facets nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-requires-max-values-per-field-value",
+      "query": "* | facets max_values_per_field",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-zero-max-values-per-field",
+      "query": "* | facets max_values_per_field 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-nonnumeric-max-values-per-field",
+      "query": "* | facets max_values_per_field nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-requires-max-value-length",
+      "query": "* | facets max_value_len",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-zero-max-value-length",
+      "query": "* | facets max_value_len 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-nonnumeric-max-value-length",
+      "query": "* | facets max_value_len nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P18-facets-rejects-trailing-token",
+      "query": "* | facets keep_const_fields trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
