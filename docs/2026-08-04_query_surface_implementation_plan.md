@@ -732,6 +732,19 @@ narrow/wide p95 versus 3.620/36.622 ms for byte-identical same-scan controls.
 unchanged four-block storage and the HWM verdict, and closes `LQL-P24`.
 Session 17 continues with `LQL-P28`.
 
+`LQL-P28` now has strict argumentless case-insensitive `drop_empty_fields`
+grammar, typed null/empty-string removal, recursive rich-object and all-empty-
+row pruning, atomic-array retention, current-row composition, a 128-level
+nesting ceiling, hard traversal/result/response limits, cancellation,
+optimize/reopen coverage, and executable public `SQL-LOG-038`. Two row-query,
+five exact-result, and four error cases pass the complete 722-case pinned
+VictoriaLogs oracle. Timeless preserves zero, false, arrays, and every other
+rich source type while matching the upstream flattened empty-field set.
+`QSF-176` records the semantic boundary and the decision to keep dynamic
+traversal in the Rust API. Exact-build performance/HWM evidence remains to be
+recorded before the row closes. Session 17 must continue with its remaining
+declared P2 rows before Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

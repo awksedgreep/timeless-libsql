@@ -204,6 +204,9 @@ pub(crate) fn execute(
                 math_fields(rows, spec, execution.limits, execution.cancelled)?
             }
             PipelineOp::Len(spec) => len_fields(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::DropEmptyFields => {
+                drop_empty_fields(rows, execution.limits, execution.cancelled)?
+            }
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -1469,6 +1472,83 @@ fn victorialogs_len(
         Some(value @ Value::Array(_)) => {
             compact_json_len(value, 0, work_items, max_work_items, cancelled)
         }
+    }
+}
+
+fn drop_empty_fields(
+    mut rows: Vec<Value>,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    ensure_active(cancelled)?;
+    let mut work_items = 0usize;
+    let mut failure = None;
+    rows.retain_mut(|row| {
+        if failure.is_some() {
+            return true;
+        }
+        if !row.is_object() {
+            failure = Some("LogsQL drop_empty_fields input row is not a JSON object".to_owned());
+            return true;
+        }
+        match retain_nonempty_value(row, 0, &mut work_items, limits.max_state_items, cancelled) {
+            Ok(keep) => keep,
+            Err(error) => {
+                failure = Some(error);
+                true
+            }
+        }
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    ensure_active(cancelled)?;
+    Ok(rows)
+}
+
+fn retain_nonempty_value(
+    value: &mut Value,
+    depth: usize,
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    const MAX_JSON_NESTING: usize = 128;
+    if depth > MAX_JSON_NESTING {
+        return Err(format!(
+            "LogsQL drop_empty_fields JSON nesting exceeds {MAX_JSON_NESTING}"
+        ));
+    }
+    charge_transfer_work(work_items, max_work_items, "drop_empty_fields")?;
+    check_periodically(cancelled, *work_items)?;
+
+    match value {
+        Value::Null => Ok(false),
+        Value::String(value) => Ok(!value.is_empty()),
+        Value::Object(object) => {
+            let mut failure = None;
+            object.retain(|_, child| {
+                if failure.is_some() {
+                    return true;
+                }
+                match retain_nonempty_value(child, depth + 1, work_items, max_work_items, cancelled)
+                {
+                    Ok(keep) => keep,
+                    Err(error) => {
+                        failure = Some(error);
+                        true
+                    }
+                }
+            });
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            Ok(!object.is_empty())
+        }
+        // VictoriaLogs stores these as non-empty textual columns. Timeless
+        // retains their native JSON types while applying the same emptiness
+        // decision. Arrays remain atomic; their elements are not fields.
+        Value::Bool(_) | Value::Number(_) | Value::Array(_) => Ok(true),
     }
 }
 
@@ -5404,6 +5484,89 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             len_fields(vec![row], &array_spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn drop_empty_fields_prunes_rich_objects_and_observes_bounds() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 10_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let source = json!({
+            "empty":"",
+            "null_value":null,
+            "zero":0,
+            "flag":false,
+            "empty_array":[],
+            "array_with_empty":["", null],
+            "nested":{
+                "empty":"",
+                "null_value":null,
+                "keep":"yes",
+                "deeper":{"empty":"", "keep":0},
+                "empty_parent":{"only":""}
+            }
+        });
+        assert_eq!(
+            drop_empty_fields(vec![source.clone()], limits, &cancelled).unwrap(),
+            [json!({
+                "zero":0,
+                "flag":false,
+                "empty_array":[],
+                "array_with_empty":["", null],
+                "nested":{"keep":"yes", "deeper":{"keep":0}}
+            })]
+        );
+        assert_eq!(
+            drop_empty_fields(
+                vec![json!({"empty":"", "null_value":null})],
+                limits,
+                &cancelled
+            )
+            .unwrap(),
+            Vec::<Value>::new()
+        );
+
+        let work_error = drop_empty_fields(
+            vec![source.clone()],
+            PipelineLimits {
+                max_state_items: 2,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            work_error.contains("LogsQL drop_empty_fields"),
+            "{work_error}"
+        );
+        assert!(work_error.contains("max_work_rows=2"), "{work_error}");
+
+        let mut deeply_nested = Value::String(String::new());
+        for _ in 0..130 {
+            deeply_nested = json!({"child": deeply_nested});
+        }
+        let nesting_error = drop_empty_fields(
+            vec![json!({"deep": deeply_nested})],
+            PipelineLimits {
+                max_state_items: 1_000,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            nesting_error.contains("JSON nesting exceeds 128"),
+            "{nesting_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            drop_empty_fields(vec![source], limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

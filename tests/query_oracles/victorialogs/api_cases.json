@@ -2004,6 +2004,18 @@
       "query": "comment_group:=\"comments\" \"hash#inside\"# ignore rest",
       "status": 200,
       "expected_cases": ["comment-hash"]
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-retains-a-nonempty-row",
+      "query": "case:=delete-row | drop_empty_fields",
+      "status": 200,
+      "expected_cases": ["delete-row"]
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-is-case-insensitive-and-allows-semicolon",
+      "query": "case:=delete-row | DrOp_EmPtY_FiElDs;",
+      "status": 200,
+      "expected_cases": ["delete-row"]
     }
   ],
   "stats_cases": [
@@ -3220,6 +3232,38 @@
       "id": "LQL-P24-len-time-uses-rendered-timestamp-bytes",
       "query": "case:=format-row | len(_time) as time_len | fields case, time_len",
       "expected_rows": [{"case": "format-row", "time_len": "27"}]
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-removes-null-and-empty-but-retains-rich-values",
+      "query": "case:=delete-row | drop_empty_fields | fields case, keep, empty_value, null_value, nested.drop, nested.keep, array",
+      "expected_rows": [{"case": "delete-row", "keep": "kept", "nested.drop": "nested-gone", "nested.keep": "nested-kept", "array": "[\"x\",1]"}]
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-retains-zero-and-false",
+      "query": "state_group:=state | fields case, probe | drop_empty_fields | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty"},
+        {"case": "state-false", "probe": "false"},
+        {"case": "state-missing"},
+        {"case": "state-null"},
+        {"case": "state-string", "probe": "value"},
+        {"case": "state-zero", "probe": "0"}
+      ]
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-observes-a-sequentially-created-empty-field",
+      "query": "case:=format-row | fields case | format \"\" as transient | drop_empty_fields | field_names | sort by (name)",
+      "expected_rows": [{"name": "case", "hits": "1"}]
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-omits-an-all-empty-row",
+      "query": "case:=delete-row | fields empty_value, null_value | drop_empty_fields | count() as rows",
+      "expected_rows": [{"rows": "0"}]
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-retains-an-empty-array",
+      "query": "case:=json-array-empty | fields case, tags | drop_empty_fields",
+      "expected_rows": [{"case": "json-array-empty", "tags": "[]"}]
     }
   ],
   "error_cases": [
@@ -4717,6 +4761,34 @@
     {
       "id": "LQL-P24-len-rejects-trailing-token",
       "query": "* | len(source) result trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-rejects-parentheses",
+      "query": "* | drop_empty_fields()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-rejects-an-argument",
+      "query": "* | drop_empty_fields field",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-rejects-an-attached-suffix",
+      "query": "* | drop_empty_fields.extra",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P28-drop-empty-fields-rejects-as",
+      "query": "* | drop_empty_fields as",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

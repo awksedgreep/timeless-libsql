@@ -643,3 +643,16 @@ The fixture contains 296 row-query cases, 214 error cases, and 201
 statistics/pipeline cases: 711 cases total, all passing against the immutable
 image.
 The fixture now contains 711 cases.
+
+`LQL-P28` adds two successful row-query cases, five exact pipeline-result
+cases, and four error cases for `drop_empty_fields`. They pin the argumentless,
+case-insensitive grammar; terminal semicolon; null/empty removal; zero, false,
+array, nested-leaf, and nonempty retention; a sequentially created empty
+field; all-empty row omission; and strict rejection of parentheses, arguments,
+attached suffixes, and `as`. Source audit is against
+`pipe_drop_empty_fields.go` and `pipe_drop_empty_fields_test.go` at immutable
+VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+The fixture contains 298 row-query cases, 218 error cases, and 206
+statistics/pipeline cases: 722 cases total, all passing against the immutable
+image.
+The fixture now contains 722 cases.

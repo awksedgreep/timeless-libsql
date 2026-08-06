@@ -966,6 +966,43 @@ follows the same one/four candidate blocks, 1,024/8,192 decoded entries, and
 235,778/1,914,055 payload bytes. `QSF-175` accepts the bounded row-local byte-
 length work above the unchanged public storage boundary.
 
+## LogsQL `drop_empty_fields` over current rows
+
+`drop_empty_fields` removes empty fields from each current pipeline row:
+
+```text
+* | drop_empty_fields
+* | fields case, optional, nested | drop_empty_fields
+* | format "" as transient | drop_empty_fields
+```
+
+The command is case-insensitive and accepts no arguments. JSON null and an
+empty string are empty. Missing fields are already absent. Zero, false,
+nonempty strings, and arrays—including `[]`—are retained without changing
+their types. Rich objects are traversed recursively: empty leaves and newly
+empty parents are removed, but arrays are atomic and their elements are not
+fields. If a prior `fields`, `delete`, `format`, or other transformation leaves
+no fields at all, the row is omitted. Later pipeline stages observe the
+pruned row. Durable stored metadata is never changed.
+
+Traversal is in place over request-owned public rows. JSON nesting is capped
+at 128 levels; every visited row/value consumes the hard work allowance;
+cancellation is checked before and during traversal; and final result rows and
+response bytes use the shared request limits. Invalid arguments, parentheses,
+aliases, and trailing tokens fail as malformed LogsQL.
+
+Executable
+[`SQL-LOG-038`](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)
+uses only public `logs` rows and SQLite JSON1 to remove one known null/empty
+metadata path. A fixed-schema embedded application can repeat that expression
+for its known fields. Dynamic field discovery, canonical `_msg`/`_time`/`level`
+handling, recursive empty-parent and all-empty-row pruning, resource limits,
+cancellation, and HTTP envelopes remain Rust API behavior. No extension
+primitive or private storage table is used.
+
+Exact-build performance/HWM evidence remains to be recorded before this row
+is marked shipped.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

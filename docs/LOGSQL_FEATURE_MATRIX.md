@@ -131,7 +131,7 @@ extension.
 | `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P26` | `collapse_nums` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P28` | `drop_empty_fields` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
@@ -417,6 +417,28 @@ table, or storage-contract change is required.
 Exact-build evidence records 3.785/40.724 ms narrow/wide p95 versus
 3.620/36.622 ms for byte-identical same-scan controls; `QSF-175` accepts the
 +4.6%/+11.2% bounded byte-length cost.
+
+`LQL-P28` removes every empty field from the current row. Empty means an
+explicit JSON null or a zero-byte string under the pinned VictoriaLogs
+textual field policy. Missing fields are already absent. Numeric zero,
+boolean false, nonempty strings, and arrays—including an empty array—remain
+present. Retained objects are traversed recursively; empty leaves and newly
+empty parent objects are pruned, while arrays remain atomic. A row with no
+fields after pruning is omitted. The case-insensitive command accepts no
+arguments, parentheses, aliases, or trailing syntax, and it observes fields
+created or selected by earlier pipeline stages.
+
+Timeless preserves native JSON values instead of flattening durable metadata.
+The transformation mutates only request-owned response rows in place, with a
+128-level nesting ceiling, a hard traversal-work bound, periodic cancellation,
+and the shared final result/response limits. Executable `SQL-LOG-038` gives
+direct users an ordinary JSON1 recipe for removing one known empty metadata
+path; fixed schemas can repeat it in explicit CTE order. Dynamic current-row
+discovery, canonical fields, recursive parent/row pruning, limits, and HTTP
+envelopes remain Rust API work. The complete 722-case pinned oracle and
+`QSF-176` record the flattened-versus-rich boundary. No extension primitive,
+private table, durable mutation, or storage-contract change is required.
+Exact-build performance/HWM evidence remains to be recorded before shipment.
 
 ## Statistics functions
 

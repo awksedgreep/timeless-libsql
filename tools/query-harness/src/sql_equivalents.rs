@@ -385,6 +385,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "math_source_path_2" => Value::Text("$.nested.count".to_owned()),
         "math_multiplier" => Value::Real(2.0),
         "len_source_path" => Value::Text("$.host".to_owned()),
+        "drop_empty_path" => Value::Text("$.nested.empty".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1676,6 +1677,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let format_rows = recipe_values("SQL-LOG-035", 0)?;
     let math_rows = recipe_values("SQL-LOG-036", 0)?;
     let len_rows = recipe_values("SQL-LOG-037", 0)?;
+    let drop_empty_rows = recipe_values("SQL-LOG-038", 0)?;
     if [
         bounded,
         substring,
@@ -2027,6 +2029,30 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-037 byte-length result changed: {len_rows:?}");
+    }
+    if drop_empty_rows.len() != 2 {
+        bail!("SQL-LOG-038 result cardinality changed: {drop_empty_rows:?}");
+    }
+    for row in &drop_empty_rows {
+        let metadata = match row.get(3) {
+            Some(Value::Text(metadata)) => serde_json::from_str::<serde_json::Value>(metadata)?,
+            _ => bail!("SQL-LOG-038 metadata result changed: {row:?}"),
+        };
+        if metadata.pointer("/nested/empty").is_some()
+            || metadata.pointer("/nested/ok").is_none()
+            || metadata.pointer("/tags").is_none()
+        {
+            bail!("SQL-LOG-038 typed empty-field removal changed: {metadata}");
+        }
+    }
+    let source_empty_states: i64 = connection.query_row(
+        "SELECT count(*) FROM logs
+         WHERE json_type(metadata, '$.nested.empty') IN ('null', 'text')",
+        [],
+        |row| row.get(0),
+    )?;
+    if source_empty_states != 2 {
+        bail!("SQL-LOG-038 mutated its public source: {source_empty_states}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3253,13 +3279,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 103);
+        assert_eq!(recipes.len(), 104);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            133
+            134
         );
         assert_eq!(
             recipes
@@ -3267,7 +3293,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            139
+            140
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -784,6 +784,31 @@ Exact-build `len` evidence measures 3.785/40.724 ms narrow/wide p95 versus
 work after the unchanged one/four-block public scan; `SQL-LOG-037` remains
 the direct-user path.
 
+LogsQL `drop_empty_fields` removes null and empty-string fields from the
+current rich row:
+
+```text
+* | drop_empty_fields
+* | fields case, optional, nested | drop_empty_fields
+* | format "" as transient | drop_empty_fields
+```
+
+The case-insensitive command accepts no arguments. Missing fields are already
+absent; zero, false, nonempty strings, and arrays (including `[]`) retain their
+native types. Objects are traversed recursively, empty parents are pruned, and
+arrays remain atomic. A row with no fields after pruning is omitted. Earlier
+pipeline transformations are visible, but durable source metadata is never
+mutated.
+
+Traversal uses request-owned public rows in place, a 128-level JSON nesting
+ceiling, the request work allowance, periodic cancellation, and shared final
+result/response limits. Executable
+[`SQL-LOG-038`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)
+provides direct users the public JSON1 recipe for one known metadata path.
+Dynamic field discovery, canonical fields, recursive parent/row pruning,
+limits, and envelopes stay in this Rust API. No extension primitive, private
+storage table, or durable format change is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

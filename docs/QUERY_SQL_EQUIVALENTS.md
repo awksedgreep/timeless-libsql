@@ -145,6 +145,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-035`](#sql-log-035-format-two-exact-retained-metadata-fields) | `LQL-P22` | current foundation | bounded `printf` interpolation of two exact public metadata paths with explicit rich-value textual projection; API owns LogsQL patterns, codecs, conditions, destination mutation/preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-036`](#sql-log-036-arithmetic-over-exact-retained-numeric-fields) | `LQL-P23` | current foundation | bounded row-local arithmetic over two exact typed numeric metadata paths; API owns LogsQL math grammar, broader coercions, functions, sequential destinations, fixed float rendering, limits, cancellation, and envelopes |
 | [`SQL-LOG-037`](#sql-log-037-utf-8-byte-length-of-one-exact-retained-field) | `LQL-P24` | current foundation | UTF-8/compact-JSON byte length for one exact public metadata path with explicit missing/null/object-parent behavior; API owns LogsQL grammar, canonical fields, sequential destinations, rich conflicts, limits, cancellation, and envelopes |
+| [`SQL-LOG-038`](#sql-log-038-drop-one-empty-retained-metadata-field) | `LQL-P28` | current foundation | typed removal of one exact public metadata path when it is JSON null or an empty string; API owns dynamic current-row traversal, recursive empty-parent/row pruning, canonical fields, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6730,6 +6731,72 @@ format change.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_len_counts_textual_bytes_and_preserves_rich_sources`.
+
+### SQL-LOG-038: drop one empty retained metadata field
+
+Bind one exact SQLite JSON path, inclusive native timestamp bounds, and
+positive work/result limits. This ordinary statement removes the selected
+retained metadata field only when its typed value is JSON null or an empty
+string:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), cleaned AS (
+  SELECT
+    ts,
+    level,
+    message,
+    CASE
+      WHEN json_type(metadata, :drop_empty_path) = 'null' THEN
+        json_remove(metadata, :drop_empty_path)
+      WHEN json_type(metadata, :drop_empty_path) = 'text'
+       AND json_extract(metadata, :drop_empty_path) = '' THEN
+        json_remove(metadata, :drop_empty_path)
+      ELSE metadata
+    END AS cleaned_metadata
+  FROM bounded
+)
+SELECT ts, level, message, cleaned_metadata
+FROM cleaned
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, cleaned_metadata
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit, and
+`:drop_empty_path` is one exact SQLite JSON path such as `$.optional` or
+`$.nested.empty`. Missing paths are unchanged. Numeric zero, boolean false,
+arrays (including `[]`), objects, and nonempty strings retain their exact JSON
+types and values. The statement reads and returns only public `logs` columns;
+it does not mutate stored metadata. Repeat the `CASE` in explicit CTE order
+for every known path in a fixed application schema. After removing the last
+child of a known object, direct users may apply the same test to that parent
+path to prune it.
+
+The complete `LQL-P28` API dynamically visits every field in the current
+pipeline row, including canonical `_msg`, `_time`, and `level`. It removes
+empty strings and nulls, recursively prunes newly empty object parents, omits
+a row when no fields remain, treats arrays as atomic nonempty fields, and
+observes transformations from earlier pipeline stages. Its traversal has a
+128-level nesting ceiling, a request work bound, periodic cancellation, final
+result/response limits, and stable HTTP errors. Timeless preserves rich JSON
+types while VictoriaLogs exposes flattened textual columns; both select the
+same empty/nonempty field set.
+
+Every selected value already crosses the bounded public log-row interface.
+SQLite JSON1 provides the useful fixed-schema operation directly. Dynamic
+field discovery and recursive current-row composition remain in the Rust API;
+moving them into an extension primitive would not avoid storage reads, block
+decode, or row crossing.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_drop_empty_fields_is_typed_bounded_and_durable`.
 
 ## Adding the next recipe
 

@@ -3508,6 +3508,184 @@ async fn session_seventeen_len_counts_textual_bytes_and_preserves_rich_sources()
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_drop_empty_fields_is_typed_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("drop-empty-fields-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "rich".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"drop-empty-rich",
+                        "drop_empty_group":"drop-empty",
+                        "empty":"",
+                        "null_value":null,
+                        "zero":0,
+                        "flag":false,
+                        "array":[],
+                        "nested":{
+                            "empty":"",
+                            "null_value":null,
+                            "keep":"yes",
+                            "deeper":{"empty":"", "keep":0},
+                            "empty_parent":{"only":""}
+                        }
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "all empty after projection".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"drop-empty-all",
+                        "drop_empty_group":"drop-empty",
+                        "empty":"",
+                        "null_value":null
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="drop-empty-rich" | fields case, empty, null_value, zero, flag, array, nested | DrOp_EmPtY_FiElDs"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"drop-empty-rich",
+            "zero":0,
+            "flag":false,
+            "array":[],
+            "nested":{"keep":"yes", "deeper":{"keep":0}}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="drop-empty-all" | fields empty, null_value | drop_empty_fields | stats count() as rows"#,
+        )
+        .await,
+        [serde_json::json!({"rows":0})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="drop-empty-rich" | fields case | format "" as transient | drop_empty_fields | field_names"#,
+        )
+        .await,
+        [serde_json::json!({"name":"case", "hits":1})]
+    );
+
+    for malformed in [
+        "* | drop_empty_fields()",
+        "* | drop_empty_fields field",
+        "* | drop_empty_fields.extra",
+        "* | drop_empty_fields as",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 2,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="drop-empty-rich" | fields case, nested | drop_empty_fields"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(limited.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(limited["reason"], "max_work_rows", "{limited}");
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="drop-empty-rich" | fields case, empty, null_value, zero, flag, array, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"drop-empty-rich",
+            "empty":"",
+            "null_value":null,
+            "zero":0,
+            "flag":false,
+            "array":[],
+            "nested":{
+                "empty":"",
+                "null_value":null,
+                "keep":"yes",
+                "deeper":{"empty":"", "keep":0},
+                "empty_parent":{"only":""}
+            }
+        })],
+        "drop_empty_fields must not mutate durable rich source values and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="drop-empty-rich" | fields case, empty, null_value, zero, flag, array, nested | drop_empty_fields"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"drop-empty-rich",
+            "zero":0,
+            "flag":false,
+            "array":[],
+            "nested":{"keep":"yes", "deeper":{"keep":0}}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {

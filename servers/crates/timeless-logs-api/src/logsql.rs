@@ -1119,6 +1119,16 @@ fn parse_len_exact_field(value: &str, role: &str) -> Result<PipelineField, Logsq
     }
 }
 
+fn parse_drop_empty_fields_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "drop_empty_fields")?;
+    if tokens.len() != 1 || !tokens[0].eq_ignore_ascii_case("drop_empty_fields") {
+        return Err(LogsqlError::malformed(
+            "LogsQL drop_empty_fields accepts no arguments",
+        ));
+    }
+    Ok(PipelineOp::DropEmptyFields)
+}
+
 impl MathParser {
     fn peek(&self) -> Option<&MathToken> {
         self.tokens.get(self.cursor)
@@ -1982,6 +1992,13 @@ fn is_len_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "len")
 }
 
+fn is_drop_empty_fields_pipe(segment: &str) -> bool {
+    let operation = "drop_empty_fields";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -2610,6 +2627,7 @@ pub(crate) enum PipelineOp {
     Format(FormatSpec),
     Math(MathSpec),
     Len(LenSpec),
+    DropEmptyFields,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2985,6 +3003,10 @@ pub fn parse_at(
             }
             _ if is_len_pipe(segment) => {
                 pipeline.push(parse_len_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_drop_empty_fields_pipe(segment) => {
+                pipeline.push(parse_drop_empty_fields_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -8157,6 +8179,30 @@ mod tests {
             "* | len(source*)",
             "* | len(source) as result*",
             "* | len(source) result trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_drop_empty_fields_grammar_is_complete_and_strict() {
+        for query in [
+            "* | drop_empty_fields",
+            "* | DROP_EMPTY_FIELDS",
+            "* | drop_empty_fields;",
+            "* | fields case | drop_empty_fields | stats count() as rows",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | drop_empty_fields()",
+            "* | drop_empty_fields field",
+            "* | drop_empty_fields.extra",
+            "* | drop_empty_fields as",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
