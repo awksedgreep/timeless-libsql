@@ -656,3 +656,21 @@ The fixture contains 298 row-query cases, 218 error cases, and 206
 statistics/pipeline cases: 722 cases total, all passing against the immutable
 image.
 The fixture now contains 722 cases.
+
+`LQL-P29` adds eleven exact pipeline-result cases and seven error cases for
+literal `replace`. They pin default-message and exact-field targets,
+case-insensitive syntax, Unicode literals, all/zero/first-`N` replacement,
+optional matching and nonmatching `if (...)`, empty-old no-op behavior,
+quoted/dotted fields, number/boolean/array textual projection, and sequential
+composition. Missing arguments, wrong arity, wildcard targets, nonnumeric or
+leading-zero limits, and trailing tokens fail. Source audit is against
+`pipe_replace.go`, `pipe_replace_test.go`, `pipe_update.go`, and the unsigned
+limit parser at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The direct pipe parser rejects
+attached `replace(foo,bar)`, while the complete HTTP query parser can
+ambiguously accept that text as an unrelated filter. Timeless deliberately
+rejects the attached spelling instead of silently ignoring the intended pipe.
+The fixture contains 309 row-query cases, 225 error cases, and 206
+statistics/pipeline cases: 740 cases total, all passing against the immutable
+image.
+The fixture now contains 740 cases.

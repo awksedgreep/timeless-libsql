@@ -749,6 +749,20 @@ unchanged four-block storage and the HWM verdict, and closes `LQL-P28`.
 Session 17 continues with `LQL-P29`; its remaining declared P2 rows must not
 be skipped before Session 18 begins.
 
+`LQL-P29` now has strict case-insensitive literal `replace` grammar, optional
+current-row `if (...)`, default `_msg` and exact quoted/dotted targets,
+zero/unbounded and first-`N` replacement, typed textual projection, native
+no-op preservation, hard work/state/result/response limits, cancellation,
+optimize/reopen coverage, and executable public `SQL-LOG-039`. Eleven exact
+result and seven error cases pass the complete 740-case pinned VictoriaLogs
+oracle. Timeless keeps rich missing/null/object/no-match values intact while
+actual replacements become query-row strings. `QSF-178` records that retained-
+model boundary and the deliberate strict rejection of upstream's ambiguous
+attached `replace(foo,bar)` whole-query interpretation. Exact-build
+performance/HWM evidence remains required before `LQL-P29` can ship. Session
+17 then continues with `LQL-P30`; its remaining declared P2 rows must not be
+skipped before Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

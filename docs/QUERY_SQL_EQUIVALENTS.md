@@ -146,6 +146,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-036`](#sql-log-036-arithmetic-over-exact-retained-numeric-fields) | `LQL-P23` | current foundation | bounded row-local arithmetic over two exact typed numeric metadata paths; API owns LogsQL math grammar, broader coercions, functions, sequential destinations, fixed float rendering, limits, cancellation, and envelopes |
 | [`SQL-LOG-037`](#sql-log-037-utf-8-byte-length-of-one-exact-retained-field) | `LQL-P24` | current foundation | UTF-8/compact-JSON byte length for one exact public metadata path with explicit missing/null/object-parent behavior; API owns LogsQL grammar, canonical fields, sequential destinations, rich conflicts, limits, cancellation, and envelopes |
 | [`SQL-LOG-038`](#sql-log-038-drop-one-empty-retained-metadata-field) | `LQL-P28` | current foundation | typed removal of one exact public metadata path when it is JSON null or an empty string; API owns dynamic current-row traversal, recursive empty-parent/row pruning, canonical fields, limits, cancellation, and envelopes |
+| [`SQL-LOG-039`](#sql-log-039-literal-replacement-in-one-exact-retained-field) | `LQL-P29` | current foundation | all-occurrence literal replacement over one exact public metadata path's textual projection; API owns LogsQL grammar, conditional/limited/sequential mutation, rich-value preservation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6797,6 +6798,85 @@ decode, or row crossing.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_drop_empty_fields_is_typed_bounded_and_durable`.
+
+### SQL-LOG-039: literal replacement in one exact retained field
+
+Bind one exact SQLite JSON path, old and new literal strings, an explicit
+condition flag, inclusive native timestamp bounds, and positive work/result
+limits. This ordinary statement applies SQLite's literal all-occurrence
+`replace()` to the VictoriaLogs-compatible textual projection of that public
+metadata field:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), textual AS (
+  SELECT
+    ts,
+    level,
+    message,
+    CASE
+      WHEN json_type(metadata, :replace_path) IS NULL THEN ''
+      WHEN json_type(metadata, :replace_path) IN ('null', 'object') THEN ''
+      WHEN json_type(metadata, :replace_path) = 'text' THEN
+        json_extract(metadata, :replace_path)
+      WHEN json_type(metadata, :replace_path) = 'true' THEN 'true'
+      WHEN json_type(metadata, :replace_path) = 'false' THEN 'false'
+      ELSE json(metadata -> :replace_path)
+    END AS source_value
+  FROM bounded
+), replaced AS (
+  SELECT
+    ts,
+    level,
+    message,
+    CASE
+      WHEN :replace_enabled = 0 OR :replace_old = '' THEN source_value
+      ELSE replace(source_value, :replace_old, :replace_new)
+    END AS replaced_value
+  FROM textual
+)
+SELECT ts, level, message, replaced_value
+FROM replaced
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, replaced_value
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit.
+`:replace_path` is one exact SQLite JSON path such as `$.host` or
+`$.nested.value`; `:replace_old` and `:replace_new` are bound literal strings,
+not regular expressions. `:replace_enabled` is zero to preserve the textual
+source and nonzero to apply replacement. Missing, explicit null, and retained
+object parents project to empty text. Strings lose JSON quotes; booleans use
+lowercase JSON spelling; numbers and arrays use compact JSON. An empty old
+substring is explicitly a no-op. The query is read-only and deterministically
+orders by timestamp, level, message, and result.
+
+The complete `LQL-P29` API additionally owns case-insensitive `replace`,
+quoted and unquoted substring grammar, optional arbitrary `if (...)`, default
+`_msg` or exact `at` targets, zero-as-unbounded or first-`N` replacement
+limits, canonical and nested current-row paths, and sequential composition.
+When no substring matches, Timeless preserves the retained native JSON value;
+an actual replacement produces a string while leaving durable storage
+unchanged. The API bounds projected arrays, matches, output bytes, work,
+result rows, response bytes, and cancellation and shapes stable HTTP errors.
+Direct users can add an ordinary SQL predicate or `CASE` for a condition and
+use an explicit recursive CTE when first-`N` rather than all-occurrence
+replacement is required.
+
+Every selected value already crosses the bounded public log-row interface.
+SQLite's core `replace()` performs the useful literal operation directly, so
+no extension primitive, private shadow-table access, or storage-format change
+is justified.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_replace_is_literal_typed_bounded_and_durable`.
 
 ## Adding the next recipe
 

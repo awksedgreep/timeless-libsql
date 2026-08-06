@@ -1008,6 +1008,52 @@ follows the same one/four candidate blocks, 1,024/8,192 decoded entries, and
 accepts the bounded in-place rich-row traversal above the unchanged public
 storage boundary.
 
+## LogsQL literal `replace` over current rows
+
+`replace` substitutes literal, non-overlapping substrings in one exact
+current-row field:
+
+```text
+* | replace ("_", "-")
+* | replace ("_", "-") at host limit 1
+* | replace if (kind:=admin) ("secret", "***") at password
+* | replace if () ("a,b", "c|d") at "quoted field" limit 0
+```
+
+The command, `if`, `at`, and `limit` keywords are case-insensitive. Two
+parenthesized literal substrings are required; quoted values may contain
+spaces, commas, pipes, and Unicode. This is byte-for-byte substring matching,
+not regular-expression replacement. The target defaults to `_msg` and may be
+one quoted or dotted exact field. `limit 0` or an omitted limit replaces every
+non-overlapping occurrence; a positive limit replaces only the first `N`.
+An empty old substring is a no-op. Optional `if (...)` evaluates against the
+current row before replacement, and later pipeline stages observe the result.
+
+VictoriaLogs stores a flattened textual view. Timeless projects strings,
+lowercase booleans, numbers, and compact JSON arrays for replacement while
+treating a missing field, null, or exact object parent as empty. When the old
+literal does not match—or is empty—the original rich native value remains
+unchanged. An actual replacement produces a string in the query result only;
+durable metadata and canonical fields are never mutated. This retained-model
+rule preserves more information without changing the observable replacement
+text. Sequential `replace` pipes see prior transformations.
+
+Parsing is strict. In particular, Timeless rejects attached
+`replace(foo,bar)` syntax. The pinned VictoriaLogs replace-pipe parser rejects
+that spelling too, although its whole-query endpoint can ambiguously accept it
+as an unrelated filter; Timeless does not silently reinterpret malformed pipe
+syntax. Wildcard targets, invalid or leading-zero limits, wrong arity, and
+trailing tokens also fail as malformed LogsQL.
+
+Projected arrays, matches, generated text, field paths, work, result rows,
+response bytes, and cancellation use the hard request limits. Executable
+[`SQL-LOG-039`](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)
+uses only public `logs` rows, SQLite JSON1, and core `replace()` for an
+all-occurrence exact-field equivalent. Conditional, first-`N`, current-row,
+rich-preservation, limit, cancellation, and HTTP-envelope behavior remains in
+the Rust API. No extension primitive, private storage table, or durable format
+change is needed.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

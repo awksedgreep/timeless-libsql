@@ -864,7 +864,7 @@ fn parse_format_pipe(
 
     let condition = if starts_format_keyword(rest, "if") {
         rest = rest["if".len()..].trim_start();
-        let (expression, tail) = take_format_condition(rest)?;
+        let (expression, tail) = take_pipeline_condition(rest, "format")?;
         rest = tail.trim_start();
         if expression.is_empty() {
             Some(LogPredicate::True)
@@ -946,6 +946,172 @@ fn parse_format_pipe(
         skip_empty_results,
         condition,
     }))
+}
+
+fn parse_replace_pipe(
+    segment: &str,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<PipelineOp, LogsqlError> {
+    let operation = "replace";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL replace pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL replace pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[operation.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL replace requires whitespace before its arguments",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL replace requires two parenthesized substrings",
+        ));
+    }
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, operation)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(
+                &expression,
+                None,
+                timestamp_unit,
+                query_now,
+            )?)
+        }
+    } else {
+        None
+    };
+
+    if !rest.starts_with('(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL replace requires two parenthesized substrings",
+        ));
+    }
+    let close = matching_parenthesis(rest, 0)?;
+    let arguments = split_top_level(&rest[1..close], ',')?;
+    if arguments.len() != 2 {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL replace requires exactly two substrings, got {}",
+            arguments.len()
+        )));
+    }
+    let old_substring = parse_replace_substring(&arguments[0], "old")?;
+    let new_substring = parse_replace_substring(&arguments[1], "new")?;
+    rest = rest[close + 1..].trim_start();
+
+    let tokens = pipeline_words(rest)?;
+    let mut cursor = 0usize;
+    let mut field = parse_delete_field("_msg")?;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("at"))
+    {
+        cursor += 1;
+        let value = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL replace at requires an exact field"))?;
+        field = match parse_delete_field(value)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL replace at requires an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+
+    let mut limit = 0u64;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("limit"))
+    {
+        cursor += 1;
+        let value = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL replace limit requires an unsigned integer")
+        })?;
+        let value = quoted_value(value)?.unwrap_or_else(|| value.clone());
+        limit = parse_replace_limit(&value)?;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL replace token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Replace(ReplaceSpec {
+        old_substring,
+        new_substring,
+        field,
+        limit,
+        condition,
+    }))
+}
+
+fn parse_replace_substring(value: &str, role: &str) -> Result<String, LogsqlError> {
+    let value = value.trim();
+    if let Some(value) = quoted_value(value)? {
+        return Ok(value);
+    }
+    if value.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value
+            .chars()
+            .any(|character| matches!(character, '(' | ')' | ',' | '"' | '\'' | '`'))
+    {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL replace {role} substring must be one token or a quoted value"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_replace_limit(value: &str) -> Result<u64, LogsqlError> {
+    const MAX_TEXT_LEN: usize = "18_446_744_073_709_551_615".len();
+    if value.is_empty() || value.len() > MAX_TEXT_LEN || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL replace limit must be an unsigned integer, not {value:?}"
+        )));
+    }
+    let mut parsed = 0u64;
+    for byte in value.bytes() {
+        if byte == b'_' {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL replace limit must be an unsigned integer, not {value:?}"
+            )));
+        }
+        parsed = parsed
+            .checked_mul(10)
+            .and_then(|parsed| parsed.checked_add(u64::from(byte - b'0')))
+            .ok_or_else(|| {
+                LogsqlError::malformed(format!(
+                    "LogsQL replace limit must be an unsigned integer, not {value:?}"
+                ))
+            })?;
+    }
+    Ok(parsed)
 }
 
 const MAX_MATH_AST_NODES: usize = 4_096;
@@ -1576,11 +1742,14 @@ fn starts_format_keyword(value: &str, keyword: &str) -> bool {
             .is_none_or(|character| character.is_whitespace() || character == '(')
 }
 
-fn take_format_condition(value: &str) -> Result<(&str, &str), LogsqlError> {
+fn take_pipeline_condition<'a>(
+    value: &'a str,
+    operation: &str,
+) -> Result<(&'a str, &'a str), LogsqlError> {
     if !value.starts_with('(') {
-        return Err(LogsqlError::malformed(
-            "LogsQL format if requires a parenthesized filter",
-        ));
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL {operation} if requires a parenthesized filter"
+        )));
     }
     let mut depth = 0usize;
     let mut quote = None;
@@ -1601,7 +1770,9 @@ fn take_format_condition(value: &str) -> Result<(&str, &str), LogsqlError> {
             '(' => depth += 1,
             ')' => {
                 depth = depth.checked_sub(1).ok_or_else(|| {
-                    LogsqlError::malformed("unmatched LogsQL format if closing parenthesis")
+                    LogsqlError::malformed(format!(
+                        "unmatched LogsQL {operation} if closing parenthesis"
+                    ))
                 })?;
                 if depth == 0 {
                     let expression = value[1..index].trim();
@@ -1611,9 +1782,9 @@ fn take_format_condition(value: &str) -> Result<(&str, &str), LogsqlError> {
             _ => {}
         }
     }
-    Err(LogsqlError::malformed(
-        "unterminated LogsQL format if filter",
-    ))
+    Err(LogsqlError::malformed(format!(
+        "unterminated LogsQL {operation} if filter"
+    )))
 }
 
 fn parse_format_pattern(pattern: &str) -> Result<Vec<FormatStep>, LogsqlError> {
@@ -1997,6 +2168,10 @@ fn is_drop_empty_fields_pipe(segment: &str) -> bool {
     segment
         .get(..operation.len())
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
+fn is_replace_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "replace")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -2596,6 +2771,17 @@ pub(crate) struct LenSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ReplaceSpec {
+    pub old_substring: String,
+    pub new_substring: String,
+    pub field: PipelineField,
+    /// Zero means unbounded at the language layer. API work and response
+    /// limits remain authoritative.
+    pub limit: u64,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -2628,6 +2814,7 @@ pub(crate) enum PipelineOp {
     Math(MathSpec),
     Len(LenSpec),
     DropEmptyFields,
+    Replace(ReplaceSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3007,6 +3194,10 @@ pub fn parse_at(
             }
             _ if is_drop_empty_fields_pipe(segment) => {
                 pipeline.push(parse_drop_empty_fields_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_replace_pipe(segment) => {
+                pipeline.push(parse_replace_pipe(segment, timestamp_unit, query_now)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -8203,6 +8394,41 @@ mod tests {
             "* | drop_empty_fields field",
             "* | drop_empty_fields.extra",
             "* | drop_empty_fields as",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_replace_grammar_is_complete_and_strict() {
+        for query in [
+            r#"* | replace ("_", "-")"#,
+            r#"* | RePlAcE ("_", "-") at host limit 1"#,
+            r#"* | replace if (kind:=admin) ("secret", "***") at password"#,
+            r#"* | replace if () ('a,b', 'c|d') at "left field" limit 0"#,
+            r#"* | replace ("", "ignored") at nested.value"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | replace",
+            "* | replace(foo,bar)",
+            "* | replace (foo)",
+            "* | replace (, bar)",
+            "* | replace (foo, )",
+            "* | replace (foo, bar, baz)",
+            "* | replace (foo, bar) at *",
+            "* | replace (foo, bar) at field*",
+            "* | replace (foo, bar) at",
+            "* | replace (foo, bar) limit",
+            "* | replace (foo, bar) limit N",
+            "* | replace (foo, bar) limit 01",
+            "* | replace (foo, bar) trailing",
+            "* | replace if (kind:=admin) (foo, bar",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

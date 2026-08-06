@@ -3264,6 +3264,68 @@
       "id": "LQL-P28-drop-empty-fields-retains-an-empty-array",
       "query": "case:=json-array-empty | fields case, tags | drop_empty_fields",
       "expected_rows": [{"case": "json-array-empty", "tags": "[]"}]
+    },
+    {
+      "id": "LQL-P29-replace-all-literal-message-substrings",
+      "query": "case:=format-row | replace (l, L) | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "heLLo \"worLd\"\nnext"}]
+    },
+    {
+      "id": "LQL-P29-replace-limits-first-match",
+      "query": "case:=format-row | replace (l, L) limit 1 | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "heLlo \"world\"\nnext"}]
+    },
+    {
+      "id": "LQL-P29-replace-zero-limit-is-unbounded",
+      "query": "case:=format-row | replace (l, L) limit 0 | fields case, _msg",
+      "expected_rows": [{"case": "format-row", "_msg": "heLLo \"worLd\"\nnext"}]
+    },
+    {
+      "id": "LQL-P29-replace-is-case-insensitive-and-supports-unicode",
+      "query": "case:=format-row | RePlAcE (ц, λ) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "aλC"}]
+    },
+    {
+      "id": "LQL-P29-replace-conditional-match",
+      "query": "case:=format-row | replace if (host:=aцC) (a, X) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "XцC"}]
+    },
+    {
+      "id": "LQL-P29-replace-conditional-miss-preserves-value",
+      "query": "case:=format-row | replace if (host:=other) (a, X) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "aцC"}]
+    },
+    {
+      "id": "LQL-P29-replace-empty-old-substring-is-noop",
+      "query": "case:=format-row | replace (\"\", ignored) at host | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "aцC"}]
+    },
+    {
+      "id": "LQL-P29-replace-supports-quoted-and-flattened-fields",
+      "query": "case:=format-row | replace (2, two) at \"math left field\" | replace (4, four) at math_nested.value | fields case, \"math left field\", math_nested.value",
+      "expected_rows": [{"case": "format-row", "math left field": "two", "math_nested.value": "four"}]
+    },
+    {
+      "id": "LQL-P29-replace-textualizes-numeric-and-boolean-fields",
+      "query": "state_group:=state | replace (0, zero) at probe | fields case, probe | sort by (case)",
+      "expected_rows": [
+        {"case": "state-empty"},
+        {"case": "state-false", "probe": "false"},
+        {"case": "state-missing"},
+        {"case": "state-null"},
+        {"case": "state-string", "probe": "value"},
+        {"case": "state-zero", "probe": "zero"}
+      ]
+    },
+    {
+      "id": "LQL-P29-replace-textualizes-json-array-target",
+      "query": "case:=json-array-strings | replace (prod, stage) at tags | fields case, tags",
+      "expected_rows": [{"case": "json-array-strings", "tags": "[\"stage\",\"canary\",\"\"]"}]
+    },
+    {
+      "id": "LQL-P29-replace-composes-sequentially",
+      "query": "case:=format-row | replace (a, x) at host | replace (x, z) at host limit 1 | fields case, host",
+      "expected_rows": [{"case": "format-row", "host": "zцC"}]
     }
   ],
   "error_cases": [
@@ -4789,6 +4851,55 @@
     {
       "id": "LQL-P28-drop-empty-fields-rejects-as",
       "query": "* | drop_empty_fields as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P29-replace-requires-arguments",
+      "query": "* | replace",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P29-replace-requires-two-arguments",
+      "query": "* | replace (foo)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P29-replace-rejects-three-arguments",
+      "query": "* | replace (foo, bar, baz)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P29-replace-rejects-wildcard-field",
+      "query": "* | replace (foo, bar) at field*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P29-replace-requires-numeric-limit",
+      "query": "* | replace (foo, bar) limit N",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P29-replace-rejects-leading-zero-limit",
+      "query": "* | replace (foo, bar) limit 01",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P29-replace-rejects-trailing-token",
+      "query": "* | replace (foo, bar) trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
