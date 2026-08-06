@@ -664,6 +664,20 @@ same-scan controls. `QSF-167` accepts the -11.8%/+9.7% mixed row-transform
 variation, records unchanged four-block storage and the HWM verdict, and
 closes the row. Session 17 continues with `LQL-P21`.
 
+`LQL-P21` has strict case-insensitive `rename`/`mv` grammar, optional `as`,
+sequential comma-separated pairs, exact/all/prefix sources and destinations,
+typed exact moves, deterministic recursively flattened wildcard snapshots,
+removal-before-insertion, prefix substitution, missing/object-parent
+compatibility, hard work/state/result/response limits, cancellation,
+actionable rich-object destination conflicts, optimize/reopen coverage, and
+executable public `SQL-LOG-034`. Twenty successful and nine error cases pass
+the complete 616-case pinned VictoriaLogs oracle. The retained-model policy
+prunes empty response parents while keeping durable source rows immutable;
+object parents and rich empty objects that do not exist as flattened columns
+remain intact. `QSF-168` records the semantic boundary. The row remains `in
+progress` until exact-build query, completed-work, storage, and HWM evidence
+receives an explicit disposition.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

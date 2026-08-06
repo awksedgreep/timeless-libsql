@@ -376,6 +376,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "source_path_3" => Value::Text("$.service".to_owned()),
         "copy_source_path" => Value::Text("$.duration_ms".to_owned()),
         "copy_destination_path" => Value::Text("$.copied".to_owned()),
+        "rename_source_path" => Value::Text("$.duration_ms".to_owned()),
+        "rename_destination_path" => Value::Text("$.moved".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1663,6 +1665,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let facet_rows = recipe_values("SQL-LOG-031", 0)?;
     let coalesce_rows = recipe_values("SQL-LOG-032", 0)?;
     let copy_rows = recipe_values("SQL-LOG-033", 0)?;
+    let rename_rows = recipe_values("SQL-LOG-034", 0)?;
     if [
         bounded,
         substring,
@@ -1946,6 +1949,21 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             bail!("SQL-LOG-033 exact typed copy or source retention changed: {metadata}");
         }
     }
+    if rename_rows.len() != 2 {
+        bail!("SQL-LOG-034 rename result changed: {rename_rows:?}");
+    }
+    for row in &rename_rows {
+        let Value::Text(metadata) = &row[3] else {
+            bail!("SQL-LOG-034 renamed metadata is not JSON text: {row:?}");
+        };
+        let metadata: serde_json::Value = serde_json::from_str(metadata)?;
+        if metadata.pointer("/moved").is_none()
+            || metadata.pointer("/duration_ms").is_some()
+            || metadata.pointer("/host").is_none()
+        {
+            bail!("SQL-LOG-034 exact typed move or source removal changed: {metadata}");
+        }
+    }
     let coalesce_sql = recipe_sql("SQL-LOG-032", 0)?;
     let coalesced = |source_path_1: &str,
                      source_path_2: &str,
@@ -2045,6 +2063,91 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         || null_or_missing[1].pointer("/copied") != Some(&serde_json::json!(""))
     {
         bail!("SQL-LOG-033 null/missing fidelity changed: {null_or_missing:?}");
+    }
+    let rename_sql = recipe_sql("SQL-LOG-034", 0)?;
+    let renamed = |source_path: &str, destination_path: &str| -> Result<Vec<serde_json::Value>> {
+        let mut statement = connection.prepare(&rename_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-034 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "rename_source_path" => Value::Text(source_path.to_owned()),
+                "rename_destination_path" => Value::Text(destination_path.to_owned()),
+                _ => parameter("SQL-LOG-034", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        statement
+            .raw_query()
+            .mapped(|row| {
+                let metadata = row.get::<_, String>(3)?;
+                serde_json::from_str(&metadata).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    let boolean_or_string = renamed("$.nested.ok", "$.moved")?;
+    if boolean_or_string[0].pointer("/moved") != Some(&serde_json::json!(true))
+        || boolean_or_string[1].pointer("/moved") != Some(&serde_json::json!("true"))
+        || boolean_or_string
+            .iter()
+            .any(|metadata| metadata.pointer("/nested/ok").is_some())
+    {
+        bail!("SQL-LOG-034 boolean/string move changed: {boolean_or_string:?}");
+    }
+    let arrays = renamed("$.tags", "$.moved")?;
+    if !arrays.iter().all(|metadata| {
+        metadata
+            .pointer("/moved")
+            .is_some_and(serde_json::Value::is_array)
+            && metadata.pointer("/tags").is_none()
+    }) {
+        bail!("SQL-LOG-034 array move changed: {arrays:?}");
+    }
+    let object_parents = renamed("$.nested", "$.moved")?;
+    if !object_parents.iter().all(|metadata| {
+        metadata.pointer("/moved") == Some(&serde_json::json!(""))
+            && metadata.pointer("/nested").is_some()
+    }) {
+        bail!("SQL-LOG-034 flattened object-parent behavior changed: {object_parents:?}");
+    }
+    let missing = renamed("$.absent", "$.moved")?;
+    if !missing
+        .iter()
+        .all(|metadata| metadata.pointer("/moved") == Some(&serde_json::json!("")))
+    {
+        bail!("SQL-LOG-034 missing-source behavior changed: {missing:?}");
+    }
+    let null_or_missing = renamed("$.nested.none", "$.moved")?;
+    if null_or_missing[0].pointer("/moved") != Some(&serde_json::Value::Null)
+        || null_or_missing[0].pointer("/nested/none").is_some()
+        || null_or_missing[1].pointer("/moved") != Some(&serde_json::json!(""))
+    {
+        bail!("SQL-LOG-034 null/missing fidelity changed: {null_or_missing:?}");
+    }
+    let identity = renamed("$.host", "$.host")?;
+    if identity
+        .iter()
+        .any(|metadata| metadata.pointer("/host").is_none())
+    {
+        bail!("SQL-LOG-034 exact identity changed: {identity:?}");
+    }
+    let overwritten = renamed("$.duration_ms", "$.host")?;
+    if overwritten.iter().any(|metadata| {
+        metadata.pointer("/duration_ms").is_some()
+            || !metadata
+                .pointer("/host")
+                .is_some_and(serde_json::Value::is_number)
+    }) {
+        bail!("SQL-LOG-034 destination overwrite changed: {overwritten:?}");
     }
     let facets_sql = recipe_sql("SQL-LOG-031", 0)?;
     let facet_values = |max_values_per_field: i64,
@@ -3007,13 +3110,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 99);
+        assert_eq!(recipes.len(), 100);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            129
+            130
         );
         assert_eq!(
             recipes
@@ -3021,7 +3124,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            135
+            136
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

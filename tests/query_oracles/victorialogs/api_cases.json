@@ -2817,6 +2817,106 @@
       "id": "LQL-P20-copy-exact-to-wildcard-keeps-literal-destination",
       "query": "case:=state-string | copy probe as selected* | fields case, \"selected*\"",
       "expected_rows": [{"case": "state-string", "selected*": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-exact-removes-source",
+      "query": "case:=state-string | rename probe as selected | fields case, probe, selected",
+      "expected_rows": [{"case": "state-string", "selected": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-missing-exact-produces-empty",
+      "query": "case:=state-missing | rename probe as selected | fields case, selected",
+      "expected_rows": [{"case": "state-missing"}]
+    },
+    {
+      "id": "LQL-P21-rename-flattened-nested-leaf",
+      "query": "case:=delete-row | rename nested.drop as selected | fields case, nested.drop, selected",
+      "expected_rows": [{"case": "delete-row", "selected": "nested-gone"}]
+    },
+    {
+      "id": "LQL-P21-rename-flattened-object-parent-is-missing",
+      "query": "case:=delete-row | rename nested as selected | fields case, nested.drop, selected",
+      "expected_rows": [{"case": "delete-row", "nested.drop": "nested-gone"}]
+    },
+    {
+      "id": "LQL-P21-rename-alias-and-optional-as",
+      "query": "case:=state-string | MV probe selected | fields case, probe, selected",
+      "expected_rows": [{"case": "state-string", "selected": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-pairs-compose-sequentially",
+      "query": "case:=state-string | rename probe as first, first as second | fields case, probe, first, second",
+      "expected_rows": [{"case": "state-string", "second": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-repeated-source-becomes-empty",
+      "query": "case:=state-string | rename probe as first, probe as second | fields case, probe, first, second",
+      "expected_rows": [{"case": "state-string", "first": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-swaps-through-sequential-pairs",
+      "query": "case:=state-string | rename case as saved, probe as case, saved as probe | fields case, probe, saved",
+      "expected_rows": [{"case": "value", "probe": "state-string"}]
+    },
+    {
+      "id": "LQL-P21-rename-last-write-wins",
+      "query": "case:=state-string | rename probe as selected, case as selected | fields case, selected",
+      "expected_rows": [{"selected": "state-string"}]
+    },
+    {
+      "id": "LQL-P21-rename-prefix-substitution",
+      "query": "case:=delete-row | rename drop_prefix* as moved* | fields case, drop_prefix_a, drop_prefix_b, moved_a, moved_b",
+      "expected_rows": [{"case": "delete-row", "moved_a": "one", "moved_b": "two"}]
+    },
+    {
+      "id": "LQL-P21-rename-prefix-to-exact-last-write-wins",
+      "query": "case:=delete-row | rename drop_prefix* as selected | fields case, drop_prefix_a, drop_prefix_b, selected",
+      "expected_rows": [{"case": "delete-row", "selected": "two"}]
+    },
+    {
+      "id": "LQL-P21-rename-unmatched-prefix-is-noop",
+      "query": "case:=delete-row | rename absent* as moved* | fields case, moved",
+      "expected_rows": [{"case": "delete-row"}]
+    },
+    {
+      "id": "LQL-P21-rename-overwrites-existing-destination",
+      "query": "case:=state-string | rename probe as case | fields case, probe",
+      "expected_rows": [{"case": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-empty-input",
+      "query": "case:=rename-missing | rename case as selected",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P21-rename-exact-to-itself",
+      "query": "case:=state-string | rename probe as probe | fields case, probe",
+      "expected_rows": [{"case": "state-string", "probe": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-all-to-itself",
+      "query": "case:=state-string | rename * as * | fields case, probe",
+      "expected_rows": [{"case": "state-string", "probe": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-all-to-prefix",
+      "query": "case:=state-string | rename * as moved.* | fields case, probe, moved.case, moved.probe",
+      "expected_rows": [{"moved.case": "state-string", "moved.probe": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-empty-prefix-suffix-is-literal-field",
+      "query": "case:=state-string | fields case | rename case* as *",
+      "expected_rows": [{"": "state-string"}]
+    },
+    {
+      "id": "LQL-P21-rename-wildcard-pairs-compose-sequentially",
+      "query": "case:=state-string | rename probe* as moved*, moved* as chained* | fields case, probe, moved, chained",
+      "expected_rows": [{"case": "state-string", "chained": "value"}]
+    },
+    {
+      "id": "LQL-P21-rename-exact-to-wildcard-keeps-literal-destination",
+      "query": "case:=state-string | rename probe as selected* | fields case, probe, \"selected*\"",
+      "expected_rows": [{"case": "state-string", "selected*": "value"}]
     }
   ],
   "error_cases": [
@@ -3999,6 +4099,69 @@
     {
       "id": "LQL-P20-copy-rejects-separated-destination-wildcard",
       "query": "* | copy source as destination *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-requires-a-pair",
+      "query": "* | rename",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-mv-requires-a-pair",
+      "query": "* | mv",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-requires-destination",
+      "query": "* | rename source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-requires-destination-after-as",
+      "query": "* | rename source as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-rejects-leading-comma",
+      "query": "* | rename , source as destination",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-rejects-trailing-comma",
+      "query": "* | rename source as destination,",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-rejects-trailing-token",
+      "query": "* | rename source as destination trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-rejects-separated-source-wildcard",
+      "query": "* | rename source * as destination",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P21-rename-rejects-separated-destination-wildcard",
+      "query": "* | rename source as destination *",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

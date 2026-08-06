@@ -124,7 +124,7 @@ extension.
 | `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
 | `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P21` | `rename` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` | missing | no | `SQL` | `API` | P2 |
@@ -297,6 +297,36 @@ Exact-build evidence records 3.229/46.025 ms narrow/wide p95 versus
 3.659/41.958 ms for byte-identical same-scan controls; `QSF-167` accepts the
 mixed -11.8%/+9.7% bounded row-transform variation above the public storage
 boundary.
+
+`LQL-P21` moves exact, all-field, or suffix-star prefix sources to exact,
+all-field, or suffix-star destinations. `rename` and `mv` are
+case-insensitive, `as` is optional, comma-separated pairs execute from left
+to right, and later pairs observe the current row produced by earlier pairs.
+Each wildcard source snapshots recursively flattened leaves in deterministic
+bytewise order. All sources selected by one pair are removed before that
+pair's destinations are written. Prefix substitution, exact-to-wildcard
+literal destinations, unmatched-prefix no-ops, and prefix-to-exact
+deterministic last-write behavior match the pinned VictoriaLogs processor.
+
+Exact strings, numbers, booleans, arrays, null, and empty strings retain their
+JSON types. Present exact leaves and wildcard leaves are removed from the
+current response row, with empty rich parents pruned; the durable stored row
+is never mutated. A missing exact source or exact rich-object parent writes an
+explicit empty destination and does not remove the retained object. Empty
+rich objects have no flattened wildcard leaves and remain present. A
+wildcard-generated empty suffix is a literal empty field distinct from
+canonical `_msg`, while an exact source with a wildcard destination retains
+the literal `*`.
+
+Timeless overwrites compatible scalar destinations but returns HTTP 422
+`field_conflict` rather than replacing a retained object or descending
+through a scalar parent. Work, moved temporary values, source/destination
+paths, results, response bytes, and cancellation use existing request limits.
+Executable `SQL-LOG-034` provides the direct exact top-level JSON1
+foundation and documents nested-parent pruning and conflict responsibilities.
+The operation requires no extension primitive, private table, or storage
+contract change. Exact-build performance and HWM evidence remain required
+before the row can move from `in progress` to `shipped`.
 
 ## Statistics functions
 

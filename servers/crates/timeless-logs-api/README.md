@@ -650,6 +650,40 @@ cloned state, result/response size, and cancellation are bounded. Executable
 provides the direct public exact-field JSON1 foundation. No extension
 primitive or private table is used.
 
+LogsQL `rename` (alias `mv`) moves fields in the current response row:
+
+```text
+* | rename trace_id as correlation_id
+* | mv context.* as moved.*, moved.attempt as retry_attempt
+* | rename service saved, host service, saved host
+```
+
+`as` is optional and comma-separated pairs execute sequentially. Exact,
+all-field, and suffix-star prefix filters are accepted on both sides. Each
+wildcard source snapshots recursively flattened leaves at that pair in
+deterministic bytewise order. All matched sources for the pair are removed
+before destinations are inserted. Prefix destinations substitute the source
+prefix; multiple matches moved to one exact destination are deterministic
+last-write-wins. Unmatched wildcard sources are no-ops, and later pairs
+observe earlier removals and destinations.
+
+Exact strings, numbers, booleans, arrays, null, and empty strings retain their
+types. Removed rich leaves prune empty parents, but durable storage remains
+unchanged. Missing exact fields and exact object parents produce an explicit
+empty destination; object parents and rich empty objects remain intact in the
+current row because neither is a flattened leaf. A wildcard-generated empty
+suffix remains a literal empty field distinct from `_msg`. Exact sources with
+wildcard destinations preserve the literal destination, including `*`.
+
+Replacing a retained object or descending through a scalar destination parent
+returns HTTP 422 `field_conflict` without data loss. Work, temporary moved
+state and paths, result/response size, and cancellation are bounded.
+Executable
+[`SQL-LOG-034`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)
+provides the direct public exact top-level JSON1 foundation and explicitly
+documents nested-parent and destination-conflict responsibilities. No
+extension primitive or private table is used.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

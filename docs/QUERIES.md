@@ -775,6 +775,46 @@ shows the public JSON1 equivalent for one exact retained metadata source and
 one exact top-level destination. Sequential/wildcard language composition
 remains in the Rust API; no extension primitive or private table is used.
 
+## LogsQL `rename` over rich current rows
+
+`rename` (alias `mv`) moves fields within the current response row:
+
+```text
+* | rename trace_id as correlation_id
+* | mv context.* as moved.*, moved.attempt as retry_attempt
+* | rename service saved, host service, saved host
+```
+
+`as` is optional. Comma-separated pairs execute left to right, so later pairs
+observe earlier removals and destinations and can implement chains or swaps.
+Sources and destinations may be exact fields, `*`, or suffix-star prefix
+filters. Each wildcard source snapshots the current recursively flattened
+leaves in bytewise field-name order. Arrays remain atomic. All sources for one
+pair are removed before its destinations are inserted. Prefix destinations
+replace the matched source prefix; multiple wildcard sources moved to one
+exact destination are deterministic last-write-wins. An unmatched wildcard
+source is a no-op.
+
+Exact strings, numbers, booleans, arrays, null, and empty strings retain their
+JSON types. Present leaves are removed from the response and empty rich
+parents are pruned, but the stored row remains immutable. A missing exact
+source or exact rich-object parent produces an explicit empty destination;
+the object remains because VictoriaLogs' flattened view has no parent column.
+Rich empty objects likewise have no wildcard leaf and are retained. An exact
+source paired with a wildcard destination uses the literal destination name,
+including `*`. When prefix removal yields an empty suffix, the destination is
+a literal empty field distinct from `_msg`; exact quoted `""` still names the
+message.
+
+Compatible scalar destinations are overwritten. A destination that would
+replace a retained object or descend through a scalar fails with HTTP 422
+reason `field_conflict`. Traversal, temporary moved values and paths, result
+rows, response bytes, and cancellation are bounded. Executable
+[`SQL-LOG-034`](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)
+shows the public JSON1 foundation for one exact top-level move. The Rust API
+owns nested-parent pruning, wildcard and sequential composition, strict
+errors, and hard limits; no extension primitive or private table is used.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

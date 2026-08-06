@@ -573,3 +573,18 @@ VictoriaLogs commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 The fixture contains 296 row-query cases, 169 error cases, and 122
 statistics/pipeline cases: 587 cases total.
 The fixture now contains 587 cases.
+
+`LQL-P21` adds twenty successful pipeline cases and nine error cases for
+typed exact moves and source removal; missing and flattened object-parent
+behavior; `rename`/`mv`; optional `as`; strict pair/comma grammar; sequential
+chains, swaps, repeated-source emptiness, and overwrite order; exact and
+all-field identity; prefix substitution; prefix-to-exact deterministic
+last-write behavior; all-field-to-prefix mapping; unmatched prefixes;
+wildcard-pair chaining; exact-to-wildcard literal destinations; the literal
+empty field produced by an empty wildcard suffix; and empty input. Source
+audit is against `pipe_rename.go`, `pipe_rename_test.go`, `parser_utils.go`,
+`block_result.go`, and `prefixfilter/filter.go` at immutable VictoriaLogs
+commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+The fixture contains 296 row-query cases, 178 error cases, and 142
+statistics/pipeline cases: 616 cases total.
+The fixture now contains 616 cases.

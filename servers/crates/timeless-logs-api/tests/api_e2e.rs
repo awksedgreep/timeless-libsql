@@ -2405,6 +2405,289 @@ async fn session_seventeen_copy_is_typed_sequential_bounded_and_durable() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_rename_is_typed_sequential_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("rename-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let entries = [
+        LogEntry {
+            ts: 1_800_000_000_000_001,
+            level: 1,
+            severity: "info".into(),
+            message: "rename rich".into(),
+            metadata_json: serde_json::json!({
+                "case":"rename-rich",
+                "rename_group":"rename",
+                "probe":2,
+                "flag":false,
+                "nested":{"a":"one","b":[1,"x"]},
+                "null_value":null,
+                "empty_value":""
+            })
+            .to_string(),
+        },
+        LogEntry {
+            ts: 1_800_000_000_000_002,
+            level: 1,
+            severity: "info".into(),
+            message: "rename missing".into(),
+            metadata_json: serde_json::json!({
+                "case":"rename-missing",
+                "rename_group":"rename"
+            })
+            .to_string(),
+        },
+    ];
+    storage.ingest(entries.into()).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename probe as selected, flag flag_moved, nested.b as array_moved, null_value as null_moved, empty_value as empty_moved, missing as missing_moved | fields case, probe, flag, nested.b, null_value, empty_value, selected, flag_moved, array_moved, null_moved, empty_moved, missing_moved"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"rename-rich",
+            "selected":2,
+            "flag_moved":false,
+            "array_moved":[1,"x"],
+            "null_moved":null,
+            "empty_moved":"",
+            "missing_moved":""
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | MV case saved, probe AS case, saved probe | fields case, probe, saved"#,
+        )
+        .await,
+        [serde_json::json!({"case":2,"probe":"rename-rich"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename probe first, probe second | fields case, probe, first, second"#,
+        )
+        .await,
+        [serde_json::json!({"case":"rename-rich","first":2,"second":""})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename nested.* as moved.* | fields case, nested.a, nested.b, moved.a, moved.b"#,
+        )
+        .await,
+        [serde_json::json!({"case":"rename-rich","moved":{"a":"one","b":[1,"x"]}})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename nested.* as selected | fields case, nested.a, nested.b, selected"#,
+        )
+        .await,
+        [serde_json::json!({"case":"rename-rich","selected":[1,"x"]})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename nested as object_parent, absent* as moved* | fields case, nested, object_parent"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"rename-rich",
+            "nested":{"a":"one","b":[1,"x"]},
+            "object_parent":""
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename * as * | fields case, probe, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"rename-rich",
+            "probe":2,
+            "nested":{"a":"one","b":[1,"x"]}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename * as moved.* | fields case, probe, moved.case, moved.probe, moved.nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "moved":{
+                "case":"rename-rich",
+                "probe":2,
+                "nested":{"a":"one","b":[1,"x"]}
+            }
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | fields case | rename case* as *"#,
+        )
+        .await,
+        [serde_json::json!({"":"rename-rich"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename case* as * | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({"_msg":"rename rich"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename probe* as moved*, moved* as chained* | fields case, probe, moved, chained"#,
+        )
+        .await,
+        [serde_json::json!({"case":"rename-rich","chained":2})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | rename probe as selected* | fields case, probe, "selected*""#,
+        )
+        .await,
+        [serde_json::json!({"case":"rename-rich","selected*":2})]
+    );
+    assert!(pipeline_rows(
+        &app,
+        r#"case:="rename-does-not-exist" | rename case as selected"#,
+    )
+    .await
+    .is_empty());
+
+    for malformed in [
+        "* | rename",
+        "* | mv",
+        "* | rename source",
+        "* | rename source as",
+        "* | rename , source as destination",
+        "* | rename source as destination,",
+        "* | rename source as destination trailing",
+        "* | rename source * as destination",
+        "* | rename source as destination *",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for query in [
+        r#"case:="rename-rich" | rename case as probe.child"#,
+        r#"case:="rename-rich" | rename probe as nested"#,
+    ] {
+        let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "query_execution");
+        assert_eq!(body["reason"], "field_conflict");
+        assert!(body["message"].as_str().unwrap().contains("LogsQL rename"));
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            r#"rename_group:="rename" | rename case as selected | limit 2"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="rename-rich" | rename * as moved*"#,
+            "max_response_bytes",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 8,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="rename-rich" | rename probe as a, probe as b, probe as c, probe as d, probe as e, probe as f, probe as g, probe as h, probe as i"#,
+            "max_work_rows",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason);
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="rename-rich" | fields case, probe, nested, null_value, empty_value"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"rename-rich",
+            "probe":2,
+            "nested":{"a":"one","b":[1,"x"]},
+            "null_value":null,
+            "empty_value":""
+        })],
+        "rename must not mutate stored rich source fields and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="rename-rich" | RENAME nested.* AS moved.* | fields case, nested.a, nested.b, moved.a, moved.b"#,
+        )
+        .await,
+        [serde_json::json!({"case":"rename-rich","moved":{"a":"one","b":[1,"x"]}})]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
@@ -7737,12 +8020,45 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_copy);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_copy_cancel = default_app
+        .clone()
         .oneshot(logsql_request(
             "level:error | copy _msg as selected | fields selected | limit 1",
         ))
         .await
         .unwrap();
     assert_eq!(reused_after_copy_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_rename = storage.stats().await.unwrap().api_query_cancelled;
+    let rename_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | rename * as moved* | fields moved* | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(rename_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_rename && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_rename);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_rename_cancel = default_app
+        .oneshot(logsql_request(
+            "level:error | rename _msg as selected | fields selected | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_rename_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

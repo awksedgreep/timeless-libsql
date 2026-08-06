@@ -17,8 +17,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    CoalesceSpec, CopySpec, FacetsSpec, FirstSpec, PipelineField, PipelineOp, StatsExpression,
-    StatsKind, TopSpec, UniqSpec,
+    CoalesceSpec, CopySpec, FacetsSpec, FirstSpec, PipelineField, PipelineOp, RenameSpec,
+    StatsExpression, StatsKind, TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -185,6 +185,9 @@ pub(crate) fn execute(
             }
             PipelineOp::Copy(spec) => {
                 copy_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
+            PipelineOp::Rename(spec) => {
+                rename_fields(rows, spec, execution.limits, execution.cancelled)?
             }
         };
     }
@@ -1132,6 +1135,223 @@ fn copy_fields(
         .collect()
 }
 
+#[derive(Debug)]
+struct RenameMove {
+    source_name: String,
+    source_path: Option<Vec<String>>,
+    destination_name: String,
+    destination_path: Vec<String>,
+    value: Value,
+}
+
+fn rename_fields(
+    rows: Vec<Value>,
+    spec: &RenameSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            let mut work_items = 0usize;
+            for (source, destination) in &spec.pairs {
+                ensure_active(cancelled)?;
+                let mut moves = Vec::new();
+                let mut state_bytes = size_of::<Vec<RenameMove>>();
+                match source {
+                    PipelineField::Exact { path, name } => {
+                        charge_rename_work(&mut work_items, limits.max_state_items)?;
+                        let source_value = coalesce_exact_value(&row, path)
+                            .filter(|value| !matches!(value, Value::Object(_)));
+                        let source_path = source_value.map(|_| path.clone());
+                        let value = source_value
+                            .cloned()
+                            .unwrap_or_else(|| Value::String(String::new()));
+                        charge_rename_move(
+                            name,
+                            source_path.as_deref(),
+                            &value,
+                            &mut state_bytes,
+                            limits,
+                            cancelled,
+                            &mut work_items,
+                        )?;
+                        moves.push(RenameMove {
+                            source_name: name.clone(),
+                            source_path,
+                            destination_name: String::new(),
+                            destination_path: Vec::new(),
+                            value,
+                        });
+                    }
+                    PipelineField::Prefix { prefix } => collect_rename_leaves(
+                        &row,
+                        &mut String::new(),
+                        &mut Vec::new(),
+                        Some(prefix),
+                        &mut moves,
+                        &mut state_bytes,
+                        limits,
+                        cancelled,
+                        &mut work_items,
+                    )?,
+                    PipelineField::All => collect_rename_leaves(
+                        &row,
+                        &mut String::new(),
+                        &mut Vec::new(),
+                        None,
+                        &mut moves,
+                        &mut state_bytes,
+                        limits,
+                        cancelled,
+                        &mut work_items,
+                    )?,
+                }
+
+                for (move_index, field) in moves.iter_mut().enumerate() {
+                    check_periodically(cancelled, move_index)?;
+                    let (destination_name, destination_path) =
+                        copy_destination(source, destination, &field.source_name)?;
+                    charge_rename_string(
+                        &destination_name,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                    )?;
+                    charge_rename_path(
+                        &destination_path,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                    )?;
+                    field.destination_name = destination_name;
+                    field.destination_path = destination_path;
+                }
+
+                let object = row
+                    .as_object_mut()
+                    .ok_or_else(|| "LogsQL rename input row is not a JSON object".to_string())?;
+                for field in &moves {
+                    ensure_active(cancelled)?;
+                    if let Some(path) = &field.source_path {
+                        delete_exact_path(object, path, cancelled)?;
+                    }
+                }
+                for (move_index, field) in moves.into_iter().enumerate() {
+                    check_periodically(cancelled, move_index)?;
+                    if copy_destination_replaces_object(object, &field.destination_path) {
+                        return Err(format!(
+                            "LogsQL rename destination conflict: field {:?} would replace a retained object",
+                            field.destination_name
+                        ));
+                    }
+                    insert_path(object, &field.destination_path, field.value)
+                        .map_err(|error| format!("LogsQL rename destination conflict: {error}"))?;
+                }
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_rename_leaves(
+    value: &Value,
+    flattened_path: &mut String,
+    source_path: &mut Vec<String>,
+    prefix: Option<&str>,
+    output: &mut Vec<RenameMove>,
+    state_bytes: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+) -> Result<(), String> {
+    charge_rename_work(work_items, limits.max_state_items)?;
+    check_periodically(cancelled, *work_items)?;
+    if let Value::Object(object) = value {
+        for (name, child) in object {
+            let original_len = flattened_path.len();
+            if !flattened_path.is_empty() {
+                flattened_path.push('.');
+            }
+            flattened_path.push_str(name);
+            source_path.push(name.clone());
+            collect_rename_leaves(
+                child,
+                flattened_path,
+                source_path,
+                prefix,
+                output,
+                state_bytes,
+                limits,
+                cancelled,
+                work_items,
+            )?;
+            source_path.pop();
+            flattened_path.truncate(original_len);
+        }
+        return Ok(());
+    }
+    if prefix.is_some_and(|prefix| !flattened_path.starts_with(prefix)) {
+        return Ok(());
+    }
+    charge_rename_move(
+        flattened_path,
+        Some(source_path),
+        value,
+        state_bytes,
+        limits,
+        cancelled,
+        work_items,
+    )?;
+    output.push(RenameMove {
+        source_name: flattened_path.clone(),
+        source_path: Some(source_path.clone()),
+        destination_name: String::new(),
+        destination_path: Vec::new(),
+        value: value.clone(),
+    });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn charge_rename_move(
+    source_name: &str,
+    source_path: Option<&[String]>,
+    value: &Value,
+    state_bytes: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+) -> Result<(), String> {
+    *state_bytes = state_bytes
+        .checked_add(size_of::<RenameMove>())
+        .ok_or_else(|| "LogsQL rename state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "rename")?;
+    charge_rename_string(source_name, state_bytes, limits.max_state_bytes)?;
+    if let Some(path) = source_path {
+        charge_rename_path(path, state_bytes, limits.max_state_bytes)?;
+    }
+    charge_rename_value(
+        value,
+        state_bytes,
+        limits.max_state_bytes,
+        cancelled,
+        work_items,
+        limits.max_state_items,
+    )
+}
+
+fn charge_rename_path(path: &[String], used: &mut usize, limit: usize) -> Result<(), String> {
+    *used = used
+        .checked_add(size_of::<Vec<String>>())
+        .ok_or_else(|| "LogsQL rename state size overflow".to_string())?;
+    ensure_first_state_bytes(*used, limit, "rename")?;
+    for segment in path {
+        charge_rename_string(segment, used, limit)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_copy_leaves(
     value: &Value,
@@ -1241,23 +1461,44 @@ fn copy_destination_replaces_object(object: &Map<String, Value>, path: &[String]
 }
 
 fn charge_copy_work(used: &mut usize, limit: usize) -> Result<(), String> {
+    charge_transfer_work(used, limit, "copy")
+}
+
+fn charge_rename_work(used: &mut usize, limit: usize) -> Result<(), String> {
+    charge_transfer_work(used, limit, "rename")
+}
+
+fn charge_transfer_work(used: &mut usize, limit: usize, operation: &str) -> Result<(), String> {
     *used = used
         .checked_add(1)
-        .ok_or_else(|| "LogsQL copy work size overflow".to_string())?;
+        .ok_or_else(|| format!("LogsQL {operation} work size overflow"))?;
     if *used > limit {
         return Err(format!(
-            "LogsQL copy traversal exceeds max_work_rows={limit}"
+            "LogsQL {operation} traversal exceeds max_work_rows={limit}"
         ));
     }
     Ok(())
 }
 
 fn charge_copy_string(value: &str, used: &mut usize, limit: usize) -> Result<(), String> {
+    charge_transfer_string(value, used, limit, "copy")
+}
+
+fn charge_rename_string(value: &str, used: &mut usize, limit: usize) -> Result<(), String> {
+    charge_transfer_string(value, used, limit, "rename")
+}
+
+fn charge_transfer_string(
+    value: &str,
+    used: &mut usize,
+    limit: usize,
+    operation: &str,
+) -> Result<(), String> {
     *used = used
         .checked_add(size_of::<String>())
         .and_then(|bytes| bytes.checked_add(value.len()))
-        .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
-    ensure_first_state_bytes(*used, limit, "copy")
+        .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+    ensure_first_state_bytes(*used, limit, operation)
 }
 
 fn charge_copy_value(
@@ -1268,39 +1509,96 @@ fn charge_copy_value(
     work_items: &mut usize,
     max_work_items: usize,
 ) -> Result<(), String> {
+    charge_transfer_value(
+        value,
+        used,
+        limit,
+        cancelled,
+        work_items,
+        max_work_items,
+        "copy",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn charge_rename_value(
+    value: &Value,
+    used: &mut usize,
+    limit: usize,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+    max_work_items: usize,
+) -> Result<(), String> {
+    charge_transfer_value(
+        value,
+        used,
+        limit,
+        cancelled,
+        work_items,
+        max_work_items,
+        "rename",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn charge_transfer_value(
+    value: &Value,
+    used: &mut usize,
+    limit: usize,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+    max_work_items: usize,
+    operation: &str,
+) -> Result<(), String> {
     ensure_active(cancelled)?;
     *used = used
         .checked_add(size_of::<Value>())
-        .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
-    ensure_first_state_bytes(*used, limit, "copy")?;
+        .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+    ensure_first_state_bytes(*used, limit, operation)?;
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
         Value::String(value) => {
             *used = used
                 .checked_add(value.len())
-                .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
-            ensure_first_state_bytes(*used, limit, "copy")
+                .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+            ensure_first_state_bytes(*used, limit, operation)
         }
         Value::Array(values) => {
             *used = used
                 .checked_add(size_of::<Vec<Value>>())
-                .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
-            ensure_first_state_bytes(*used, limit, "copy")?;
+                .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+            ensure_first_state_bytes(*used, limit, operation)?;
             for value in values {
-                charge_copy_work(work_items, max_work_items)?;
-                charge_copy_value(value, used, limit, cancelled, work_items, max_work_items)?;
+                charge_transfer_work(work_items, max_work_items, operation)?;
+                charge_transfer_value(
+                    value,
+                    used,
+                    limit,
+                    cancelled,
+                    work_items,
+                    max_work_items,
+                    operation,
+                )?;
             }
             Ok(())
         }
         Value::Object(object) => {
             *used = used
                 .checked_add(size_of::<Map<String, Value>>())
-                .ok_or_else(|| "LogsQL copy state size overflow".to_string())?;
-            ensure_first_state_bytes(*used, limit, "copy")?;
+                .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+            ensure_first_state_bytes(*used, limit, operation)?;
             for (name, value) in object {
-                charge_copy_work(work_items, max_work_items)?;
-                charge_copy_string(name, used, limit)?;
-                charge_copy_value(value, used, limit, cancelled, work_items, max_work_items)?;
+                charge_transfer_work(work_items, max_work_items, operation)?;
+                charge_transfer_string(name, used, limit, operation)?;
+                charge_transfer_value(
+                    value,
+                    used,
+                    limit,
+                    cancelled,
+                    work_items,
+                    max_work_items,
+                    operation,
+                )?;
             }
             Ok(())
         }
@@ -3572,7 +3870,7 @@ mod tests {
             2
         );
 
-        assert!(copy_fields(
+        let state_error = copy_fields(
             rows.clone(),
             &spec,
             PipelineLimits {
@@ -3581,9 +3879,13 @@ mod tests {
             },
             &cancelled,
         )
-        .unwrap_err()
-        .contains("max_response_bytes=1"));
-        assert!(copy_fields(
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL copy"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+        let work_error = copy_fields(
             rows.clone(),
             &CopySpec {
                 pairs: vec![(PipelineField::All, prefix("copied."))],
@@ -3594,8 +3896,9 @@ mod tests {
             },
             &cancelled,
         )
-        .unwrap_err()
-        .contains("max_work_rows=1"));
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL copy"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
 
         for destination in [exact("probe.child"), exact("nested")] {
             let error = copy_fields(
@@ -3613,6 +3916,203 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             copy_fields(rows, &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn rename_moves_rich_values_sequentially_and_bounds_temporary_state() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: name.split('.').map(str::to_owned).collect(),
+            name: name.to_owned(),
+        };
+        let prefix = |prefix: &str| PipelineField::Prefix {
+            prefix: prefix.to_owned(),
+        };
+        let rows = vec![json!({
+            "probe": 2,
+            "flag": false,
+            "nested": {"a": "one", "b": [1, "x"]},
+            "null_value": null,
+            "empty_value": ""
+        })];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 10_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let spec = RenameSpec {
+            pairs: vec![
+                (exact("probe"), exact("selected")),
+                (exact("selected"), exact("chained")),
+                (prefix("nested."), prefix("moved.")),
+                (exact("missing"), exact("absent")),
+            ],
+        };
+        assert_eq!(
+            rename_fields(rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [json!({
+                "chained": 2,
+                "flag": false,
+                "moved": {"a": "one", "b": [1, "x"]},
+                "null_value": null,
+                "empty_value": "",
+                "absent": ""
+            })]
+        );
+
+        assert_eq!(
+            rename_fields(
+                rows.clone(),
+                &RenameSpec {
+                    pairs: vec![(exact("nested"), exact("parent"))],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({
+                "probe": 2,
+                "flag": false,
+                "nested": {"a": "one", "b": [1, "x"]},
+                "null_value": null,
+                "empty_value": "",
+                "parent": ""
+            })]
+        );
+        assert_eq!(
+            rename_fields(
+                vec![json!({"a": 1, "b": 2})],
+                &RenameSpec {
+                    pairs: vec![
+                        (exact("a"), exact("temporary")),
+                        (exact("b"), exact("a")),
+                        (exact("temporary"), exact("b")),
+                    ],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"a": 2, "b": 1})]
+        );
+        assert_eq!(
+            rename_fields(
+                vec![json!({"a": 1})],
+                &RenameSpec {
+                    pairs: vec![(exact("a"), exact("b")), (exact("a"), exact("c"))],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"b": 1, "c": ""})]
+        );
+        assert_eq!(
+            rename_fields(
+                rows.clone(),
+                &RenameSpec {
+                    pairs: vec![(prefix("nested."), exact("last"))],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({
+                "probe": 2,
+                "flag": false,
+                "null_value": null,
+                "empty_value": "",
+                "last": [1, "x"]
+            })]
+        );
+        assert_eq!(
+            rename_fields(
+                rows.clone(),
+                &RenameSpec {
+                    pairs: vec![(PipelineField::All, PipelineField::All)],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            rows
+        );
+        assert_eq!(
+            rename_fields(
+                vec![json!({"case": "rename", "probe": 2})],
+                &RenameSpec {
+                    pairs: vec![(prefix("case"), PipelineField::All)],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            [json!({"": "rename", "probe": 2})]
+        );
+        assert_eq!(
+            rename_fields(
+                rows.clone(),
+                &RenameSpec {
+                    pairs: vec![(exact("probe"), prefix("literal"))],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap()[0]["literal*"],
+            2
+        );
+
+        let state_error = rename_fields(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL rename"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+        let work_error = rename_fields(
+            rows.clone(),
+            &RenameSpec {
+                pairs: vec![(PipelineField::All, prefix("moved."))],
+            },
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL rename"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        for destination in [exact("probe.child"), exact("nested")] {
+            let error = rename_fields(
+                vec![json!({"case": "rename", "probe": 2, "nested": {"a": 1}})],
+                &RenameSpec {
+                    pairs: vec![(exact("case"), destination)],
+                },
+                limits,
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("LogsQL rename destination conflict"),
+                "{error}"
+            );
+        }
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            rename_fields(rows, &spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

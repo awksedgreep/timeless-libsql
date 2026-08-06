@@ -823,16 +823,43 @@ fn parse_copy_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         )));
     }
 
+    Ok(PipelineOp::Copy(CopySpec {
+        pairs: parse_field_pairs(&tokens, "copy")?,
+    }))
+}
+
+fn parse_rename_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "rename")?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL rename pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("rename") && !command.eq_ignore_ascii_case("mv") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL rename/mv pipe, not {command:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Rename(RenameSpec {
+        pairs: parse_field_pairs(&tokens, "rename")?,
+    }))
+}
+
+fn parse_field_pairs(
+    tokens: &[String],
+    operation: &str,
+) -> Result<Vec<(PipelineField, PipelineField)>, LogsqlError> {
     let mut cursor = 1usize;
     let mut pairs = Vec::new();
     loop {
         let source_token = tokens.get(cursor).ok_or_else(|| {
-            LogsqlError::malformed("LogsQL copy requires at least one source/destination pair")
+            LogsqlError::malformed(format!(
+                "LogsQL {operation} requires at least one source/destination pair"
+            ))
         })?;
         if source_token == "," {
-            return Err(LogsqlError::malformed(
-                "LogsQL copy requires a source field before each comma",
-            ));
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {operation} requires a source field before each comma"
+            )));
         }
         let source = parse_delete_field(source_token)?;
         cursor += 1;
@@ -843,13 +870,13 @@ fn parse_copy_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         {
             cursor += 1;
         }
-        let destination_token = tokens
-            .get(cursor)
-            .ok_or_else(|| LogsqlError::malformed("LogsQL copy requires a destination field"))?;
+        let destination_token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed(format!("LogsQL {operation} requires a destination field"))
+        })?;
         if destination_token == "," {
-            return Err(LogsqlError::malformed(
-                "LogsQL copy requires a destination field before each comma",
-            ));
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {operation} requires a destination field before each comma"
+            )));
         }
         let destination = parse_delete_field(destination_token)?;
         cursor += 1;
@@ -860,20 +887,20 @@ fn parse_copy_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
             Some(",") => {
                 cursor += 1;
                 if cursor == tokens.len() {
-                    return Err(LogsqlError::malformed(
-                        "LogsQL copy requires a pair after each comma",
-                    ));
+                    return Err(LogsqlError::malformed(format!(
+                        "LogsQL {operation} requires a pair after each comma"
+                    )));
                 }
             }
             Some(token) => {
                 return Err(LogsqlError::malformed(format!(
-                    "unexpected LogsQL copy token {token:?}; expected ',' or end of pipe"
+                    "unexpected LogsQL {operation} token {token:?}; expected ',' or end of pipe"
                 )))
             }
         }
     }
 
-    Ok(PipelineOp::Copy(CopySpec { pairs }))
+    Ok(pairs)
 }
 
 fn parse_uniq_fields(
@@ -1116,6 +1143,10 @@ fn is_coalesce_pipe(segment: &str) -> bool {
 
 fn is_copy_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "copy") || is_first_last_pipe(segment, "cp")
+}
+
+fn is_rename_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "rename") || is_first_last_pipe(segment, "mv")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -1573,6 +1604,11 @@ pub(crate) struct CopySpec {
     pub pairs: Vec<(PipelineField, PipelineField)>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RenameSpec {
+    pub pairs: Vec<(PipelineField, PipelineField)>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -1601,6 +1637,7 @@ pub(crate) enum PipelineOp {
     Facets(FacetsSpec),
     Coalesce(CoalesceSpec),
     Copy(CopySpec),
+    Rename(RenameSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1960,6 +1997,10 @@ pub fn parse_at(
             }
             _ if is_copy_pipe(segment) => {
                 pipeline.push(parse_copy_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_rename_pipe(segment) => {
+                pipeline.push(parse_rename_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -6968,6 +7009,38 @@ mod tests {
             "* | copy source as destination trailing",
             "* | copy source * as destination",
             "* | copy source as destination *",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_rename_grammar_is_complete_and_strict() {
+        for query in [
+            "* | rename source as destination",
+            "* | mv source destination",
+            "* | RENAME a AS b, b AS c",
+            "* | rename foo* as bar*",
+            r#"* | rename "foo."* as "bar."*"#,
+            "* | rename * as copied*",
+            r#"* | rename "" as message_copy"#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | rename",
+            "* | mv",
+            "* | rename source",
+            "* | rename source as",
+            "* | rename , source as destination",
+            "* | rename source as destination,",
+            "* | rename source as destination trailing",
+            "* | rename source * as destination",
+            "* | rename source as destination *",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
