@@ -162,7 +162,11 @@
     {"case": "unpack-syslog-cef", "_msg": "Sep 29 08:26:10 cef-host CEF:1|Security|product|1.0|100|name\\|value|10|src=10.0.0.1 msg=two words", "unpack_syslog_group": "unpack-syslog"},
     {"case": "unpack-syslog-cee", "_msg": "Jun  3 12:08:33 cee-host app[1]: @cee: {\"number\":123,\"flag\":false,\"null_value\":null,\"nested\":{\"leaf\":7},\"array\":[1,\"x\"],\"message\":\"cee message\"}", "unpack_syslog_group": "unpack-syslog"},
     {"case": "unpack-syslog-invalid-priority", "_msg": "<abc>1 2023-06-03T17:42:00Z host app 1 ID - tail", "unpack_syslog_group": "unpack-syslog"},
-    {"case": "unpack-syslog-invalid-cef", "_msg": "Sep 29 08:26:10 host CEF:1|Security|too-short", "unpack_syslog_group": "unpack-syslog"}
+    {"case": "unpack-syslog-invalid-cef", "_msg": "Sep 29 08:26:10 host CEF:1|Security|too-short", "unpack_syslog_group": "unpack-syslog"},
+    {"case": "unpack-words-message", "_msg": "  foo,bar foo тест45_2 Ⅳz ²q é १२  ", "unpack_words_group": "unpack-words", "source": "alpha alpha,βeta 42_7 Ⅳz ²q é १२", "words": "original"},
+    {"case": "unpack-words-punctuation", "_msg": "!#$%,", "unpack_words_group": "unpack-words", "source": ""},
+    {"case": "unpack-words-missing", "_msg": "missing source", "unpack_words_group": "unpack-words"},
+    {"case": "unpack-words-rich", "_msg": "rich source", "unpack_words_group": "unpack-words", "numeric_source": 123, "array_source": ["left", "right"]}
   ],
   "query_cases": [
     {
@@ -193,6 +197,18 @@
       "query": "тест45",
       "status": 200,
       "expected_cases": ["word-unicode"]
+    },
+    {
+      "id": "LQL-F09-letter-number-is-a-word-separator",
+      "query": "case:=unpack-words-message z",
+      "status": 200,
+      "expected_cases": ["unpack-words-message"]
+    },
+    {
+      "id": "LQL-F09-other-number-is-a-word-separator",
+      "query": "case:=unpack-words-message q",
+      "status": 200,
+      "expected_cases": ["unpack-words-message"]
     },
     {
       "id": "LQL-F10-word-prefix-boundaries",
@@ -1280,6 +1296,8 @@
         "unpack-syslog-rfc5424", "unpack-syslog-classic", "unpack-syslog-iso",
         "unpack-syslog-cef", "unpack-syslog-cee", "unpack-syslog-invalid-priority",
         "unpack-syslog-invalid-cef",
+        "unpack-words-message", "unpack-words-punctuation",
+        "unpack-words-missing", "unpack-words-rich",
         "word-exact", "word-inside", "word-case", "word-suffix",
         "word-prefix", "word-underscore", "word-punctuation",
         "word-unicode-boundary", "word-unicode", "word-unicode-case"
@@ -2648,7 +2666,7 @@
     {
       "id": "LQL-P12-query-stats-full-fixture-cardinality",
       "query": "* | query_stats | keep RowsFound",
-      "expected_rows": [{"RowsFound": "162"}]
+      "expected_rows": [{"RowsFound": "166"}]
     },
     {
       "id": "LQL-P12-query-stats-composes-after-limit",
@@ -4597,6 +4615,51 @@
       "id": "LQL-P38-unpack-syslog-missing-source-is-noop",
       "query": "case:=unpack-syslog-rfc5424 | unpack_syslog from absent | fields case, app_name, priority",
       "expected_rows": [{"case": "unpack-syslog-rfc5424", "app_name": "original"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-default-source-and-destination",
+      "query": "case:=unpack-words-message | unpack_words | fields case, _msg",
+      "expected_rows": [{"case": "unpack-words-message", "_msg": "[\"foo\",\"bar\",\"foo\",\"тест45_2\",\"z\",\"q\",\"e\",\"१२\"]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-custom-source-destination-and-unicode-categories",
+      "query": "case:=unpack-words-message | unpack_words from source as words | fields case, source, words",
+      "expected_rows": [{"case": "unpack-words-message", "source": "alpha alpha,βeta 42_7 Ⅳz ²q é १२", "words": "[\"alpha\",\"alpha\",\"βeta\",\"42_7\",\"z\",\"q\",\"e\",\"१२\"]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-drops-duplicates-in-first-seen-order",
+      "query": "case:=unpack-words-message | unpack_words source words drop_duplicates | fields case, words",
+      "expected_rows": [{"case": "unpack-words-message", "words": "[\"alpha\",\"βeta\",\"42_7\",\"z\",\"q\",\"e\",\"१२\"]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-from-without-as-replaces-source",
+      "query": "case:=unpack-words-message | unpack_words from source drop_duplicates | fields case, source",
+      "expected_rows": [{"case": "unpack-words-message", "source": "[\"alpha\",\"βeta\",\"42_7\",\"z\",\"q\",\"e\",\"१२\"]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-punctuation-is-empty-array",
+      "query": "case:=unpack-words-punctuation | unpack_words as words | fields case, words",
+      "expected_rows": [{"case": "unpack-words-punctuation", "words": "[]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-missing-source-is-empty-array",
+      "query": "case:=unpack-words-missing | unpack_words from absent as words | fields case, words",
+      "expected_rows": [{"case": "unpack-words-missing", "words": "[]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-keywords-and-quoted-fields-are-case-insensitive",
+      "query": "case:=unpack-words-message | UnPaCk_WoRdS FrOm source As \"word list\" DrOp_DuPlIcAtEs | fields case, \"word list\"",
+      "expected_rows": [{"case": "unpack-words-message", "word list": "[\"alpha\",\"βeta\",\"42_7\",\"z\",\"q\",\"e\",\"१२\"]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-projects-numeric-source-text",
+      "query": "case:=unpack-words-rich | unpack_words numeric_source numeric_words | fields case, numeric_words",
+      "expected_rows": [{"case": "unpack-words-rich", "numeric_words": "[\"123\"]"}]
+    },
+    {
+      "id": "LQL-P39-unpack-words-projects-array-source-text",
+      "query": "case:=unpack-words-rich | unpack_words array_source array_words | fields case, array_words",
+      "expected_rows": [{"case": "unpack-words-rich", "array_words": "[\"left\",\"right\"]"}]
     },
     {
       "id": "LQL-P41-json-array-len-counts-string-elements",
@@ -7109,6 +7172,69 @@
     {
       "id": "LQL-P38-unpack-syslog-rejects-attached-suffix",
       "query": "* | unpack_syslog.extra",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-as-requires-destination",
+      "query": "* | unpack_words as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-rejects-wildcard-destination",
+      "query": "* | unpack_words as *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-from-requires-source",
+      "query": "* | unpack_words from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-rejects-wildcard-source",
+      "query": "* | unpack_words from *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-rejects-prefix-source",
+      "query": "* | unpack_words from source*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-rejects-trailing-token",
+      "query": "* | unpack_words source destination trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-rejects-token-after-drop-duplicates",
+      "query": "* | unpack_words drop_duplicates source",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-rejects-comma-separated-fields",
+      "query": "* | unpack_words source, destination",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P39-unpack-words-rejects-attached-suffix",
+      "query": "* | unpack_words.extra",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

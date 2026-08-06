@@ -1138,6 +1138,23 @@ six-section focused correctness, dbhealth, 120-recipe/158-statement SQL,
 32-test documentation-harness, formatting, and warnings-denied lint gates
 close the shipped row.
 
+Session 18's `LQL-P39` semantic implementation is complete as an API-owned
+`unpack_words` pipe over public `logs` rows. Pinned VictoriaLogs source and
+the complete 1,175-case live oracle establish strict source/destination
+grammar, source snapshots, exact Unicode Letter/Decimal_Number/underscore
+tokens, first-seen duplicate removal, missing/empty/numeric/array projection,
+and errors. Timeless preserves nested typed metadata and treats retained
+object parents as missing instead of flattening them away. The parser and
+evaluator are bounded and cancellable; durable storage and the public
+extension remain unchanged. Core SQLite cannot express the exact Unicode
+categories portably, so the row's inferred `SQL` foundation is corrected to
+`none`; the unchanged public scan provides no evidence for an extension
+scalar. `QSF-225` records the semantic/storage boundary, and `QSF-226` records
+the adjacent shared-boundary correction from Rust's broader
+`is_alphanumeric()` to the pinned category rule. Exact-build performance/HWM
+capture and the complete final gates remain before the row can become
+`shipped`.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

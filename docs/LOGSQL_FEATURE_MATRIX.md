@@ -142,7 +142,7 @@ extension.
 | `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-053-unpack-fixed-fields-from-unquoted-logfmt)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-054-decode-one-fixed-rfc5424-header)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P39` | `unpack_words` | in progress | no | none | `API` | P3 |
 | `LQL-P40` | `json_array_concat` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P42` | `unroll` | missing | no | `SQL` | `API` | P3 |
@@ -862,6 +862,48 @@ decoding all 8,192 formatted rows before a terminal limit correctly exceeds
 the unchanged 100,000-work-item default; the measured representative shape
 limits before expansion without hiding the complete public scan. Bounded
 row-local parsing does not justify storage pushdown.
+
+`LQL-P39` snapshots one exact current-row field, extracts words in source
+order, encodes them as compact JSON-array text, and writes that text to one
+exact destination in the request-owned row. `unpack_words` defaults both
+source and destination to `_msg`; accepts bare or `from` sources, bare or
+`as` destinations, quoted/dotted exact fields, and a terminal
+`drop_duplicates`; and treats keywords case-insensitively. With no explicit
+destination, the source is replaced only after tokenization. Missing, null,
+object-parent, empty, and punctuation-only sources produce `[]`. Malformed,
+wildcard, prefix, comma-separated, attached-suffix, and trailing syntax fails
+before storage execution.
+
+A word is one maximal sequence of Unicode Letter, Unicode Decimal_Number, or
+underscore characters. Letter_Number, Other_Number, combining marks, and
+punctuation are separators. Case and normalization are preserved exactly;
+`drop_duplicates` retains the first occurrence of each byte-identical word.
+Timeless string sources remain exact, booleans and numbers use compact text,
+and retained arrays use compact JSON text before tokenization. Retained
+objects have no VictoriaLogs parent-column equivalent and therefore project
+as empty rather than discarding nested fidelity. Dotted destinations
+reconstruct retained nested metadata and preserve unrelated siblings;
+replacing an object or descending through a scalar returns HTTP 422.
+
+The complete 1,175-case pinned oracle establishes grammar, source/destination
+defaults and aliases, Unicode categories, duplicate order, missing/empty/rich
+projection, and strict errors. Parser, input scan, tokens, duplicate state,
+JSON output, paths, work, results, response bytes, deadline, and cancellation
+are bounded. Request-local writes do not mutate durable rows through optimize,
+shutdown, or reopen. The same audit corrected ordinary LogsQL word boundaries
+that had used Rust's broader `is_alphanumeric()` and now share the exact
+Letter/Decimal_Number/underscore rule.
+
+This row intentionally has no SQL foundation. Core SQLite/libSQL cannot
+portably classify Unicode Letter versus Decimal_Number while excluding
+Letter_Number, Other_Number, and marks; recursive ASCII SQL would be a weaker
+language. Every source already crosses the same bounded public `logs` scan,
+so a new extension scalar would not avoid block reads, decode, payload
+transfer, or required response-row materialization. Complete semantics remain
+bounded Rust API composition with no language opcode, private-table access,
+durable mutation, storage-format change, or batching/index/compression change.
+Exact-build performance and HWM evidence will determine the final row
+disposition without changing that ownership boundary.
 
 `LQL-P41` counts the top-level elements of one exact current-row field. The
 Rust logs API accepts case-insensitive `json_array_len`, parenthesized or bare

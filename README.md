@@ -940,6 +940,19 @@ work. `QSF-223` retains the default-work-limit failure when expansion is
 placed before the 64-row limit; callers must narrow/limit first or explicitly
 budget more work. Storage remains four raw blocks with no new extension
 primitive.
+`unpack_words` snapshots `_msg` or one exact current-row field, extracts
+maximal Unicode Letter/Decimal_Number/underscore tokens in source order, and
+writes compact JSON-array text to the source or one exact destination.
+Bare/`from` sources, bare/`as` destinations, quoted and dotted fields, and
+terminal `drop_duplicates` are supported with strict case-insensitive grammar.
+First-seen deduplication, missing and rich textual projection, scalar/object
+conflicts, work/state/result/response limits, deadline cancellation, optimize,
+shutdown, and reopen are pinned without changing durable rows. Core SQLite
+cannot express the exact Unicode categories portably, and the same public
+row scan is required either way, so this pipe intentionally has no inexact SQL
+recipe or new extension scalar. The Rust API owns the transform over public
+`logs`; storage formats, authoritative 8,192-entry batching, compression,
+indexes, and maintenance remain unchanged.
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

@@ -1027,3 +1027,21 @@ immutable image. Evaluation-year-dependent RFC3164 leap-day normalization is
 additionally pinned directly against the audited Go `time.Date` behavior in
 the Rust parser regression rather than encoded as a date-stale oracle row.
 The fixture now contains 1155 cases.
+
+`LQL-P39` adds nine exact pipeline/statistics cases and nine error cases for
+`unpack_words`. They pin default `_msg`, bare and explicit source/destination
+fields, in-place source snapshots, first-seen duplicate removal, missing and
+punctuation-only inputs, quoted fields, case-insensitive keywords, numeric and
+array textual projection, and the exact Unicode Letter/Decimal_Number/
+underscore token rule. Letter_Number, Other_Number, and combining marks are
+separators. Error cases pin missing and wildcard source/destination fields,
+prefix fields, comma-separated fields, attached suffixes, tokens after
+`drop_duplicates`, and trailing text. Source audit covers
+`pipe_unpack_words.go`, `pipe_unpack_words_test.go`, `tokenizer.go`, and the
+public LogsQL documentation at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. Two adjacent `LQL-F09` cases
+pin Letter_Number and Other_Number as word separators for ordinary filters,
+closing a shared-boundary regression exposed by this audit. The fixture now
+contains 166 source rows, 346 row-query cases, one stochastic case, 407 error
+cases, and 421 statistics/pipeline cases: 1,175 cases total, all passing
+against the immutable image. The fixture now contains 1175 cases.

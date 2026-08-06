@@ -3510,7 +3510,7 @@ fn logsql_phrase_match_end(message: &str, phrase: &str) -> Option<usize> {
 }
 
 fn logsql_word_char(character: char) -> bool {
-    character == '_' || character.is_alphanumeric()
+    pipeline::word_character(character)
 }
 
 fn metadata_exact_matches(metadata: Option<&JsonValue>, predicates: &[MetadataExact]) -> bool {

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -25,7 +26,7 @@ use crate::logsql::{
     MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec,
     PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
     SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec, UniqSpec, UnpackJsonSpec,
-    UnpackLogfmtSpec, UnpackSyslogSpec,
+    UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -291,6 +292,9 @@ pub(crate) fn execute(
                 execution.limits,
                 execution.cancelled,
             )?,
+            PipelineOp::UnpackWords(spec) => {
+                unpack_words_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -1021,6 +1025,218 @@ fn apply_unpack_syslog_field(
     }
     insert_path(object, &destination_path, Value::String(value))
         .map_err(|error| format!("LogsQL unpack_syslog destination conflict: {error}"))
+}
+
+fn unpack_words_fields(
+    rows: Vec<Value>,
+    spec: &UnpackWordsSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path,
+        name: source_name,
+    } = &spec.source
+    else {
+        return Err("LogsQL unpack_words source is not exact".into());
+    };
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL unpack_words destination is not exact".into());
+    };
+
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(
+                &mut work_items,
+                limits.max_state_items,
+                "unpack_words",
+            )?;
+            let mut state_bytes = size_of::<Value>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "unpack_words")?;
+            charge_transfer_string(
+                source_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "unpack_words",
+            )?;
+            for segment in source_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "unpack_words",
+                )?;
+            }
+            let source = textual_transform_projection(
+                coalesce_exact_value(&row, source_path),
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+                "unpack_words",
+            )?;
+            let encoded = bounded_words_json_array(
+                source.as_ref(),
+                spec.drop_duplicates,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+
+            charge_transfer_string(
+                destination_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "unpack_words",
+            )?;
+            for segment in destination_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "unpack_words",
+                )?;
+            }
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL unpack_words input row is not a JSON object".to_string())?;
+            if copy_destination_replaces_object(object, destination_path) {
+                return Err(format!(
+                    "LogsQL unpack_words destination conflict: field {destination_name:?} would replace a retained object"
+                ));
+            }
+            insert_path(object, destination_path, Value::String(encoded))
+                .map_err(|error| format!("LogsQL unpack_words destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn bounded_words_json_array(
+    source: &str,
+    drop_duplicates: bool,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let mut words = Vec::<&str>::new();
+    let mut seen = BTreeSet::<&str>::new();
+    *state_bytes = state_bytes
+        .checked_add(size_of::<Vec<&str>>())
+        .and_then(|bytes| bytes.checked_add(size_of::<BTreeSet<&str>>()))
+        .ok_or_else(|| "LogsQL unpack_words state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "unpack_words")?;
+
+    let mut token_start = None;
+    let mut characters = 0usize;
+    for (offset, character) in source.char_indices() {
+        check_periodically(cancelled, characters)?;
+        characters = characters
+            .checked_add(1)
+            .ok_or_else(|| "LogsQL unpack_words character count overflow".to_string())?;
+        if word_character(character) {
+            token_start.get_or_insert(offset);
+        } else if let Some(start) = token_start.take() {
+            push_word(
+                &source[start..offset],
+                drop_duplicates,
+                &mut words,
+                &mut seen,
+                state_bytes,
+                work_items,
+                limits,
+            )?;
+        }
+    }
+    if let Some(start) = token_start {
+        push_word(
+            &source[start..],
+            drop_duplicates,
+            &mut words,
+            &mut seen,
+            state_bytes,
+            work_items,
+            limits,
+        )?;
+    }
+    ensure_active(cancelled)?;
+
+    let mut output_len = 2usize;
+    for (index, word) in words.iter().enumerate() {
+        if index != 0 {
+            output_len = output_len
+                .checked_add(1)
+                .ok_or_else(|| "LogsQL unpack_words result size overflow".to_string())?;
+        }
+        output_len = output_len
+            .checked_add(2)
+            .and_then(|bytes| bytes.checked_add(word.len()))
+            .ok_or_else(|| "LogsQL unpack_words result size overflow".to_string())?;
+    }
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL unpack_words state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "unpack_words")?;
+
+    let mut output = String::with_capacity(output_len);
+    output.push('[');
+    for (index, word) in words.into_iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index != 0 {
+            output.push(',');
+        }
+        // Word tokens contain only Unicode letters, decimal digits, or '_',
+        // so no JSON string escaping is possible or necessary.
+        output.push('"');
+        output.push_str(word);
+        output.push('"');
+    }
+    output.push(']');
+    if output.len() != output_len {
+        return Err("LogsQL unpack_words result length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_word<'a>(
+    word: &'a str,
+    drop_duplicates: bool,
+    words: &mut Vec<&'a str>,
+    seen: &mut BTreeSet<&'a str>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, limits.max_state_items, "unpack_words")?;
+    if drop_duplicates && !seen.insert(word) {
+        return Ok(());
+    }
+    let entries = if drop_duplicates { 2 } else { 1 };
+    *state_bytes = state_bytes
+        .checked_add(
+            entries * size_of::<&str>()
+                + if drop_duplicates {
+                    3 * size_of::<usize>()
+                } else {
+                    0
+                },
+        )
+        .ok_or_else(|| "LogsQL unpack_words state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "unpack_words")?;
+    words.push(word);
+    Ok(())
 }
 
 fn parse_logfmt_fields(
@@ -8167,8 +8383,17 @@ fn phrase_match_end(value: &str, phrase: &str) -> Option<usize> {
     })
 }
 
-fn word_character(character: char) -> bool {
-    character == '_' || character.is_alphanumeric()
+pub(crate) fn word_character(character: char) -> bool {
+    if character.is_ascii() {
+        return character == '_' || character.is_ascii_alphanumeric();
+    }
+    static WORD_RUNE: OnceLock<regex::Regex> = OnceLock::new();
+    let matcher = WORD_RUNE.get_or_init(|| {
+        regex::Regex::new(r"^(?:\p{L}|\p{Nd})$")
+            .expect("VictoriaLogs Unicode word-rune expression must compile")
+    });
+    let mut encoded = [0_u8; 4];
+    matcher.is_match(character.encode_utf8(&mut encoded))
 }
 
 fn check_periodically(cancelled: &AtomicBool, index: usize) -> Result<(), String> {
@@ -8221,6 +8446,15 @@ mod tests {
         let exact = Number::from(9_007_199_254_740_993u64);
         let rounded = Number::from_f64(9_007_199_254_740_992.0).unwrap();
         assert_eq!(compare_numbers(&exact, &rounded), Some(Ordering::Greater));
+    }
+
+    #[test]
+    fn word_boundaries_use_letters_decimal_digits_and_underscore_only() {
+        assert!(word_matches("leftⅣright", "left"));
+        assert!(word_matches("left²right", "right"));
+        assert!(word_matches("left\u{301}right", "left"));
+        assert!(!word_matches("left१२_right", "left"));
+        assert!(!word_matches("éleft", "left"));
     }
 
     #[test]
@@ -11718,6 +11952,115 @@ mod tests {
                 &cancelled,
             )
             .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn unpack_words_is_exact_rich_and_bounded() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::UnpackWords(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected unpack_words plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 500,
+            max_state_bytes: 40_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "_msg":"foo,bar foo тест45_2 Ⅳz ²q e\u{301} १२",
+            "source":"alpha alpha,βeta 42_7 Ⅳz ²q e\u{301} १२",
+            "numeric_source":123,
+            "array_source":["left","right"],
+            "object_source":{"leaf":"value"},
+            "nested":{"sibling":"retained"}
+        });
+
+        let defaults = parse_spec("* | unpack_words");
+        let default_rows =
+            unpack_words_fields(vec![row.clone()], &defaults, limits, &cancelled).unwrap();
+        assert_eq!(
+            default_rows[0]["_msg"],
+            r#"["foo","bar","foo","тест45_2","z","q","e","१२"]"#
+        );
+        assert_eq!(default_rows[0]["nested"], row["nested"]);
+
+        let distinct = parse_spec(r#"* | unpack_words from source as "word list" drop_duplicates"#);
+        let distinct_rows =
+            unpack_words_fields(vec![row.clone()], &distinct, limits, &cancelled).unwrap();
+        assert_eq!(
+            distinct_rows[0]["word list"],
+            r#"["alpha","βeta","42_7","z","q","e","१२"]"#
+        );
+        assert_eq!(distinct_rows[0]["source"], row["source"]);
+
+        let inplace = parse_spec("* | unpack_words source drop_duplicates");
+        let inplace_rows =
+            unpack_words_fields(vec![row.clone()], &inplace, limits, &cancelled).unwrap();
+        assert_eq!(
+            inplace_rows[0]["source"],
+            r#"["alpha","βeta","42_7","z","q","e","१२"]"#
+        );
+
+        for (query, expected) in [
+            ("* | unpack_words from absent as words", "[]"),
+            (
+                "* | unpack_words numeric_source numeric_words",
+                r#"["123"]"#,
+            ),
+            (
+                "* | unpack_words array_source array_words",
+                r#"["left","right"]"#,
+            ),
+            ("* | unpack_words object_source object_words", "[]"),
+        ] {
+            let spec = parse_spec(query);
+            let rows = unpack_words_fields(vec![row.clone()], &spec, limits, &cancelled).unwrap();
+            let PipelineField::Exact { path, .. } = &spec.destination else {
+                unreachable!();
+            };
+            assert_eq!(
+                field_value(&rows[0], path),
+                Some(&json!(expected)),
+                "{query}"
+            );
+        }
+
+        for constrained in [
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+        ] {
+            let error = unpack_words_fields(vec![row.clone()], &distinct, constrained, &cancelled)
+                .unwrap_err();
+            assert!(error.contains("LogsQL unpack_words"), "{error}");
+        }
+
+        let conflict = parse_spec("* | unpack_words source nested.words");
+        let conflict_error = unpack_words_fields(
+            vec![json!({"source":"one two", "nested":"scalar"})],
+            &conflict,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL unpack_words destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            unpack_words_fields(vec![row], &distinct, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

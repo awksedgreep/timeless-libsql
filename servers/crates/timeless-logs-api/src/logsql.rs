@@ -3077,6 +3077,13 @@ fn is_unpack_syslog_pipe(segment: &str) -> bool {
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
+fn is_unpack_words_pipe(segment: &str) -> bool {
+    let operation = "unpack_words";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
     let Some(command) = segment.get(..operation.len()) else {
         return false;
@@ -3482,6 +3489,93 @@ fn parse_unpack_syslog_pipe(
         current_year,
         query_now_seconds,
     }))
+}
+
+fn parse_unpack_words_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    const OPERATION: &str = "unpack_words";
+    let command = segment
+        .get(..OPERATION.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL unpack_words pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(OPERATION) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL unpack_words pipe, not {command:?}"
+        )));
+    }
+    if segment[OPERATION.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "unexpected text attached to LogsQL unpack_words pipe",
+        ));
+    }
+
+    let tokens = lex_first_pipe(segment[OPERATION.len()..].trim_start(), OPERATION)?;
+    let mut cursor = 0usize;
+    let mut source = parse_pipeline_field("_msg", false)?;
+    if tokens.get(cursor).is_some_and(|token| {
+        !token.eq_ignore_ascii_case("as") && !token.eq_ignore_ascii_case("drop_duplicates")
+    }) {
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("from"))
+        {
+            cursor += 1;
+        }
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL unpack_words from requires an exact source field")
+        })?;
+        source = parse_unpack_words_exact_field(token, "source")?;
+        cursor += 1;
+    }
+
+    let mut destination = source.clone();
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| !token.eq_ignore_ascii_case("drop_duplicates"))
+    {
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("as"))
+        {
+            cursor += 1;
+        }
+        let token = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL unpack_words as requires an exact destination field")
+        })?;
+        destination = parse_unpack_words_exact_field(token, "destination")?;
+        cursor += 1;
+    }
+
+    let mut drop_duplicates = false;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("drop_duplicates"))
+    {
+        drop_duplicates = true;
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL unpack_words token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::UnpackWords(UnpackWordsSpec {
+        source,
+        destination,
+        drop_duplicates,
+    }))
+}
+
+fn parse_unpack_words_exact_field(token: &str, role: &str) -> Result<PipelineField, LogsqlError> {
+    match parse_delete_field(token)? {
+        field @ PipelineField::Exact { .. } => Ok(field),
+        PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
+            "LogsQL unpack_words {role} must be an exact field"
+        ))),
+    }
 }
 
 struct ParsedUnpackSpec {
@@ -4362,6 +4456,13 @@ pub(crate) struct UnpackSyslogSpec {
     pub query_now_seconds: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UnpackWordsSpec {
+    pub source: PipelineField,
+    pub destination: PipelineField,
+    pub drop_duplicates: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -4410,6 +4511,7 @@ pub(crate) enum PipelineOp {
     UnpackJson(UnpackJsonSpec),
     UnpackLogfmt(UnpackLogfmtSpec),
     UnpackSyslog(UnpackSyslogSpec),
+    UnpackWords(UnpackWordsSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4873,6 +4975,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_unpack_syslog_pipe(segment) => {
                 pipeline.push(parse_unpack_syslog_pipe(segment, context)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_unpack_words_pipe(segment) => {
+                pipeline.push(parse_unpack_words_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_extract_pipe(segment) => {
@@ -11136,6 +11242,40 @@ mod tests {
             "* | unpack_syslog from source trailing",
             "* | unpack_syslog keep_original_fields trailing",
             "* | unpack_syslog.extra",
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_unpack_words_grammar_is_complete_and_strict() {
+        for query in [
+            "* | unpack_words",
+            "* | unpack_words drop_duplicates",
+            "* | unpack_words as words",
+            "* | unpack_words as words drop_duplicates",
+            "* | unpack_words source",
+            "* | unpack_words from source",
+            "* | unpack_words source words",
+            "* | unpack_words from source as words",
+            r#"* | UnPaCk_WoRdS FrOm "source field" As "word list" DrOp_DuPlIcAtEs"#,
+        ] {
+            parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+
+        for query in [
+            "* | unpack_words as",
+            "* | unpack_words as *",
+            "* | unpack_words as words*",
+            "* | unpack_words from",
+            "* | unpack_words from *",
+            "* | unpack_words from source*",
+            "* | unpack_words source destination trailing",
+            "* | unpack_words drop_duplicates source",
+            "* | unpack_words source, destination",
+            "* | unpack_words.extra",
         ] {
             let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{query:?}");

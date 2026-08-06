@@ -1516,6 +1516,47 @@ exceeds the default work budget; callers must narrow/limit first or configure
 more work. Bounded RFC5424 parsing does not justify moving LogsQL syntax into
 the extension.
 
+LogsQL `unpack_words` extracts ordered words without changing durable log
+metadata:
+
+```text
+* | unpack_words
+* | unpack_words from payload
+* | unpack_words payload words
+* | unpack_words from payload as words drop_duplicates
+* | unpack_words as "word list"
+```
+
+The command and keywords are case-insensitive. Source and destination must be
+one exact quoted, bare, or dotted field. The source defaults to `_msg`; the
+destination defaults to the source, and is written only after the original
+value is tokenized. `drop_duplicates` is terminal and preserves the first
+byte-identical occurrence. Wildcards, prefixes, comma-separated fields,
+attached suffixes, and trailing tokens fail explicitly.
+
+A word is one maximal run of Unicode Letter, Unicode Decimal_Number, or `_`.
+Letter_Number, Other_Number, combining marks, whitespace, and punctuation are
+separators; case and normalization are unchanged. Strings are read exactly,
+numbers and booleans use compact text, arrays use compact JSON text, and
+missing/null/object-parent fields project to empty. Empty or punctuation-only
+input yields the text `[]`. Timeless reconstructs dotted destinations as
+retained nested metadata while preserving siblings. Replacing an object or
+descending through a scalar returns HTTP 422.
+
+Input scanning, token and duplicate state, output, paths, work, results,
+response bytes, deadline, and cancellation are bounded. Real-extension tests
+pin immutable source rows, optimize, shutdown, reopen, and reader reuse after
+cancellation. The complete 1,175-case immutable VictoriaLogs fixture pins the
+grammar and semantic boundary, including numeric/array projection and exact
+Unicode categories.
+
+Core SQLite/libSQL has no portable expression for the required Unicode
+category split. A recursive ASCII CTE would not be equivalent, and an
+extension scalar would not avoid the required public block scan, decode, or
+row materialization. This row therefore remains API-owned over public `logs`
+with no private-table path, language opcode, storage-format change, or
+batching/index/compression change.
+
 LogsQL `json_array_len` counts top-level array elements without changing
 durable log metadata:
 

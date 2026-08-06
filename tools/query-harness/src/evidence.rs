@@ -2732,6 +2732,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "unpack_words_narrow",
+                "logs-unpack-words-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | unpack_words range_key words drop_duplicates | fields words"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_words_wide",
+                "logs-unpack-words-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields range_key | unpack_words range_key words drop_duplicates | fields words"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_words_control_narrow",
+                "logs-unpack-words-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | copy range_key as words | fields words"#,
+                64,
+                None,
+            ),
+            (
+                "unpack_words_control_wide",
+                "logs-unpack-words-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields range_key | copy range_key as words | fields words"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3282,6 +3310,12 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "unpack_syslog_control_wide",
             "unpack_syslog_wide",
         )?;
+        require_same_public_query_work(
+            &queries,
+            "unpack_words_control_narrow",
+            "unpack_words_narrow",
+        )?;
+        require_same_public_query_work(&queries, "unpack_words_control_wide", "unpack_words_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({

@@ -1888,6 +1888,50 @@ formatted rows correctly exceeds the default work budget; configure more work
 or narrow/limit first. `QSF-224` accepts the bounded returned-row parse above
 the unchanged storage boundary.
 
+## LogsQL word extraction over current rows
+
+`unpack_words` snapshots one exact request-owned field, extracts ordered word
+tokens, and writes compact JSON-array text to the current result row:
+
+```text
+* | unpack_words
+* | unpack_words from payload
+* | unpack_words payload words
+* | unpack_words from payload as words drop_duplicates
+* | unpack_words as "word list"
+```
+
+Keywords are case-insensitive. The exact source defaults to `_msg`; the exact
+destination defaults to the source. Bare and explicit `from`/`as` forms,
+quoted fields, and dotted paths are accepted. The source is read before the
+destination is written. A terminal `drop_duplicates` keeps the first
+byte-identical occurrence in source order. Wildcards, prefixes,
+comma-separated fields, attached suffixes, and trailing tokens fail before
+storage execution.
+
+A word is one maximal sequence of Unicode Letter, Unicode Decimal_Number, or
+underscore characters. Unicode Letter_Number, Other_Number, combining marks,
+punctuation, and whitespace split words. Case and normalization are not
+changed. String sources are exact; numbers and booleans use compact text;
+arrays use compact JSON text; missing, null, and object-parent sources project
+as empty. Empty and punctuation-only sources produce `[]`.
+
+Timeless writes dotted destinations into retained nested metadata without
+discarding siblings. A destination that would replace an object or descend
+through a scalar fails with HTTP 422. Input characters, tokens, duplicate
+state, output bytes, paths, work, results, response bytes, deadlines, and
+cancellation are bounded. Request-local writes never mutate public durable
+rows through optimize, shutdown, or reopen. The complete 1,175-case immutable
+VictoriaLogs fixture and real-extension regression pin this behavior.
+
+There is deliberately no SQL recipe for complete `LQL-P39`. Core
+SQLite/libSQL cannot portably implement the exact Unicode category rule;
+ASCII recursive SQL would silently change results. Every candidate row must
+already cross the bounded public `logs` interface, so a new extension scalar
+would not avoid block reads, decode, payload transfer, or required response
+materialization. The Rust logs API owns this transform without a private table,
+language opcode, or storage-format change.
+
 ## LogsQL top-level JSON array length
 
 `json_array_len` snapshots one exact request-owned field, counts its top-level

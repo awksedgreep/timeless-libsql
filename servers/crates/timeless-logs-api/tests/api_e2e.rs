@@ -7173,6 +7173,276 @@ async fn session_eighteen_unpack_syslog_is_exact_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_unpack_words_is_exact_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("unpack-words-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "  foo,bar foo тест45_2 Ⅳz ²q e\u{301} १२  ".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-words-message",
+                        "unpack_words_group":"unpack-words",
+                        "source":"alpha alpha,βeta 42_7 Ⅳz ²q e\u{301} १२",
+                        "words":"original",
+                        "nested":{"sibling":"retained"}
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "!#$%,".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-words-punctuation",
+                        "unpack_words_group":"unpack-words",
+                        "source":""
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_003,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: "missing source".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-words-missing",
+                        "unpack_words_group":"unpack-words"
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_004,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: "rich source".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-words-rich",
+                        "unpack_words_group":"unpack-words",
+                        "numeric_source":123,
+                        "array_source":["left","right"],
+                        "object_source":{"leaf":"value"}
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_005,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: "destination conflict".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-words-conflict",
+                        "unpack_words_group":"unpack-words",
+                        "source":"one two",
+                        "nested":"scalar"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(&app, r#"case:="unpack-words-message" z q | fields case"#,).await,
+        [serde_json::json!({"case":"unpack-words-message"})],
+        "Letter_Number and Other_Number must remain word separators"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-words-message" | unpack_words | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-words-message",
+            "_msg":r#"["foo","bar","foo","тест45_2","z","q","e","१२"]"#
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-words-message" | UnPaCk_WoRdS FrOm source As "word list" DrOp_DuPlIcAtEs | fields case, source, "word list", nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-words-message",
+            "source":"alpha alpha,βeta 42_7 Ⅳz ²q e\u{301} १२",
+            "word list":r#"["alpha","βeta","42_7","z","q","e","१२"]"#,
+            "nested":{"sibling":"retained"}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-words-message" | unpack_words from source drop_duplicates | fields case, source"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-words-message",
+            "source":r#"["alpha","βeta","42_7","z","q","e","१२"]"#
+        })],
+        "in-place unpack must snapshot the source before replacement"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-words-missing" | unpack_words from absent as words | fields case, words"#,
+        )
+        .await,
+        [serde_json::json!({"case":"unpack-words-missing", "words":"[]"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-words-punctuation" | unpack_words as words | fields case, words"#,
+        )
+        .await,
+        [serde_json::json!({"case":"unpack-words-punctuation", "words":"[]"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-words-rich" | unpack_words numeric_source numeric_words | unpack_words array_source array_words | unpack_words object_source object_words | fields case, numeric_words, array_words, object_words"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-words-rich",
+            "numeric_words":r#"["123"]"#,
+            "array_words":r#"["left","right"]"#,
+            "object_words":"[]"
+        })]
+    );
+
+    for malformed in [
+        "* | unpack_words as",
+        "* | unpack_words as *",
+        "* | unpack_words from",
+        "* | unpack_words from *",
+        "* | unpack_words from source*",
+        "* | unpack_words source destination trailing",
+        "* | unpack_words drop_duplicates source",
+        "* | unpack_words source, destination",
+        "* | unpack_words.extra",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="unpack-words-conflict" | unpack_words source nested.words"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                r#"unpack_words_group:="unpack-words" | unpack_words as words | limit 10000"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-words-conflict" | fields case, source, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-words-conflict",
+            "source":"one two",
+            "nested":"scalar"
+        })],
+        "failed unpack_words must not mutate durable source values"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="unpack-words-message" | unpack_words source reopened.words drop_duplicates | fields case, reopened"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-words-message",
+            "reopened":{"words":r#"["alpha","βeta","42_7","z","q","e","१२"]"#}
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_seventeen_json_array_len_is_typed_bounded_and_durable() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
@@ -13770,6 +14040,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_unpack_syslog_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_unpack_words = storage.stats().await.unwrap().api_query_cancelled;
+    let unpack_words_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | unpack_words as selected drop_duplicates | fields selected | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(unpack_words_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_unpack_words
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_unpack_words);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_unpack_words_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            r#"level:error | unpack_words as selected | fields selected | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_unpack_words_cancel.status(), StatusCode::OK);
 
     let cancelled_before_extract_regexp = storage.stats().await.unwrap().api_query_cancelled;
     let extract_regexp_timeout = router_with_limits(

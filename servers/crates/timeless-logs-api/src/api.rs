@@ -771,6 +771,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL unpack_json field selection conflict:")
         || error.starts_with("LogsQL unpack_logfmt destination conflict:")
         || error.starts_with("LogsQL unpack_syslog destination conflict:")
+        || error.starts_with("LogsQL unpack_words destination conflict:")
     {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
