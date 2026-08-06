@@ -10,8 +10,15 @@ use tower::ServiceExt;
 
 async fn pipeline_rows(app: &axum::Router, query: &str) -> Vec<serde_json::Value> {
     let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "{query}");
-    ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{query}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    ndjson_values(&body)
 }
 
 fn numeric_pipeline_entries() -> Vec<LogEntry> {
@@ -1914,6 +1921,212 @@ async fn session_seventeen_facets_are_flattened_bounded_and_durable() {
             serde_json::json!({"field_name":"first_partition","field_value":"a","hits":"5"}),
             serde_json::json!({"field_name":"numeric_group","field_value":"numeric","hits":"9"}),
         ]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_coalesce_is_textual_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("coalesce-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let mut entries = numeric_pipeline_entries();
+    for (index, (case, probe)) in [
+        ("state-missing", None),
+        ("state-null", Some(serde_json::Value::Null)),
+        ("state-empty", Some(serde_json::json!(""))),
+        ("state-string", Some(serde_json::json!("value"))),
+        ("state-zero", Some(serde_json::json!(0))),
+        ("state-false", Some(serde_json::json!(false))),
+        ("state-array", Some(serde_json::json!([1, "x"]))),
+        ("state-object", Some(serde_json::json!({"child":"nested"}))),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut metadata = serde_json::json!({"case":case,"state_group":"state"});
+        if let Some(probe) = probe {
+            metadata["probe"] = probe;
+        }
+        entries.push(LogEntry {
+            ts: 1_800_000_000_001_000 + index as i64,
+            level: 1,
+            severity: "info".into(),
+            message: case.replace('-', " "),
+            metadata_json: serde_json::to_string(&metadata).unwrap(),
+        });
+    }
+    storage.ingest(entries).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"state_group:="state" | coalesce(probe, case) as selected | fields case, selected"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"state-missing","selected":"state-missing"}),
+            serde_json::json!({"case":"state-null","selected":"state-null"}),
+            serde_json::json!({"case":"state-empty","selected":"state-empty"}),
+            serde_json::json!({"case":"state-string","selected":"value"}),
+            serde_json::json!({"case":"state-zero","selected":"0"}),
+            serde_json::json!({"case":"state-false","selected":"false"}),
+            serde_json::json!({"case":"state-array","selected":"[1,\"x\"]"}),
+            serde_json::json!({"case":"state-object","selected":"state-object"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="state-missing" | coalesce(probe) default "fallback value" | fields case, _msg"#,
+        )
+        .await,
+        [serde_json::json!({"case":"state-missing","_msg":"fallback value"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="numeric-two" | coalesce(nested*, case) as selected | fields case, selected"#,
+        )
+        .await,
+        [serde_json::json!({"case":"numeric-two","selected":"numeric-two"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="numeric-two" | fields n | coalesce(*) as selected"#,
+        )
+        .await,
+        [serde_json::json!({"n":2,"selected":"2"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="numeric-two" | coalesce(n, n*, case) as selected | fields case, selected"#,
+        )
+        .await,
+        [serde_json::json!({"case":"numeric-two","selected":"2"})]
+    );
+    assert!(pipeline_rows(
+        &app,
+        r#"case:="coalesce-missing" | coalesce(case) as selected"#,
+    )
+    .await
+    .is_empty());
+
+    for malformed in [
+        "* | coalesce",
+        "* | coalesce a, b",
+        "* | coalesce()",
+        "* | coalesce(,a)",
+        "* | coalesce(a,,b)",
+        "* | coalesce(a",
+        "* | coalesce(a) default",
+        "* | coalesce(a) default count() as result",
+        "* | coalesce(a) as",
+        "* | coalesce(a) as result*",
+        "* | coalesce(a) trailing",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 4,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | coalesce(n, case) as selected | limit 9"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 4,
+                ..LogsQueryLimits::default()
+            },
+            r#"numeric_group:="numeric" | coalesce(n, case) as selected | limit 9"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"case:="numeric-two" | coalesce(n, case) as selected"#,
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason);
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="state-string" | coalesce(case) as probe.child"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict_body = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict_body["error"], "query_execution");
+    assert_eq!(conflict_body["reason"], "field_conflict");
+    assert!(conflict_body["message"]
+        .as_str()
+        .unwrap()
+        .contains("conflicts with a scalar field"));
+    assert_eq!(
+        pipeline_rows(&app, r#"case:="numeric-two" | fields nested, n"#).await,
+        [serde_json::json!({"n":2,"nested":{"case":"numeric-two"}})],
+        "coalesce must not mutate rich source fields and the reader remains reusable"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="numeric-two" | COALESCE(n, case,) DEFAULT fallback AS selected | fields case, selected"#,
+        )
+        .await,
+        [serde_json::json!({"case":"numeric-two","selected":"2"})]
     );
     reopened.shutdown().await.unwrap();
 }
@@ -7186,10 +7399,45 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     assert!(stats.api_query_cancelled > cancelled_before_facets);
     assert_eq!(stats.api_query_in_flight, 0);
     let reused_after_facets_cancel = default_app
+        .clone()
         .oneshot(logsql_request("level:error | facets 1"))
         .await
         .unwrap();
     assert_eq!(reused_after_facets_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_coalesce = storage.stats().await.unwrap().api_query_cancelled;
+    let coalesce_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | coalesce(_msg) as selected | fields selected | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(coalesce_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_coalesce
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_coalesce);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_coalesce_cancel = default_app
+        .oneshot(logsql_request(
+            "level:error | coalesce(_msg) as selected | fields selected | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_coalesce_cancel.status(), StatusCode::OK);
 
     storage.flush().await.unwrap();
     storage.shutdown().await.unwrap();

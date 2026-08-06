@@ -139,6 +139,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-029`](#sql-log-029-top-values-by-hit-count) | `LQL-P15` | current foundation | bounded frequency groups and deterministic string hits/rank over one public JSON path; API owns multi-field/current-row grammar, collision naming, limits, cancellation, and envelopes |
 | [`SQL-LOG-030`](#sql-log-030-unique-textual-values) | `LQL-P16` | current foundation | bounded unique textual groups, optional case-sensitive filtering, deterministic limiting, and optional hits over one public JSON path; API owns multi-field/current-row grammar, omitted empty fields, collision naming, strict limits, cancellation, and envelopes |
 | [`SQL-LOG-031`](#sql-log-031-bounded-facets-over-public-log-fields) | `LQL-P18` | current foundation | recursive rich-field flattening, textual nonempty frequencies, per-field limits, constant/high-cardinality/long-value exclusion, and deterministic ordering; API owns grammar, pipeline composition, hard state limits, cancellation, and envelopes |
+| [`SQL-LOG-032`](#sql-log-032-first-nonempty-textual-log-field) | `LQL-P19` | current foundation | bounded first-nonempty textual selection across three exact public metadata paths with a default; API owns exact/all/prefix current-row expansion, destination mutation, conflicts, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -6271,6 +6272,93 @@ crossing.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_facets_are_flattened_bounded_and_durable`.
+
+### SQL-LOG-032: first nonempty textual log field
+
+Bind three SQLite JSON paths, a textual default, native timestamp bounds, and
+a positive public row-work limit. This ordinary statement selects the first
+nonempty LogsQL-style textual value from three exact retained metadata paths:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), projected AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN json_type(metadata, :source_path_1) IS NULL
+        OR json_type(metadata, :source_path_1) = 'null' THEN ''
+      WHEN json_type(metadata, :source_path_1) = 'true' THEN 'true'
+      WHEN json_type(metadata, :source_path_1) = 'false' THEN 'false'
+      ELSE CAST(json_extract(metadata, :source_path_1) AS TEXT)
+    END AS value_1,
+    CASE
+      WHEN json_type(metadata, :source_path_2) IS NULL
+        OR json_type(metadata, :source_path_2) = 'null' THEN ''
+      WHEN json_type(metadata, :source_path_2) = 'true' THEN 'true'
+      WHEN json_type(metadata, :source_path_2) = 'false' THEN 'false'
+      ELSE CAST(json_extract(metadata, :source_path_2) AS TEXT)
+    END AS value_2,
+    CASE
+      WHEN json_type(metadata, :source_path_3) IS NULL
+        OR json_type(metadata, :source_path_3) = 'null' THEN ''
+      WHEN json_type(metadata, :source_path_3) = 'true' THEN 'true'
+      WHEN json_type(metadata, :source_path_3) = 'false' THEN 'false'
+      ELSE CAST(json_extract(metadata, :source_path_3) AS TEXT)
+    END AS value_3
+  FROM bounded
+)
+SELECT
+  ts,
+  level,
+  message,
+  metadata,
+  COALESCE(
+    NULLIF(value_1, ''),
+    NULLIF(value_2, ''),
+    NULLIF(value_3, ''),
+    :default_value
+  ) AS coalesced_value
+FROM projected
+WHERE :max_result_rows > 0
+ORDER BY ts, level, message, metadata
+LIMIT :max_result_rows;
+```
+
+Missing, JSON null, and the empty string are skipped. Strings remain
+unquoted; numbers use SQLite's retained textual representation; booleans are
+`true`/`false`; and retained arrays/objects use compact JSON text. The final
+default is always textual and may itself be empty. Extend the repeated
+projection and `NULLIF` list for additional exact fields, or substitute the
+public `message`, `level`, or rendered `ts` columns when those canonical
+fields are sources. Bounds use the table's native millisecond or microsecond
+unit and are inclusive in this recipe.
+
+The Rust API owns case-insensitive `coalesce(...)`, quoted names, trailing
+comma, exact/all/prefix expansion across the current recursively flattened
+row, duplicate-source suppression, destination default `_msg`, optional
+`default` and `as`, current-pipeline composition, rich-path insertion, an
+explicit field-conflict envelope, hard work/state/result/response limits,
+cancellation, and HTTP encoding. Exact object sources are absent in the
+flattened compatibility view, while arrays remain atomic textual values.
+Timeless retains an explicitly empty destination string in its rich response;
+VictoriaLogs stream JSON omits empty-valued columns during serialization.
+
+All inputs already cross the public bounded log-row interface. Ordinary
+`CASE`, `NULLIF`, and `COALESCE` are complete and efficient for exact direct
+SQL use, so no new extension primitive or private shadow-table access is
+justified.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_coalesce_is_textual_bounded_and_durable`.
 
 ## Adding the next recipe
 

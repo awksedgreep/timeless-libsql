@@ -704,6 +704,38 @@ projection, cardinality/length/constant exclusion, and per-field window ranks
 for `facets`. Neither operation requires a new extension primitive or private
 storage access.
 
+## LogsQL `coalesce` over rich current rows
+
+`coalesce` writes the first nonempty textual source value to an exact
+destination field:
+
+```text
+* | coalesce(trace_id, request_id) default unknown as correlation_id
+* | coalesce(context.*, service) as context.primary
+* | fields error, message | coalesce(error, message)
+```
+
+Sources are parenthesized and may be exact fields, `*`, or suffix-star prefix
+filters. Source filters are evaluated left to right and expanded names are
+de-duplicated. Missing, JSON null, empty strings, and exact rich-object parents
+are skipped; object leaves participate through dotted names. Strings remain
+unquoted, numbers and booleans become text, and arrays remain one compact JSON
+text value. Wildcard expansion is deterministic by bytewise flattened field
+name. A trailing source comma is accepted to match VictoriaLogs.
+
+The destination defaults to `_msg`. `default value` supplies a textual value
+when no source is nonempty, and `as field` chooses an exact destination.
+Timeless retains an explicitly empty destination in the rich JSON result;
+VictoriaLogs omits empty-valued columns when serializing streams. If a nested
+destination would replace a retained scalar parent, Timeless returns HTTP 422
+with reason `field_conflict` and leaves the row unchanged.
+
+Work, temporary path/de-duplication state, results, response bytes, and
+cancellation are bounded. Executable
+[`SQL-LOG-032`](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)
+shows the ordinary public `CASE`/`NULLIF`/`COALESCE` equivalent for exact
+metadata paths. No extension primitive or private table is needed.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

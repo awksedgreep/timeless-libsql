@@ -17,8 +17,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    FacetsSpec, FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind, TopSpec,
-    UniqSpec,
+    CoalesceSpec, FacetsSpec, FirstSpec, PipelineField, PipelineOp, StatsExpression, StatsKind,
+    TopSpec, UniqSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -180,6 +180,9 @@ pub(crate) fn execute(
             PipelineOp::Top(spec) => top(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Uniq(spec) => uniq(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::Facets(spec) => facets(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::Coalesce(spec) => {
+                coalesce(rows, spec, execution.limits, execution.cancelled)?
+            }
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -877,6 +880,168 @@ fn update_facet_state(
     ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "facets")?;
     field.values.insert(value.into_owned(), 1);
     Ok(())
+}
+
+fn coalesce(
+    rows: Vec<Value>,
+    spec: &CoalesceSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: destination_path,
+        name: destination_name,
+    } = &spec.destination
+    else {
+        return Err("LogsQL coalesce destination is not exact".into());
+    };
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            let mut seen = BTreeSet::new();
+            let mut state_bytes = size_of::<BTreeSet<String>>();
+            let mut visits = 0usize;
+            let mut selected = None;
+            for source in &spec.sources {
+                ensure_active(cancelled)?;
+                selected = match source {
+                    PipelineField::Exact { path, name } => {
+                        if remember_coalesce_field(
+                            &mut seen,
+                            &mut state_bytes,
+                            name,
+                            limits.max_state_bytes,
+                        )? {
+                            coalesce_exact_value(&row, path)
+                                .filter(|value| !matches!(value, Value::Object(_)))
+                                .map(|value| projected_text(Some(value)))
+                                .filter(|value| !value.is_empty())
+                                .map(Cow::into_owned)
+                        } else {
+                            None
+                        }
+                    }
+                    PipelineField::Prefix { prefix } => first_coalesce_leaf(
+                        &row,
+                        &mut String::new(),
+                        Some(prefix),
+                        &mut seen,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                        cancelled,
+                        &mut visits,
+                    )?,
+                    PipelineField::All => first_coalesce_leaf(
+                        &row,
+                        &mut String::new(),
+                        None,
+                        &mut seen,
+                        &mut state_bytes,
+                        limits.max_state_bytes,
+                        cancelled,
+                        &mut visits,
+                    )?,
+                };
+                if selected.is_some() {
+                    break;
+                }
+            }
+            let selected = selected.unwrap_or_else(|| spec.default_value.clone());
+            state_bytes = state_bytes
+                .checked_add(selected.len())
+                .and_then(|bytes| bytes.checked_add(destination_name.len()))
+                .ok_or_else(|| "LogsQL coalesce state size overflow".to_string())?;
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "coalesce")?;
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL coalesce input row is not a JSON object".to_string())?;
+            insert_path(object, destination_path, Value::String(selected))
+                .map_err(|error| format!("LogsQL coalesce destination conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn coalesce_exact_value<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = match current {
+            Value::Object(object) => object.get(segment)?,
+            // VictoriaLogs retains arrays as one atomic textual column; a
+            // dotted source never invents array-index columns.
+            Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::Array(_) => return None,
+        };
+    }
+    Some(current)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn first_coalesce_leaf(
+    value: &Value,
+    path: &mut String,
+    prefix: Option<&str>,
+    seen: &mut BTreeSet<String>,
+    state_bytes: &mut usize,
+    max_state_bytes: usize,
+    cancelled: &AtomicBool,
+    visits: &mut usize,
+) -> Result<Option<String>, String> {
+    *visits = visits.saturating_add(1);
+    check_periodically(cancelled, *visits)?;
+    if let Value::Object(object) = value {
+        for (name, child) in object {
+            let original_len = path.len();
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(name);
+            if let Some(value) = first_coalesce_leaf(
+                child,
+                path,
+                prefix,
+                seen,
+                state_bytes,
+                max_state_bytes,
+                cancelled,
+                visits,
+            )? {
+                return Ok(Some(value));
+            }
+            path.truncate(original_len);
+        }
+        return Ok(None);
+    }
+    if prefix.is_some_and(|prefix| !path.starts_with(prefix)) {
+        return Ok(None);
+    }
+    if !remember_coalesce_field(seen, state_bytes, path, max_state_bytes)? {
+        return Ok(None);
+    }
+    let value = projected_text(Some(value));
+    Ok((!value.is_empty()).then(|| value.into_owned()))
+}
+
+fn remember_coalesce_field(
+    seen: &mut BTreeSet<String>,
+    state_bytes: &mut usize,
+    name: &str,
+    max_state_bytes: usize,
+) -> Result<bool, String> {
+    if seen.contains(name) {
+        return Ok(false);
+    }
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(name.len()))
+        .ok_or_else(|| "LogsQL coalesce state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, max_state_bytes, "coalesce")?;
+    seen.insert(name.to_owned());
+    Ok(true)
 }
 
 fn first_row_comparison(
@@ -2958,6 +3123,80 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             facets(Vec::new(), &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn coalesce_uses_textual_flattened_sources_and_bounds_temporary_state() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: name.split('.').map(str::to_owned).collect(),
+            name: name.to_owned(),
+        };
+        let spec = CoalesceSpec {
+            sources: vec![
+                exact("probe"),
+                PipelineField::Prefix {
+                    prefix: "nested.".into(),
+                },
+                exact("fallback"),
+            ],
+            destination: exact("selected"),
+            default_value: "default".into(),
+        };
+        let rows = vec![
+            json!({"probe":null,"nested":{"a":"","b":"nested"},"fallback":"last"}),
+            json!({"probe":0,"fallback":"last"}),
+            json!({"probe":false,"fallback":"last"}),
+            json!({"probe":[1,"x"],"fallback":"last"}),
+            json!({"probe":{"child":"object-is-flattened"},"fallback":"last"}),
+            json!({"probe":"","fallback":""}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            coalesce(rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [
+                json!({"probe":null,"nested":{"a":"","b":"nested"},"fallback":"last","selected":"nested"}),
+                json!({"probe":0,"fallback":"last","selected":"0"}),
+                json!({"probe":false,"fallback":"last","selected":"false"}),
+                json!({"probe":[1,"x"],"fallback":"last","selected":"[1,\"x\"]"}),
+                json!({"probe":{"child":"object-is-flattened"},"fallback":"last","selected":"last"}),
+                json!({"probe":"","fallback":"","selected":"default"}),
+            ]
+        );
+        assert!(coalesce(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("max_response_bytes=1"));
+
+        let conflict = CoalesceSpec {
+            destination: exact("probe.child"),
+            ..spec.clone()
+        };
+        assert!(coalesce(
+            vec![json!({"probe":"scalar"})],
+            &conflict,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err()
+        .contains("conflicts with a scalar field"));
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            coalesce(rows, &spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

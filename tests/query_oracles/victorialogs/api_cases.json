@@ -2652,6 +2652,71 @@
       "id": "LQL-P18-facets-empty-input",
       "query": "case:=facets-missing | facets",
       "expected_rows": []
+    },
+    {
+      "id": "LQL-P19-coalesce-skips-empty-states-and-stringifies-types",
+      "query": "state_group:=state | coalesce(probe, case) as selected | fields case, selected | sort by (case) asc",
+      "expected_rows": [
+        {"case": "state-empty", "selected": "state-empty"},
+        {"case": "state-false", "selected": "false"},
+        {"case": "state-missing", "selected": "state-missing"},
+        {"case": "state-null", "selected": "state-null"},
+        {"case": "state-string", "selected": "value"},
+        {"case": "state-zero", "selected": "0"}
+      ]
+    },
+    {
+      "id": "LQL-P19-coalesce-uses-first-nonempty-source",
+      "query": "case:in(numeric-two,numeric-string) | coalesce(n, case) as selected | fields case, selected | sort by (case) asc",
+      "expected_rows": [
+        {"case": "numeric-string", "selected": "3"},
+        {"case": "numeric-two", "selected": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P19-coalesce-default-destination-is-message",
+      "query": "case:=state-missing | coalesce(probe) default fallback | fields case, _msg",
+      "expected_rows": [{"case": "state-missing", "_msg": "fallback"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-quoted-default-and-destination",
+      "query": "case:=state-null | coalesce(probe) default \"fallback value\" as \"selected value\" | fields case, \"selected value\"",
+      "expected_rows": [{"case": "state-null", "selected value": "fallback value"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-observes-flattened-nested-fields",
+      "query": "case:=delete-row | coalesce(nested.drop, nested.keep) as selected | fields case, selected",
+      "expected_rows": [{"case": "delete-row", "selected": "nested-gone"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-prefix-expands-in-current-field-order",
+      "query": "case:=delete-row | coalesce(drop_prefix*, keep) as selected | fields case, selected",
+      "expected_rows": [{"case": "delete-row", "selected": "one"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-empty-prefix-expansion-falls-through",
+      "query": "case:=delete-row | coalesce(absent*, keep) as selected | fields case, selected",
+      "expected_rows": [{"case": "delete-row", "selected": "kept"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-overwrites-existing-destination",
+      "query": "case:=state-string | coalesce(probe) as case | fields case",
+      "expected_rows": [{"case": "value"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-composes-with-current-row-filtering",
+      "query": "state_group:=state | fields case, probe | coalesce(probe, case) as selected | filter selected:=value | fields case, selected",
+      "expected_rows": [{"case": "state-string", "selected": "value"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-command-quoted-field-and-trailing-comma",
+      "query": "case:=identifier-colon | COALESCE(\"log:level\",) AS \"result field\" | fields case, \"result field\"",
+      "expected_rows": [{"case": "identifier-colon", "result field": "error"}]
+    },
+    {
+      "id": "LQL-P19-coalesce-empty-input",
+      "query": "case:=coalesce-missing | coalesce(case) as selected",
+      "expected_rows": []
     }
   ],
   "error_cases": [
@@ -3701,6 +3766,83 @@
     {
       "id": "LQL-P18-facets-rejects-trailing-token",
       "query": "* | facets keep_const_fields trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-requires-parentheses",
+      "query": "* | coalesce",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-rejects-bare-fields",
+      "query": "* | coalesce a, b",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-requires-a-source",
+      "query": "* | coalesce()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-rejects-leading-comma",
+      "query": "* | coalesce(,a)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-rejects-empty-middle-source",
+      "query": "* | coalesce(a,,b)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-requires-closing-parenthesis",
+      "query": "* | coalesce(a",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-requires-default-value",
+      "query": "* | coalesce(a) default",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-rejects-function-default",
+      "query": "* | coalesce(a) default count() as result",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-requires-destination",
+      "query": "* | coalesce(a) as",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-rejects-wildcard-destination",
+      "query": "* | coalesce(a) as result*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P19-coalesce-rejects-trailing-token",
+      "query": "* | coalesce(a) trailing",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

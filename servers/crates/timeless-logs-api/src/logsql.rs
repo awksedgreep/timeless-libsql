@@ -694,6 +694,124 @@ fn parse_facets_positive_number(name: &str, value: &str) -> Result<usize, Logsql
     Ok(parsed as usize)
 }
 
+fn parse_coalesce_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "coalesce")?;
+    let Some(command) = tokens.first() else {
+        return Err(LogsqlError::malformed("LogsQL coalesce pipe is empty"));
+    };
+    if !command.eq_ignore_ascii_case("coalesce") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL coalesce pipe, not {command:?}"
+        )));
+    }
+
+    let mut cursor = 1usize;
+    if tokens.get(cursor).is_none_or(|token| token != "(") {
+        return Err(LogsqlError::malformed(
+            "LogsQL coalesce requires parenthesized source fields",
+        ));
+    }
+    cursor += 1;
+    let mut sources = Vec::new();
+    loop {
+        match tokens.get(cursor).map(String::as_str) {
+            Some(")") if sources.is_empty() => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL coalesce requires at least one source field",
+                ));
+            }
+            Some(")") => {
+                cursor += 1;
+                break;
+            }
+            Some(",") | None => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL coalesce requires a field after each comma",
+                ));
+            }
+            Some(token) => {
+                sources.push(parse_delete_field(token)?);
+                cursor += 1;
+                match tokens.get(cursor).map(String::as_str) {
+                    Some(")") => {
+                        cursor += 1;
+                        break;
+                    }
+                    Some(",") => {
+                        cursor += 1;
+                        if tokens.get(cursor).is_some_and(|token| token == ")") {
+                            cursor += 1;
+                            break;
+                        }
+                    }
+                    Some(token) => {
+                        return Err(LogsqlError::malformed(format!(
+                            "unexpected LogsQL coalesce source token {token:?}; expected ',' or ')'"
+                        )));
+                    }
+                    None => {
+                        return Err(LogsqlError::malformed(
+                            "unterminated LogsQL coalesce source fields",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut default_value = String::new();
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("default"))
+    {
+        cursor += 1;
+        let value = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL coalesce default requires a value"))?;
+        if matches!(value.as_str(), "(" | ")" | ",") {
+            return Err(LogsqlError::malformed(
+                "LogsQL coalesce default requires a scalar token",
+            ));
+        }
+        default_value = quoted_value(value)?.unwrap_or_else(|| value.clone());
+        cursor += 1;
+    }
+
+    let mut destination = PipelineField::Exact {
+        path: vec!["_msg".into()],
+        name: "_msg".into(),
+    };
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("as"))
+    {
+        cursor += 1;
+        let value = tokens.get(cursor).ok_or_else(|| {
+            LogsqlError::malformed("LogsQL coalesce as requires a destination field")
+        })?;
+        destination = match parse_delete_field(value)? {
+            field @ PipelineField::Exact { .. } => field,
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                return Err(LogsqlError::malformed(
+                    "LogsQL coalesce destination must be an exact field",
+                ));
+            }
+        };
+        cursor += 1;
+    }
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL coalesce token {token:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Coalesce(CoalesceSpec {
+        sources,
+        destination,
+        default_value,
+    }))
+}
+
 fn parse_uniq_fields(
     tokens: &[String],
     cursor: &mut usize,
@@ -926,6 +1044,10 @@ fn is_uniq_pipe(segment: &str) -> bool {
 
 fn is_facets_pipe(segment: &str) -> bool {
     is_first_last_pipe(segment, "facets")
+}
+
+fn is_coalesce_pipe(segment: &str) -> bool {
+    is_first_last_pipe(segment, "coalesce")
 }
 
 fn is_first_last_pipe(segment: &str, operation: &str) -> bool {
@@ -1371,6 +1493,13 @@ pub(crate) struct FacetsSpec {
     pub keep_const_fields: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CoalesceSpec {
+    pub sources: Vec<PipelineField>,
+    pub destination: PipelineField,
+    pub default_value: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -1397,6 +1526,7 @@ pub(crate) enum PipelineOp {
     Top(TopSpec),
     Uniq(UniqSpec),
     Facets(FacetsSpec),
+    Coalesce(CoalesceSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1748,6 +1878,10 @@ pub fn parse_at(
             }
             _ if is_facets_pipe(segment) => {
                 pipeline.push(parse_facets_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_coalesce_pipe(segment) => {
+                pipeline.push(parse_coalesce_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             [] => return Err(LogsqlError::malformed("empty LogsQL pipeline")),
@@ -6323,6 +6457,40 @@ mod tests {
             assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
         }
 
+        let plan = parse_at(
+            r#"* | COALESCE("", nested.value, foo*) DEFAULT "x y" AS "result field""#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::Coalesce(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected coalesce plan: {plan:?}");
+        };
+        assert_eq!(spec.default_value, "x y");
+        assert_eq!(
+            spec.sources,
+            [
+                PipelineField::Exact {
+                    path: vec!["_msg".into()],
+                    name: "_msg".into(),
+                },
+                PipelineField::Exact {
+                    path: vec!["nested".into(), "value".into()],
+                    name: "nested.value".into(),
+                },
+                PipelineField::Prefix {
+                    prefix: "foo".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            spec.destination,
+            PipelineField::Exact {
+                path: vec!["result field".into()],
+                name: "result field".into(),
+            }
+        );
+
         for malformed in [
             "* | delete",
             "* | delete foo,",
@@ -6626,6 +6794,38 @@ mod tests {
             "* | facets max_value_len 0",
             "* | facets max_value_len nope",
             "* | facets keep_const_fields trailing",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_seventeen_coalesce_grammar_is_complete_and_strict() {
+        for query in [
+            "* | coalesce(a)",
+            "* | coalesce(a, b) default fallback as result",
+            "* | coalesce(foo*, bar, baz*)",
+            r#"* | COALESCE("", nested.value, foo*) DEFAULT "x y" AS "result field""#,
+            "* | coalesce(a,)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | coalesce",
+            "* | coalesce a, b",
+            "* | coalesce()",
+            "* | coalesce(,a)",
+            "* | coalesce(a,,b)",
+            "* | coalesce(a",
+            "* | coalesce(a) default",
+            "* | coalesce(a) default count() as result",
+            "* | coalesce(a) as",
+            "* | coalesce(a) as result*",
+            "* | coalesce(a) trailing",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

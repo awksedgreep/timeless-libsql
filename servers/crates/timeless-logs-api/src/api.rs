@@ -456,6 +456,17 @@ fn timeout_error(limits: LogsQueryLimits) -> Response<Body> {
 }
 
 fn query_execution_error(error: String) -> Response<Body> {
+    if error.starts_with("LogsQL coalesce destination conflict:") {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "query_execution",
+                "reason": "field_conflict",
+                "message": error
+            })),
+        )
+            .into_response();
+    }
     if let Some(limit) = error
         .split("max_result_rows=")
         .nth(1)

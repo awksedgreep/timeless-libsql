@@ -324,6 +324,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "max_work_entries" => Value::Integer(100_000),
         "threshold" if identifier == "SQL-MQL-001" => Value::Real(15.0),
         "threshold" => Value::Real(0.0),
+        "default_value" if identifier == "SQL-LOG-032" => Value::Text("fallback".to_owned()),
         "default_value" => Value::Real(0.0),
         "scalar" | "scalar_value" | "value" => Value::Real(2.0),
         "q" | "quantile" => Value::Real(0.5),
@@ -370,6 +371,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "timestamp_units_per_second" => Value::Integer(1_000),
         "start_ts" => Value::Integer(1_000),
         "end_ts" => Value::Integer(2_000),
+        "source_path_1" => Value::Text("$.nested.empty".to_owned()),
+        "source_path_2" => Value::Text("$.host".to_owned()),
+        "source_path_3" => Value::Text("$.service".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1655,6 +1659,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let top_rows = recipe_values("SQL-LOG-029", 0)?;
     let uniq_rows = recipe_values("SQL-LOG-030", 0)?;
     let facet_rows = recipe_values("SQL-LOG-031", 0)?;
+    let coalesce_rows = recipe_values("SQL-LOG-032", 0)?;
     if [
         bounded,
         substring,
@@ -1911,6 +1916,54 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             .any(|row| matches!(row.first(), Some(Value::Text(name)) if name == "service" || name == "nested.ok" || name == "nested.count"))
     {
         bail!("SQL-LOG-031 facets result changed: {facet_rows:?}");
+    }
+    if coalesce_rows.len() != 2
+        || coalesce_rows
+            .iter()
+            .map(|row| row.get(4))
+            .collect::<Vec<_>>()
+            != [
+                Some(&Value::Text("web-1".into())),
+                Some(&Value::Text("web-2".into())),
+            ]
+    {
+        bail!("SQL-LOG-032 coalesce result changed: {coalesce_rows:?}");
+    }
+    let coalesce_sql = recipe_sql("SQL-LOG-032", 0)?;
+    let coalesced = |source_path_1: &str,
+                     source_path_2: &str,
+                     source_path_3: &str,
+                     default_value: &str|
+     -> Result<Vec<String>> {
+        let mut statement = connection.prepare(&coalesce_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-032 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "source_path_1" => Value::Text(source_path_1.to_owned()),
+                "source_path_2" => Value::Text(source_path_2.to_owned()),
+                "source_path_3" => Value::Text(source_path_3.to_owned()),
+                "default_value" => Value::Text(default_value.to_owned()),
+                _ => parameter("SQL-LOG-032", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        statement
+            .raw_query()
+            .mapped(|row| row.get::<_, String>(4))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    };
+    if coalesced("$.nested.ok", "$.host", "$.service", "fallback")? != ["true", "true"] {
+        bail!("SQL-LOG-032 boolean textual projection changed");
+    }
+    if coalesced("$.duration_ms", "$.host", "$.service", "fallback")? != ["12", "4"] {
+        bail!("SQL-LOG-032 numeric textual projection changed");
+    }
+    if coalesced("$.absent", "$.missing", "$.never", "fallback")? != ["fallback", "fallback"] {
+        bail!("SQL-LOG-032 default projection changed");
     }
     let facets_sql = recipe_sql("SQL-LOG-031", 0)?;
     let facet_values = |max_values_per_field: i64,
@@ -2873,13 +2926,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 97);
+        assert_eq!(recipes.len(), 98);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            127
+            128
         );
         assert_eq!(
             recipes
@@ -2887,7 +2940,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            133
+            134
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

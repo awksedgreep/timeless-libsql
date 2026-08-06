@@ -597,6 +597,32 @@ provides the recursive public JSON1/window-function equivalent, including
 native timestamp units and canonical special fields. No extension primitive
 or private table is used.
 
+LogsQL `coalesce` writes the first nonempty textual source to an exact current
+row destination:
+
+```text
+* | coalesce(trace_id, request_id) default unknown as correlation_id
+* | coalesce(context.*, service) as context.primary
+* | fields error, message | coalesce(error, message)
+```
+
+Sources are parenthesized exact, all-field, or suffix-star prefix filters and
+are evaluated left to right with duplicate expanded names suppressed.
+Missing, null, empty strings, and exact rich-object parents are skipped;
+object leaves participate as dotted names, arrays remain atomic JSON text,
+and other rich values use the LogsQL textual projection. Wildcard leaves use
+deterministic bytewise name order. A trailing source comma is accepted.
+
+The destination defaults to `_msg`; optional `default` and `as` select a
+textual fallback and exact destination. Timeless preserves an explicitly
+empty destination in its rich response, unlike VictoriaLogs stream JSON's
+empty-column omission. A nested destination that collides with a retained
+scalar parent returns HTTP 422 `field_conflict` without data loss. Existing
+work/state/result/response limits and cancellation apply. Executable
+[`SQL-LOG-032`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)
+provides the ordinary public exact-field equivalent; no extension primitive
+or private table is used.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

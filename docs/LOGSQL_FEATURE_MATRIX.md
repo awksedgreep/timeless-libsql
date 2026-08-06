@@ -122,7 +122,7 @@ extension.
 | `LQL-P16` | `uniq` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-030-unique-textual-values)) | shipped | no | `VALUES`, `SQL` | `API` | P2 |
 | `LQL-P17` | `sample` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P18` | `facets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-031-bounded-facets-over-public-log-fields)) | shipped | no | `VALUES`, `COUNT`, `SQL` | `API` | P2 |
-| `LQL-P19` | `coalesce` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P22` | `format` | missing | no | `SQL` | `API` | P2 |
@@ -247,6 +247,24 @@ and native timestamp units. No storage primitive or private table is used.
 Exact-build evidence records 3.239/44.087 ms narrow/wide p95 versus
 4.464/41.116 ms for byte-identical same-scan controls; `QSF-163` accepts the
 mixed -27.4%/+7.2% variation above the unchanged public storage boundary.
+
+`LQL-P19` selects the first nonempty textual value from parenthesized exact,
+all-field, or prefix source filters, suppressing duplicate expanded names.
+Missing, null, empty strings, and exact object parents are empty in the
+flattened compatibility view; strings remain unquoted, numbers and booleans
+become text, arrays remain atomic JSON text, and rich object leaves are dotted
+sources. The destination defaults to `_msg`; optional `default` and `as` are
+textual and exact. Timeless expands wildcard leaves bytewise for deterministic
+current-row behavior and preserves an explicitly empty destination string in
+its rich response, while VictoriaLogs stream serialization omits empty-valued
+columns. A nested destination colliding with a retained scalar fails with an
+explicit HTTP 422 `field_conflict` instead of replacing rich data.
+
+Input rows, temporary de-duplication/path state, result rows, response bytes,
+and cancellation use existing request limits. Executable `SQL-LOG-032`
+provides the direct exact-field `CASE`/`NULLIF`/`COALESCE` foundation. The
+operation requires no extension primitive, private table, or storage-contract
+change.
 
 ## Statistics functions
 

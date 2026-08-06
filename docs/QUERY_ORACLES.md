@@ -544,3 +544,17 @@ rewrite at immutable VictoriaLogs commit
 row-query cases, 150 error cases, and 91 statistics/pipeline cases: 537 cases
 total.
 The fixture now contains 537 cases.
+
+`LQL-P19` adds eleven successful pipeline cases and eleven error cases for
+first-nonempty priority, missing/null/empty skipping, numeric and boolean
+textual projection, default destination `_msg`, quoted defaults and
+destinations, recursively flattened exact fields, prefix expansion order,
+empty prefix matches, destination replacement, current-row composition,
+case-insensitive grammar, trailing comma, empty input, and strict parentheses,
+field-list, default, destination, wildcard, function, and tail errors. Source
+audit is against `pipe_coalesce.go`, `pipe_coalesce_test.go`,
+`parser_utils.go`, and `block_result.go` at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 296
+row-query cases, 161 error cases, and 102 statistics/pipeline cases: 559 cases
+total.
+The fixture now contains 559 cases.
