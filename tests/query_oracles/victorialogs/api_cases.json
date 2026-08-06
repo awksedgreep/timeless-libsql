@@ -3673,6 +3673,91 @@
       "id": "LQL-P34-pack-json-overlapping-selectors-repeat-upstream-key",
       "query": "case:=format-row | fields case, math_a | pack_json fields (math_*, math_a) as packed | fields case, packed",
       "expected_rows": [{"case": "format-row", "packed": "{\"math_a\":\"2\",\"math_a\":\"2\"}"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-defaults-to-message-and-textualizes-values",
+      "query": "case:=format-row | format '{\"foo\":\"bar\",\"n\":2,\"flag\":true,\"empty\":\"\",\"none\":null,\"nested\":{\"x\":\"y\"},\"arr\":[1,true]}' | unpack_json | fields case, foo, n, flag, empty, none, nested.x, arr",
+      "expected_rows": [{"case": "format-row", "foo": "bar", "n": "2", "flag": "true", "nested.x": "y", "arr": "[1,true]"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-selects-exact-and-missing-fields",
+      "query": "case:=format-row | format '{\"foo\":\"bar\",\"other\":\"x\"}' as source | unpack_json from source fields (foo, missing) | fields case, foo, missing",
+      "expected_rows": [{"case": "format-row", "foo": "bar"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-selects-flattened-prefixes",
+      "query": "case:=format-row | format '{\"nested\":{\"x\":\"one\",\"y\":2},\"other\":3}' as source | unpack_json source fields (nested.*) | fields case, nested.x, nested.y, other",
+      "expected_rows": [{"case": "format-row", "nested.x": "one", "nested.y": "2"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-preserves-selected-nested-keys",
+      "query": "case:=format-row | format '{\"nested\":{\"x\":\"one\",\"y\":2},\"other\":3}' as source | unpack_json source preserve_keys (nested) | fields case, nested, nested.x, other",
+      "expected_rows": [{"case": "format-row", "nested": "{\"x\":\"one\",\"y\":2}", "other": "3"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-prefixes-result-fields",
+      "query": "case:=format-row | format '{\"foo\":\"bar\",\"nested\":{\"x\":1}}' as source | unpack_json from source result_prefix decoded_ | fields case, decoded_foo, decoded_nested.x",
+      "expected_rows": [{"case": "format-row", "decoded_foo": "bar", "decoded_nested.x": "1"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-keep-original-preserves-nonempty-values",
+      "query": "case:=format-row | format '{\"result\":\"new\",\"fresh\":\"yes\"}' as source | unpack_json from source keep_original_fields | fields case, result, fresh",
+      "expected_rows": [{"case": "format-row", "result": "original", "fresh": "yes"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-skip-empty-preserves-nonempty-values",
+      "query": "case:=format-row | format '{\"result\":\"\",\"fresh\":\"yes\"}' as source | unpack_json from source skip_empty_results | fields case, result, fresh",
+      "expected_rows": [{"case": "format-row", "result": "original", "fresh": "yes"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-default-empty-overwrites-original",
+      "query": "case:=format-row | format '{\"foo\":\"\"}' as source | unpack_json from source | stats count_empty(foo) as empty",
+      "expected_rows": [{"empty": "1"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-condition-matches-current-row",
+      "query": "case:=format-row | format '{\"fresh\":\"yes\"}' as source | unpack_json if (result:=original) from source | fields case, fresh",
+      "expected_rows": [{"case": "format-row", "fresh": "yes"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-condition-miss-is-noop",
+      "query": "case:=format-row | format '{\"fresh\":\"yes\"}' as source | unpack_json if (foo:=other) from source | fields case, fresh",
+      "expected_rows": [{"case": "format-row"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-bare-source-and-keywords-are-case-insensitive",
+      "query": "case:=format-row | format '{\"fresh\":\"yes\"}' as \"source field\" | UnPaCk_JsOn \"source field\" FiElDs (fresh) ReSuLt_PrEfIx decoded_ | fields case, decoded_fresh",
+      "expected_rows": [{"case": "format-row", "decoded_fresh": "yes"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-trims-leading-and-trailing-space",
+      "query": "case:=format-row | format '  {\"fresh\":\"yes\"}  ' as source | unpack_json from source | fields case, fresh",
+      "expected_rows": [{"case": "format-row", "fresh": "yes"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-snapshots-source-before-overwrite",
+      "query": "case:=format-row | format '{\"source\":\"replaced\",\"fresh\":\"yes\"}' as source | unpack_json from source | fields case, source, fresh",
+      "expected_rows": [{"case": "format-row", "source": "replaced", "fresh": "yes"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-non-object-is-noop",
+      "query": "case:=format-row | format '[1,2]' as source | unpack_json from source | fields case, source",
+      "expected_rows": [{"case": "format-row", "source": "[1,2]"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-malformed-object-emits-requested-empties",
+      "query": "case:=format-row | format '{broken' as source | unpack_json from source fields (foo) | stats count_empty(foo) as empty",
+      "expected_rows": [{"empty": "1"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-empty-fields-list-means-all",
+      "query": "case:=format-row | format '{\"foo\":\"bar\"}' as source | unpack_json from source fields () | fields case, foo",
+      "expected_rows": [{"case": "format-row", "foo": "bar"}]
+    },
+    {
+      "id": "LQL-P36-unpack-json-accepts-nonstandard-nan-as-text",
+      "query": "case:=format-row | format '{\"special\":NaN}' as source | unpack_json from source | fields case, special",
+      "expected_rows": [{"case": "format-row", "special": "NaN"}]
     }
   ],
   "error_cases": [
@@ -5541,6 +5626,62 @@
     {
       "id": "LQL-P34-pack-json-rejects-prefix-result",
       "query": "* | pack_json as x*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-condition-requires-parentheses",
+      "query": "* | unpack_json if",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-requires-source-after-from",
+      "query": "* | unpack_json from",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-rejects-wildcard-source",
+      "query": "* | unpack_json from x*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-fields-requires-parentheses",
+      "query": "* | unpack_json fields x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-preserve-keys-requires-parentheses",
+      "query": "* | unpack_json preserve_keys x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-result-prefix-requires-value",
+      "query": "* | unpack_json result_prefix",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-rejects-trailing-token",
+      "query": "* | unpack_json from x trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P36-unpack-json-rejects-both-preservation-modifiers",
+      "query": "* | unpack_json keep_original_fields skip_empty_results",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

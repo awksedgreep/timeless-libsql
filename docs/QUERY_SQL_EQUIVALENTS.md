@@ -149,6 +149,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-039`](#sql-log-039-literal-replacement-in-one-exact-retained-field) | `LQL-P29` | current foundation | all-occurrence literal replacement over one exact public metadata path's textual projection; API owns LogsQL grammar, conditional/limited/sequential mutation, rich-value preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-040`](#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field) | `LQL-P32` | current foundation | two unquoted captures from one exact public metadata path using fixed literal prefix/middle/suffix delimiters; API owns LogsQL patterns, quoted-string decoding, conditions, current-row mutation/preservation, limits, cancellation, and envelopes |
 | [`SQL-LOG-041`](#sql-log-041-pack-selected-rich-metadata-fields-as-json) | `LQL-P34` | current foundation | bounded packing of a fixed list of exact public metadata paths into one typed nested JSON object; API owns current-row/canonical fields, prefix selection, destination mutation, limits, cancellation, and envelopes |
+| [`SQL-LOG-042`](#sql-log-042-unpack-selected-rich-fields-from-a-json-object) | `LQL-P36` | current foundation | bounded unpacking of fixed exact paths from one public native-object or JSON-text metadata field into a typed nested JSON object; API owns LogsQL grammar, dynamic selection, current-row mutation/preservation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -7075,6 +7076,122 @@ private shadow-table access, or storage-format change is warranted.
 Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_seventeen_pack_json_is_rich_bounded_and_durable`.
+
+### SQL-LOG-042: unpack selected rich fields from a JSON object
+
+Bind one exact SQLite JSON source path, a fixed list of exact paths relative to
+that source, inclusive native timestamp bounds, and positive work/result
+limits. This recursive statement accepts either a retained native object or a
+string containing a valid JSON object and reconstructs one typed, nested JSON
+object per public log row:
+
+```sql
+WITH RECURSIVE
+bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), sources AS MATERIALIZED (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN json_type(metadata, :unpack_source_path) = 'object'
+      THEN metadata -> :unpack_source_path
+      WHEN json_type(metadata, :unpack_source_path) = 'text'
+       AND json_valid(json_extract(metadata, :unpack_source_path))
+       AND json_type(json_extract(metadata, :unpack_source_path)) = 'object'
+      THEN json(json_extract(metadata, :unpack_source_path))
+      ELSE NULL
+    END AS source_json
+  FROM bounded
+), selected(position, path) AS (
+  VALUES
+    (1, :unpack_path_1),
+    (2, :unpack_path_2),
+    (3, :unpack_path_3),
+    (4, :unpack_path_4),
+    (5, :unpack_path_5)
+), unpacked(ts, level, message, metadata, source_json, position, unpacked_json) AS (
+  SELECT ts, level, message, metadata, source_json, 0, json('{}')
+  FROM sources
+  WHERE source_json IS NOT NULL
+  UNION ALL
+  SELECT
+    unpacked.ts,
+    unpacked.level,
+    unpacked.message,
+    unpacked.metadata,
+    unpacked.source_json,
+    selected.position,
+    CASE
+      WHEN json_type(unpacked.source_json, selected.path) IS NULL
+      THEN json_set(unpacked.unpacked_json, selected.path, '')
+      ELSE json_set(
+        unpacked.unpacked_json,
+        selected.path,
+        unpacked.source_json -> selected.path
+      )
+    END
+  FROM unpacked
+  JOIN selected ON selected.position = unpacked.position + 1
+)
+SELECT ts, level, message, unpacked_json
+FROM unpacked
+WHERE position = (SELECT count(*) FROM selected)
+  AND :max_result_rows > 0
+ORDER BY ts, level, message, unpacked_json
+LIMIT :max_result_rows;
+```
+
+`:start_ts` and `:end_ts` use the table's declared timestamp unit.
+`:unpack_source_path` is one exact SQLite JSON path such as `$.payload` or
+`$.nested`. The source may be a retained object or JSON-object text with
+surrounding whitespace. Other strings, arrays, scalars, missing paths, and
+explicit nulls produce no unpacked row in this focused statement. A caller
+that needs the language's no-op behavior can `LEFT JOIN` this result to the
+bounded source identity and retain the original row when `unpacked_json` is
+NULL.
+
+The five `:unpack_path_N` values are valid exact paths relative to the source,
+such as `$.ok`, `$.nested.value`, or `$.tags`; extend or shorten `selected` for
+the application's fixed schema. A missing exact path becomes empty text.
+Explicit JSON null remains null, an empty string remains empty text, and `->`
+preserves native booleans, numbers, arrays, objects, and null when `json_set()`
+reconstructs nesting. Output is compact JSON TEXT with deterministic source
+ordering. The statement is read-only and never changes durable metadata.
+
+The complete `LQL-P36` API additionally owns case-insensitive `unpack_json`
+grammar; optional `if (...)`; default `_msg`, bare, `from`, quoted, and dotted
+exact sources; exact, prefix, empty-list, and all-field selection;
+`preserve_keys`; arbitrary `result_prefix`; current-row source snapshots;
+sequential pipeline composition; `keep_original_fields`;
+`skip_empty_results`; malformed-object compatibility; literal dotted keys;
+and field-conflict, work, response, deadline, and cancellation envelopes. It
+accepts the pinned VictoriaLogs bare `NaN` token as the string `"NaN"`.
+
+VictoriaLogs flattens object leaves to textual columns, compact-serializes
+arrays, textualizes numbers and booleans, and uses empty text for JSON null.
+Timeless deliberately preserves native rich JSON types and reconstructs
+nested objects so the retained storage model does not lose fidelity. The
+upstream grammar and selection behavior remain pinned; this type policy is an
+explicit compatibility boundary rather than a claim of identical rich-row
+output.
+
+Every source value already crosses the bounded public `logs` row interface.
+SQLite JSON1 provides the useful fixed-schema parse/select/reconstruction
+operation directly. Moving dynamic LogsQL grammar or request-local row
+mutation into the extension would not avoid a storage read, block decode, or
+row crossing. No extension primitive, private shadow-table access, or storage
+format change is warranted.
+
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_seventeen_unpack_json_is_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

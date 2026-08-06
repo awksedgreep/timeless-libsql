@@ -139,7 +139,7 @@ extension.
 | `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
-| `LQL-P36` | `unpack_json` | missing | no | `SQL` | `API` | P2 |
+| `LQL-P36` | `unpack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)) | in progress | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P38` | `unpack_syslog` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P39` | `unpack_words` | missing | no | `SQL` | `API` | P3 |
@@ -561,6 +561,47 @@ Exact-build evidence records 3.146/37.921 ms narrow/wide p95 versus
 plain-field controls because every selected value is wrapped in a JSON object
 string. `QSF-187` accepts the bounded rich selection/serialization cost above
 the unchanged public storage boundary.
+
+`LQL-P36` parses one exact current-row field as a JSON object and writes the
+selected values back into that request-owned row. The Rust logs API accepts
+case-insensitive `unpack_json`, optional `if (...)`, default `_msg`, optional
+bare or `from` source fields, exact/prefix/all `fields (...)`,
+`preserve_keys (...)`, `result_prefix`, `keep_original_fields`, and
+`skip_empty_results`. The source is snapshotted before writes, so unpacking a
+JSON member over the source itself is deterministic and later pipeline stages
+see the replacement. Omitted or empty `fields (...)` selects all fields;
+missing exact selections become empty strings, while unmatched prefixes add
+nothing.
+
+Timeless accepts a string containing a whitespace-padded JSON object or an
+already retained native object. It preserves native strings, numbers,
+booleans, arrays, objects, explicit nulls, empty strings, and empty objects;
+reconstructs nesting while retaining unrelated existing siblings; and keeps
+literal dotted JSON keys distinct from nested paths. `preserve_keys` makes a
+selected object atomic without converting it to text. The pinned upstream
+bare `NaN` token becomes the string `"NaN"`. A malformed source beginning
+with `{` still supplies empty values for requested exact fields, matching the
+upstream boundary; other malformed/nonobject sources are no-ops. Default
+writes replace scalar values, `keep_original_fields` retains nonempty
+destinations, and `skip_empty_results` suppresses null or empty-string writes.
+Scalar writes cannot replace retained objects or cross a scalar parent.
+
+VictoriaLogs v1.52.0 flattens nested leaves into textual columns, compact-
+serializes arrays, textualizes numbers and booleans, and maps null to empty
+text. Timeless deliberately retains its richer nested JSON model. The
+complete 875-case pinned oracle records the upstream grammar, selection,
+preservation, malformed-input, and textualization behavior; real-extension
+regressions pin the selected rich-value policy.
+
+Public
+[`SQL-LOG-042`](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)
+uses only `logs` plus SQLite JSON1 to validate one object source, select a
+fixed set of exact paths, distinguish missing/null/empty states, preserve
+native JSON subtypes, and reconstruct nesting. Dynamic LogsQL grammar,
+conditions, recursive prefix/all selection, current-row mutation,
+preservation modes, limits, cancellation, and HTTP envelopes remain bounded
+Rust API composition over public rows. No extension primitive, private table,
+durable mutation, or storage-contract change is required.
 
 ## Statistics functions
 

@@ -399,6 +399,12 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "pack_path_4" => Value::Text("$.nested.none".to_owned()),
         "pack_path_5" => Value::Text("$.tags".to_owned()),
         "pack_path_6" => Value::Text("$.nested.empty".to_owned()),
+        "unpack_source_path" => Value::Text("$.nested".to_owned()),
+        "unpack_path_1" => Value::Text("$.ok".to_owned()),
+        "unpack_path_2" => Value::Text("$.count".to_owned()),
+        "unpack_path_3" => Value::Text("$.none".to_owned()),
+        "unpack_path_4" => Value::Text("$.empty".to_owned()),
+        "unpack_path_5" => Value::Text("$.missing".to_owned()),
         "with_hits" => Value::Integer(1),
         "max_result_rows" => Value::Integer(100),
         "separator" => Value::Text("/".to_owned()),
@@ -1694,6 +1700,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let replace_rows = recipe_values("SQL-LOG-039", 0)?;
     let extract_rows = recipe_values("SQL-LOG-040", 0)?;
     let pack_json_rows = recipe_values("SQL-LOG-041", 0)?;
+    let unpack_json_rows = recipe_values("SQL-LOG-042", 0)?;
     if [
         bounded,
         substring,
@@ -2158,6 +2165,41 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
             .any(|metadata| serde_json::from_str::<serde_json::Value>(metadata).is_err())
     {
         bail!("SQL-LOG-041 mutated its public source: {source_packed_fields:?}");
+    }
+    if unpack_json_rows.len() != 2 {
+        bail!("SQL-LOG-042 result cardinality changed: {unpack_json_rows:?}");
+    }
+    let expected_unpacked = [
+        serde_json::json!({
+            "ok":true,
+            "count":2,
+            "none":null,
+            "empty":"",
+            "missing":""
+        }),
+        serde_json::json!({
+            "ok":"true",
+            "count":"2",
+            "none":"",
+            "empty":null,
+            "missing":""
+        }),
+    ];
+    for (row, expected) in unpack_json_rows.iter().zip(expected_unpacked) {
+        let Some(Value::Text(unpacked)) = row.get(3) else {
+            bail!("SQL-LOG-042 unpacked result is not JSON TEXT: {row:?}");
+        };
+        let unpacked = serde_json::from_str::<serde_json::Value>(unpacked)?;
+        if unpacked != expected {
+            bail!("SQL-LOG-042 typed unpacked result changed: {unpacked}");
+        }
+    }
+    let source_unpacked_fields = connection
+        .prepare("SELECT metadata FROM logs ORDER BY ts")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if source_unpacked_fields != source_packed_fields {
+        bail!("SQL-LOG-042 mutated its public source: {source_unpacked_fields:?}");
     }
     let len_sql = recipe_sql("SQL-LOG-037", 0)?;
     let measured_lengths = |source_path: &str| -> Result<Vec<i64>> {
@@ -3384,13 +3426,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 107);
+        assert_eq!(recipes.len(), 108);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            137
+            138
         );
         assert_eq!(
             recipes
@@ -3398,7 +3440,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            143
+            144
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

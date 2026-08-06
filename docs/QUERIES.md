@@ -1304,6 +1304,61 @@ one/four candidate blocks, 1,024/8,192 decoded entries,
 accepts the bounded rich selection and serialization cost above the unchanged
 public storage boundary.
 
+## LogsQL typed `unpack_json` over current rows
+
+`unpack_json` snapshots one request-owned field, parses a JSON object, and
+writes selected members back into the current result row:
+
+```text
+* | unpack_json
+* | unpack_json from payload
+* | unpack_json payload fields (host, status, context.*)
+* | unpack_json if (kind:=audit) from payload preserve_keys (context)
+    result_prefix decoded. keep_original_fields
+* | unpack_json from payload fields () skip_empty_results
+```
+
+Keywords are case-insensitive. The source defaults to `_msg`; one exact
+source may appear bare or after `from`. The source may be whitespace-padded
+JSON-object text or a retained native object. Omitted or empty `fields ()`
+selects all fields. Exact and prefix selectors may be mixed; missing exact
+paths become empty strings, while unmatched prefixes produce no fields.
+`preserve_keys` keeps named objects atomic and native. `result_prefix` is
+prepended before reconstructed output paths.
+
+Timeless preserves the retained rich JSON model. Strings, numbers, booleans,
+arrays, objects, explicit nulls, empty strings, and empty objects retain their
+native types. Nested output merges with unrelated existing siblings, and a
+literal JSON key containing `.` remains distinct from a nested path. The
+source is snapshotted before any destination write, including when an
+unpacked member replaces the source itself. By default selected values
+overwrite scalar destinations. `keep_original_fields` retains existing
+nonempty values; `skip_empty_results` suppresses incoming null and empty
+strings. Writes through a scalar parent or scalar replacement of a retained
+object fail with HTTP 422.
+
+Whitespace is ignored around object text. Missing, null, scalar, array, and
+nonobject strings are no-ops. For compatibility, malformed text beginning
+with `{` writes empty strings only for explicitly requested exact paths, and
+the pinned bare `NaN` token becomes the string `"NaN"`. Grammar, JSON/path
+work, parsed and selected state, result rows, response bytes, deadlines, and
+cancellation are bounded by shared request limits. The transform never
+changes durable public rows, including after optimize, shutdown, and reopen.
+
+VictoriaLogs v1.52.0 flattens nested values to textual columns, serializes
+arrays compactly, textualizes numbers/booleans, and maps null to empty text.
+The pinned 875-case oracle records that language behavior; Timeless's native
+types and reconstructed nesting are the documented retained-model policy.
+
+Executable
+[`SQL-LOG-042`](QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)
+uses public `logs`, `json_valid`, `json_type`, `->`, and `json_set` for a
+bounded fixed set of exact paths while preserving missing/null/empty/type
+distinctions. Dynamic selectors, request-local mutation and preservation,
+language errors, limits, cancellation, and envelopes remain Rust API
+composition. No extension primitive, private table, or storage-format change
+is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

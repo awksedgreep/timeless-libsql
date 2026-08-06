@@ -296,7 +296,7 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
                 .method("POST")
                 .uri("/select/logsql/query")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("query=level%3Aerror+%7C+unpack_json"))
+                .body(Body::from("query=level%3Aerror+%7C+block_stats"))
                 .unwrap(),
         )
         .await
@@ -308,7 +308,7 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
         serde_json::json!({
             "error": "unsupported_capability",
             "reason": "unsupported_logsql",
-            "message": "unsupported LogsQL pipeline \"unpack_json\""
+            "message": "unsupported LogsQL pipeline \"block_stats\""
         })
     );
 
@@ -4965,6 +4965,332 @@ async fn session_seventeen_pack_json_is_rich_bounded_and_durable() {
             "array":["prod",1],
             "nested":{"keep":"yes", "drop":"no"}
         })
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_seventeen_unpack_json_is_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("unpack-json-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let json_source = r#" {"decoded":"yes","zero":0,"flag":false,"empty":"","null_value":null,"array":["prod",1],"nested":{"keep":"yes","number":2},"empty_object":{},"json_source":"replaced","nonstandard":NaN} "#;
+    storage
+        .ingest(
+            [
+                LogEntry {
+                    ts: 1_800_000_000_000_001,
+                    level: 3,
+                    severity: "warning".into(),
+                    message: "unpack source".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-json-admin",
+                        "unpack_json_group":"unpack-json",
+                        "kind":"admin",
+                        "json_source":json_source,
+                        "overwrite_source":r#"{"result":"new","empty":"","null_value":null,"overwrite_source":"replaced"}"#,
+                        "malformed_source":"{broken",
+                        "scalar_source":"[1,2]",
+                        "native_source":{"native":true,"nested":{"value":3}},
+                        "literal_source":r#"{"literal.key":1,"nested":{"key":2}}"#,
+                        "conflict_source":r#"{"nested":"scalar"}"#,
+                        "decoded":"original",
+                        "empty":"existing-empty",
+                        "null_value":"existing-null",
+                        "nested":{"sibling":"retained"},
+                        "result":["native"]
+                    })
+                    .to_string(),
+                },
+                LogEntry {
+                    ts: 1_800_000_000_000_002,
+                    level: 1,
+                    severity: "info".into(),
+                    message: "condition miss".into(),
+                    metadata_json: serde_json::json!({
+                        "case":"unpack-json-user",
+                        "unpack_json_group":"unpack-json",
+                        "kind":"user",
+                        "json_source":r#"{"decoded":"changed"}"#,
+                        "decoded":"untouched"
+                    })
+                    .to_string(),
+                },
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | unpack_json from json_source fields (decoded, zero, flag, empty, null_value, array, nested.*, empty_object, json_source, nonstandard, missing) | fields case, decoded, zero, flag, empty, null_value, array, nested, empty_object, json_source, nonstandard, missing"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-json-admin",
+            "decoded":"yes",
+            "zero":0,
+            "flag":false,
+            "empty":"",
+            "null_value":null,
+            "array":["prod",1],
+            "nested":{"sibling":"retained", "keep":"yes", "number":2},
+            "empty_object":{},
+            "json_source":"replaced",
+            "nonstandard":"NaN",
+            "missing":""
+        })]
+    );
+
+    let prefixed = pipeline_rows(
+        &app,
+        r#"case:="unpack-json-admin" | UnPaCk_JsOn FrOm json_source PrEsErVe_KeYs (nested) ReSuLt_PrEfIx "decoded_prefix." | fields case, decoded_prefix"#,
+    )
+    .await;
+    assert_eq!(prefixed[0]["decoded_prefix"]["zero"], serde_json::json!(0));
+    assert_eq!(
+        prefixed[0]["decoded_prefix"]["nested"],
+        serde_json::json!({"keep":"yes", "number":2})
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | unpack_json from overwrite_source keep_original_fields | fields case, result, empty, null_value, overwrite_source"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-json-admin",
+            "result":["native"],
+            "empty":"existing-empty",
+            "null_value":"existing-null",
+            "overwrite_source":r#"{"result":"new","empty":"","null_value":null,"overwrite_source":"replaced"}"#
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | unpack_json from overwrite_source skip_empty_results | fields case, result, empty, null_value, overwrite_source"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-json-admin",
+            "result":"new",
+            "empty":"existing-empty",
+            "null_value":"existing-null",
+            "overwrite_source":"replaced"
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-user" | unpack_json if (kind:=admin) from json_source fields (decoded) | fields case, decoded"#,
+        )
+        .await,
+        [serde_json::json!({"case":"unpack-json-user", "decoded":"untouched"})]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | unpack_json from native_source fields (native, nested.value) | fields case, native, nested"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-json-admin",
+            "native":true,
+            "nested":{"sibling":"retained", "value":3}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | unpack_json from malformed_source fields (missing) result_prefix malformed_ | fields case, malformed_missing"#,
+        )
+        .await,
+        [serde_json::json!({"case":"unpack-json-admin", "malformed_missing":""})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | unpack_json from scalar_source fields (missing) | fields case, scalar_source"#,
+        )
+        .await,
+        [serde_json::json!({"case":"unpack-json-admin", "scalar_source":"[1,2]"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | unpack_json from literal_source fields ("literal.key", nested.key) result_prefix decoded_literal. | fields case, decoded_literal"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-json-admin",
+            "decoded_literal":{"literal.key":1, "nested":{"key":2}}
+        })]
+    );
+
+    let round_trip = pipeline_rows(
+        &app,
+        r#"case:="unpack-json-admin" | pack_json fields (case, null_value, nested.sibling, result, native_source) as packed | unpack_json from packed result_prefix roundtrip. | fields case, roundtrip"#,
+    )
+    .await;
+    assert_eq!(
+        round_trip[0]["roundtrip"],
+        serde_json::json!({
+            "case":"unpack-json-admin",
+            "null_value":"existing-null",
+            "nested":{"sibling":"retained"},
+            "result":["native"],
+            "native_source":{"native":true,"nested":{"value":3}}
+        })
+    );
+
+    for malformed in [
+        "* | unpack_json if",
+        "* | unpack_json from",
+        "* | unpack_json from *",
+        "* | unpack_json fields",
+        "* | unpack_json fields (case missing)",
+        "* | unpack_json preserve_keys (*)",
+        "* | unpack_json result_prefix",
+        "* | unpack_json keep_original_fields skip_empty_results",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="unpack-json-admin" | unpack_json from conflict_source"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="unpack-json-admin" | unpack_json from json_source"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let work_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(work_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(work_limited["reason"], "max_work_rows", "{work_limited}");
+
+    let response_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_response_bytes: 8,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"case:="unpack-json-admin" | unpack_json from json_source"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response_limited = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(response_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response_limited["reason"], "max_response_bytes",
+        "{response_limited}"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"case:="unpack-json-admin" | fields case, json_source, overwrite_source, malformed_source, scalar_source, native_source, literal_source, conflict_source, decoded, empty, null_value, nested, result"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-json-admin",
+            "json_source":json_source,
+            "overwrite_source":r#"{"result":"new","empty":"","null_value":null,"overwrite_source":"replaced"}"#,
+            "malformed_source":"{broken",
+            "scalar_source":"[1,2]",
+            "native_source":{"native":true,"nested":{"value":3}},
+            "literal_source":r#"{"literal.key":1,"nested":{"key":2}}"#,
+            "conflict_source":r#"{"nested":"scalar"}"#,
+            "decoded":"original",
+            "empty":"existing-empty",
+            "null_value":"existing-null",
+            "nested":{"sibling":"retained"},
+            "result":["native"]
+        })],
+        "unpack_json must not mutate durable rich source values after failures"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline_rows(
+            &router(reopened.clone()),
+            r#"case:="unpack-json-admin" | unpack_json from json_source fields (decoded, zero, flag, null_value, array, nested.*, nonstandard) result_prefix reopened. | fields case, reopened"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"unpack-json-admin",
+            "reopened":{
+                "decoded":"yes",
+                "zero":0,
+                "flag":false,
+                "null_value":null,
+                "array":["prod",1],
+                "nested":{"keep":"yes", "number":2},
+                "nonstandard":"NaN"
+            }
+        })]
     );
     reopened.shutdown().await.unwrap();
 }
@@ -9912,10 +10238,6 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     );
     for (query, message) in [
         (
-            "* | unpack_json",
-            "unsupported LogsQL pipeline \"unpack_json\"",
-        ),
-        (
             "* | block_stats",
             "unsupported LogsQL pipeline \"block_stats\"",
         ),
@@ -10509,6 +10831,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_pack_json_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_unpack_json = storage.stats().await.unwrap().api_query_cancelled;
+    let unpack_json_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"* | pack_json fields (_msg, level, service) as packed | unpack_json from packed result_prefix selected. | fields selected | limit 10000"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(unpack_json_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_unpack_json
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_unpack_json);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_unpack_json_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            r#"level:error | pack_json fields (_msg, level) as packed | unpack_json from packed result_prefix selected. | fields selected | limit 1"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_unpack_json_cancel.status(), StatusCode::OK);
 
     let cancelled_before_extract_regexp = storage.stats().await.unwrap().api_query_cancelled;
     let extract_regexp_timeout = router_with_limits(

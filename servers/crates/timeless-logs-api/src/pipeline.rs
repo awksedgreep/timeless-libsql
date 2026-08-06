@@ -24,7 +24,7 @@ use crate::logsql::{
     ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep, LenSpec,
     MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec, PipelineField,
     PipelineOp, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, StatsExpression,
-    StatsKind, TopSpec, UniqSpec,
+    StatsKind, TopSpec, UniqSpec, UnpackJsonSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::{LogField, LogPredicate, NumericOp, TimestampUnit, ValueTypeKind};
@@ -240,6 +240,13 @@ pub(crate) fn execute(
             PipelineOp::PackJson(spec) => {
                 pack_json_fields(rows, spec, execution.limits, execution.cancelled)?
             }
+            PipelineOp::UnpackJson(spec) => unpack_json_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
         };
     }
     if let Some(limit) = execution.implicit_result_limit {
@@ -276,13 +283,14 @@ fn pack_json_fields(
             charge_transfer_work(&mut work_items, limits.max_state_items, "pack_json")?;
             let mut state_bytes = size_of::<Map<String, Value>>();
             ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "pack_json")?;
-            let packed = select_pack_json_fields(
+            let packed = select_json_fields(
                 &row,
                 &spec.fields,
                 &mut state_bytes,
                 &mut work_items,
                 limits,
                 cancelled,
+                "pack_json",
             )?;
             let packed_value = Value::Object(packed);
             let encoded_len = compact_json_len_for_operation(
@@ -328,17 +336,419 @@ fn pack_json_fields(
         .collect()
 }
 
-fn select_pack_json_fields(
+fn unpack_json_fields(
+    rows: Vec<Value>,
+    spec: &UnpackJsonSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: source_path,
+        name: source_name,
+    } = &spec.source
+    else {
+        return Err("LogsQL unpack_json source is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "unpack_json")?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let mut state_bytes = size_of::<Map<String, Value>>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "unpack_json")?;
+            charge_transfer_string(
+                source_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "unpack_json",
+            )?;
+            for segment in source_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "unpack_json",
+                )?;
+            }
+
+            let Some(source) = field_value(&row, source_path) else {
+                return Ok(row);
+            };
+            let parsed = parse_unpack_json_source(
+                source,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            let (mut selected, object_like) = match parsed {
+                UnpackJsonSource::Object(value) => (
+                    select_json_fields(
+                        &value,
+                        &spec.fields,
+                        &mut state_bytes,
+                        &mut work_items,
+                        limits,
+                        cancelled,
+                        "unpack_json",
+                    )?,
+                    true,
+                ),
+                UnpackJsonSource::MalformedObject => (Map::new(), true),
+                UnpackJsonSource::NotObject => return Ok(row),
+            };
+
+            if object_like {
+                add_missing_unpack_json_fields(
+                    &mut selected,
+                    &spec.fields,
+                    &mut state_bytes,
+                    &mut work_items,
+                    limits,
+                    cancelled,
+                )?;
+            }
+            apply_unpack_json_fields(
+                &mut row,
+                selected,
+                spec,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            Ok(row)
+        })
+        .collect()
+}
+
+enum UnpackJsonSource {
+    Object(Value),
+    MalformedObject,
+    NotObject,
+}
+
+fn parse_unpack_json_source(
+    source: &Value,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<UnpackJsonSource, String> {
+    ensure_active(cancelled)?;
+    let parsed = match source {
+        Value::Object(object) => Value::Object(object.clone()),
+        Value::String(source) => {
+            charge_transfer_string(source, state_bytes, limits.max_state_bytes, "unpack_json")?;
+            let source = source.trim();
+            if !source.starts_with('{') {
+                return Ok(UnpackJsonSource::NotObject);
+            }
+            let normalized = normalize_unpack_json_nan(source);
+            if let Cow::Owned(normalized) = &normalized {
+                charge_transfer_string(
+                    normalized,
+                    state_bytes,
+                    limits.max_state_bytes,
+                    "unpack_json",
+                )?;
+            }
+            match serde_json::from_str::<Value>(&normalized) {
+                Ok(value @ Value::Object(_)) => value,
+                Ok(_) => return Ok(UnpackJsonSource::NotObject),
+                Err(_) => return Ok(UnpackJsonSource::MalformedObject),
+            }
+        }
+        _ => return Ok(UnpackJsonSource::NotObject),
+    };
+    charge_transfer_value(
+        &parsed,
+        state_bytes,
+        limits.max_state_bytes,
+        cancelled,
+        work_items,
+        limits.max_state_items,
+        "unpack_json",
+    )?;
+    Ok(UnpackJsonSource::Object(parsed))
+}
+
+fn normalize_unpack_json_nan(source: &str) -> Cow<'_, str> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut copied_through = 0usize;
+    let mut output = None::<String>;
+    let mut in_string = false;
+    let mut escaped = false;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            cursor += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            cursor += 1;
+            continue;
+        }
+        if bytes.get(cursor..cursor.saturating_add(3)) == Some(b"NaN")
+            && unpack_json_token_boundary(cursor.checked_sub(1).map(|index| bytes[index]))
+            && unpack_json_token_boundary(bytes.get(cursor + 3).copied())
+        {
+            let output = output.get_or_insert_with(|| String::with_capacity(source.len() + 2));
+            output.push_str(&source[copied_through..cursor]);
+            output.push_str("\"NaN\"");
+            cursor += 3;
+            copied_through = cursor;
+            continue;
+        }
+        cursor += 1;
+    }
+    match output {
+        Some(mut output) => {
+            output.push_str(&source[copied_through..]);
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(source),
+    }
+}
+
+fn unpack_json_token_boundary(byte: Option<u8>) -> bool {
+    byte.is_none_or(|byte| byte.is_ascii_whitespace() || b",:{}[]".contains(&byte))
+}
+
+fn add_missing_unpack_json_fields(
+    selected: &mut Map<String, Value>,
+    fields: &[PipelineField],
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    for field in fields {
+        let PipelineField::Exact { path, .. } = field else {
+            continue;
+        };
+        check_periodically(cancelled, *work_items)?;
+        charge_transfer_work(work_items, limits.max_state_items, "unpack_json")?;
+        if object_field_value(selected, path).is_some() {
+            continue;
+        }
+        charge_json_path(path, state_bytes, limits.max_state_bytes, "unpack_json")?;
+        charge_transfer_value(
+            &Value::String(String::new()),
+            state_bytes,
+            limits.max_state_bytes,
+            cancelled,
+            work_items,
+            limits.max_state_items,
+            "unpack_json",
+        )?;
+        insert_path(selected, path, Value::String(String::new()))
+            .map_err(|error| format!("LogsQL unpack_json field selection conflict: {error}"))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_unpack_json_fields(
+    row: &mut Value,
+    selected: Map<String, Value>,
+    spec: &UnpackJsonSpec,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    for (name, value) in selected {
+        let mut source_path = vec![name];
+        apply_unpack_json_value(
+            row,
+            value,
+            &mut source_path,
+            spec,
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_unpack_json_value(
+    row: &mut Value,
+    value: Value,
+    source_path: &mut Vec<String>,
+    spec: &UnpackJsonSpec,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, limits.max_state_items, "unpack_json")?;
+    check_periodically(cancelled, *work_items)?;
+    let preserve = spec
+        .preserve_keys
+        .iter()
+        .any(|field| matches!(field, PipelineField::Exact { path, .. } if path == source_path));
+    if !preserve {
+        return match value {
+            Value::Object(object) if !object.is_empty() => {
+                for (name, child) in object {
+                    source_path.push(name);
+                    apply_unpack_json_value(
+                        row,
+                        child,
+                        source_path,
+                        spec,
+                        state_bytes,
+                        work_items,
+                        limits,
+                        cancelled,
+                    )?;
+                    source_path.pop();
+                }
+                Ok(())
+            }
+            Value::Object(object) => apply_unpack_json_leaf(
+                row,
+                Value::Object(object),
+                source_path,
+                spec,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            ),
+            value => apply_unpack_json_leaf(
+                row,
+                value,
+                source_path,
+                spec,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            ),
+        };
+    }
+    apply_unpack_json_leaf(
+        row,
+        value,
+        source_path,
+        spec,
+        state_bytes,
+        work_items,
+        limits,
+        cancelled,
+    )
+}
+
+fn object_field_value<'a>(object: &'a Map<String, Value>, path: &[String]) -> Option<&'a Value> {
+    let (first, remaining) = path.split_first()?;
+    let value = object.get(first)?;
+    field_value(value, remaining)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_unpack_json_leaf(
+    row: &mut Value,
+    value: Value,
+    source_path: &[String],
+    spec: &UnpackJsonSpec,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    ensure_active(cancelled)?;
+    if spec.skip_empty_results && is_empty(&value) {
+        return Ok(());
+    }
+    let destination_path = unpack_json_destination_path(&spec.result_prefix, source_path)?;
+    charge_json_path(
+        &destination_path,
+        state_bytes,
+        limits.max_state_bytes,
+        "unpack_json",
+    )?;
+    let existing = field_value(row, &destination_path);
+    if spec.keep_original_fields && existing.is_some_and(is_nonempty) {
+        return Ok(());
+    }
+    let object = row
+        .as_object_mut()
+        .ok_or_else(|| "LogsQL unpack_json input row is not a JSON object".to_string())?;
+    if !value.is_object() && copy_destination_replaces_object(object, &destination_path) {
+        return Err(format!(
+            "LogsQL unpack_json destination conflict: field {:?} would replace a retained object",
+            destination_path.join(".")
+        ));
+    }
+    charge_transfer_value(
+        &value,
+        state_bytes,
+        limits.max_state_bytes,
+        cancelled,
+        work_items,
+        limits.max_state_items,
+        "unpack_json",
+    )?;
+    insert_path(object, &destination_path, value)
+        .map_err(|error| format!("LogsQL unpack_json destination conflict: {error}"))
+}
+
+fn unpack_json_destination_path(
+    result_prefix: &str,
+    source_path: &[String],
+) -> Result<Vec<String>, String> {
+    let Some((first, remaining)) = source_path.split_first() else {
+        return Err("LogsQL unpack_json source path is empty".into());
+    };
+    if result_prefix.is_empty() {
+        return Ok(source_path.to_vec());
+    }
+    let mut destination = result_prefix
+        .split('.')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let last = destination
+        .last_mut()
+        .expect("splitting a non-empty prefix produces one segment");
+    last.push_str(first);
+    destination.extend(remaining.iter().cloned());
+    Ok(destination)
+}
+
+fn select_json_fields(
     row: &Value,
     fields: &[PipelineField],
     state_bytes: &mut usize,
     work_items: &mut usize,
     limits: PipelineLimits,
     cancelled: &AtomicBool,
+    operation: &str,
 ) -> Result<Map<String, Value>, String> {
     let source = row
         .as_object()
-        .ok_or_else(|| "LogsQL pack_json input row is not a JSON object".to_string())?;
+        .ok_or_else(|| format!("LogsQL {operation} input row is not a JSON object"))?;
     if fields.is_empty()
         || fields
             .iter()
@@ -351,7 +761,7 @@ fn select_pack_json_fields(
             cancelled,
             work_items,
             limits.max_state_items,
-            "pack_json",
+            operation,
         )?;
         return Ok(source.clone());
     }
@@ -361,11 +771,11 @@ fn select_pack_json_fields(
         ensure_active(cancelled)?;
         match field {
             PipelineField::Exact { path, .. } => {
-                charge_transfer_work(work_items, limits.max_state_items, "pack_json")?;
+                charge_transfer_work(work_items, limits.max_state_items, operation)?;
                 let Some(value) = field_value(row, path) else {
                     continue;
                 };
-                charge_pack_json_path(path, state_bytes, limits.max_state_bytes)?;
+                charge_json_path(path, state_bytes, limits.max_state_bytes, operation)?;
                 charge_transfer_value(
                     value,
                     state_bytes,
@@ -373,16 +783,16 @@ fn select_pack_json_fields(
                     cancelled,
                     work_items,
                     limits.max_state_items,
-                    "pack_json",
+                    operation,
                 )?;
                 insert_path(&mut packed, path, value.clone()).map_err(|error| {
-                    format!("LogsQL pack_json field selection conflict: {error}")
+                    format!("LogsQL {operation} field selection conflict: {error}")
                 })?;
             }
             PipelineField::Prefix { prefix } => {
                 let mut flattened_path = String::new();
                 let mut source_path = Vec::new();
-                select_pack_json_prefix(
+                select_json_prefix(
                     row,
                     &mut flattened_path,
                     &mut source_path,
@@ -392,6 +802,7 @@ fn select_pack_json_fields(
                     work_items,
                     limits,
                     cancelled,
+                    operation,
                 )?;
             }
             PipelineField::All => unreachable!("all-fields selection handled above"),
@@ -401,7 +812,7 @@ fn select_pack_json_fields(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn select_pack_json_prefix(
+fn select_json_prefix(
     value: &Value,
     flattened_path: &mut String,
     source_path: &mut Vec<String>,
@@ -411,8 +822,9 @@ fn select_pack_json_prefix(
     work_items: &mut usize,
     limits: PipelineLimits,
     cancelled: &AtomicBool,
+    operation: &str,
 ) -> Result<(), String> {
-    charge_transfer_work(work_items, limits.max_state_items, "pack_json")?;
+    charge_transfer_work(work_items, limits.max_state_items, operation)?;
     check_periodically(cancelled, *work_items)?;
     if let Value::Object(object) = value {
         if !object.is_empty() {
@@ -423,7 +835,7 @@ fn select_pack_json_prefix(
                 }
                 flattened_path.push_str(name);
                 source_path.push(name.clone());
-                select_pack_json_prefix(
+                select_json_prefix(
                     child,
                     flattened_path,
                     source_path,
@@ -433,6 +845,7 @@ fn select_pack_json_prefix(
                     work_items,
                     limits,
                     cancelled,
+                    operation,
                 )?;
                 source_path.pop();
                 flattened_path.truncate(original_length);
@@ -443,7 +856,7 @@ fn select_pack_json_prefix(
     if !flattened_path.starts_with(prefix) {
         return Ok(());
     }
-    charge_pack_json_path(source_path, state_bytes, limits.max_state_bytes)?;
+    charge_json_path(source_path, state_bytes, limits.max_state_bytes, operation)?;
     charge_transfer_value(
         value,
         state_bytes,
@@ -451,23 +864,24 @@ fn select_pack_json_prefix(
         cancelled,
         work_items,
         limits.max_state_items,
-        "pack_json",
+        operation,
     )?;
     insert_path(packed, source_path, value.clone())
-        .map_err(|error| format!("LogsQL pack_json field selection conflict: {error}"))
+        .map_err(|error| format!("LogsQL {operation} field selection conflict: {error}"))
 }
 
-fn charge_pack_json_path(
+fn charge_json_path(
     path: &[String],
     state_bytes: &mut usize,
     limit: usize,
+    operation: &str,
 ) -> Result<(), String> {
     *state_bytes = state_bytes
         .checked_add(size_of::<Vec<String>>())
-        .ok_or_else(|| "LogsQL pack_json state size overflow".to_string())?;
-    ensure_first_state_bytes(*state_bytes, limit, "pack_json")?;
+        .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+    ensure_first_state_bytes(*state_bytes, limit, operation)?;
     for segment in path {
-        charge_transfer_string(segment, state_bytes, limit, "pack_json")?;
+        charge_transfer_string(segment, state_bytes, limit, operation)?;
     }
     Ok(())
 }
@@ -7578,6 +7992,230 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             pack_json_fields(vec![row], &all, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn unpack_json_preserves_typed_nested_states_and_observes_bounds() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::UnpackJson(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected unpack_json plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 500,
+            max_state_bytes: 40_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "_msg": r#"{"case":"decoded","zero":0,"false_value":false,"empty":"","null_value":null,"array":["prod",1],"nested":{"keep":"yes","number":2},"empty_object":{}}"#,
+            "case":"original",
+            "empty":"original-empty",
+            "null_value":"original-null",
+            "nested":{"sibling":"retained"},
+            "result":["native"],
+            "source": r#"{"result":"new","empty":"","null_value":null,"source":"replaced"}"#,
+            "native_source":{"native":true,"nested":{"value":3}}
+        });
+
+        let selected = parse_spec(
+            "* | unpack_json fields (case, zero, false_value, empty, null_value, array, nested.*, empty_object, missing)",
+        );
+        let selected_rows = unpack_json_fields(
+            vec![row.clone()],
+            &selected,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(selected_rows[0]["case"], "decoded");
+        assert_eq!(selected_rows[0]["zero"], json!(0));
+        assert_eq!(selected_rows[0]["false_value"], json!(false));
+        assert_eq!(selected_rows[0]["empty"], "");
+        assert_eq!(selected_rows[0]["null_value"], Value::Null);
+        assert_eq!(selected_rows[0]["array"], json!(["prod", 1]));
+        assert_eq!(
+            selected_rows[0]["nested"],
+            json!({"sibling":"retained", "keep":"yes", "number":2})
+        );
+        assert_eq!(selected_rows[0]["empty_object"], json!({}));
+        assert_eq!(selected_rows[0]["missing"], "");
+
+        let nonstandard = parse_spec("* | unpack_json from nonstandard");
+        let nonstandard_rows = unpack_json_fields(
+            vec![json!({
+                "nonstandard": r#"{"value":NaN,"quoted":"NaN"}"#,
+                "value":"old"
+            })],
+            &nonstandard,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(nonstandard_rows[0]["value"], "NaN");
+        assert_eq!(nonstandard_rows[0]["quoted"], "NaN");
+
+        let literal_dotted = parse_spec(
+            r#"* | unpack_json from dotted fields ("literal.key", nested.key) result_prefix decoded."#,
+        );
+        let dotted_rows = unpack_json_fields(
+            vec![json!({
+                "dotted": r#"{"literal.key":1,"nested":{"key":2}}"#
+            })],
+            &literal_dotted,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(dotted_rows[0]["decoded"]["literal.key"], json!(1));
+        assert_eq!(dotted_rows[0]["decoded"]["nested"]["key"], json!(2));
+
+        let preserve =
+            parse_spec("* | unpack_json from _msg preserve_keys (nested) result_prefix decoded.");
+        let preserved = unpack_json_fields(
+            vec![row.clone()],
+            &preserve,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            preserved[0]["decoded"]["nested"],
+            json!({"keep":"yes", "number":2})
+        );
+        assert_eq!(preserved[0]["decoded"]["zero"], json!(0));
+
+        let keep = parse_spec("* | unpack_json from source keep_original_fields");
+        let kept = unpack_json_fields(
+            vec![row.clone()],
+            &keep,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(kept[0]["result"], json!(["native"]));
+        assert_eq!(kept[0]["empty"], "original-empty");
+        assert_eq!(kept[0]["null_value"], "original-null");
+        assert_eq!(kept[0]["source"], row["source"]);
+
+        let skip = parse_spec("* | unpack_json from source skip_empty_results");
+        let skipped = unpack_json_fields(
+            vec![row.clone()],
+            &skip,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(skipped[0]["result"], "new");
+        assert_eq!(skipped[0]["empty"], "original-empty");
+        assert_eq!(skipped[0]["null_value"], "original-null");
+        assert_eq!(skipped[0]["source"], "replaced");
+
+        let native = parse_spec("* | unpack_json from native_source");
+        let native_rows = unpack_json_fields(
+            vec![row.clone()],
+            &native,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(native_rows[0]["native"], json!(true));
+        assert_eq!(native_rows[0]["nested"]["value"], json!(3));
+        assert_eq!(native_rows[0]["nested"]["sibling"], "retained");
+
+        let false_condition = parse_spec("* | unpack_json if (case:=other)");
+        assert_eq!(
+            unpack_json_fields(
+                vec![row.clone()],
+                &false_condition,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap(),
+            vec![row.clone()]
+        );
+
+        let malformed = parse_spec("* | unpack_json from source fields (missing)");
+        let malformed_row = json!({"source":"{broken", "missing":"original"});
+        assert_eq!(
+            unpack_json_fields(
+                vec![malformed_row],
+                &malformed,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap()[0]["missing"],
+            ""
+        );
+
+        let work_error = unpack_json_fields(
+            vec![row.clone()],
+            &selected,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("LogsQL unpack_json"), "{work_error}");
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = unpack_json_fields(
+            vec![row.clone()],
+            &selected,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(state_error.contains("LogsQL unpack_json"), "{state_error}");
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        let conflict = parse_spec("* | unpack_json from source");
+        let conflict_error = unpack_json_fields(
+            vec![json!({"source":r#"{"nested":{"child":1}}"#, "nested":"scalar"})],
+            &conflict,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL unpack_json destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            unpack_json_fields(
+                vec![row],
+                &selected,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

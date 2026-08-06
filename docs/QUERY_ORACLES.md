@@ -742,3 +742,22 @@ richer retained-model policy: one deterministic JSON object, idempotent
 selector union, native JSON types, explicit empty/null values, and reconstructed
 nested objects instead of duplicate flattened textual keys.
 The fixture now contains 850 cases.
+
+`LQL-P36` adds seventeen exact pipeline/statistics cases and eight error cases
+for `unpack_json`. They pin default `_msg`, bare and explicit `from` sources,
+exact/missing/prefix/all selection, empty `fields ()`, preserved nested keys,
+result prefixes, source snapshots, default/keep-original/skip-empty writes,
+matching and nonmatching conditions, case-insensitive and quoted grammar,
+surrounding whitespace, native textualization, nonobject no-ops, malformed
+object exact-field empties, and the accepted bare `NaN` token. Missing
+conditions/sources/prefixes, wildcard sources or preserved keys, malformed
+field lists, trailing tokens, and conflicting preservation modifiers fail.
+Source audit is against `pipe_unpack_json.go`, `pipe_unpack.go`,
+`json_parser.go`, and their tests at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The fixture contains 298
+row-query cases, 275 error cases, and 302 statistics/pipeline cases: 875 cases
+total, all passing against the immutable image. Timeless selects an explicit
+richer retained-model policy: native JSON types, literal dotted keys, explicit
+empty/null values, and reconstructed nesting rather than flattened textual
+columns.
+The fixture now contains 875 cases.

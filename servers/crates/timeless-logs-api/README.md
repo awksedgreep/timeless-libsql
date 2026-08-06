@@ -1026,6 +1026,43 @@ public storage work. Packed results are 2,688 bytes versus 1,600 because they
 contain the requested JSON object strings. This bounded rich selection and
 serialization cost does not justify moving LogsQL syntax into the extension.
 
+LogsQL `unpack_json` parses one current-row JSON object without changing
+durable log metadata:
+
+```text
+* | unpack_json
+* | unpack_json from payload
+* | unpack_json payload fields (host, status, context.*)
+* | unpack_json if (kind:=audit) from payload preserve_keys (context)
+    result_prefix decoded. keep_original_fields
+* | unpack_json from payload fields () skip_empty_results
+```
+
+The command and clauses are case-insensitive. The source defaults to `_msg`
+and may be one bare or `from` exact field containing whitespace-padded JSON
+object text or a native retained object. Omitted or empty `fields ()` selects
+all members. Exact missing fields become empty strings; unmatched prefixes add
+nothing. `preserve_keys` keeps selected objects atomic and native, while
+`result_prefix` prepends a destination namespace.
+
+Timeless preserves strings, numbers, booleans, arrays, objects, explicit
+nulls, empty strings, empty objects, nested siblings, and literal dotted JSON
+keys. Sources are snapshotted before writes. `keep_original_fields` retains
+nonempty destinations, and `skip_empty_results` suppresses null/empty writes.
+Malformed object text supplies empties only for explicit exact selectors;
+other nonobjects are no-ops. The pinned bare `NaN` token becomes text `NaN`.
+Scalar/object path conflicts return HTTP 422. Parsing, paths, selected state,
+work, result rows, response bytes, deadlines, and cancellation are bounded.
+
+This deliberately differs from VictoriaLogs v1.52.0 textual flattening. The
+pinned 875-case oracle records upstream grammar and behavior; real-extension
+tests pin Timeless's rich retained-model policy through optimize and reopen.
+Direct SQLite/libSQL users can use executable
+[`SQL-LOG-042`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-042-unpack-selected-rich-fields-from-a-json-object)
+for fixed exact paths through public `logs` and JSON1. Dynamic LogsQL
+selection and request-local writes stay in the Rust API; no private table,
+language-specific extension primitive, or storage-format change is involved.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical
