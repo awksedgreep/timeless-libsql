@@ -666,7 +666,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S06` | `min` / `max` / `median` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `ROWS`, `SQL` | `API` | P1 |
 | `LQL-S07` | `quantile` / `stddev` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-044-upper-step-numeric-quantile-and-population-standard-deviation)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S08` | `rate` / `rate_sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
-| `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | in progress | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S10` | `any` / `field_min` / `field_max` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` | missing | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -696,6 +696,14 @@ reusable. Timeless intentionally returns a native JSON integer rather than
 VictoriaLogs' decimal string. `SQL-LOG-045` is the executable single-exact-
 metadata-path foundation; dynamic field selection, canonical fields, language
 grammar, limits, cancellation, and HTTP envelopes remain Rust API work.
+
+Exact-build evidence records 3.223/3.460/3.940 ms narrow and
+34.152/35.691/36.932 ms wide p50/p95/p99 versus 3.109/3.719/4.321 and
+35.066/37.760/40.220 ms for same-run numeric-`sum` controls. The 7.0%/5.5%
+lower p95 follows exactly the same one/four candidate blocks, 1,024/8,192
+decoded entries, 235,778/1,914,055 payload bytes, and 128/8,192 public rows.
+`QSF-195` accepts the bounded constant-state Rust reduction above the unchanged
+public storage boundary.
 
 ## Query options and HTTP behavior
 

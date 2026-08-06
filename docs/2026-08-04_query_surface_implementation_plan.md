@@ -882,6 +882,21 @@ unchanged four-block storage and the HWM verdict, and closes `LQL-S07`.
 Session 17 continues with `LQL-S09`; its remaining declared P2 rows must not
 be skipped before Session 18 begins.
 
+`LQL-S09` now has strict case-insensitive `sum_len` grammar; exact, prefix,
+and all-current-field selection; UTF-8/compact-JSON byte semantics; explicit
+missing/null/type behavior; a checked constant `u64` aggregate; work/result/
+response limits; cancellation; optimize/reopen durability; reader recovery;
+and immutable durable sources. Five exact statistics cases and five errors
+pass the complete 917-case pinned VictoriaLogs oracle with the documented
+native-integer retained-model response. Executable `SQL-LOG-045` gives direct
+users the exact-metadata-path JSON1 foundation. Exact-build commit
+`411de6d35fdf91f383fac7a2fc32e4a8b22dd35a` measures 3.460/35.691 ms
+narrow/wide p95 versus 3.719/37.760 ms for numeric-`sum` controls. `QSF-195`
+accepts the 7.0%/5.5% lower bounded reduction tails, records unchanged four-
+block storage and the HWM verdict, and closes `LQL-S09`. Session 17 continues
+with `LQL-S10`; its remaining declared P2 rows must not be skipped before
+Session 18 begins.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,

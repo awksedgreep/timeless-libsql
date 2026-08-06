@@ -1518,6 +1518,15 @@ envelopes remain bounded Rust API composition. The required public scan
 already crosses each selected row, so no extension primitive or private
 storage access is involved.
 
+Exact-build evidence measures 3.223/3.460/3.940 ms narrow and
+34.152/35.691/36.932 ms wide p50/p95/p99. Same-run numeric-`sum` controls
+measure 3.109/3.719/4.321 and 35.066/37.760/40.220 ms, making `sum_len` p95
+7.0%/5.5% lower. Every equal-width pair reads the same one/four blocks,
+decodes the same 1,024/8,192 entries, transfers the same
+235,778/1,914,055 extension payload bytes, and materializes the same
+128/8,192 public rows. `QSF-195` retains this bounded API reduction without a
+storage primitive.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the
