@@ -1628,6 +1628,22 @@ Dynamic selectors and the complete LogsQL comparator remain bounded Rust API
 composition after the same required public scan; no private table or language-
 specific extension primitive is involved.
 
+Exact release build `74a92f1b6ae927695fbb39d80303482966218e10`
+measures `row_any` at 2.880/3.097/4.720 ms narrow and
+35.036/37.829/39.595 ms wide p50/p95/p99. Same-scan scalar `any` controls
+measure 3.201/3.660/4.240 and 36.597/37.888/39.081 ms, making `row_any` p95
+15.4%/0.2% lower. Two rich row extrema measure 2.948/3.219/3.427 and
+37.970/39.790/40.474 ms versus 3.022/3.429/3.737 and
+34.149/36.227/37.943 ms for scalar companion-extrema controls, or 6.1% lower/
+9.8% higher p95. Rich outputs are intentionally larger: 36 versus 12 bytes
+for selection and 101 versus 26 bytes for extrema. Every comparison reads the
+same one/four blocks, decodes the same 1,024/8,192 entries, transfers the same
+235,778/1,914,055 extension bytes, and materializes the same 128/8,192 public
+rows. The checked evidence artifact is
+[`2026-08-06_session17_lql_s11_row_selection.json`](evidence/2026-08-06_session17_lql_s11_row_selection.json)
+with SHA-256
+`eae8dc26fc6eb257445b96229a74891fea695470c65d053724dc53dd0184ed8b`.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

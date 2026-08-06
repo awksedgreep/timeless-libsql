@@ -668,7 +668,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S08` | `rate` / `rate_sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-013-numeric-aggregates-median-and-rates)) | shipped | `COUNT`, `BUCKETS`, `SQL` | `API` | P1 |
 | `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | in progress | `ROWS`, `SQL` | `API` | P2 |
+| `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -749,6 +749,19 @@ deadline-cancellable. `SQL-LOG-047` gives direct users deterministic fixed-
 path rich selection and finite-native-number row extrema through public
 `logs`; dynamic selectors, canonical fields, complete comparison, limits,
 cancellation, grammar, and envelopes remain Rust API composition.
+
+Exact-build `row_any` evidence records 2.880/3.097/4.720 ms narrow and
+35.036/37.829/39.595 ms wide p50/p95/p99 versus 3.201/3.660/4.240 and
+36.597/37.888/39.081 ms for same-scan scalar `any` controls. Its p95 is
+15.4% lower/0.2% lower. Rich row extrema record 2.948/3.219/3.427 and
+37.970/39.790/40.474 ms versus 3.022/3.429/3.737 and
+34.149/36.227/37.943 ms for scalar companion-extrema controls, or 6.1% lower/
+9.8% higher p95. The rich responses are 36 versus 12 bytes and 101 versus 26
+bytes; every pair nevertheless performs byte-identical public storage work:
+one/four candidate blocks, 1,024/8,192 decoded entries,
+235,778/1,914,055 payload bytes, and 128/8,192 materialized rows. `QSF-199`
+accepts the bounded rich-object cost and retains the wide tail and whole-
+workload HWM honestly above the unchanged public storage boundary.
 
 ## Query options and HTTP behavior
 

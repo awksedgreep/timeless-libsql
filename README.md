@@ -762,6 +762,11 @@ cancellation. Result aliases accept both `as name` and VictoriaLogs' implicit
 finite-native-number public-row foundation in `SQL-LOG-047`; dynamic language
 semantics stay in the standalone Rust logs API without an Elixir, NIF, HTTP,
 or private-storage fallback.
+Exact-build p95 is 3.097/37.829 ms narrow/wide for `row_any`, 15.4%/0.2%
+below same-scan scalar controls. Rich `row_min` plus `row_max` p95 is
+3.219/39.790 ms, 6.1% below/9.8% above scalar companion controls; all pairs
+read byte-identical public blocks and the wide cost stays documented rather
+than hidden.
 The bounded `first` pipeline selects an optional positive number of rows by
 exact fields with per-field direction, optional partitioning, and an optional
 one-based string rank. Its coercion chain covers exact signed/unsigned

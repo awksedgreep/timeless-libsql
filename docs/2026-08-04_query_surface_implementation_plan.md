@@ -928,6 +928,15 @@ foundations without a new extension primitive. Exact-build performance,
 storage work, HWM, and the final row disposition remain required before
 `LQL-S11` closes and Session 18 begins.
 
+Exact-build commit `74a92f1b6ae927695fbb39d80303482966218e10` closes
+that final gate. `row_any` p95 is 3.097/37.829 ms narrow/wide versus
+3.660/37.888 ms for same-scan scalar controls; rich row extrema p95 is
+3.219/39.790 ms versus 3.429/36.227 ms for scalar companion controls. `QSF-199`
+accepts the 15.4%/0.2% lower and 6.1% lower/9.8% higher tails, records the
+larger rich responses, byte-identical public reads, unchanged four-block
+storage, and HWM verdict, and closes `LQL-S11`. Session 17's declared P2 rows
+are complete; the sequential roadmap continues with Session 18.
+
 ### Session 18: applicable LogsQL P3
 
 Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,
