@@ -758,10 +758,13 @@ result and seven error cases pass the complete 740-case pinned VictoriaLogs
 oracle. Timeless keeps rich missing/null/object/no-match values intact while
 actual replacements become query-row strings. `QSF-178` records that retained-
 model boundary and the deliberate strict rejection of upstream's ambiguous
-attached `replace(foo,bar)` whole-query interpretation. Exact-build
-performance/HWM evidence remains required before `LQL-P29` can ship. Session
-17 then continues with `LQL-P30`; its remaining declared P2 rows must not be
-skipped before Session 18 begins.
+attached `replace(foo,bar)` whole-query interpretation. Exact-build commit
+`2288307503c1110d9fa5ac9056a35d965afb61a4` measures 3.520/37.711 ms
+narrow/wide p95 versus 3.908/36.882 ms for byte-identical same-scan controls.
+`QSF-179` accepts the -9.9%/+2.2% bounded literal-transform variation,
+records unchanged four-block storage and the HWM verdict, and closes
+`LQL-P29`. Session 17 continues with `LQL-P30`; its remaining declared P2
+rows must not be skipped before Session 18 begins.
 
 ### Session 18: applicable LogsQL P3
 

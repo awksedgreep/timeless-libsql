@@ -1054,6 +1054,15 @@ rich-preservation, limit, cancellation, and HTTP-envelope behavior remains in
 the Rust API. No extension primitive, private storage table, or durable format
 change is needed.
 
+Exact-build literal-replacement evidence measures 3.240/3.520/3.576 ms
+narrow and 36.716/37.711/37.948 ms wide p50/p95/p99 while returning 64 rows
+and 1,600 response bytes. Byte-identical same-scan controls measure
+3.261/3.908/4.406 and 35.734/36.882/37.846 ms. The -9.9%/+2.2% p95 and
+-3.6%/+2.7% internal API variation follows the same one/four candidate
+blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. `QSF-179` accepts this bounded literal row transform
+above the unchanged public storage boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

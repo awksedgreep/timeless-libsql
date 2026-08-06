@@ -132,7 +132,7 @@ extension.
 | `LQL-P26` | `collapse_nums` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P30` | `replace_regexp` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` | missing | no | `SQL` | `API` | P2 |
