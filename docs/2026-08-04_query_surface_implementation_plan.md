@@ -777,8 +777,12 @@ pass the complete 765-case pinned VictoriaLogs oracle. `QSF-180` records the
 retained-model boundary and the absence of a portable SQLite/public-extension
 RE2 capture-replacement scalar. Accordingly, this row has no dishonest SQL
 recipe and does not justify a language-specific extension primitive. Exact-
-build performance, storage, and HWM evidence remains before `LQL-P30` can
-ship; Session 17 then continues through its remaining declared P2 rows.
+build commit `8c7c27d4f98f7bfd58c0b27764c7f48f2b2ff425` measures
+3.442/40.628 ms narrow/wide p95 versus 3.391/35.822 ms for byte-identical
+same-scan controls. `QSF-181` accepts the +1.5%/+13.4% bounded regex/capture-
+expansion cost, records unchanged four-block storage and the HWM verdict, and
+closes `LQL-P30`. Session 17 continues with its remaining declared P2 rows;
+none may be skipped before Session 18 begins.
 
 ### Session 18: applicable LogsQL P3
 

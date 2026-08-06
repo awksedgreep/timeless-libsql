@@ -133,7 +133,7 @@ extension.
 | `LQL-P27` | `decolorize` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P28` | `drop_empty_fields` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-038-drop-one-empty-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P29` | `replace` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-039-literal-replacement-in-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P30` | `replace_regexp` | in progress | no | none | `API` | P2 |
+| `LQL-P30` | `replace_regexp` | shipped | no | none | `API` | P2 |
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | missing | no | `SQL` | `API` | P2 |
@@ -465,8 +465,10 @@ replacement scalar with capture-template expansion, so this row honestly has
 no SQL foundation or recipe. Direct users must compose it in their host or
 load a separate regexp extension. `QSF-180` records the language/storage
 boundary and the complete 765-case pinned oracle. No extension primitive,
-private table, or storage-contract change is required by correctness; exact-
-build evidence remains required before the row ships.
+private table, or storage-contract change is required. Exact-build evidence
+records 3.442/40.628 ms narrow/wide p95 versus 3.391/35.822 ms for byte-
+identical same-scan controls; `QSF-181` accepts the +1.5%/+13.4% bounded
+regexp/capture-expansion cost above the unchanged public storage boundary.
 
 ## Statistics functions
 

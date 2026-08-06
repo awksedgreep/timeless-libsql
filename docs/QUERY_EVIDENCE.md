@@ -4642,3 +4642,97 @@ compression, indexes, retention, optimize, transactions, migrations, and
 public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or downstream
 repository was used or modified.
+
+## Session 17 LogsQL P2: bounded literal `replace`
+
+The checked-in
+[`2026-08-06_session17_lql_p29_replace.json`](evidence/2026-08-06_session17_lql_p29_replace.json)
+was captured from exact release extension and server build
+`2288307503c1110d9fa5ac9056a35d965afb61a4`. The narrow shape scans one
+indexed host, projects `range_key`, replaces literal `key` with equal-width
+`log`, and returns 64 rows. The wide shape performs the same transform across
+all 8,192 entries before its 64-row limit. Same-run controls scan the
+identical source rowsets, sort by time, and project the unchanged field.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `replace`, indexed host | 64 | 1,600 | 3.240 | 3.520 | 3.576 | 1 | 1,024 | 235,778 | 128 |
+| `replace`, full fixture | 64 | 1,600 | 36.716 | 37.711 | 37.948 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 64 | 1,600 | 3.261 | 3.908 | 4.406 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 64 | 1,600 | 35.734 | 36.882 | 37.846 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 9.9% below/2.2% above its narrow/wide same-run control.
+Its internal API timer averages 2.509/35.530 ms versus 2.603/34.596 ms, or
+3.6% below/2.7% above. Every equal-width pair performs byte-identical public
+storage scans, block decodes, payload reads, row materialization, and response
+encoding. Literal matching, exact two-pass output sizing, rich no-op policy,
+field mutation, limits, cancellation, and errors remain bounded Rust API
+work. `SQL-LOG-039` already gives direct SQLite/libSQL users ordinary public
+JSON1/core-`replace()` composition, so a new extension primitive would not
+avoid storage work.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.106 ms and the explicit durability barrier took 35.430 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 92,060 KiB and metrics HWM was
+53,448 KiB. Each maximum spans the enlarged complete workload and is retained
+as whole-process variation. Cancellation ended with zero requests in flight.
+
+All 740 pinned VictoriaLogs v1.52.0 cases pass live. The final 43-test logs
+real-extension suite, 92 logs library tests, complete 45-section CLI/crash/
+transaction suite, 30-test Rust query harness, documentation contracts,
+Clippy with warnings denied, formatting, and all 105 SQL recipes (141
+statements) pass locally. Storage formats, batching, compression, indexes,
+retention, optimize, transactions, migrations, and public batch/SQL contracts
+are unchanged. No private table, fallback process, CI workflow, tag, release,
+or downstream repository was used or modified.
+
+## Session 17 LogsQL P2: bounded `replace_regexp`
+
+The checked-in
+[`2026-08-06_session17_lql_p30_replace_regexp.json`](evidence/2026-08-06_session17_lql_p30_replace_regexp.json)
+was captured from exact release extension and server build
+`8c7c27d4f98f7bfd58c0b27764c7f48f2b2ff425`. The narrow shape scans one
+indexed host, projects `range_key`, matches `^key-([0-9a-f]+)$`, expands the
+capture into equal-width `log-$1`, and returns 64 rows. The wide shape performs
+the same transform across all 8,192 entries before its 64-row limit. Same-run
+controls scan the identical source rowsets, sort by time, and project the
+unchanged field.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `replace_regexp`, indexed host | 64 | 1,600 | 3.303 | 3.442 | 3.533 | 1 | 1,024 | 235,778 | 128 |
+| `replace_regexp`, full fixture | 64 | 1,600 | 39.620 | 40.628 | 45.369 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 64 | 1,600 | 3.200 | 3.391 | 3.646 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 64 | 1,600 | 33.545 | 35.822 | 36.126 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The transform p95 is 1.5%/13.4% above its narrow/wide same-run control. Its
+internal API timer averages 2.698/38.925 ms versus 2.693/32.479 ms, or
+0.2%/19.8% above. Every equal-width pair performs byte-identical public
+storage scans, block decodes, payload reads, row materialization, and response
+encoding. Request-once pattern compilation, automata matching, capture-
+template sizing/rendering, field mutation, limits, cancellation, and errors
+remain bounded Rust API work. Core SQLite and the public extension have no
+portable RE2 capture-replacement scalar, so no false SQL recipe is claimed;
+the measured post-scan API cost does not justify a LogsQL-specific extension
+primitive.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+12.971 ms and the explicit durability barrier took 36.993 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 93,256 KiB, 1,196 KiB above
+LQL-P29; metrics HWM was 52,100 KiB, 1,348 KiB below it. Each maximum spans
+the enlarged complete workload and is retained as whole-process variation.
+Cancellation ended with zero requests in flight; direct evaluator and HTTP
+deadline regressions pin work/state/result/response bounds, rejection,
+cancellation, and reader reuse.
+
+All 765 pinned VictoriaLogs v1.52.0 cases pass live. The final 44-test logs
+real-extension suite, 94 logs library tests, complete 45-section CLI/crash/
+transaction suite, 30-test Rust query harness, documentation contracts,
+Clippy with warnings denied, formatting, and all 105 SQL recipes (141
+statements) pass locally. The extension's authoritative 8,192-entry batching,
+storage formats, compression, indexes, retention, optimize, transactions,
+migrations, and public batch/SQL contracts are unchanged. No private shadow
+table, Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or
+downstream repository was used or modified.

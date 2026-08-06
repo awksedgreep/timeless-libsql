@@ -1118,6 +1118,15 @@ boundary, and measurements decide whether a future general-purpose extension
 primitive is justified. Promoting LogsQL syntax or a language-specific
 replacement helper into the storage extension is not justified.
 
+Exact-build regexp-replacement evidence measures 3.303/3.442/3.533 ms
+narrow and 39.620/40.628/45.369 ms wide p50/p95/p99 while returning 64 rows
+and 1,600 response bytes. Byte-identical same-scan controls measure
+3.200/3.391/3.646 and 33.545/35.822/36.126 ms. The +1.5%/+13.4% p95 and
++0.2%/+19.8% internal API cost follows the same one/four candidate blocks,
+1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and 128/8,192
+public rows. `QSF-181` accepts the bounded API-side regex and capture-
+expansion work above the unchanged public storage boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the
