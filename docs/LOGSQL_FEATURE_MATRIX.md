@@ -137,7 +137,7 @@ extension.
 | `LQL-P31` | `split` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P32` | `extract` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-040-two-literal-delimited-fields-from-one-exact-retained-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P33` | `extract_regexp` | shipped | no | none | `API` | P2 |
-| `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P34` | `pack_json` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-041-pack-selected-rich-metadata-fields-as-json)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P35` | `pack_logfmt` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P36` | `unpack_json` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P37` | `unpack_logfmt` | missing | no | `SQL` | `API` | P3 |
@@ -552,6 +552,15 @@ grammar, recursive prefix/all selection, destination mutation, limits,
 cancellation, and HTTP envelopes remain Rust API composition over public
 rows. No extension primitive, private table, durable mutation, or storage-
 contract change is required.
+
+Exact-build evidence records 3.146/37.921 ms narrow/wide p95 versus
+3.098/35.717 ms for same-scan controls. The +1.5%/+6.2% p95 and
+-1.3%/+7.4% internal API variation follows exactly the same one/four blocks,
+1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 public rows. Packed responses are 2,688 bytes versus 1,600 for the
+plain-field controls because every selected value is wrapped in a JSON object
+string. `QSF-187` accepts the bounded rich selection/serialization cost above
+the unchanged public storage boundary.
 
 ## Statistics functions
 

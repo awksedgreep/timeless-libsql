@@ -1294,6 +1294,16 @@ Recursive prefix/all selectors, destination writes, language errors, limits,
 cancellation, and HTTP envelopes remain Rust API composition. No extension
 primitive, private table, or storage-format change is involved.
 
+Exact-build typed-packing evidence measures 2.946/3.146/4.588 ms narrow and
+35.570/37.921/38.085 ms wide p50/p95/p99 while returning 64 rows and 2,688
+response bytes. Same-scan plain-field controls measure
+2.959/3.098/3.227 and 32.567/35.717/37.101 ms while returning 1,600 bytes.
+The +1.5%/+6.2% p95 and -1.3%/+7.4% internal API variation follows the same
+one/four candidate blocks, 1,024/8,192 decoded entries,
+235,778/1,914,055 payload bytes, and 128/8,192 public rows. `QSF-187`
+accepts the bounded rich selection and serialization cost above the unchanged
+public storage boundary.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the
