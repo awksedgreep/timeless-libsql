@@ -4425,3 +4425,56 @@ compression, indexes, retention, optimize, transactions, migrations, and
 public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or downstream
 repository was used or modified.
+
+## Session 17 LogsQL P2: bounded `format`
+
+The checked-in
+[`2026-08-05_session17_lql_p22_format.json`](evidence/2026-08-05_session17_lql_p22_format.json)
+was captured from exact release extension and server build
+`49761cdc2d980ffc2110a9e3483994b8a4d9b47b`. The narrow shape scans one
+indexed host, projects `context` and `status`, formats three rich values into
+`rendered`, and returns 64 rows. The wide shape performs the same transform
+across all 8,192 entries before its 64-row limit. Same-run controls scan the
+identical source rowsets and return the same cardinality using established
+time sort and `range_key` projection. They control storage and result count;
+they are not semantic equivalents to pattern interpolation and transforms.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `format`, indexed host | 64 | 1,706 | 2.986 | 3.297 | 3.903 | 1 | 1,024 | 235,778 | 128 |
+| `format`, full fixture | 64 | 1,706 | 36.493 | 39.353 | 40.036 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/cardinality control, indexed host | 64 | 1,600 | 2.868 | 3.090 | 4.200 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/cardinality control, full fixture | 64 | 1,600 | 33.004 | 35.941 | 36.801 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The `format` p95 is 6.7%/9.5% above its narrow/wide same-run control. Its
+internal API timer averages 2.502/36.118 ms versus 2.406/32.465 ms, or
+4.0%/11.3% above. Responses are 6.6% larger because
+the formatted field and value are longer than the control. Every equal-width
+pair performs exactly the same public storage scan, block decode, payload
+read, and row materialization. Pattern traversal, rich textual projection,
+transforms, output expansion, conditions, preservation, and destination
+mutation remain bounded Rust API work. `SQL-LOG-035` already gives direct
+SQLite/libSQL users ordinary public JSON1/`printf` interpolation, so a new
+extension primitive would not avoid storage work.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+15.217 ms and the explicit durability barrier took 34.807 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Those values are byte-identical to LQL-P21.
+Logs HWM was 99,516 KiB, 1,964 KiB above LQL-P21; metrics HWM was 51,752 KiB,
+464 KiB above it. Each maximum spans the enlarged complete workload and is
+retained as whole-process variation rather than attributed to one `format`
+request. Cancellation ended with zero requests in flight; direct evaluator
+and HTTP deadline regressions pin cancellation, bounded work/state/result/
+response behavior, rejection, and reader reuse.
+
+All 649 pinned VictoriaLogs v1.52.0 cases pass live. The final 39-test logs
+real-extension suite, 83 logs library tests, complete supported extension and
+Rust server workspaces, complete 45-section CLI/crash/transaction suite,
+30-test Rust query harness, documentation contracts, Clippy with warnings
+denied, formatting, and all 101 SQL recipes (137 statements) pass locally.
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow, tag, release, or downstream
+repository was used or modified.

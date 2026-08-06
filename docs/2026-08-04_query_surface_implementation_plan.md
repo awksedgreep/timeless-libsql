@@ -692,7 +692,11 @@ pass the complete 649-case pinned VictoriaLogs oracle. Timeless preserves
 typed rich inputs and explicit empty destinations where the flattened
 upstream stream response omits them. `QSF-170` records the semantic boundary
 and the corrected scientific-time/HTTP-envelope regressions. Exact-build
-performance and HWM remain to be recorded in `QSF-171` before the row closes.
+commit `49761cdc2d980ffc2110a9e3483994b8a4d9b47b` measures `format` at
+3.297/39.353 ms narrow/wide p95 versus 3.090/35.941 ms for byte-identical
+same-scan controls. `QSF-171` accepts the +6.7%/+9.5% bounded transform cost,
+records unchanged four-block storage and the HWM verdict, and closes the row.
+Session 17 continues with `LQL-P23`.
 
 ### Session 18: applicable LogsQL P3
 

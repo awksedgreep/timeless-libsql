@@ -125,7 +125,7 @@ extension.
 | `LQL-P19` | `coalesce` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-032-first-nonempty-textual-log-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P20` | `copy` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-033-copy-one-exact-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P21` | `rename` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-034-rename-one-exact-top-level-retained-metadata-field)) | shipped | no | `SQL` | `API` | P2 |
-| `LQL-P22` | `format` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)) | in progress | no | `SQL` | `API` | P2 |
+| `LQL-P22` | `format` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-035-format-two-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P23` | `math` / `eval` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P24` | `len` | missing | no | `SQL` | `API` | P2 |
 | `LQL-P25` | `hash` | missing | no | `SQL` | `API` | P3 |
@@ -351,7 +351,10 @@ and cancellation are bounded. Executable `SQL-LOG-035` provides ordinary
 JSON1/`printf` interpolation for exact metadata paths. Language syntax,
 arbitrary patterns, codecs, conditional composition, destination mutation,
 limits, and HTTP envelopes remain in the Rust API; no extension primitive,
-private table, or storage-contract change is required.
+private table, or storage-contract change is required. Exact-build evidence
+records 3.297/39.353 ms narrow/wide p95 versus 3.090/35.941 ms for
+byte-identical same-scan controls; `QSF-171` accepts the +6.7%/+9.5% bounded
+formatting cost.
 
 ## Statistics functions
 

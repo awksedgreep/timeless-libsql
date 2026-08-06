@@ -860,7 +860,9 @@ response bytes, and cancellation use the hard request limits. Executable
 shows a public JSON1/`printf` equivalent for two exact metadata paths. The
 Rust API owns LogsQL syntax, arbitrary placeholders and codecs, conditions,
 destination preservation, errors, and limits; no extension primitive or
-private table is used.
+private table is used. Exact-build evidence measures 3.297/39.353 ms
+narrow/wide p95 versus 3.090/35.941 ms for byte-identical same-scan controls;
+`QSF-171` accepts the +6.7%/+9.5% bounded formatting cost.
 
 ## Public log storage statistics
 
