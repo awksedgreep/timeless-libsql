@@ -87,6 +87,7 @@ pub(crate) enum StatsKind {
     RowMin,
     RowMax,
     JsonValues,
+    Histogram,
     Rate,
     RateSum,
 }
@@ -439,6 +440,7 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         "row_min" => StatsKind::RowMin,
         "row_max" => StatsKind::RowMax,
         "json_values" => StatsKind::JsonValues,
+        "histogram" => StatsKind::Histogram,
         "rate" => StatsKind::Rate,
         "rate_sum" => StatsKind::RateSum,
         _ => {
@@ -531,6 +533,12 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         {
             return Err(LogsqlError::malformed(format!(
                 "LogsQL {function} requires exact field names"
+            )))
+        }
+        StatsKind::Histogram if !matches!(fields.as_slice(), [PipelineField::Exact { .. }]) => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL histogram requires exactly one exact field; got {}",
+                fields.len()
             )))
         }
         StatsKind::Rate => {}
@@ -4296,6 +4304,33 @@ fn parse_json_values_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Stats(vec![expression]))
 }
 
+fn is_histogram_pipe(segment: &str) -> bool {
+    let operation = "histogram";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
+fn parse_histogram_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let operation = "histogram";
+    if segment[operation.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace() && character != '(')
+    {
+        return Err(LogsqlError::malformed(
+            "unexpected text attached to LogsQL histogram pipe",
+        ));
+    }
+    let expression = parse_stats_expression(segment)?;
+    if expression.kind != StatsKind::Histogram {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL histogram pipe, not {segment:?}"
+        )));
+    }
+    Ok(PipelineOp::Stats(vec![expression]))
+}
+
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
     let operation = "drop_empty_fields";
     segment
@@ -6256,6 +6291,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
                 pipeline.push(parse_json_values_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
+            _ if is_histogram_pipe(segment) => {
+                pipeline.push(parse_histogram_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
             _ if words
                 .first()
                 .is_some_and(|word| word.eq_ignore_ascii_case("query_stats")) =>
@@ -7603,7 +7642,7 @@ fn parse_victorialogs_sort_i64(value: &str) -> Option<i64> {
     }
 }
 
-fn parse_victorialogs_sort_number(value: &str) -> Option<f64> {
+pub(crate) fn parse_victorialogs_sort_number(value: &str) -> Option<f64> {
     parse_victorialogs_decimal(value)
         .or_else(|| parse_victorialogs_human_duration(value).map(|value| value as f64))
         .or_else(|| parse_victorialogs_human_bytes(value).map(|value| value as f64))
@@ -13313,6 +13352,54 @@ mod tests {
             "* | stats json_values(a) limit 2 sort by (rank)",
             "* | stats json_values(a) as rows trailing",
             "* | json_values.extra(a)",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn session_eighteen_histogram_grammar_is_exact_and_strict() {
+        for query in [
+            "* | stats histogram(value) as buckets",
+            r#"* | stats HiStOgRaM("nested.value") "bucket rows""#,
+            "* | histogram(value)",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+            let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+                panic!("unexpected histogram plan: {plan:?}");
+            };
+            assert_eq!(expressions.len(), 1, "{query:?}");
+            assert!(
+                matches!(
+                    expressions[0].fields.as_slice(),
+                    [PipelineField::Exact { .. }]
+                ),
+                "{query:?}: {:?}",
+                expressions[0].fields
+            );
+        }
+
+        let plan = parse_at("* | HiStOgRaM(value)", TimestampUnit::Microseconds, 0).unwrap();
+        let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+            panic!("unexpected histogram plan: {plan:?}");
+        };
+        assert_eq!(expressions[0].alias, "histogram(value)");
+
+        for malformed in [
+            "* | stats histogram",
+            "* | stats histogram()",
+            "* | stats histogram(*)",
+            "* | stats histogram(value*)",
+            "* | stats histogram(value, other)",
+            "* | stats histogram(value) limit 1",
+            "* | stats histogram(value) as buckets trailing",
+            "* | histogram.extra(value)",
         ] {
             assert!(
                 parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),

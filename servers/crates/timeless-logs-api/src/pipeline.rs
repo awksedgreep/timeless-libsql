@@ -21,14 +21,14 @@ use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
-    parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CollapseNumsSpec,
-    CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
-    JoinSpec, JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec,
-    PackJsonSpec, PackLogfmtSpec, PipelineField, PipelineOp, QueryRowsSource,
-    RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, RunningStatsExpression,
-    RunningStatsKind, RunningStatsMode, RunningStatsSpec, SplitSpec, StatsExpression, StatsKind,
-    TimeAddSpec, TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec,
-    UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
+    parse_logsql_math_number, parse_victorialogs_human_duration, parse_victorialogs_sort_number,
+    CoalesceSpec, CollapseNumsSpec, CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec,
+    FirstSpec, FormatSpec, FormatStep, JoinSpec, JsonArrayConcatSpec, MathBinaryOperator,
+    MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec, PipelineField,
+    PipelineOp, QueryRowsSource, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
+    RunningStatsExpression, RunningStatsKind, RunningStatsMode, RunningStatsSpec, SplitSpec,
+    StatsExpression, StatsKind, TimeAddSpec, TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec,
+    UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -9057,6 +9057,8 @@ fn stats(
     let mut result = Map::new();
     let mut json_values_work_items = 0usize;
     let mut json_values_retained_bytes = size_of::<Map<String, Value>>();
+    let mut histogram_work_items = 0usize;
+    let mut histogram_retained_bytes = size_of::<Map<String, Value>>();
     for expression in expressions {
         ensure_active(cancelled)?;
         let value = match expression.kind {
@@ -9157,6 +9159,33 @@ fn stats(
                 )?;
                 value
             }
+            StatsKind::Histogram => {
+                let value = histogram(
+                    rows,
+                    &expression.fields,
+                    limits,
+                    cancelled,
+                    &mut histogram_work_items,
+                    histogram_retained_bytes,
+                )?;
+                let encoded_len = value
+                    .as_str()
+                    .ok_or_else(|| "LogsQL histogram result is not a string".to_string())?
+                    .len();
+                histogram_retained_bytes = histogram_retained_bytes
+                    .checked_add(size_of::<String>())
+                    .and_then(|bytes| bytes.checked_add(expression.alias.len()))
+                    .and_then(|bytes| bytes.checked_add(size_of::<Value>()))
+                    .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+                    .and_then(|bytes| bytes.checked_add(encoded_len))
+                    .ok_or_else(|| "LogsQL histogram state size overflow".to_string())?;
+                ensure_first_state_bytes(
+                    histogram_retained_bytes,
+                    limits.max_state_bytes,
+                    "histogram",
+                )?;
+                value
+            }
             StatsKind::Rate => {
                 let value = rate_window_seconds
                     .filter(|duration| *duration > 0.0)
@@ -9176,6 +9205,173 @@ fn stats(
         result.insert(expression.alias.clone(), value);
     }
     Ok(result)
+}
+
+const HISTOGRAM_MIDDLE_BUCKETS: usize = 486;
+const HISTOGRAM_LOWER_BUCKET: usize = HISTOGRAM_MIDDLE_BUCKETS;
+const HISTOGRAM_UPPER_BUCKET: usize = HISTOGRAM_MIDDLE_BUCKETS + 1;
+const HISTOGRAM_BUCKETS: usize = HISTOGRAM_MIDDLE_BUCKETS + 2;
+
+fn histogram(
+    rows: &[Value],
+    fields: &[PipelineField],
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+    retained_stats_bytes: usize,
+) -> Result<Value, String> {
+    const OPERATION: &str = "histogram";
+    let [field] = fields else {
+        return Err("LogsQL histogram plan requires exactly one field".to_string());
+    };
+    if !matches!(field, PipelineField::Exact { .. }) {
+        return Err("LogsQL histogram plan requires an exact field".to_string());
+    }
+    ensure_active(cancelled)?;
+
+    // VictoriaMetrics' histogram has 486 logarithmic counters plus one lower
+    // and one upper counter. Keeping the same fixed stack state makes memory
+    // independent of input cardinality and avoids per-value allocation.
+    let mut hits = [0u64; HISTOGRAM_BUCKETS];
+    let fixed_state_bytes = retained_stats_bytes
+        .checked_add(size_of::<[u64; HISTOGRAM_BUCKETS]>())
+        .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+    ensure_first_state_bytes(fixed_state_bytes, limits.max_state_bytes, OPERATION)?;
+
+    for (index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        charge_transfer_work(work_items, limits.max_state_items, OPERATION)?;
+        let Some(value) = exact_stats_field_value(row, field)? else {
+            continue;
+        };
+        let number = match value {
+            Value::Number(value) => value.as_f64(),
+            Value::String(value) => parse_victorialogs_sort_number(value),
+            Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
+        };
+        let Some(bucket) = number.and_then(histogram_bucket) else {
+            continue;
+        };
+        hits[bucket] = hits[bucket]
+            .checked_add(1)
+            .ok_or_else(|| "LogsQL histogram hit count overflows uint64".to_string())?;
+    }
+    ensure_active(cancelled)?;
+
+    let ranges = histogram_ranges();
+    let mut buckets = hits
+        .iter()
+        .enumerate()
+        .filter(|(_, hits)| **hits > 0)
+        .map(|(index, hits)| (ranges[index].as_str(), *hits))
+        .collect::<Vec<_>>();
+    let bucket_state_bytes = size_of::<Vec<(&str, u64)>>()
+        .checked_add(
+            buckets
+                .capacity()
+                .checked_mul(size_of::<(&str, u64)>())
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        )
+        .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+    ensure_first_state_bytes(
+        fixed_state_bytes
+            .checked_add(bucket_state_bytes)
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        limits.max_state_bytes,
+        OPERATION,
+    )?;
+    buckets.sort_by(|left, right| logsql_sort_comparison(left.0, right.0));
+    ensure_active(cancelled)?;
+
+    let encoded_len = buckets
+        .iter()
+        .enumerate()
+        .try_fold(2usize, |bytes, (index, (vmrange, hits))| {
+            bytes
+                .checked_add(usize::from(index > 0))
+                .and_then(|bytes| bytes.checked_add(r#"{"vmrange":""#.len()))
+                .and_then(|bytes| bytes.checked_add(vmrange.len()))
+                .and_then(|bytes| bytes.checked_add(r#"","hits":"#.len()))
+                .and_then(|bytes| bytes.checked_add(hits.to_string().len()))
+                .and_then(|bytes| bytes.checked_add(1))
+        })
+        .ok_or_else(|| format!("LogsQL {OPERATION} result size overflow"))?;
+    ensure_first_state_bytes(
+        fixed_state_bytes
+            .checked_add(bucket_state_bytes)
+            .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+            .and_then(|bytes| bytes.checked_add(encoded_len))
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        limits.max_state_bytes,
+        OPERATION,
+    )?;
+    let mut encoded = String::with_capacity(encoded_len);
+    encoded.push('[');
+    for (index, (vmrange, hits)) in buckets.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index > 0 {
+            encoded.push(',');
+        }
+        encoded.push_str(r#"{"vmrange":""#);
+        encoded.push_str(vmrange);
+        encoded.push_str(r#"","hits":"#);
+        encoded.push_str(&hits.to_string());
+        encoded.push('}');
+    }
+    encoded.push(']');
+    debug_assert_eq!(encoded.len(), encoded_len);
+    ensure_active(cancelled)?;
+    Ok(Value::String(encoded))
+}
+
+fn histogram_bucket(value: f64) -> Option<usize> {
+    if value.is_nan() || value < 0.0 {
+        return None;
+    }
+    let bucket = (value.log10() + 9.0) * 18.0;
+    if bucket < 0.0 {
+        Some(HISTOGRAM_LOWER_BUCKET)
+    } else if bucket >= HISTOGRAM_MIDDLE_BUCKETS as f64 {
+        Some(HISTOGRAM_UPPER_BUCKET)
+    } else {
+        let mut index = bucket as usize;
+        if bucket == index as f64 && index > 0 {
+            index -= 1;
+        }
+        Some(index)
+    }
+}
+
+fn histogram_ranges() -> &'static [String; HISTOGRAM_BUCKETS] {
+    static RANGES: OnceLock<[String; HISTOGRAM_BUCKETS]> = OnceLock::new();
+    RANGES.get_or_init(|| {
+        let mut middle = Vec::with_capacity(HISTOGRAM_MIDDLE_BUCKETS);
+        let multiplier = 10f64.powf(1.0 / 18.0);
+        let mut value = 1e-9f64;
+        let mut start = histogram_scientific(value);
+        for _ in 0..HISTOGRAM_MIDDLE_BUCKETS {
+            value *= multiplier;
+            let end = histogram_scientific(value);
+            middle.push(format!("{start}...{end}"));
+            start = end;
+        }
+        std::array::from_fn(|index| match index {
+            HISTOGRAM_LOWER_BUCKET => "0...1.000e-09".to_string(),
+            HISTOGRAM_UPPER_BUCKET => "1.000e+18...+Inf".to_string(),
+            _ => middle[index].clone(),
+        })
+    })
+}
+
+fn histogram_scientific(value: f64) -> String {
+    let formatted = format!("{value:.3e}");
+    let (mantissa, exponent) = formatted
+        .rsplit_once('e')
+        .expect("Rust scientific notation includes an exponent");
+    let exponent = exponent
+        .parse::<i32>()
+        .expect("Rust scientific notation has a numeric exponent");
+    format!("{mantissa}e{exponent:+03}")
 }
 
 #[derive(Debug)]
@@ -11543,6 +11739,106 @@ mod tests {
         );
         assert_eq!(
             evaluate(&rows, &expression, limits, true).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn histogram_matches_victoria_buckets_types_bounds_and_cancellation() {
+        let field = PipelineField::Exact {
+            path: vec!["value".into()],
+            name: "value".into(),
+        };
+        let rows = [
+            json!({"value": 0}),
+            json!({"value": "1e-10"}),
+            json!({"value": "1e-9"}),
+            json!({"value": "1.9"}),
+            json!({"value": 2}),
+            json!({"value": 2.5}),
+            json!({"value": 3.05}),
+            json!({"value": "1.5KiB"}),
+            json!({"value": "10m5s"}),
+            json!({"value": 1_000_000_000_000_000_000u64}),
+            json!({"value": "+Inf"}),
+            json!({"value": -1}),
+            json!({"value": "-Inf"}),
+            json!({"value": "NaN"}),
+            json!({"value": "123.45.67.89"}),
+            json!({"value": "2024-05-30T01:02:03Z"}),
+            json!({"value": [1, 2]}),
+            json!({"value": {"n": 1}}),
+            json!({"value": null}),
+            json!({"missing": false}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let mut work_items = 0usize;
+        let encoded = histogram(
+            &rows,
+            std::slice::from_ref(&field),
+            limits,
+            &cancelled,
+            &mut work_items,
+            0,
+        )
+        .unwrap();
+        assert_eq!(work_items, rows.len());
+        assert_eq!(
+            serde_json::from_str::<Value>(encoded.as_str().unwrap()).unwrap(),
+            json!([
+                {"vmrange":"0...1.000e-09","hits":2},
+                {"vmrange":"1.000e+18...+Inf","hits":2},
+                {"vmrange":"1.000e-09...1.136e-09","hits":1},
+                {"vmrange":"1.468e+03...1.668e+03","hits":1},
+                {"vmrange":"1.896e+00...2.154e+00","hits":2},
+                {"vmrange":"2.448e+00...2.783e+00","hits":1},
+                {"vmrange":"2.783e+00...3.162e+00","hits":1},
+                {"vmrange":"5.995e+11...6.813e+11","hits":1}
+            ])
+        );
+
+        let mut work_items = 0usize;
+        let work_error = histogram(
+            &rows,
+            std::slice::from_ref(&field),
+            PipelineLimits {
+                max_state_items: rows.len() - 1,
+                ..limits
+            },
+            &cancelled,
+            &mut work_items,
+            0,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("max_work_rows=19"), "{work_error}");
+
+        let mut work_items = 0usize;
+        let state_error = histogram(
+            &rows,
+            std::slice::from_ref(&field),
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+            &mut work_items,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        let mut work_items = 0usize;
+        assert_eq!(
+            histogram(&rows, &[field], limits, &cancelled, &mut work_items, 0,).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

@@ -462,6 +462,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "json_values_path_3" => Value::Text("$.nested.none".to_owned()),
         "json_values_sort_path" => Value::Text("$.duration_ms".to_owned()),
         "json_values_limit" => Value::Integer(2),
+        "histogram_path" => Value::Text("$.duration_ms".to_owned()),
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "any_source_path" => Value::Text("$.host".to_owned()),
@@ -1795,6 +1796,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let time_add_rows = recipe_values("SQL-LOG-061", 0)?;
     let generate_sequence_rows = recipe_values("SQL-LOG-062", 0)?;
     let json_values_rows = recipe_values("SQL-LOG-063", 0)?;
+    let histogram_rows = recipe_values("SQL-LOG-064", 0)?;
     if [
         bounded,
         substring,
@@ -2158,6 +2160,14 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         )]]
     {
         bail!("SQL-LOG-063 typed JSON values changed: {json_values_rows:?}");
+    }
+    if histogram_rows
+        != [vec![Value::Text(
+            r#"[{"vmrange":"3.594e+00...4.084e+00","hits":1},{"vmrange":"1.136e+01...1.292e+01","hits":1}]"#
+                .to_owned(),
+        )]]
+    {
+        bail!("SQL-LOG-064 native-number histogram changed: {histogram_rows:?}");
     }
     let join_sql = recipe_sql("SQL-LOG-057", 0)?;
     let measured_join =
@@ -4486,13 +4496,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 129);
+        assert_eq!(recipes.len(), 130);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            161
+            162
         );
         assert_eq!(
             recipes
@@ -4500,7 +4510,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            167
+            168
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

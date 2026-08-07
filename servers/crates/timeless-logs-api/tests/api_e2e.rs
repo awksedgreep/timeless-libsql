@@ -9784,6 +9784,206 @@ async fn session_eighteen_json_values_is_sorted_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_histogram_is_exact_bounded_rich_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("histogram-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let body = [
+        r#"{"_time":1800500000000001,"_msg":"zero","level":"info","histogram_group":"s13","case":"zero","value":0}"#,
+        r#"{"_time":1800500000000002,"_msg":"small","level":"info","histogram_group":"s13","case":"small","value":0.0000000001}"#,
+        r#"{"_time":1800500000000003,"_msg":"first boundary","level":"notice","histogram_group":"s13","case":"first-boundary","value":"1e-9"}"#,
+        r#"{"_time":1800500000000004,"_msg":"decimal string","level":"notice","histogram_group":"s13","case":"decimal-string","value":"1.9"}"#,
+        r#"{"_time":1800500000000005,"_msg":"native integer","level":"warning","histogram_group":"s13","case":"native-integer","value":2}"#,
+        r#"{"_time":1800500000000006,"_msg":"native decimal","level":"warning","histogram_group":"s13","case":"native-decimal","value":2.5}"#,
+        r#"{"_time":1800500000000007,"_msg":"nested","level":"warning","histogram_group":"s13","case":"nested","value":3.05,"nested":{"value":3.05,"keep":[1,false,null]}}"#,
+        r#"{"_time":1800500000000008,"_msg":"bytes","level":"error","histogram_group":"s13","case":"bytes","value":"1.5KiB"}"#,
+        r#"{"_time":1800500000000009,"_msg":"duration","level":"error","histogram_group":"s13","case":"duration","value":"10m5s"}"#,
+        r#"{"_time":1800500000000010,"_msg":"upper","level":"critical","histogram_group":"s13","case":"upper","value":1000000000000000000}"#,
+        r#"{"_time":1800500000000011,"_msg":"infinity","level":"critical","histogram_group":"s13","case":"infinity","value":"+Inf"}"#,
+        r#"{"_time":1800500000000012,"_msg":"negative","level":"alert","histogram_group":"s13","case":"negative","value":-2}"#,
+        r#"{"_time":1800500000000013,"_msg":"negative infinity","level":"alert","histogram_group":"s13","case":"negative-infinity","value":"-Inf"}"#,
+        r#"{"_time":1800500000000014,"_msg":"nan","level":"emergency","histogram_group":"s13","case":"nan","value":"NaN"}"#,
+        r#"{"_time":1800500000000015,"_msg":"ip","level":"info","histogram_group":"s13","case":"ip","value":"123.45.67.89"}"#,
+        r#"{"_time":1800500000000016,"_msg":"timestamp","level":"info","histogram_group":"s13","case":"timestamp","value":"2024-05-30T01:02:03Z"}"#,
+        r#"{"_time":1800500000000017,"_msg":"array","level":"info","histogram_group":"s13","case":"array","value":[1,2]}"#,
+        r#"{"_time":1800500000000018,"_msg":"object","level":"info","histogram_group":"s13","case":"object","value":{"x":1}}"#,
+        r#"{"_time":1800500000000019,"_msg":"null","level":"info","histogram_group":"s13","case":"null","value":null}"#,
+        r#"{"_time":1800500000000020,"_msg":"missing","level":"info","histogram_group":"s13","case":"missing","flag":false}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn histogram(app: &axum::Router) -> serde_json::Value {
+        let rows = pipeline_rows(
+            app,
+            r#"histogram_group:="s13" | stats histogram(value) as buckets"#,
+        )
+        .await;
+        assert_eq!(rows.len(), 1);
+        serde_json::from_str(rows[0]["buckets"].as_str().unwrap()).unwrap()
+    }
+
+    let expected = serde_json::json!([
+        {"vmrange":"0...1.000e-09","hits":2},
+        {"vmrange":"1.000e+18...+Inf","hits":2},
+        {"vmrange":"1.000e-09...1.136e-09","hits":1},
+        {"vmrange":"1.468e+03...1.668e+03","hits":1},
+        {"vmrange":"1.896e+00...2.154e+00","hits":2},
+        {"vmrange":"2.448e+00...2.783e+00","hits":1},
+        {"vmrange":"2.783e+00...3.162e+00","hits":1},
+        {"vmrange":"5.995e+11...6.813e+11","hits":1}
+    ]);
+    let app = router(storage.clone());
+    assert_eq!(histogram(&app).await, expected);
+
+    let shorthand = pipeline_rows(&app, r#"histogram_group:="s13" | HiStOgRaM(value)"#).await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            shorthand[0]["histogram(value)"].as_str().unwrap()
+        )
+        .unwrap(),
+        expected,
+        "standalone histogram must use the canonical VictoriaLogs result name"
+    );
+    let nested = pipeline_rows(
+        &app,
+        r#"histogram_group:="s13" | stats histogram(nested.value) as nested"#,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(nested[0]["nested"].as_str().unwrap()).unwrap(),
+        serde_json::json!([{"vmrange":"2.783e+00...3.162e+00","hits":1}])
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"histogram_group:="absent" | stats histogram(value) as buckets"#,
+        )
+        .await,
+        [serde_json::json!({"buckets":"[]"})]
+    );
+
+    for malformed in [
+        r#"histogram_group:="s13" | stats histogram"#,
+        r#"histogram_group:="s13" | stats histogram()"#,
+        r#"histogram_group:="s13" | stats histogram(*)"#,
+        r#"histogram_group:="s13" | stats histogram(value*)"#,
+        r#"histogram_group:="s13" | stats histogram(value, case)"#,
+        r#"histogram_group:="s13" | stats histogram(value) limit 1"#,
+        r#"histogram_group:="s13" | stats histogram(value) as buckets trailing"#,
+        r#"histogram_group:="s13" | histogram.extra(value)"#,
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(logsql_request(malformed))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{malformed}"
+        );
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 19,
+                ..LogsQueryLimits::default()
+            },
+            r#"histogram_group:="s13" | stats histogram(value) as buckets"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 39,
+                ..LogsQueryLimits::default()
+            },
+            r#"histogram_group:="s13" | stats histogram(value) as first, histogram(nested.value) as second"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"histogram_group:="s13" | stats histogram(value) as buckets"#,
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    let source_query = r#"histogram_group:="s13" | sort by (_time) asc | fields case, value, nested, flag | limit 10000"#;
+    let source_rows = pipeline_rows(&app, source_query).await;
+    assert_eq!(source_rows.len(), 20);
+    assert_eq!(source_rows[0]["value"], 0);
+    assert_eq!(
+        source_rows[6]["nested"]["keep"],
+        serde_json::json!([1, false, null])
+    );
+    assert_eq!(source_rows[16]["value"], serde_json::json!([1, 2]));
+    assert_eq!(source_rows[17]["value"], serde_json::json!({"x":1}));
+    assert_eq!(source_rows[18]["value"], serde_json::Value::Null);
+    assert_eq!(source_rows[19]["flag"], false);
+    assert_eq!(
+        pipeline_rows(&app, r#"histogram_group:="s13" | stats count() as total"#).await,
+        [serde_json::json!({"total":20})],
+        "histogram limit failures must leave the public reader reusable"
+    );
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(histogram(&reopened_app).await, expected);
+    assert_eq!(
+        pipeline_rows(&reopened_app, source_query).await,
+        source_rows
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

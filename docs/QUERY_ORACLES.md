@@ -1239,3 +1239,26 @@ textual upstream store. The fixture remains 167 source rows and now contains
 346 row-query cases, one stochastic case, 503 error cases, and 524
 statistics/pipeline cases: 1,374 cases total, all passing against the
 immutable image. The fixture now contains 1374 cases.
+
+`LQL-S13` adds six exact statistics/pipeline cases and eight error cases for
+`histogram`. They pin native/text numeric bucketing, zero and sub-`1e-9`
+lower-bound behavior, exact internal boundaries, the `1e18`/infinity upper
+bucket, ignored negative/NaN values, duration and byte-size parsing,
+IPv4/timestamp exclusion, hit aggregation, empty input, standalone shorthand,
+canonical case-insensitive aliases, and strict field arity, wildcard, limit,
+suffix, and trailing-token failures.
+
+Source audit covers `stats_histogram.go`, its parser and processor tests, the
+pinned `github.com/VictoriaMetrics/metrics` histogram implementation, and the
+shared number/natural-sort helpers at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. Upstream uses 18 logarithmic
+buckets per decimal decade from `1e-9` through `1e18`, plus fixed lower and
+upper buckets; intervals are lower-exclusive/upper-inclusive except that the
+first middle bucket includes exact `1e-9`. It ignores negative and NaN values,
+emits only nonempty buckets, naturally sorts their `vmrange` labels, and
+returns one string containing a JSON array with native unsigned hit counts.
+Timeless preserves those semantics while reading native numbers and rich
+nested current-row values directly. The fixture remains 167 source rows and
+now contains 346 row-query cases, one stochastic case, 511 error cases, and
+530 statistics/pipeline cases: 1,388 cases total, all passing against the
+immutable image. The fixture now contains 1388 cases.

@@ -171,6 +171,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-061`](#sql-log-061-add-a-duration-to-public-native-log-time) | `LQL-P47` | current foundation | bounded saturating shift of public native log timestamps plus an explicit sub-native nanosecond remainder; API owns duration/RFC3339Nano grammar, arbitrary fields, UTC canonicalization, response mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-062`](#sql-log-062-generate-a-bounded-decimal-string-sequence) | `LQL-P48` | current foundation | input-independent bounded recursive sequence of decimal strings using core SQLite/libSQL; API owns LogsQL numeric grammar, replacement semantics, limits, cancellation, composition, and envelopes |
 | [`SQL-LOG-063`](#sql-log-063-bounded-typed-json-values-from-fixed-public-paths) | `LQL-S12` | current foundation | one JSON-array string of fixed exact retained paths from bounded public log rows, with missing omission, explicit-null/native-type fidelity, and deterministic native-number ordering; API owns dynamic selectors, complete natural sorting, top-k, grammar, limits, cancellation, and envelopes |
+| [`SQL-LOG-064`](#sql-log-064-bounded-histogram-over-one-native-number-path) | `LQL-S13` | current foundation | bounded Victoria-compatible logarithmic bucket assignment over one fixed public native-number path; API owns textual number/duration/byte parsing, natural result order, grammar, cumulative limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -9635,6 +9636,105 @@ read, decode, or public row crossing, so the storage extension remains
 unchanged. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
 harness; HTTP/oracle/optimize/reopen regression:
 `session_eighteen_json_values_is_sorted_rich_bounded_and_durable`.
+
+### SQL-LOG-064: bounded histogram over one native-number path
+
+Bind one exact SQLite JSON path, inclusive native timestamp bounds, and a
+positive work limit. This ordinary recursive statement classifies nonnegative
+native JSON integers and reals into VictoriaMetrics' 486 logarithmic middle
+buckets plus its fixed lower and upper buckets. It returns one compact JSON
+array string with native integer hit counts and reads only the public `logs`
+virtual table:
+
+```sql
+WITH RECURSIVE
+bounded AS MATERIALIZED (
+  SELECT metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), numeric_values(value) AS (
+  SELECT CAST(json_extract(metadata, :histogram_path) AS REAL)
+  FROM bounded
+  WHERE json_type(metadata, :histogram_path) IN ('integer', 'real')
+    AND CAST(json_extract(metadata, :histogram_path) AS REAL) >= 0.0
+), scaled(value, bucket) AS (
+  SELECT
+    value,
+    CASE
+      WHEN value < 1.0e-9 THEN 486
+      WHEN value >= 1.0e18 THEN 487
+      ELSE
+        CAST((log10(value) + 9.0) * 18.0 AS INTEGER)
+        - CASE
+            WHEN (log10(value) + 9.0) * 18.0
+                   = CAST((log10(value) + 9.0) * 18.0 AS INTEGER)
+             AND CAST((log10(value) + 9.0) * 18.0 AS INTEGER) > 0
+            THEN 1
+            ELSE 0
+          END
+    END
+  FROM numeric_values
+), middle_bounds(bucket, lower_bound, upper_bound) AS (
+  SELECT 0, 1.0e-9, 1.0e-9 * pow(10.0, 1.0 / 18.0)
+  UNION ALL
+  SELECT bucket + 1, upper_bound, upper_bound * pow(10.0, 1.0 / 18.0)
+  FROM middle_bounds
+  WHERE bucket + 1 < 486
+), ranges(bucket, vmrange) AS (
+  SELECT
+    bucket,
+    printf('%.3e', lower_bound) || '...' || printf('%.3e', upper_bound)
+  FROM middle_bounds
+  UNION ALL SELECT 486, '0...1.000e-09'
+  UNION ALL SELECT 487, '1.000e+18...+Inf'
+), counts AS MATERIALIZED (
+  SELECT ranges.bucket, ranges.vmrange, count(*) AS hits
+  FROM scaled
+  JOIN ranges USING (bucket)
+  GROUP BY ranges.bucket, ranges.vmrange
+  ORDER BY ranges.bucket
+)
+SELECT COALESCE(
+  json_group_array(json_object('vmrange', vmrange, 'hits', hits)),
+  '[]'
+) AS histogram
+FROM counts;
+```
+
+For the executable fixture, bind `:histogram_path` to `$.duration_ms`,
+`:start_ts`/`:end_ts` to `1000`/`2000` milliseconds, and
+`:max_work_entries` to `100000`. The two retained native numbers, `4` and
+`12`, return:
+
+```json
+[{"vmrange":"3.594e+00...4.084e+00","hits":1},{"vmrange":"1.136e+01...1.292e+01","hits":1}]
+```
+
+The SQL foundation deliberately accepts only native JSON integers and reals;
+missing, null, strings, booleans, arrays, objects, negative numbers, and NaN
+are absent. Zero and values below `1e-9` use the lower bucket, exact internal
+boundaries use the preceding bucket, and values at or above `1e18` use the
+upper bucket. The statement emits only nonempty buckets and orders them by
+numeric bucket position. Empty input returns the string `[]`.
+
+The complete `LQL-S13` Rust API additionally owns case-insensitive `stats
+histogram(field)` and standalone grammar, one-exact-field validation,
+VictoriaLogs decimal/general-number/duration/byte parsing, rejection of
+IPv4/timestamps as numeric input, natural `vmrange` ordering, canonical
+result names, rich nested current-row paths, cumulative work and response
+state limits, cancellation, and HTTP envelopes. It returns the same
+VictoriaLogs JSON-array string and never mutates the retained rich value.
+
+Every candidate already crosses the bounded public log-row interface, and
+core SQLite math, grouping, and JSON functions perform the useful native-
+number reduction. Moving LogsQL syntax or this fixed 488-counter reduction
+into the extension would not avoid a storage read or public row crossing, so
+no extension primitive or private table access is justified. Direct
+regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_eighteen_histogram_is_exact_bounded_rich_and_durable`.
 
 ## Adding the next recipe
 

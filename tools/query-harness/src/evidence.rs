@@ -3082,6 +3082,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "histogram_narrow",
+                "logs-histogram-narrow",
+                r#"host:="h00" AND query | stats histogram(context.attempt) as buckets"#,
+                1,
+                None,
+            ),
+            (
+                "histogram_wide",
+                "logs-histogram-wide",
+                r#"query | stats histogram(context.attempt) as buckets"#,
+                1,
+                None,
+            ),
+            (
+                "histogram_control_narrow",
+                "logs-histogram-control-narrow",
+                r#"host:="h00" AND query | stats values(context.attempt) limit 64 as buckets"#,
+                1,
+                None,
+            ),
+            (
+                "histogram_control_wide",
+                "logs-histogram-control-wide",
+                r#"query | stats values(context.attempt) limit 64 as buckets"#,
+                1,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3706,6 +3734,8 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "json_values_narrow",
         )?;
         require_same_public_query_work(&queries, "json_values_control_wide", "json_values_wide")?;
+        require_same_public_query_work(&queries, "histogram_control_narrow", "histogram_narrow")?;
+        require_same_public_query_work(&queries, "histogram_control_wide", "histogram_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({

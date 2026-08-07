@@ -2390,6 +2390,36 @@
       "expected_rows": [{"selected": "[]"}]
     },
     {
+      "id": "LQL-S13-histogram-buckets-numeric-values",
+      "query": "numeric_group:=numeric | stats histogram(n) as buckets",
+      "expected_rows": [{"buckets": "[{\"vmrange\":\"0...1.000e-09\",\"hits\":1},{\"vmrange\":\"1.896e+00...2.154e+00\",\"hits\":1},{\"vmrange\":\"2.448e+00...2.783e+00\",\"hits\":1},{\"vmrange\":\"2.783e+00...3.162e+00\",\"hits\":1},{\"vmrange\":\"8.799e+00...1.000e+01\",\"hits\":1},{\"vmrange\":\"8.799e+15...1.000e+16\",\"hits\":1}]"}]
+    },
+    {
+      "id": "LQL-S13-histogram-pins-lower-middle-upper-and-invalid-values",
+      "query": "case:=does-not-exist | union rows({\"v\":\"0\"},{\"v\":\"1e-10\"},{\"v\":\"1e-9\"},{\"v\":\"1e18\"},{\"v\":\"+Inf\"},{\"v\":\"NaN\"},{\"v\":\"-1\"},{\"v\":\"-Inf\"}) | stats histogram(v) as buckets",
+      "expected_rows": [{"buckets": "[{\"vmrange\":\"0...1.000e-09\",\"hits\":2},{\"vmrange\":\"1.000e+18...+Inf\",\"hits\":2},{\"vmrange\":\"1.000e-09...1.136e-09\",\"hits\":1}]"}]
+    },
+    {
+      "id": "LQL-S13-histogram-parses-duration-bytes-but-not-ip-or-time",
+      "query": "case:=format-row | stats histogram(math_duration) as duration, histogram(math_bytes) as bytes, histogram(math_ipv4) as ipv4, histogram(math_timestamp) as timestamp",
+      "expected_rows": [{"duration": "[{\"vmrange\":\"5.995e+11...6.813e+11\",\"hits\":1}]", "bytes": "[{\"vmrange\":\"1.468e+03...1.668e+03\",\"hits\":1}]", "ipv4": "[]", "timestamp": "[]"}]
+    },
+    {
+      "id": "LQL-S13-histogram-shorthand-is-case-insensitive-and-canonical",
+      "query": "numeric_group:=numeric | HiStOgRaM(n)",
+      "expected_rows": [{"histogram(n)": "[{\"vmrange\":\"0...1.000e-09\",\"hits\":1},{\"vmrange\":\"1.896e+00...2.154e+00\",\"hits\":1},{\"vmrange\":\"2.448e+00...2.783e+00\",\"hits\":1},{\"vmrange\":\"2.783e+00...3.162e+00\",\"hits\":1},{\"vmrange\":\"8.799e+00...1.000e+01\",\"hits\":1},{\"vmrange\":\"8.799e+15...1.000e+16\",\"hits\":1}]"}]
+    },
+    {
+      "id": "LQL-S13-histogram-empty-input-emits-an-empty-array",
+      "query": "case:=does-not-exist | stats histogram(n) as buckets",
+      "expected_rows": [{"buckets": "[]"}]
+    },
+    {
+      "id": "LQL-S13-histogram-aggregates-hits-in-one-bucket",
+      "query": "case:=does-not-exist | union rows({\"v\":\"1.9\"},{\"v\":\"2\"},{\"v\":\"-2\"}) | stats histogram(v) as buckets",
+      "expected_rows": [{"buckets": "[{\"vmrange\":\"1.896e+00...2.154e+00\",\"hits\":2}]"}]
+    },
+    {
       "id": "LQL-P48-generate-sequence-is-independent-of-input",
       "query": "case:=does-not-exist | generate_sequence 3",
       "expected_rows": [{"_msg": "0"}, {"_msg": "1"}, {"_msg": "2"}]
@@ -5536,6 +5566,62 @@
     {
       "id": "LQL-S12-json-values-rejects-an-attached-command-suffix",
       "query": "state_group:=state | json_values.extra(case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-requires-parentheses",
+      "query": "numeric_group:=numeric | stats histogram",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-requires-one-field",
+      "query": "numeric_group:=numeric | stats histogram()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-rejects-all-fields",
+      "query": "numeric_group:=numeric | stats histogram(*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-rejects-prefix-fields",
+      "query": "numeric_group:=numeric | stats histogram(n*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-rejects-multiple-fields",
+      "query": "numeric_group:=numeric | stats histogram(n,case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-rejects-limit",
+      "query": "numeric_group:=numeric | stats histogram(n) limit 1",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-rejects-trailing-tokens",
+      "query": "numeric_group:=numeric | stats histogram(n) as buckets trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S13-histogram-rejects-an-attached-command-suffix",
+      "query": "numeric_group:=numeric | histogram.extra(n)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

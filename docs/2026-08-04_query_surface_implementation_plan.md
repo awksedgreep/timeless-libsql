@@ -1386,6 +1386,25 @@ accepted exact-build verdict. No extension primitive, private table, storage
 contract, batching, compression, index, retention, transaction, migration,
 optimize, or maintenance behavior changed. `LQL-S12` is closed.
 
+Session 18's `LQL-S13` semantic implementation is complete as API-owned,
+bounded `histogram` aggregation with `SQL-LOG-064` as the fixed-path native-
+number foundation for direct users. Pinned VictoriaLogs source plus the
+complete 1,388-case live oracle establish strict one-exact-field statistics
+and shorthand grammar; decimal/general-number/duration/byte coercions;
+VictoriaMetrics' 486 logarithmic middle buckets plus lower/upper buckets;
+exact edge handling; ignored negative/NaN/IPv4/timestamp values; natural
+`vmrange` order; native hit counts; the JSON-array-string envelope; empty
+input; canonical aliases; and strict failures.
+
+Timeless additionally reads native numbers and rich nested paths without
+flattening or mutation. Parser/evaluator and real-extension regressions pin a
+fixed 488-counter stack state, process-wide immutable range labels,
+cumulative multi-expression work, response-state accounting, cancellation
+and reader reuse, immutable sources, optimize, flush, shutdown, and reopen.
+`QSF-249` records the semantic and unchanged-storage boundary. Exact-build
+performance, physical-work equality, storage, and HWM evidence remain the
+final exit criterion before `LQL-S13` ships.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

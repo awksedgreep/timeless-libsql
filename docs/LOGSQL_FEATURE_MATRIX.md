@@ -1060,7 +1060,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)) | shipped | `ROWS`, `SQL` | `API` | P3 |
-| `LQL-S13` | `histogram` | missing | `ROWS`, `SQL` | `API` | P3 |
+| `LQL-S13` | `histogram` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-064-bounded-histogram-over-one-native-number-path)) | in progress | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S15` | total `count/first/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 
@@ -1200,6 +1200,35 @@ bytes, and 128/8,192 public rows. `QSF-248` accepts the bounded API-owned
 selection/sort/encoding cost, unchanged four-block storage, zero queue and
 in-flight work, and 106,908 KiB complete-workload logs HWM. `LQL-S12` is
 closed.
+
+`histogram(field)` is implemented as a strict one-exact-field statistics
+expression and standalone shorthand over bounded public rows. Native JSON
+numbers and VictoriaLogs-compatible decimal, general-number, compound-
+duration, and byte-size strings feed the VictoriaMetrics logarithmic layout:
+486 middle buckets at 18 buckets per decimal decade from `1e-9` through
+`1e18`, plus fixed lower and upper buckets. Negative and NaN values are
+ignored; IPv4, RFC3339 timestamps, missing, null, booleans, arrays, and
+objects are not numeric histogram input.
+
+Only nonempty buckets are returned. Each object contains a `vmrange` string
+and native unsigned `hits`, and the complete result is one JSON-array string
+in VictoriaLogs natural-label order. Intervals are lower-exclusive and upper-
+inclusive, with exact `1e-9` entering the first middle bucket; exact later
+boundaries enter the preceding bucket. Empty input emits the string `[]`.
+Timeless additionally reads native rich nested paths without flattening or
+mutating them.
+
+All 1,388 pinned VictoriaLogs cases establish grammar, aliases, input parsing,
+bucket edges, hit aggregation, ordering, empty results, and strict failures.
+Parser, evaluator, and real-extension regressions pin fixed 488-counter
+memory, cumulative multi-expression work, response-state limits,
+cancellation, immutable rich sources, optimize, flush, shutdown, and reopen.
+Public `SQL-LOG-064` gives direct users an ordinary fixed-path native-number
+histogram over the public `logs` table. Textual duration/byte parsing, natural
+result order, LogsQL grammar, limits, cancellation, and envelopes remain Rust
+API composition after the unavoidable row crossing; no extension primitive
+or private storage access is warranted. Exact-build performance, physical-
+work equality, storage, and HWM evidence remain the final exit criterion.
 
 ## Query options and HTTP behavior
 

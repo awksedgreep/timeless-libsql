@@ -2783,6 +2783,60 @@ public storage work: one/four blocks, 1,024/8,192 decoded entries,
 235,778/1,914,055 payload bytes, and 128/8,192 materialized rows. The checked
 artifact and accepted boundary verdict are recorded in `QSF-248`.
 
+## LogsQL bounded logarithmic `histogram`
+
+The statistics pipeline can aggregate one exact current-row field into the
+VictoriaMetrics logarithmic bucket layout:
+
+```text
+* | stats histogram(duration_ms) as duration_buckets
+* | histogram(context.attempt)
+* | stats HiStOgRaM("literal dotted field") as buckets
+```
+
+`histogram` is case-insensitive and works as a statistics expression or
+standalone shorthand. It requires exactly one exact field; empty arguments,
+`*`, suffix-wildcard prefixes, multiple fields, `limit`, attached command
+suffixes, and trailing tokens fail explicitly. Without an alias the result
+field is the canonical lowercase spelling, such as
+`histogram(context.attempt)`. Quoted names select a literal field name;
+unquoted dotted names traverse retained nested metadata.
+
+Native JSON integers/reals and VictoriaLogs-compatible textual decimals,
+general math numbers, compound durations, and byte sizes are numeric input.
+IPv4 and RFC3339 timestamp strings are deliberately not treated as numbers.
+Negative values, `NaN`, missing, null, booleans, arrays, and objects are
+ignored. `+Inf` enters the upper bucket and `-Inf` is ignored. Rich source
+values and nested siblings remain unchanged.
+
+The layout contains 486 middle buckets—18 per decimal decade from `1e-9`
+through `1e18`—plus `0...1.000e-09` and `1.000e+18...+Inf`. Intervals are
+lower-exclusive and upper-inclusive. Exact `1e-9` enters the first middle
+bucket; exact later boundaries enter the preceding bucket. Only nonempty
+buckets are emitted, naturally ordered by `vmrange`. The field value is one
+string containing compact JSON with native integer hit counts:
+
+```json
+[{"vmrange":"1.896e+00...2.154e+00","hits":2}]
+```
+
+Empty input or input with no accepted value returns the string `[]`. The
+fixed 488-counter state, every visited row, multiple histogram expressions,
+the ordered bucket vector, encoded result, response, deadline, and
+cancellation are cumulatively bounded. A rejected or cancelled query leaves
+the public reader reusable; flush, optimize, shutdown, and reopen do not
+change results.
+
+Pinned VictoriaLogs v1.52.0 source and all 1,388 oracle cases establish the
+grammar, input coercions, exact boundaries, natural order, result envelope,
+and explicit errors. Executable
+[`SQL-LOG-064`](QUERY_SQL_EQUIVALENTS.md#sql-log-064-bounded-histogram-over-one-native-number-path)
+provides a fixed-path native-number foundation using public `logs`, SQLite
+math, grouping, and JSON functions. Textual duration/byte parsing, natural
+result ordering, dynamic LogsQL syntax, limits, cancellation, and HTTP
+envelopes stay in the Rust API. The operation already requires the public row
+scan, so no private table or extension primitive is justified.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the
