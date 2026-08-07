@@ -65,6 +65,10 @@ Pinned Prometheus also marks `mad_over_time` experimental. Stable requests
 preserve its disabled-function diagnostic before storage. Direct users have a
 documented finite-float two-median SQL recipe, while PromQL execution remains
 deferred to a separately configured experimental Rust tier and oracle.
+The same stable gate applies to `ts_of_first_over_time`,
+`ts_of_last_over_time`, `ts_of_min_over_time`, and `ts_of_max_over_time`.
+Direct SQL documentation covers their bounded finite-float timestamp subset;
+the server does not silently enable, approximate, or delegate the functions.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`

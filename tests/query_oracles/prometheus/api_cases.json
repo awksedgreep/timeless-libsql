@@ -3992,6 +3992,50 @@
       }
     },
     {
+      "id": "PQL-R23-ts-of-first-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "ts_of_first_over_time(vector(1)[1m:])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"ts_of_first_over_time\" is not enabled"
+      }
+    },
+    {
+      "id": "PQL-R23-ts-of-last-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "ts_of_last_over_time(vector(1)[1m:])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"ts_of_last_over_time\" is not enabled"
+      }
+    },
+    {
+      "id": "PQL-R23-ts-of-min-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "ts_of_min_over_time(vector(1)[1m:])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"ts_of_min_over_time\" is not enabled"
+      }
+    },
+    {
+      "id": "PQL-R23-ts-of-max-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "ts_of_max_over_time(vector(1)[1m:])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"ts_of_max_over_time\" is not enabled"
+      }
+    },
+    {
       "id": "PQL-R09-quantile-over-time-arity-error",
       "endpoint": "/api/v1/query",
       "params": {"query": "quantile_over_time(up[20s])", "time": "2"},

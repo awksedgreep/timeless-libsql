@@ -11596,6 +11596,22 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
             "function \"mad_over_time\" is not enabled",
         ),
         (
+            "ts_of_first_over_time(vector(1)[1m:])",
+            "function \"ts_of_first_over_time\" is not enabled",
+        ),
+        (
+            "ts_of_last_over_time(vector(1)[1m:])",
+            "function \"ts_of_last_over_time\" is not enabled",
+        ),
+        (
+            "ts_of_min_over_time(vector(1)[1m:])",
+            "function \"ts_of_min_over_time\" is not enabled",
+        ),
+        (
+            "ts_of_max_over_time(vector(1)[1m:])",
+            "function \"ts_of_max_over_time\" is not enabled",
+        ),
+        (
             "limitk(1, vector(1))",
             "limitk() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
         ),

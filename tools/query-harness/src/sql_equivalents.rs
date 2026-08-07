@@ -251,6 +251,12 @@ fn setup(connection: &mut Connection) -> Result<()> {
             ("mad_metric", r#"{"host":"c"}"#, 91, 1.0),
             ("mad_metric", r#"{"host":"c"}"#, 100, 4.0),
             ("mad_metric", r#"{"host":"c"}"#, 110, 10.0),
+            ("timestamp_metric", r#"{"host":"a"}"#, 91, 3.0),
+            ("timestamp_metric", r#"{"host":"a"}"#, 100, 1.0),
+            ("timestamp_metric", r#"{"host":"a"}"#, 105, 5.0),
+            ("timestamp_metric", r#"{"host":"a"}"#, 110, 1.0),
+            ("timestamp_metric", r#"{"host":"b"}"#, 95, 2.0),
+            ("timestamp_metric", r#"{"host":"b"}"#, 110, 2.0),
         ];
         for (name, labels, ts, value) in rows {
             insert.execute(params![name, labels, ts, value])?;
@@ -311,6 +317,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "SQL-PROM-054" | "SQL-PROM-056" | "SQL-MQL-012" => "sql_histogram_bucket",
         "SQL-PROM-055" => "cpu",
         "SQL-PROM-058" => "mad_metric",
+        "SQL-PROM-059" => "timestamp_metric",
         _ => "cpu",
     };
     match name {
@@ -326,7 +333,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "request_filter" => Value::Text(r#"{"host":"web-1"}"#.to_owned()),
         "at" => Value::Integer(110),
         "anchor" => Value::Integer(100),
-        "start" | "end" if identifier == "SQL-PROM-058" => Value::Integer(110),
+        "start" | "end" if matches!(identifier, "SQL-PROM-058" | "SQL-PROM-059") => {
+            Value::Integer(110)
+        }
         "start" => Value::Integer(if counter_window { 60 } else { 100 }),
         "end" => Value::Integer(if counter_window { 60 } else { 110 }),
         "step" | "resolution" => Value::Integer(10),
@@ -556,6 +565,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "offset_ns" => Value::Integer(0),
         "timestamp_scale_ns" => Value::Integer(1_000_000),
         "units_per_day" => Value::Integer(86_400_000),
+        "units_per_second" => Value::Integer(1),
+        "mode" => Value::Text("first".to_owned()),
         "empty_path" => Value::Text("$.nested.none".to_owned()),
         "any_path" => Value::Text("$.deployment.region".to_owned()),
         "duration_threshold" => Value::Integer(10),
@@ -974,6 +985,71 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     ];
     if mad != expected_mad {
         bail!("SQL-PROM-058 median absolute deviation changed: {mad:?}");
+    }
+
+    let timestamp_sql = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-PROM-059")
+        .context("SQL-PROM-059 recipe")?
+        .statements
+        .first()
+        .context("SQL-PROM-059 statement")?;
+    for (mode, expected) in [
+        (
+            "first",
+            vec![
+                (r#"{"host":"a"}"#.to_owned(), 110, 91.0),
+                (r#"{"host":"b"}"#.to_owned(), 110, 95.0),
+            ],
+        ),
+        (
+            "last",
+            vec![
+                (r#"{"host":"a"}"#.to_owned(), 110, 110.0),
+                (r#"{"host":"b"}"#.to_owned(), 110, 110.0),
+            ],
+        ),
+        (
+            "min",
+            vec![
+                (r#"{"host":"a"}"#.to_owned(), 110, 110.0),
+                (r#"{"host":"b"}"#.to_owned(), 110, 110.0),
+            ],
+        ),
+        (
+            "max",
+            vec![
+                (r#"{"host":"a"}"#.to_owned(), 110, 105.0),
+                (r#"{"host":"b"}"#.to_owned(), 110, 110.0),
+            ],
+        ),
+    ] {
+        let mut statement = connection.prepare(timestamp_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .unwrap()
+                .trim_start_matches(':');
+            let value = if name == "mode" {
+                Value::Text(mode.to_owned())
+            } else {
+                parameter("SQL-PROM-059", name)
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let timestamps = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if timestamps != expected {
+            bail!("SQL-PROM-059 {mode} timestamps changed: {timestamps:?}");
+        }
     }
 
     let metricsql_recipe = recipes
@@ -4609,13 +4685,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 132);
+        assert_eq!(recipes.len(), 133);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            164
+            165
         );
         assert_eq!(
             recipes
@@ -4623,7 +4699,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            170
+            171
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

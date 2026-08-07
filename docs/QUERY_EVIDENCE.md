@@ -6279,3 +6279,24 @@ executes this experimental function. The SQL reference is not relabeled as
 PromQL support. No storage format, private access, batching, compression,
 index, rollup, retention, transaction, migration, optimize, or maintenance
 behavior changed.
+
+## Session 19 experimental disposition: timestamp-of-range functions
+
+`PQL-R23` is classified, not enabled. Four exact cases pass against immutable
+Prometheus 3.13.2, bringing the complete API fixture to 539 cases and pinning
+the default feature gate for first, last, min, and max timestamp functions.
+Rust and real-extension regressions failed first on the internal `unsupported
+PromQL expression (parsed as function call)` message, then passed with exact
+GET envelopes, POST diagnostics, shutdown, reopen, and zero raw/window
+extension queries for all four names.
+
+Direct users receive executable `SQL-PROM-059`: 133 recipes and 171 statements
+now pass against the public extension. One bounded public-raw query supports
+all four finite-float modes and semantically pins earliest/latest source
+timestamps plus latest-tied min/max timestamps across multiple series. No
+extension primitive can avoid the required raw timestamps/value decode. No API
+narrow/wide p50/p95/p99, result-cardinality, storage-byte, or RSS comparison is
+reported because stable Timeless never executes these experimental functions.
+The SQL reference is not relabeled as PromQL support. No storage format,
+private access, batching, compression, index, rollup, retention, transaction,
+migration, optimize, or maintenance behavior changed.

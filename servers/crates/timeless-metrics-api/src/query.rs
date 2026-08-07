@@ -1861,6 +1861,10 @@ fn prometheus_disabled_stable_function(name: &str) -> bool {
             | "max_of"
             | "histogram_quantiles"
             | "mad_over_time"
+            | "ts_of_first_over_time"
+            | "ts_of_last_over_time"
+            | "ts_of_min_over_time"
+            | "ts_of_max_over_time"
     )
 }
 
@@ -10170,6 +10174,22 @@ mod tests {
             (
                 "mad_over_time(oracle_temporal[1m])",
                 "1:1: parse error: function \"mad_over_time\" is not enabled",
+            ),
+            (
+                "ts_of_first_over_time(oracle_temporal[1m])",
+                "1:1: parse error: function \"ts_of_first_over_time\" is not enabled",
+            ),
+            (
+                "ts_of_last_over_time(oracle_temporal[1m])",
+                "1:1: parse error: function \"ts_of_last_over_time\" is not enabled",
+            ),
+            (
+                "ts_of_min_over_time(oracle_temporal[1m])",
+                "1:1: parse error: function \"ts_of_min_over_time\" is not enabled",
+            ),
+            (
+                "ts_of_max_over_time(oracle_temporal[1m])",
+                "1:1: parse error: function \"ts_of_max_over_time\" is not enabled",
             ),
             (
                 "limitk(1, oracle_temporal)",

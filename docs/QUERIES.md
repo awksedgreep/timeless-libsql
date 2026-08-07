@@ -3290,6 +3290,17 @@ absolute deviations. That SQL foundation is not a stable PromQL support claim
 and documents the remaining NaN, signed-zero, native-histogram, annotations,
 labels, limits, cancellation, and envelope work.
 
+Pinned Prometheus likewise feature-gates `ts_of_first_over_time`,
+`ts_of_last_over_time`, `ts_of_min_over_time`, and `ts_of_max_over_time`.
+Stable Timeless preserves each disabled-function diagnostic before storage on
+GET, POST, and reopen. Direct SQLite/libSQL users can bind `first`, `last`,
+`min`, or `max` in executable
+[`SQL-PROM-059`](QUERY_SQL_EQUIVALENTS.md#sql-prom-059-timestamp-of-range-functions)
+to obtain the finite-float source timestamp over bounded public raw windows;
+min/max ties choose the latest sample. The SQL recipe states timestamp units
+and the native-histogram/NaN limitations explicitly and is not relabeled as
+stable PromQL support.
+
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
 Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over

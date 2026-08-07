@@ -1502,6 +1502,20 @@ be omitted and mixed ranges can emit the upstream info. No extension primitive
 is justified because both median passes require the already-decoded raw
 values. No API benchmark is claimed for stable syntax that is rejected.
 
+`PQL-R23` is closed as an experimental disposition. Pinned Prometheus 3.13.2
+requires `promql-experimental-functions` for `ts_of_first_over_time`,
+`ts_of_last_over_time`, `ts_of_min_over_time`, and `ts_of_max_over_time`.
+Stable Timeless previously parsed each call and leaked the same internal
+unsupported-expression error as `PQL-R22`; GET, POST, shutdown, and reopen now
+preserve all four pinned diagnostics with zero raw/window extension queries.
+Executable `SQL-PROM-059` gives direct SQLite/libSQL users bounded finite-float
+first/last timestamps and latest-tied min/max timestamps over public raw rows.
+A future experimental Rust tier requires a feature-enabled oracle and exact
+millisecond conversion, boundaries, subqueries, IEEE ordering, label/name,
+annotation, limit, and cancellation behavior. Full upstream first/last and
+mixed-range behavior requires `PQL-S22` typed native-histogram samples. No
+extension primitive or stable API benchmark is justified.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

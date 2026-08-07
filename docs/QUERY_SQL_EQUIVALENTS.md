@@ -100,6 +100,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-056`](#sql-prom-056-histogram_fraction-over-classic-buckets) | `PQL-H02` | current foundation | bounded classic-bucket grouping and linear CDF interpolation; API owns strict bounds, scalar ASTs, IEEE values, names, limits, cancellation, and envelopes |
 | [`SQL-PROM-057`](#sql-prom-057-fill-missing-one-to-one-vector-matches) | `PQL-O18` | reference | bounded full-outer one-to-one arithmetic with independently optional left/right defaults; the stable API rejects experimental fill syntax and a future experimental tier owns grammar, matching, labels, types, limits, cancellation, and envelopes |
 | [`SQL-PROM-058`](#sql-prom-058-mad_over_time) | `PQL-R22` | reference | two finite-float linear medians over bounded public raw windows; the stable API rejects the experimental function and a future experimental tier owns IEEE/histogram behavior, annotations, labels, limits, cancellation, and envelopes |
+| [`SQL-PROM-059`](#sql-prom-059-timestamp-of-range-functions) | `PQL-R23` | reference | bounded finite-float first/last sample timestamps and last-tied min/max timestamps over public raw windows; the stable API rejects the experimental functions and a future tier owns IEEE/histogram behavior, annotations, labels, limits, cancellation, and envelopes |
 | [`SQL-MQL-001`](#sql-mql-001-default-if-and-ifnot) | `MQL-01` | current foundation | bounded gap filling and step-local label membership; API owns MetricsQL syntax, implicit scalar vectors, full label/name policy, limits, cancellation, and envelopes |
 | [`SQL-MQL-002`](#sql-mql-002-keep_metric_names) | `MQL-02` | current foundation | carry the public metric-name column through ordinary SQL transforms; API owns modifier grammar, operation eligibility, name-aware matching, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-003`](#sql-mql-003-union-and-alias) | `MQL-03` | current foundation | public-grid `UNION ALL`, explicit metric-name projection, and first-branch labelset precedence; API owns grammar, scalar-vector conversion, duplicate-output errors, limits, cancellation, and envelopes |
@@ -2773,6 +2774,88 @@ envelopes. Both median passes consume the already-required raw values, so a
 new extension primitive would not improve chunk pruning or avoid the public
 decode. Executable regression: Rust SQL-equivalent harness `SQL-PROM-058`.
 Stable API GET/POST/reopen and zero-storage-query behavior are pinned by
+`session_fourteen_experimental_promql_functions_fail_stably_and_reopen`.
+
+### SQL-PROM-059: timestamp-of-range functions
+
+For finite float samples, bind `:mode` to `first`, `last`, `min`, or
+`max`. The query returns the earliest sample timestamp, latest sample
+timestamp, timestamp of the last minimum-valued sample, or timestamp of the
+last maximum-valued sample in every evaluation window:
+
+```sql
+WITH RECURSIVE
+parameters(mode, units_per_second) AS (
+  SELECT :mode, CAST(:units_per_second AS REAL)
+  WHERE :mode IN ('first', 'last', 'min', 'max')
+    AND CAST(:units_per_second AS REAL) > 0
+), evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts AS evaluation_ts,
+    raw.ts AS sample_ts,
+    raw.value,
+    parameters.mode,
+    parameters.units_per_second
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+  CROSS JOIN parameters
+  WHERE raw.value IS NOT NULL
+), ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY series_id, evaluation_ts
+      ORDER BY
+        CASE WHEN mode = 'first' THEN sample_ts END ASC,
+        CASE WHEN mode = 'last' THEN sample_ts END DESC,
+        CASE WHEN mode = 'min' THEN value END ASC,
+        CASE WHEN mode = 'max' THEN value END DESC,
+        sample_ts DESC
+    ) AS sample_rank
+  FROM selected
+)
+SELECT
+  labels,
+  evaluation_ts AS ts,
+  sample_ts / units_per_second AS value
+FROM ranked
+WHERE sample_rank = 1
+ORDER BY labels, evaluation_ts;
+```
+
+Metric timestamps and `:start`, `:end`, `:step`, and `:window` use the
+table's native unit. Bind `:units_per_second` to `1` for the default
+second-native metrics table, `1000` for milliseconds, or `1000000000` for
+nanoseconds. Bind a positive step/window and finite ordered bounds; direct
+callers own those work bounds. Evaluation bounds are inclusive, each sample
+window is exactly `(T-window,T]`, and empty windows emit no row. Result rows
+are deterministic by canonical labels and outer evaluation timestamp.
+Min/max ties deliberately use the greatest source timestamp, matching
+Prometheus's “last sample” contract.
+
+This recipe is exact for finite stored floats. SQLite exposes a packed NaN as
+SQL NULL, so the recipe cannot reproduce the all-NaN last-timestamp rule.
+Upstream first/last also consider native-histogram samples, while min/max
+ignore all-histogram ranges and annotate mixed ranges; current Timeless
+storage has no such typed samples. The stable API rejects all four functions
+behind Prometheus's experimental gate. A future experimental Rust tier must
+own raw NaN and signed-zero order, native histograms, mixed-range infos,
+subqueries, metric-name removal, cumulative limits, cancellation, and HTTP
+envelopes. The required timestamps and values already cross the public raw
+boundary, so no extension primitive is justified. Executable regression:
+Rust SQL-equivalent harness `SQL-PROM-059`. Stable API GET/POST/reopen and
+zero-storage-query behavior are pinned by
 `session_fourteen_experimental_promql_functions_fail_stably_and_reopen`.
 
 ### SQL-PROM-006: range selector

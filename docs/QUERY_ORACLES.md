@@ -411,6 +411,17 @@ histogram-ignored info. Stable Timeless preserves the default feature-gate
 diagnostic. Future execution parity requires a separately feature-enabled
 oracle, and full mixed-range parity requires typed native-histogram storage.
 
+`PQL-R23` adds exact default-tier cases for all four timestamp-of-range
+functions, bringing the complete Prometheus API fixture to 539 cases. The
+pinned parser requires `promql-experimental-functions` for each. Source audit
+confirms that `ts_of_first_over_time` and `ts_of_last_over_time` choose the
+earliest/latest timestamp across floats and native histograms. The min/max
+forms inspect floats only, choose the last timestamp tied for the extreme,
+omit histogram-only ranges, and emit a histogram-ignored info for mixed
+ranges. Returned values are source timestamps in fractional seconds. Stable
+Timeless preserves all four default feature gates; future execution requires a
+separately feature-enabled oracle and typed histograms for full parity.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects
