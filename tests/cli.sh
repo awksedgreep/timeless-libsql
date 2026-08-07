@@ -128,6 +128,8 @@ SELECT 'post', name, ts, value, labels FROM metrics ORDER BY ts, name;
 SELECT 'chunks', COUNT(*), SUM(point_count) FROM metrics_chunks;
 SELECT 'series', COUNT(*) FROM metrics_series;
 SELECT 'legacy_registry', COUNT(*) FROM metrics_meta WHERE k = 'series_registry';
+SELECT 'metric_sample_types', json_extract(timeless_capabilities(), '$.signals.metrics.sample_types');
+SELECT 'native_histograms', json_extract(timeless_capabilities(), '$.signals.metrics.native_histograms');
 SQL
 )
 expected='pre|cpu|100|1.5|{"host":"a"}
@@ -138,8 +140,10 @@ post|mem|150|3.0|{"host":"b"}
 post|cpu|200|2.5|{"host":"a"}
 chunks|2|3
 series|2
-legacy_registry|0'
-check_eq "insert/select/flush round-trip + shadow tables" "$got" "$expected"
+legacy_registry|0
+metric_sample_types|["float64"]
+native_histograms|0'
+check_eq "insert/select/flush round-trip + shadow tables + metric sample capability" "$got" "$expected"
 
 # ---------------------------------------------------------------------------
 echo "== section 1b: append-only enforcement =="

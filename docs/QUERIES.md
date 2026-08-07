@@ -3533,6 +3533,25 @@ upper bound.
 
 ## Packed raw frame
 
+All current metric query surfaces are float-only. The machine-readable check
+is:
+
+```sql
+SELECT json_extract(
+         timeless_capabilities(),
+         '$.signals.metrics.sample_types'
+       ) AS sample_types,
+       json_extract(
+         timeless_capabilities(),
+         '$.signals.metrics.native_histograms'
+       ) AS native_histograms;
+-- ["float64"] | 0
+```
+
+This declaration covers row reads, `TRF1`, `TWB1`, `TRB1`, named/resolved
+batches, chunks, and rollups. Classic `_bucket` float series remain supported;
+no current SQL column or packed frame represents a typed native histogram.
+
 `timeless_raw_frame` accepts the same table, metric, matcher filter, and
 inclusive bounds as `timeless_raw_batches`, but returns one row for the whole
 non-empty result set:

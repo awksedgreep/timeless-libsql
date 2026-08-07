@@ -39,6 +39,8 @@ fn document() -> &'static str {
                 "metrics": {
                     "module": "timeless_metrics",
                     "batches": ["named-v0", "resolved-v1"],
+                    "sample_types": ["float64"],
+                    "native_histograms": false,
                     "timestamp_unit": "seconds",
                     "authoritative_batch_points_per_series": 4096,
                     "rollups": true
@@ -97,6 +99,11 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(document()).unwrap();
         assert_eq!(value["data_abi"], 1);
         assert_eq!(value["signals"]["metrics"]["rollups"], true);
+        assert_eq!(
+            value["signals"]["metrics"]["sample_types"],
+            json!(["float64"])
+        );
+        assert_eq!(value["signals"]["metrics"]["native_histograms"], false);
         assert_eq!(value["signals"]["logs"]["typed_metadata"], true);
         assert_eq!(value["signals"]["traces"]["rich_span_fidelity"], true);
         assert_eq!(

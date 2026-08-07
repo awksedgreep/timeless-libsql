@@ -110,9 +110,10 @@ the failed implementation, and continue with an independent row.
 4. **Optimize only from evidence.** Promote work into `EXT` only after query
    measurements show that SQL/API composition pays an avoidable storage or
    decode cost.
-5. **Revisit deferred types and higher libraries.** Native histograms, log
-   stream identity, subscriptions, rules, and UI workflows are separate
-   decisions after the storage/query contract is stable.
+5. **Revisit deferred types and higher libraries.** Native histograms (which
+   the capability document explicitly reports as unsupported), log stream
+   identity, subscriptions, rules, and UI workflows are separate decisions
+   after the storage/query contract is stable.
 
 ## Release gate for query work
 

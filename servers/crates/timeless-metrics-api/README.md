@@ -61,6 +61,9 @@ separate typed-data-model deferral. The server reports `requires typed
 native-histogram storage` at the operator position before reading storage;
 classic `_bucket` float series are not treated as native histogram samples,
 and no SQL, Elixir, or process fallback is used.
+The extension handshake makes the boundary machine-readable as
+`sample_types=["float64"]` and `native_histograms=false`; changing either
+requires a separately versioned public storage, batch, and result design.
 Pinned Prometheus also marks `mad_over_time` experimental. Stable requests
 preserve its disabled-function diagnostic before storage. Direct users have a
 documented finite-float two-median SQL recipe, while PromQL execution remains

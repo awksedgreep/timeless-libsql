@@ -6341,3 +6341,23 @@ reported because stable Timeless never evaluates the function. No extension
 primitive, private access, storage format, batching, compression, index,
 rollup, retention, transaction, migration, optimize, or maintenance behavior
 changed.
+
+## Session 19 data-model disposition: native histogram samples
+
+`PQL-S22` remains deferred, with a stronger public boundary. The extension
+capability test and loaded-SQL regression failed first because
+`signals.metrics.sample_types` and `native_histograms` were absent. They now
+pass with exact values `["float64"]` and `false`. The declaration is additive:
+`data_abi` remains 1, existing hosts ignore unknown JSON members, and every
+named/resolved batch, chunk, rollup, row, and packed frame remains unchanged.
+
+Pinned Prometheus 3.13.2 source establishes that an honest future design must
+retain schema, zero/count/sum, positive/negative spans and populations, custom
+bounds, counter-reset/gauge hints, mixed sample histories, and exact query
+semantics. The checked prerequisite list additionally covers marker-capable
+ingress, SQL and packed results, compression, rollups, retention,
+transactions, migration/downgrade, corruption, limits, cancellation, backup,
+and reopen. There is no SQL recipe and no narrow/wide latency, cardinality,
+storage, or RSS benchmark for a sample type the product does not store. No
+private table, storage format, batch, compression, index, rollup, retention,
+transaction, migration, optimize, or maintenance behavior changed.

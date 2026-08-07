@@ -445,6 +445,18 @@ base values can be floats or native histograms. Stable Timeless preserves the
 default feature gate; future execution requires a feature-enabled oracle plus
 the retained-model prerequisites `PQL-S17` and `PQL-S22`.
 
+`PQL-S22` adds no executable API case because Timeless has no native-histogram
+ingress or result type to compare honestly. The immutable Prometheus 3.13.2
+source remains the design oracle: its float histogram model carries schema,
+zero threshold/count, total count/sum, positive and negative spans and bucket
+populations, custom bounds, and a counter-reset/gauge hint. The TSDB and
+PromQL paths also permit float and histogram samples to coexist over a series
+history. Timeless now advertises its narrower current contract directly as
+`sample_types=["float64"]` and `native_histograms=false`; the 543-case fixture
+count is unchanged. A future feature branch must add pinned remote-write,
+storage, mixed-sample, reset, staleness, query, and response oracles before
+changing this row or capability.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects

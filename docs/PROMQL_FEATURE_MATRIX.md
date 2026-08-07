@@ -71,8 +71,30 @@ Rows with an `SQL` foundation must link an executable statement from the
 | `PQL-S19` | deterministic Prometheus error/result envelopes | shipped | yes | none | `API` | P0 | Required range parameters, parameter/type diagnostics, strict unsupported behavior, and GET/POST data/error envelopes are pinned for every shipped node. Each future grammar row must extend this contract; optional warning/info annotations are tracked separately by `PQL-S23`, and documented stricter resource/input choices remain intentional. |
 | `PQL-S20` | 11,000 points/series, sample, row, response, and deadline limits | shipped | yes | `RAW`, `WINDOW` | `API` | P0 | Configurable hard owner limits cover pre-decode raw/window work, final points, bounded serialization, and deadlines; auth may only tighten them. |
 | `PQL-S21` | cancellation and SQLite reader reuse | shipped | n/a | all | `API` | P0 | Every new evaluator loop must check the same cancellation token. |
-| `PQL-S22` | native histogram sample type | deferred | no | none | `DEFER` | DEFER | See `QSF-003`; classic `_bucket` series remain ordinary floats. |
+| `PQL-S22` | native histogram sample type | deferred | no | none | `DEFER` | DEFER | The additive capability handshake now declares `sample_types=["float64"]` and `native_histograms=false`; classic `_bucket` series remain ordinary floats. Shipping requires a separately versioned typed sample, batch, chunk, SQL, packed-result, ingress, rollup, retention, and migration design; see `QSF-003` and `QSF-258`. |
 | `PQL-S23` | Prometheus `warnings`/`infos` response annotations, including non-counter metric-name lint | shipped | no | none | `API` | P1 | Exact quantile, sort-on-range, non-counter-name, malformed-bucket, and histogram-repair annotations preserve text, line/column source positions, type, deterministic deduplication/merge, ten-item caps, GET/POST instant/range placement, response limits, and omission from unaffected/empty results; see `QSF-050`. |
+
+`PQL-S22` is an explicit data-model boundary, not an unimplemented SQL
+expression. Current metric row, named/resolved batch, and chunk sample
+payloads contain one timestamp plus one IEEE-754 float. Catalogs identify
+those float series; `TRF1` and `TWB1` carry float values; `TRB1` carries
+float-derived rollup aggregates. None has a typed histogram field.
+`timeless_capabilities()` now states that domain machine-readably without
+changing data ABI 1 or any readable format. Classic histogram `_bucket`,
+`_sum`, and `_count` series remain independent float series and must never be
+reinterpreted as a native histogram.
+
+A future typed design must be additive and backward-readable. Before this row
+can move, it must specify exponential and custom schemas, zero threshold and
+count, total count and sum, positive/negative spans and bucket populations,
+counter-reset/gauge hints, mixed float/histogram series, exact validation and
+corruption errors, marker/staleness interaction, marker-capable ingress,
+public named/resolved batches, SQLite projection, packed raw/window/result
+frames, chunk compression and indexes, rollup merge/downsampling, retention,
+transactions, migration, capability/data-ABI negotiation, limits,
+cancellation, backup/reopen, and downgrade behavior. Pinned Prometheus source
+at the recorded commit is the semantic model; no storage schema is inferred
+from classic buckets or a query-only operator.
 
 ## Operators and cross-series aggregation
 

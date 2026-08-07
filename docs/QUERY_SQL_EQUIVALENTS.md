@@ -229,6 +229,15 @@ application-defined `job` and `instance` labels, but that is not an equivalent
 to the experimental language function. The matrix therefore assigns
 `CAT`/`RAW`/`API`, not `SQL` or `EXT`.
 
+`PQL-S22` intentionally has no SQL recipe because it is a deferred storage
+type, not a query expression. Every current public metric value column and
+packed metric frame represents `float64`; `timeless_capabilities()` declares
+`sample_types=["float64"]` and `native_histograms=false`. Classic `_bucket`
+series can be queried with ordinary SQL, but converting them into a typed
+native histogram would discard or invent schema, spans, reset hints, and
+bucket identity. A future row may claim SQL only after a versioned public
+typed representation exists.
+
 `LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
 optional terminal semicolon are LogsQL source grammar owned by the Rust API;
 direct SQLite/libSQL users already write ordinary parameterized SQL and do not

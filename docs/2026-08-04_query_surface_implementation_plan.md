@@ -1545,6 +1545,21 @@ and results. A future experimental Rust tier can compose the public catalog
 and packed-raw surfaces; no extension primitive or stable API benchmark is
 justified.
 
+`PQL-S22` is closed as a data-model deferral. The extension capability
+document previously named metric batch versions but did not say that every
+current sample surface is float-only. It now additively advertises
+`sample_types=["float64"]` and `native_histograms=false`; direct SQLite
+regression, extension unit coverage, reopen/crash suites, and data ABI 1 pin
+that declaration. No existing named/resolved batch, metric chunk, rollup,
+catalog row, SQL column, or `TRF1`/`TWB1`/`TRB1` frame can represent a typed
+native histogram. Shipping therefore requires one reviewed, versioned,
+backward-readable design spanning Prometheus exponential/custom schemas,
+bucket populations, zero/count/sum/reset metadata, mixed sample types,
+ingress, chunks, public SQL/batches/frames, rollups, retention, transactions,
+migration, corruption, capability negotiation, limits, cancellation, and
+downgrade. This session deliberately adds no histogram format, SQL recipe, or
+performance benchmark.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

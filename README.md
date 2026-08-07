@@ -310,6 +310,14 @@ stored/buffered points; window batches independently cap candidate input and
 possible grid output. Errors return no partial blob. The capability document
 advertises each guarded surface under `query_surfaces`.
 
+The same `timeless_capabilities()` document declares the current metrics
+sample domain as `signals.metrics.sample_types=["float64"]` and
+`signals.metrics.native_histograms=false`. This is an additive declaration,
+not a format change: named/resolved batches, stored chunks, rollups, SQL rows,
+and packed query frames remain float-only. Prometheus classic `_bucket` series
+work as ordinary floats; typed native histograms require a future versioned
+storage and public-interface design.
+
 `timeless_window_batches` uses `TWB1 | count:u32 LE | timestamps:i64 LE[] |
 validity bitmap | value_bits:u64 LE[]`. The bitmap also preserves the optional
 `fill='null'` shape. See [the query cookbook](docs/QUERIES.md#packed-window-batches)

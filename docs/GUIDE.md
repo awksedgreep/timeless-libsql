@@ -142,6 +142,21 @@ CREATE VIRTUAL TABLE metrics USING timeless_metrics;
 | `value` | REAL | yes | the measurement |
 | `labels` | TEXT | no | flat JSON object of strings, e.g. `'{"host":"web1"}'` |
 
+The current metric sample type is exactly one IEEE-754 float per timestamp.
+Check it directly when embedding:
+
+```sql
+SELECT json_extract(
+  timeless_capabilities(),
+  '$.signals.metrics.sample_types'
+); -- ["float64"]
+```
+
+The same capability reports `native_histograms=false`. Classic Prometheus
+histograms remain ordinary `_bucket`, `_sum`, and `_count` float series; the
+extension does not reinterpret them as typed native histograms. A future
+native-histogram format must be separately versioned and capability-advertised.
+
 Each distinct `(name, labels)` pair is a separate series, compressed
 independently — so `cpu_usage{host=web1}` and `cpu_usage{host=web2}` don't
 pollute each other's compression.
