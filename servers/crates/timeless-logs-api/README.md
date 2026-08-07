@@ -2096,6 +2096,22 @@ measures 64-row/1,856-byte results at 3.040/4.564/5.399 ms narrow and
 3.376/3.633/4.119 and 37.514/38.555/39.040 ms. Candidate and control perform
 identical public storage work; the bounded post-scan cost stays in this API.
 
+## Deferred LogsQL same-stream context
+
+`stream_context before <count> after <count> [time_window <duration>]` is not
+approximated with ordinary metadata or timestamp adjacency. VictoriaLogs uses
+the stored tenant-scoped `_stream_id` of each selected row to issue additional
+same-stream time-range reads. The current Timeless batch and public log-table
+contracts do not retain that identity or its index.
+
+Top-level and nested `stream_context` pipes therefore fail before planning or
+storage with a source-positioned HTTP 422 `unsupported_logsql` envelope that
+states the missing stream-identity prerequisite. Quoted text, comments, field
+names, and metadata values named `stream_context` remain ordinary query data.
+There is no public SQL equivalent until the versioned stream model deferred by
+`LQL-F35` and `LQL-F36` is designed and stored. Rejection performs no public
+row query, candidate-block selection, payload read, or decode.
+
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for

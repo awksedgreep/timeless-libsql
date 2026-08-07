@@ -6090,6 +6090,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
     let query_now = context.query_now;
     let prepared_query = prepare_query_layout(query)?;
     let query = prepared_query.as_ref();
+    reject_deferred_stream_context_pipe(query)?;
     reject_deferred_stream_selectors(query)?;
     reject_deferred_stream_id_filters(query)?;
     let mut spec = QuerySpec {
@@ -9511,6 +9512,52 @@ fn deferred_stream_id_error(query: &str, offset: usize) -> Result<(), LogsqlErro
     )))
 }
 
+/// Reject the VictoriaLogs `stream_context` pipe before planning or storage.
+///
+/// The operation performs additional tenant- and `_stream_id`-scoped reads
+/// around every matching row. Timeless cannot reinterpret it as adjacency in
+/// the ordinary row result because the retained format has no compatible
+/// stored stream identity. Base-filter words, quoted text, comments, field
+/// names, and quoted pipeline separators remain ordinary data; a genuine
+/// nested query pipe is rejected under the same prerequisite.
+fn reject_deferred_stream_context_pipe(query: &str) -> Result<(), LogsqlError> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (separator, character) in query.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '|' => {
+                let after_separator = separator + character.len_utf8();
+                let tail = &query[after_separator..];
+                let operation = tail.trim_start();
+                let leading_bytes = tail.len() - operation.len();
+                let operation_end = operation
+                    .char_indices()
+                    .find(|(_, character)| character.is_whitespace())
+                    .map_or(operation.len(), |(offset, _)| offset);
+                if operation[..operation_end].eq_ignore_ascii_case("stream_context") {
+                    let (line, column) = source_line_column(query, after_separator + leading_bytes);
+                    return Err(LogsqlError::unsupported(format!(
+                        "LogsQL stream_context pipe at line {line}, column {column} is deferred: Timeless does not store the VictoriaLogs-compatible stream identity required for same-stream surrounding reads"
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn pipeline_segments(input: &str) -> Result<Vec<&str>, LogsqlError> {
     let mut segments = Vec::new();
     let mut start = 0usize;
@@ -10780,6 +10827,40 @@ mod tests {
             assert!(
                 parse(malformed, TimestampUnit::Microseconds).is_err(),
                 "{malformed:?} silently broadened"
+            );
+        }
+    }
+
+    #[test]
+    fn session_nineteen_stream_context_fails_with_an_explicit_storage_prerequisite() {
+        for (query, line, column) in [
+            ("* | stream_context before 1", 1, 5),
+            ("*\n| stream_context after 1", 2, 3),
+            ("* | STREAM_CONTEXT before 0 after 0", 1, 5),
+            ("* | limit 1 | stream_context after 1", 1, 15),
+            ("case:in(* | stream_context before 1 | fields case)", 1, 13),
+        ] {
+            let error = parse(query, TimestampUnit::Microseconds).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Unsupported, "{query:?}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "LogsQL stream_context pipe at line {line}, column {column} is deferred: Timeless does not store the VictoriaLogs-compatible stream identity required for same-stream surrounding reads"
+                ),
+                "{query:?}"
+            );
+        }
+
+        for ordinary_data in [
+            "stream_context",
+            r#"service:="stream_context""#,
+            r#""literal | stream_context before 1""#,
+            "* # | stream_context before 1\n| limit 1",
+            "* | fields stream_context",
+        ] {
+            assert!(
+                parse(ordinary_data, TimestampUnit::Microseconds).is_ok(),
+                "{ordinary_data:?}"
             );
         }
     }

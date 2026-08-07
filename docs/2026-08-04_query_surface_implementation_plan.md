@@ -1671,6 +1671,25 @@ ms versus 3.633/38.555 ms for the control; request-attributed API mean is
 extension primitive; exact evidence and the storage verdict are linked by
 `QSF-266`.
 
+`LQL-P50` is closed as a data-model deferral. Five successful and five error
+witnesses pass in the complete 1,429-case immutable VictoriaLogs fixture.
+Pinned source proves that `stream_context` groups selected rows by stored
+tenant-scoped `_stream_id`, performs additional exact-stream time-range reads,
+retains bounded rows before and after each match, deduplicates overlaps, orders
+contexts, and emits stream-aware delimiters. It therefore depends on the full
+`LQL-F35`/`LQL-F36` declaration, tenant, canonical hash, and stream-index
+contract; sorting Timeless rows by time or grouping arbitrary metadata would
+be a false implementation.
+
+The prior generic unsupported-pipeline response is replaced by a
+source-positioned HTTP 422 before storage for genuine top-level and nested
+pipes. Quoted text, comments, base words, field names, and nested application
+metadata remain queryable. Real-extension coverage pins zero read/decode
+counters, rich fidelity, optimize, shutdown, and reopen. There is no SQL
+recipe or benchmark for deliberately rejected syntax, and no extension,
+private access, storage format, authoritative batching, compression, index,
+retention, transaction, migration, optimize, or maintenance behavior changed.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

@@ -231,6 +231,36 @@
       "expected_cases": ["phrase-exact"]
     },
     {
+      "id": "LQL-P50-stream-context-before-uses-the-current-stream",
+      "query": "case:=phrase-exact | stream_context before 1 | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-P50-stream-context-after-uses-the-current-stream",
+      "query": "case:=phrase-exact | stream_context after 1 | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-P50-stream-context-zero-context-is-a-noop",
+      "query": "case:=phrase-exact | stream_context before 0 after 0 | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-P50-stream-context-options-are-case-insensitive-and-composable",
+      "query": "case:=phrase-exact | STREAM_CONTEXT after 1 before 1 time_window 2h30m | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-P50-stream-context-empty-input-remains-empty",
+      "query": "case:=does-not-exist | stream_context after 1 | fields case",
+      "status": 200,
+      "expected_cases": []
+    },
+    {
       "id": "LQL-F08-phrase-bytes-case-and-word-boundaries",
       "query": "\"ssh: login fail\"",
       "status": 200,
@@ -9283,6 +9313,41 @@
     {
       "id": "LQL-P49-set-stream-fields-rejects-mid-field-wildcards",
       "query": "* | set_stream_fields foo*bar",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P50-stream-context-requires-before-or-after",
+      "query": "* | stream_context",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P50-stream-context-before-requires-a-number",
+      "query": "* | stream_context before",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P50-stream-context-rejects-negative-context",
+      "query": "* | stream_context before -4",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P50-stream-context-time-window-does-not-replace-context",
+      "query": "* | stream_context time_window 1h",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P50-stream-context-rejects-invalid-time-window",
+      "query": "* | stream_context before 1 time_window invalid",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

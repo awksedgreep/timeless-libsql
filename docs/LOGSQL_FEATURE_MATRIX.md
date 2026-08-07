@@ -153,7 +153,7 @@ extension.
 | `LQL-P47` | `time_add` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-time_add)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P48` | `generate_sequence` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-062-generate-a-bounded-decimal-string-sequence); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-generate_sequence)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P49` | `set_stream_fields` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [evidence](QUERY_EVIDENCE.md#session-19-logsql-p3-result-stream-synthesis)) | shipped | no | none | `API` | P3 |
-| `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
+| `LQL-P50` | `stream_context` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-19-data-model-disposition-logsql-stream-context)) | deferred | no | none | `DEFER` | DEFER |
 
 `LQL-P47` is a bounded Rust API transform over one public `logs` scan.
 `time_add <duration> [at <exact-field>]` uses the pinned VictoriaLogs compound
@@ -231,6 +231,25 @@ narrow and 1.4% higher wide. Every pair returns the same 64 rows and 1,856
 bytes and performs byte-identical public block, decode, payload, match, and
 row work. `QSF-264`–`QSF-266` accept the bounded post-scan transform and reject
 an extension opcode that cannot avoid storage work or row crossing.
+
+`LQL-P50` remains deferred behind the same versioned stored-stream contract as
+`LQL-F35` and `LQL-F36`. Pinned VictoriaLogs groups the initial matches by
+tenant-scoped `_stream_id`, performs additional time-range searches against
+each exact stream, merges bounded rows before and after every match, orders
+contexts, deduplicates overlaps, and emits stream-aware delimiter rows. It is
+not adjacency in the original result and cannot be reconstructed from an
+ordinary metadata field without inventing identity and mixing streams.
+
+Five successful and five strict-error cases pass inside the complete 1,429-
+case immutable oracle. Timeless rejects genuine top-level or nested
+`stream_context` pipes with a source-positioned HTTP 422 before any public
+storage read, while base-filter words, quoted text, comments, field names, and
+nested application metadata remain ordinary data. Shipping requires the
+complete `LQL-F35` stream declaration/tenant/hash/index format plus bounded
+same-stream rereads, ordering, overlap/delimiter semantics, limits,
+cancellation, migration, durability, and reopen. There is no SQL recipe or
+performance benchmark for syntax the product deliberately does not execute,
+and no extension or storage contract changed.
 
 `LQL-P10` is deliberately deferred, not approximated. VictoriaLogs
 `block_stats` exposes one row per physical field column with its internal

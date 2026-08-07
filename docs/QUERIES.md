@@ -2606,6 +2606,36 @@ measures the 64-row/1,856-byte transform at 3.040/4.564/5.399 ms narrow and
 higher while API-owned mean is 4.4% lower/1.4% higher; every public block,
 decode, payload, match, and returned-row counter is identical.
 
+## Deferred LogsQL same-stream context
+
+VictoriaLogs `stream_context` performs additional stored-stream reads around
+each selected row:
+
+```text
+* | stream_context before 2 after 3
+* | stream_context after 5 time_window 30m
+```
+
+Timeless deliberately rejects this pipe before planning or storage because
+the current public log batch and table contracts do not retain a compatible
+tenant-scoped `_stream_id`. Grouping ordinary metadata or selecting adjacent
+timestamps would mix unrelated streams and is not advertised as parity. The
+HTTP API returns a source-positioned `422` response:
+
+```json
+{
+  "error": "unsupported_capability",
+  "reason": "unsupported_logsql",
+  "message": "LogsQL stream_context pipe at line 1, column 5 is deferred: Timeless does not store the VictoriaLogs-compatible stream identity required for same-stream surrounding reads"
+}
+```
+
+The same explicit error applies inside nested query expressions. Quoted text,
+comments, field names, and ordinary metadata values containing
+`stream_context` remain queryable. There is no honest SQL equivalent: a
+correct implementation depends on the deferred ingestion-owned stream model
+and index described by `LQL-F35` and `LQL-F36`, not a new row-level SQL recipe.
+
 
 ## LogsQL upper-step quantiles and population deviation
 

@@ -1461,3 +1461,25 @@ when its condition is false. It does not mutate stored stream identity. The
 fixture remains 167 source rows and now contains 356 row-query cases, one
 stochastic case, 521 error cases, and 541 statistics/pipeline cases: 1,419
 cases total, all passing against the immutable image. The fixture now contains 1419 cases.
+
+`LQL-P50` adds five successful row-query witnesses and five parser errors for
+`stream_context`. They pin before, after, zero-context, case-insensitive option
+order, `time_window`, later projection, empty input, required context options,
+numeric bounds, and invalid-window rejection. The fixture deliberately keeps
+one row per declared stream: exact output confirms accepted grammar and the
+selected row, while the immutable source audit proves the additional-read
+semantics that Timeless cannot execute without stored stream identity.
+
+Source audit at immutable commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers
+`pipe_stream_context.go`, its parser and storage-search tests,
+`storage_search.go`, and the shared stream-ID parser. The processor requires
+`_stream_id`, groups selected rows by it, derives the tenant from it, issues
+additional exact-ID time-range queries, keeps bounded before/after heaps,
+deduplicates overlaps, sorts contexts, and emits delimiter rows. The pipe must
+be first after the filter; its maximum selected set is 100 streams and 1,000
+rows per stream before the additional bounded state budget.
+
+The fixture remains 167 source rows and now contains 361 row-query cases, one
+stochastic case, 526 error cases, and 541 statistics/pipeline cases: 1,429
+cases total, all passing against the immutable image. The fixture now contains 1429 cases.

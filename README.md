@@ -713,7 +713,11 @@ identity. Core SQL has no exact dynamic-field plus Go-quoting equivalent, and
 the transform occurs after the public row boundary, so it remains in the Rust
 API without a storage opcode. Exact-build evidence returns the same 64 rows
 and 1,856 bytes as its control with byte-identical public storage work;
-narrow/wide p95 is 4.564/40.091 ms versus 3.633/38.555 ms. The LogsQL API
+narrow/wide p95 is 4.564/40.091 ms versus 3.633/38.555 ms. The related
+`stream_context` pipe is explicitly deferred rather than approximated: it
+returns a source-positioned HTTP 422 before storage because correct surrounding
+reads require the same missing tenant-scoped stream identity; ordinary SQL has
+no equivalent until that versioned ingestion model exists. The LogsQL API
 includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
 exact-prefix matching, and static multi-exact `in(...)` membership over bounded
 public rows while retaining Timeless's rich JSON types, plus static

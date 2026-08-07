@@ -6538,3 +6538,43 @@ quoting have no honest portable core-SQL equivalent. No extension primitive,
 private access, storage format, authoritative batching, compression, index,
 rollup, retention, transaction, migration, optimize, or maintenance behavior
 changed.
+
+## Session 19 data-model disposition: LogsQL stream context
+
+`LQL-P50` remains deferred. Five successful and five parser-error cases pass
+against immutable VictoriaLogs 1.52.0, bringing the complete LogsQL fixture to
+1,429 cases. They pin before/after/zero counts, option order,
+case-insensitive spelling, configurable `time_window`, later projection,
+empty input, and strict missing/negative/invalid values.
+
+Pinned source establishes the incompatible boundary: `stream_context` must be
+the first pipe after the filter; it reads each selected row's stored
+`_stream_id`, groups at most 1,000 selected rows per each of at most 100
+streams, derives the tenant from the ID, and performs additional exact-ID
+time-range searches. It keeps bounded before/after rows, deduplicates
+overlapping contexts, orders streams by their earliest match and rows by time
+and fields, and emits `---` delimiter rows carrying `_stream_id` and `_stream`.
+The retained Timeless model has no ingestion-declared stream fields, tenant
+prefix, canonical stream hash, or stream index, so ordinary timestamp
+adjacency or metadata grouping would mix unrelated streams.
+
+The Rust parser regression failed first on the generic message `unsupported
+LogsQL pipeline "stream_context before 1"`. The corrected parser returns a
+source-positioned HTTP 422 before planning or storage for top-level and nested
+genuine pipes. The first scanner revision then exposed a nested-query gap:
+top-level-only segmentation produced HTTP 400 for
+`case:in(* | stream_context before 1 | fields case)`. The quote-aware
+all-depth scanner now gives the same explicit prerequisite while preserving
+base words, quoted pipeline text, comments, field names, and nested application
+metadata.
+
+The real-extension regression pins exact envelopes, zero changes to public
+row-query, native-count, payload-byte, and decoded-entry counters, rich typed
+ordinary data, optimize, flush, shutdown, and reopen. There is no narrow/wide
+latency, cardinality, storage-byte, or RSS benchmark because Timeless
+deliberately does not execute the pipe. There is no SQL recipe: the public
+storage model lacks the identity on which correct same-stream rereads depend.
+`QSF-267`–`QSF-268` record the prerequisite and nested-scanner regression. No
+extension primitive, private access, storage format, authoritative batching,
+compression, index, rollup, retention, transaction, migration, optimize, or
+maintenance behavior changed.

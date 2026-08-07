@@ -319,6 +319,23 @@ and `LQL-P50`. Every candidate value has already crossed one bounded public
 `logs` scan, so an extension scalar or private-table path would not avoid
 block reads, decode, payload transfer, or row crossing and is not justified.
 
+`LQL-P50` intentionally has no SQL recipe. VictoriaLogs `stream_context` does
+not mean neighboring rows in a timestamp sort. It groups selected rows by the
+ingestion-owned tenant-scoped `_stream_id`, performs additional exact-stream
+searches in a configurable time window, selects bounded rows before and after
+each match, deduplicates overlapping contexts, orders streams and rows, and
+adds delimiter rows carrying that stream identity. The retained Timeless logs
+format exposes no compatible stream declaration, tenant prefix, canonical
+hash, or stream index, as documented by `LQL-F35` and `LQL-F36`.
+
+A direct application with its own persisted stream key may use window
+functions or correlated bounded reads for its own adjacency contract, but
+ordinary `service`, host, or arbitrary metadata equality is not an equivalent
+to VictoriaLogs identity and must not be advertised as LogsQL parity. Shipping
+requires a versioned public stream data model first; an extension opcode over
+the current rows would only manufacture identity after decode and could mix
+unrelated streams.
+
 `LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
 known phrase in their application and bind the resulting strings to an `IN`
 predicate for `equals_common_case`, but core SQLite `upper()`/`lower()` do not
