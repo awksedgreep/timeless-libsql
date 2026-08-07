@@ -50,6 +50,12 @@ aggregators. Stable PromQL requests reject both before any storage read; they
 are not approximated with SQL ordering or silently executed through another
 runtime. Their matrix row remains experimental until an explicitly enabled
 Rust API tier passes a feature-enabled oracle with bounded group state.
+Prometheus separately feature-gates binary `fill`, `fill_left`, and
+`fill_right`. Stable requests preserve its disabled diagnostic before storage;
+they do not execute the recognized parser nodes or cross to another runtime.
+The direct-SQL documentation provides bounded one-to-one float composition,
+while full PromQL behavior remains an explicitly configured future
+experimental tier.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`

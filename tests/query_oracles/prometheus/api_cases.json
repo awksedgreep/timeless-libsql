@@ -3847,6 +3847,22 @@
       "error_contains": "limit_ratio() is experimental and must be enabled with --enable-feature=promql-experimental-functions"
     },
     {
+      "id": "PQL-O18-fill-is-experimental",
+      "query": "oracle_temporal + fill(0) missing_metric",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "binop fill modifiers are experimental and not enabled"
+    },
+    {
+      "id": "PQL-O18-fill-right-with-matching-is-experimental",
+      "query": "oracle_temporal + on(host) group_left(zone) fill_right(-0) missing_metric",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "binop fill modifiers are experimental and not enabled"
+    },
+    {
       "id": "PQL-F19-start-is-experimental",
       "query": "start()",
       "evaluation_offset_ms": 30000,

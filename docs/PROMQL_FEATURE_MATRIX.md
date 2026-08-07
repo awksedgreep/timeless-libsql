@@ -98,7 +98,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O15` | `quantile` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-019-cross-series-quantile)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O16` | `count_values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-020-count-series-by-sample-value)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O17` | experimental `limitk` and `limit_ratio`; pinned Prometheus 3.13.2 rejects both unless `promql-experimental-functions` is enabled, and the stable Timeless GET/POST/reopen paths preserve that diagnostic without reading storage; implementation requires a separately configured experimental tier and oracle plus bounded group state, while full upstream parity also requires typed native-histogram samples | experimental | no | `RAW` | `API` | EXP |
-| `PQL-O18` | experimental binary fill modifiers | missing | no | `SQL` | `API` | EXP |
+| `PQL-O18` | experimental binary `fill`, `fill_left`, and `fill_right` modifiers ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-057-fill-missing-one-to-one-vector-matches)); pinned Prometheus 3.13.2 requires `promql-binop-fill-modifiers`, and stable Timeless GET/POST/reopen paths now preserve its diagnostic without reading storage; future execution requires a separately configured feature-enabled oracle and complete bounded matching semantics | experimental | no | `SQL` | `API` | EXP |
 | `PQL-O19` | native-histogram trim operators `</` and `>/` | deferred | no | none | `DEFER` | DEFER |
 
 `PQL-O17` is deliberately not an extension or ordinary-SQL row. Prometheus
@@ -109,6 +109,16 @@ underlying raw scan. The stable API therefore fails before storage. A future
 experimental tier belongs in the Rust planner/evaluator over public raw
 results; it must be enabled explicitly and tested against an oracle started
 with the same feature flag.
+
+`PQL-O18` is also API composition, not an extension primitive. Executable
+[`SQL-PROM-057`](QUERY_SQL_EQUIVALENTS.md#sql-prom-057-fill-missing-one-to-one-vector-matches)
+shows the honest direct-SQL foundation as a bounded full-outer composition of
+two public grids with independently optional defaults. Upstream fill semantics
+still require numeric literals, arithmetic/comparison behavior, matching and
+group cardinality, label/name projection, uniqueness errors, and per-step
+limits. Set operators and histogram samples are rejected upstream. The stable
+API fails before either child scan; a future experimental Rust tier must own
+the complete language behavior after both child vectors are evaluated.
 
 ## Range, counter, and regression functions
 

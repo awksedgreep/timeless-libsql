@@ -98,6 +98,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-054`](#sql-prom-054-histogram_quantile-over-classic-buckets) | `PQL-H01` | current foundation | bounded classic-bucket grouping, monotonic correction, and linear interpolation; API owns strict bound parsing, tolerance, annotations, IEEE, names, limits, and envelopes |
 | [`SQL-PROM-055`](#sql-prom-055-atan2) | `PQL-O08` | current foundation | bounded SQLite `atan2(Y,X)` over scalar/vector or label-matched vectors; API owns Go-compatible last-bit rounding, types, names, matching errors, limits, and envelopes |
 | [`SQL-PROM-056`](#sql-prom-056-histogram_fraction-over-classic-buckets) | `PQL-H02` | current foundation | bounded classic-bucket grouping and linear CDF interpolation; API owns strict bounds, scalar ASTs, IEEE values, names, limits, cancellation, and envelopes |
+| [`SQL-PROM-057`](#sql-prom-057-fill-missing-one-to-one-vector-matches) | `PQL-O18` | reference | bounded full-outer one-to-one arithmetic with independently optional left/right defaults; the stable API rejects experimental fill syntax and a future experimental tier owns grammar, matching, labels, types, limits, cancellation, and envelopes |
 | [`SQL-MQL-001`](#sql-mql-001-default-if-and-ifnot) | `MQL-01` | current foundation | bounded gap filling and step-local label membership; API owns MetricsQL syntax, implicit scalar vectors, full label/name policy, limits, cancellation, and envelopes |
 | [`SQL-MQL-002`](#sql-mql-002-keep_metric_names) | `MQL-02` | current foundation | carry the public metric-name column through ordinary SQL transforms; API owns modifier grammar, operation eligibility, name-aware matching, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-003`](#sql-mql-003-union-and-alias) | `MQL-03` | current foundation | public-grid `UNION ALL`, explicit metric-name projection, and first-branch labelset precedence; API owns grammar, scalar-vector conversion, duplicate-output errors, limits, cancellation, and envelopes |
@@ -175,7 +176,7 @@ language/value-envelope semantics belong to the Rust API.
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
-still correctly marked `missing`.
+still correctly marked `missing` or `experimental`.
 
 ## Rows without an honest SQL equivalent
 
@@ -2546,6 +2547,93 @@ not reduce storage reads or decoding.
 Executable regression: Rust SQL-equivalent harness `SQL-PROM-056`; HTTP,
 oracle, compact, and reopen regression:
 `session_fourteen_histogram_fraction_matches_classic_buckets_and_reopens`.
+
+### SQL-PROM-057: fill missing one-to-one vector matches
+
+For two bounded float vectors with default one-to-one label matching, this
+parameterized ordinary-SQL recipe applies addition to matched rows and fills
+either missing side independently. Bind `:lhs_fill` to the value used when the
+left series is absent and `:rhs_fill` to the value used when the right series
+is absent. Bind either parameter as NULL to disable filling that side:
+
+```sql
+WITH
+lhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :lhs_metric, :lhs_filter,
+    :start, :end, :step, :lookback
+  )
+),
+rhs AS (
+  SELECT labels, ts, value
+  FROM timeless_grid(
+    'metrics', :rhs_metric, :rhs_filter,
+    :start, :end, :step, :lookback
+  )
+),
+matched AS (
+  SELECT lhs.labels, lhs.ts, lhs.value + rhs.value AS value
+  FROM lhs
+  JOIN rhs USING (labels, ts)
+),
+left_only AS (
+  SELECT lhs.labels, lhs.ts,
+         lhs.value + CAST(:rhs_fill AS REAL) AS value
+  FROM lhs
+  WHERE :rhs_fill IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM rhs
+      WHERE rhs.labels = lhs.labels AND rhs.ts = lhs.ts
+    )
+),
+right_only AS (
+  SELECT rhs.labels, rhs.ts,
+         CAST(:lhs_fill AS REAL) + rhs.value AS value
+  FROM rhs
+  WHERE :lhs_fill IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM lhs
+      WHERE lhs.labels = rhs.labels AND lhs.ts = rhs.ts
+    )
+),
+filled AS (
+  SELECT labels, ts, value FROM matched
+  UNION ALL
+  SELECT labels, ts, value FROM left_only
+  UNION ALL
+  SELECT labels, ts, value FROM right_only
+)
+SELECT labels, ts, value
+FROM filled
+ORDER BY labels, ts;
+```
+
+Metric timestamps and `:start`, `:end`, `:step`, and `:lookback` use the
+table's native unit. Both public grids use inclusive evaluation bounds and an
+open-left lookback. Canonical label JSON excludes the separately stored metric
+name, so equality plus timestamp is default PromQL one-to-one matching.
+Results are deterministic by labels then timestamp. Substitute the desired
+ordinary arithmetic expression in all three branches; operand order must stay
+left then right. `:lhs_fill` and `:rhs_fill` are SQLite REALs. The public
+storage surface preserves float rows, but SQLite may project packed NaN as
+NULL, so this is an honest row-visible float foundation rather than a complete
+IEEE claim.
+
+This recipe deliberately does not claim stable PromQL support. Pinned
+Prometheus 3.13.2 feature-gates `fill`, `fill_left`, and `fill_right`; the
+stable Timeless API rejects them before storage. A future experimental Rust
+tier must own numeric-literal grammar, operator and comparison behavior,
+`bool`, `on`/`ignoring`, `group_left`/`group_right`, uniqueness errors, output
+labels and metric names, per-step range composition, work/result limits,
+cancellation, and HTTP envelopes. Set operators and histogram samples remain
+unsupported by upstream fill semantics. The required work is a full outer
+composition after both child vectors are evaluated, so an extension primitive
+would not prune either public scan or avoid either decode.
+
+Executable regression: Rust SQL-equivalent harness `SQL-PROM-057`. Stable API
+GET/POST/reopen and zero-storage-query behavior are pinned by
+`session_fourteen_experimental_promql_functions_fail_stably_and_reopen`.
 
 ### SQL-PROM-006: range selector
 

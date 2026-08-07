@@ -11599,6 +11599,14 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
             "limit_ratio by (host) (0.5, vector(1))",
             "limit_ratio() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
         ),
+        (
+            "vector(1) + fill(0) vector(2)",
+            "binop fill modifiers are experimental and not enabled",
+        ),
+        (
+            "vector(1) + on(host) group_left(zone) fill_right(-0) vector(2)",
+            "binop fill modifiers are experimental and not enabled",
+        ),
     ];
     let stats_before_get_errors = storage.stats().await.unwrap();
     for (query, diagnostic) in cases {

@@ -375,6 +375,18 @@ passes. This is a stable-tier compatibility decision, not evidence that
 Timeless implements the experimental operators. A future implementation must
 use a separately configured oracle run with the feature enabled.
 
+`PQL-O18` adds two more default-tier cases. The pinned parser accepts
+`fill`, `fill_left`, and `fill_right` syntax but reports `binop fill modifiers
+are experimental and not enabled` unless `promql-binop-fill-modifiers` is
+active. The cases cover symmetric fill and modifier-last
+`on`/`group_left`/`fill_right` grammar; the complete Prometheus API fixture is
+now 532 cases and passes. Source audit at the same immutable commit confirms
+that fill values are numeric literals, either side may be enabled, set
+operators are excluded, histogram samples are unsupported, and evaluation
+must account for one-to-one plus many/one matching. Future execution parity
+requires a separate oracle process started with this feature flag; the default
+oracle remains the stable compatibility authority.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects

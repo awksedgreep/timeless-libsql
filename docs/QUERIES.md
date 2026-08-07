@@ -3256,6 +3256,17 @@ direct users may write an explicitly application-defined `ORDER BY ... LIMIT`
 query, but it is not a PromQL equivalent. A future implementation requires a
 separately enabled experimental Rust API tier and matching oracle gate.
 
+Binary `fill`, `fill_left`, and `fill_right` modifiers are independently
+feature-gated by Prometheus 3.13.2. Stable Timeless GET and POST requests now
+return its pinned `binop fill modifiers are experimental and not enabled`
+diagnostic before storage, including after reopen. There is no implicit
+MetricsQL or fallback execution. Direct SQLite/libSQL users can perform
+bounded one-to-one float filling with executable
+[`SQL-PROM-057`](QUERY_SQL_EQUIVALENTS.md#sql-prom-057-fill-missing-one-to-one-vector-matches),
+which uses two public grids and an ordinary full-outer composition. It does not
+claim the experimental PromQL grammar, group matching, labels, types, limits,
+or envelopes.
+
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
 Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over

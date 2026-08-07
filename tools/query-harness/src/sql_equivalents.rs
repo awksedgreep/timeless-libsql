@@ -238,6 +238,10 @@ fn setup(connection: &mut Connection) -> Result<()> {
             ),
             ("errors_total", r#"{"host":"web-1"}"#, 100, 2.0),
             ("requests_total", r#"{"host":"web-1"}"#, 100, 10.0),
+            ("fill_lhs", r#"{"host":"both"}"#, 100, 10.0),
+            ("fill_lhs", r#"{"host":"left"}"#, 100, 3.0),
+            ("fill_rhs", r#"{"host":"both"}"#, 100, 2.0),
+            ("fill_rhs", r#"{"host":"right"}"#, 100, 4.0),
         ];
         for (name, labels, ts, value) in rows {
             insert.execute(params![name, labels, ts, value])?;
@@ -301,8 +305,10 @@ fn parameter(identifier: &str, name: &str) -> Value {
     };
     match name {
         "metric" => Value::Text(metric.to_owned()),
+        "lhs_metric" if identifier == "SQL-PROM-057" => Value::Text("fill_lhs".to_owned()),
         "lhs_metric" | "many_metric" => Value::Text("cpu".to_owned()),
         "rhs_metric" if identifier == "SQL-MQL-001" => Value::Text("requests_total".to_owned()),
+        "rhs_metric" if identifier == "SQL-PROM-057" => Value::Text("fill_rhs".to_owned()),
         "rhs_metric" => Value::Text("cpu".to_owned()),
         "one_metric" => Value::Text("requests_total".to_owned()),
         "filter_json" | "lhs_filter" | "rhs_filter" | "many_filter" | "one_filter" => Value::Null,
@@ -328,6 +334,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "threshold" => Value::Real(0.0),
         "default_value" if identifier == "SQL-LOG-032" => Value::Text("fallback".to_owned()),
         "default_value" => Value::Real(0.0),
+        "lhs_fill" | "rhs_fill" => Value::Real(0.0),
         "scalar" | "scalar_value" | "value" => Value::Real(2.0),
         "q" | "quantile" => Value::Real(0.5),
         "first_quantile" => Value::Real(0.25),
@@ -861,6 +868,67 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-PROM-056 histogram fraction changed: {fractions:?}");
+    }
+
+    let fill_sql = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-PROM-057")
+        .context("SQL-PROM-057 recipe")?
+        .statements
+        .first()
+        .context("SQL-PROM-057 statement")?;
+    let matched = vec![
+        (r#"{"host":"both"}"#.to_owned(), 100, 12.0),
+        (r#"{"host":"both"}"#.to_owned(), 110, 12.0),
+    ];
+    for (lhs_fill, rhs_fill, mut expected) in [
+        (Some(0.0), Some(0.0), matched.clone()),
+        (Some(0.0), None, matched.clone()),
+        (None, Some(0.0), matched.clone()),
+        (Some(7.0), Some(11.0), matched.clone()),
+    ] {
+        if let Some(fill) = rhs_fill {
+            expected.extend([
+                (r#"{"host":"left"}"#.to_owned(), 100, 3.0 + fill),
+                (r#"{"host":"left"}"#.to_owned(), 110, 3.0 + fill),
+            ]);
+        }
+        if let Some(fill) = lhs_fill {
+            expected.extend([
+                (r#"{"host":"right"}"#.to_owned(), 100, fill + 4.0),
+                (r#"{"host":"right"}"#.to_owned(), 110, fill + 4.0),
+            ]);
+        }
+        expected.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+        let mut statement = connection.prepare(fill_sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .unwrap()
+                .trim_start_matches(':');
+            let value = match name {
+                "lhs_fill" => lhs_fill.map_or(Value::Null, Value::Real),
+                "rhs_fill" => rhs_fill.map_or(Value::Null, Value::Real),
+                _ => parameter("SQL-PROM-057", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let filled = statement
+            .raw_query()
+            .mapped(|row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if filled != expected {
+            bail!(
+                "SQL-PROM-057 fill result changed for lhs={lhs_fill:?}, rhs={rhs_fill:?}: {filled:?}"
+            );
+        }
     }
 
     let metricsql_recipe = recipes
@@ -4496,13 +4564,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 130);
+        assert_eq!(recipes.len(), 131);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            162
+            163
         );
         assert_eq!(
             recipes
@@ -4510,7 +4578,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            168
+            169
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

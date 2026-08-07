@@ -1761,6 +1761,13 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
             format!("parse error: {error}")
         }
     })?;
+    if promql_expr_contains_binop_fill(&parsed) {
+        let start = skip_promql_whitespace(input.as_bytes(), 0);
+        let position = promql_source_position(input, start);
+        return Err(format!(
+            "{position}: parse error: binop fill modifiers are experimental and not enabled"
+        ));
+    }
     let mut plan = lower_promql_expr(parsed, lookback, 0).map_err(|error| {
         error
             .strip_prefix(PROMQL_DISABLED_FUNCTION)
@@ -1770,6 +1777,39 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
     })?;
     attach_promql_source_positions(&mut plan, input)?;
     Ok(plan)
+}
+
+fn promql_expr_contains_binop_fill(expr: &promql_parser::parser::Expr) -> bool {
+    use promql_parser::parser::Expr;
+
+    match expr {
+        Expr::Aggregate(aggregate) => {
+            aggregate
+                .param
+                .as_deref()
+                .is_some_and(promql_expr_contains_binop_fill)
+                || promql_expr_contains_binop_fill(&aggregate.expr)
+        }
+        Expr::Unary(unary) => promql_expr_contains_binop_fill(&unary.expr),
+        Expr::Binary(binary) => {
+            binary.modifier.as_ref().is_some_and(|modifier| {
+                modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some()
+            }) || promql_expr_contains_binop_fill(&binary.lhs)
+                || promql_expr_contains_binop_fill(&binary.rhs)
+        }
+        Expr::Paren(paren) => promql_expr_contains_binop_fill(&paren.expr),
+        Expr::Subquery(subquery) => promql_expr_contains_binop_fill(&subquery.expr),
+        Expr::Call(call) => call
+            .args
+            .args
+            .iter()
+            .any(|argument| promql_expr_contains_binop_fill(argument)),
+        Expr::NumberLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::VectorSelector(_)
+        | Expr::MatrixSelector(_)
+        | Expr::Extension(_) => false,
+    }
 }
 
 const PROMQL_DISABLED_FUNCTION: &str = "disabled stable PromQL function: ";
@@ -10091,6 +10131,14 @@ mod tests {
             (
                 "# experimental\nlimit_ratio by (host) (0.5, oracle_temporal)",
                 "2:1: parse error: limit_ratio() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
+            ),
+            (
+                "oracle_temporal + fill(0) missing_metric",
+                "1:1: parse error: binop fill modifiers are experimental and not enabled",
+            ),
+            (
+                "# experimental\noracle_temporal + on(host) group_left(zone) fill_right(-0) missing_metric",
+                "2:1: parse error: binop fill modifiers are experimental and not enabled",
             ),
         ] {
             assert_eq!(lower_promql(query, 300_000).unwrap_err(), expected);

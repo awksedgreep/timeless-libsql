@@ -1459,6 +1459,19 @@ group/vector state and cancellation, and typed native-histogram storage for a
 claim of full upstream parity. No query latency/storage benchmark is claimed
 for an operator that the stable product deliberately does not execute.
 
+`PQL-O18` is closed as an experimental disposition. Pinned Prometheus 3.13.2
+requires `promql-binop-fill-modifiers`; the stable Timeless parser previously
+recognized fill nodes but returned an internal “not shipped” message. It now
+preserves the pinned diagnostic across GET, POST, shutdown, and reopen with
+zero raw/window extension queries. Executable `SQL-PROM-057` gives direct
+SQLite/libSQL users bounded one-to-one left/right filling over two public
+grids. A future experimental Rust tier requires a feature-enabled oracle and
+complete numeric-literal, arithmetic/comparison, per-step matching,
+group-cardinality, uniqueness, label/name, result-limit, and cancellation
+semantics. No extension primitive is justified because both child vectors
+must already be scanned, decoded, and evaluated. No API latency/storage
+benchmark is claimed for syntax the stable product deliberately rejects.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

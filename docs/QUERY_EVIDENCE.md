@@ -6216,3 +6216,23 @@ benchmark would imply support that does not exist. The relevant cost verdict
 is exact: rejection happens before public storage work. No extension surface,
 private table, storage format, batching, compression, index, rollup, retention,
 transaction, migration, optimize, or maintenance behavior changed.
+
+## Session 19 experimental disposition: binary fill modifiers
+
+`PQL-O18` is classified, not enabled. Two new default-tier cases pass against
+the immutable Prometheus 3.13.2 API oracle, bringing that fixture to 532 cases.
+They pin symmetric `fill` and modifier-last `on`/`group_left`/`fill_right`
+syntax plus the exact stable feature-gate diagnostic. Rust and real-extension
+regressions failed first on the former internal “binary matching modifiers are
+not shipped” message, then passed with exact GET envelopes, POST diagnostics,
+shutdown, reopen, and zero raw/window extension queries.
+
+Direct users receive executable `SQL-PROM-057`: 131 recipes and 169 statements
+now pass against the public extension. It performs one bounded public grid per
+side and ordinary full-outer one-to-one float composition with independently
+optional defaults. No extension primitive can remove either required child
+scan. No API narrow/wide p50/p95/p99, result-cardinality, storage-byte, or RSS
+comparison is reported because stable Timeless never executes this
+experimental syntax. The SQL reference is not relabeled as PromQL support. No
+storage format, private access, batching, compression, index, rollup,
+retention, transaction, migration, optimize, or maintenance behavior changed.
