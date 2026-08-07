@@ -1,7 +1,11 @@
 # timeless-logs-api release server
 
-This first-class signal server was promoted from the completed API-boundary
-POC. It is not a replacement storage implementation.
+This first-class signal server owns the logs HTTP and LogsQL data plane. It is
+not a replacement storage implementation.
+
+The canonical binary, route, configuration, authentication, lifecycle,
+backup, and error contract is the
+[Rust signal server API reference](../../../docs/SERVER_API_REFERENCE.md).
 
 The storage contract is fixed:
 
@@ -34,6 +38,7 @@ durability. `/api/v1/flush` is the explicit ordered durability barrier.
 - `GET /select/logsql/field_values`
 - `GET /select/logsql/stats`
 - `GET /api/v1/flush`
+- `POST /api/v1/backup`
 
 The authoritative language contract is the
 [LogsQL feature matrix](../../../docs/LOGSQL_FEATURE_MATRIX.md). The shipped
@@ -559,9 +564,10 @@ metadata key. Unsupported syntax is rejected rather than ignored. The exact
 compatibility choices and intentional typed-data differences are recorded in
 the feature matrix and query findings.
 
-The release binary requires Phoenix-managed policy authentication by default.
-Backup and cluster administration remain in Phoenix; this process deliberately
-contains no generic metrics/traces abstraction.
+The release binary requires policy authentication by default. Phoenix may own
+policy issuance, backup scheduling, and cluster administration; the documented
+backup route performs the signal-local flush/optimize/checkpoint/copy operation.
+This process deliberately contains no generic metrics/traces abstraction.
 
 ## Run
 
@@ -576,8 +582,8 @@ TIMELESS_AUTH_MODE=disabled servers/target/release/timeless-logs-api \
 ```
 
 `TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
-release omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
-`TIMELESS_TENANT` through the Phoenix supervisor.
+production deployment omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
+`TIMELESS_TENANT` through its supervisor or control plane.
 
 The positive release controls are:
 
@@ -2287,7 +2293,7 @@ and that reaching exactly 8,192 entries triggers the extension's own four
 level-partitioned raw blocks with zero compressed blocks. No API flush occurs
 between those requests.
 
-## POC performance history
+## Historical pre-release performance
 
 The deterministic Session 1 baseline reaches 478.7K completed entries/s with
 no queries. With one and two query workers, it saturates at 162.3K and 85.5K
@@ -2338,9 +2344,10 @@ or writer timeouts. The two-reader run answered 102 native counts entirely
 from 7,637 metadata rows (2,910,678 entries, zero payload reads), while all
 407 row queries—including substring—used bounded execution.
 
-The POC still uses the unchanged storage mechanism. No alternate buffer size,
-block layout, partition scheme, or durability policy was introduced to hide
-the result. Session 5 closes the whole-workload embedded-memory gate.
+The measured historical API prototype used the unchanged storage mechanism. No
+alternate buffer size, block layout, partition scheme, or durability policy
+was introduced to hide the result. Session 5 closes the whole-workload
+embedded-memory gate.
 
 Session 6 changes shared extension compaction policy, not API storage. Raw
 compression and compressed merges are disjoint, merge generations require

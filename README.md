@@ -94,7 +94,9 @@ sqlite3 demo.db \
 The [SQLite extension API reference](docs/SQL_API_REFERENCE.md) is the
 canonical inventory of modules, schemas, hidden inputs, commands, batch and
 frame formats, capability negotiation, transaction behavior, and embedding
-entry points.
+entry points. The [Rust signal server API reference](docs/SERVER_API_REFERENCE.md)
+is the canonical inventory of binaries, routes, configuration, authentication,
+limits, lifecycle, backup, errors, and checked platforms.
 
 ## The three virtual tables
 
@@ -1268,20 +1270,20 @@ the development spike and separately packaged dbhealth modules.
 
 ## Status & limits
 
-**Experimental.** Built as a rapid POC (2026-07); the engine lineage is
-production (extracted from
-[timeless_metrics](https://github.com/awksedgreep/timeless_metrics)' Rust
-core), the harness is serious, but the extension itself is days old. Known
-limits, kept honestly ([full list](RESULTS.md#known-limits-documented-accepted-for-poc)):
+**Versioned 0.x surface.** The public data ABI is version 1, the SQL-surface
+inventory is version 1, and the capability handshake is the compatibility
+authority. The virtual tables are passive when embedded directly: callers
+choose flush, optimize/compact, rollup, and prune cadence. The Rust signal
+servers provide measured default maintenance schedules over those same public
+commands.
 
-- Whole-transaction ROLLBACK only — no SAVEPOINT-granular rollback.
-- Buffered (pre-flush) points are visible across connections in the same
-  process before COMMIT — a deliberate dirty-read trade, documented in
-  RESULTS.md; *flushed* data is fully transactional.
-- `ts` equality is re-checked by SQLite; only ranges and indexed dimensions
-  are pruned.
-- Retention is manual (`'prune:<ts>'`) — no background jobs by design; the
-  vtab is passive.
+Known language and data-model boundaries are kept in the
+[PromQL](docs/PROMQL_FEATURE_MATRIX.md) and
+[LogsQL](docs/LOGSQL_FEATURE_MATRIX.md) matrices rather than hidden behind a
+generic experimental label. Native histograms require a versioned typed
+metrics design; VictoriaLogs stream identity requires a versioned stored
+stream design; TraceQL is outside the current query surface. Unsupported
+behavior fails explicitly.
 
 ## Repository layout
 

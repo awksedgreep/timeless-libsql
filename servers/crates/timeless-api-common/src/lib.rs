@@ -450,7 +450,7 @@ pub fn validate_loopback(address: SocketAddr) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "non-loopback listen address {address} is disabled; use loopback or the release Unix-socket transport"
+            "non-loopback listen address {address} is disabled; use loopback or set TIMELESS_ALLOW_NON_LOOPBACK=1 for an explicitly secured deployment"
         ))
     }
 }
@@ -622,5 +622,14 @@ mod tests {
         unsafe { std::env::set_var("TIMELESS_ALLOW_NON_LOOPBACK", "1") };
         assert!(validate_loopback("0.0.0.0:1".parse().unwrap()).is_ok());
         unsafe { std::env::remove_var("TIMELESS_ALLOW_NON_LOOPBACK") };
+    }
+
+    #[test]
+    fn non_loopback_error_names_the_transport_that_is_actually_supported() {
+        let _guard = NON_LOOPBACK_ENV.lock().unwrap();
+        unsafe { std::env::remove_var("TIMELESS_ALLOW_NON_LOOPBACK") };
+        let error = validate_loopback("0.0.0.0:19439".parse().unwrap()).unwrap_err();
+        assert!(error.contains("TIMELESS_ALLOW_NON_LOOPBACK=1"), "{error}");
+        assert!(!error.contains("Unix-socket"), "{error}");
     }
 }

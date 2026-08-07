@@ -6,6 +6,10 @@ the existing `timeless_metrics` extension continues to own series identity,
 the 4,096-point per-series buffer threshold, compression, chunks, rollups, and
 retention commands.
 
+The canonical binary, route, configuration, authentication, lifecycle,
+backup, and error contract is the
+[Rust signal server API reference](../../../docs/SERVER_API_REFERENCE.md).
+
 ## Implemented surface
 
 - `GET /live`
@@ -13,8 +17,10 @@ retention commands.
 - `GET /health`
 - `GET /select/metrics/stats`
 - `POST /api/v1/flush`
+- `POST /api/v1/backup`
 - `POST /api/v1/import/prometheus`
 - `POST /api/v1/import`
+- `GET|PUT /api/v1/scrape/targets`
 - `GET|POST /api/v1/query` (native `metric=` exact latest or `query=` PromQL)
 - `GET /api/v1/export` (VictoriaMetrics JSON-line raw export)
 - `GET|POST /api/v1/query_range` (native exact range aggregation or `query=` PromQL)
@@ -23,7 +29,11 @@ retention commands.
 - `GET /api/v1/labels`
 - `GET /api/v1/label/{name}/values`
 - `GET /api/v1/series`
-- Prometheus aliases for instant/range queries and label/series discovery
+- `GET /prometheus/api/v1/labels`
+- `GET /prometheus/api/v1/label/{name}/values`
+- `GET /prometheus/api/v1/series`
+- `GET|POST /prometheus/api/v1/query`
+- `GET|POST /prometheus/api/v1/query_range`
 
 The current PromQL slice supports scalar literals (including `NaN` and
 infinities), string literals, exact-name and nameless instant vector
@@ -353,8 +363,8 @@ instant query; `avg_over_time` consumes them as instant vectors. It
 deliberately rejects every other
 function, operator, or aggregation not listed in the matrix with a
 Prometheus `bad_data` response. There is no hidden Elixir fallback. The
-release binary requires Phoenix-managed policy authentication by default;
-cluster and product control routes remain in Phoenix. The
+release binary requires policy authentication by default; an external control
+plane may own users, tokens, cluster state, and product routes. The
 Prometheus route keeps the request as a reference-counted body and passes the
 complete exposition through the extension's public ingest surface; Rust does
 not parse or copy it at the API boundary. The VictoriaMetrics route parses the
@@ -613,8 +623,8 @@ TIMELESS_AUTH_MODE=disabled servers/target/release/timeless-metrics-api \
 ```
 
 `TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
-release omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
-`TIMELESS_TENANT` through the Phoenix supervisor.
+production deployment omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
+`TIMELESS_TENANT` through its supervisor or control plane.
 
 The measured default is two readers. The Session 6 1/2/4/8 sweep found that
 four readers improved saturated query p95 by only 1.06ms while adding 10.7MiB

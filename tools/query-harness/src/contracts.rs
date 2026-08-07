@@ -35,6 +35,7 @@ struct MatrixRow {
 
 type TestReference = (String, String);
 type TestReferences = BTreeMap<String, TestReference>;
+type ServerRouteInventory = BTreeMap<(String, String), BTreeSet<String>>;
 
 fn plain(value: &str) -> String {
     value.trim().replace('`', "")
@@ -257,6 +258,219 @@ fn validate_public_sql_inventory(root: &Path) -> Result<Vec<String>> {
     for name in documented.difference(&registered) {
         errors.push(format!(
             "{relative}: inventory row {name} is not registered by the extension source"
+        ));
+    }
+    Ok(errors)
+}
+
+fn marked_region<'a>(
+    content: &'a str,
+    relative: &str,
+    name: &str,
+) -> Result<(&'a str, Vec<String>)> {
+    let start = format!("<!-- {name}:start -->");
+    let stop = format!("<!-- {name}:end -->");
+    let Some((_, tail)) = content.split_once(&start) else {
+        return Ok(("", vec![format!("{relative}: missing {start} marker")]));
+    };
+    let Some((region, _)) = tail.split_once(&stop) else {
+        return Ok(("", vec![format!("{relative}: missing {stop} marker")]));
+    };
+    Ok((region, Vec::new()))
+}
+
+fn production_source(path: &Path) -> Result<String> {
+    let source = fs::read_to_string(path)?;
+    Ok(source
+        .split_once("#[cfg(test)]")
+        .map_or(source.as_str(), |(production, _)| production)
+        .to_owned())
+}
+
+fn source_routes(source_path: &Path) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let source = production_source(source_path)?;
+    let route = Regex::new(r#"(?s)\.route\s*\(\s*\"([^\"]+)\""#)?;
+    let method = Regex::new(r"\b(get|post|put|delete|patch|head|options)\s*\(")?;
+    let matches: Vec<_> = route.captures_iter(&source).collect();
+    let mut routes = BTreeMap::new();
+    for (index, captures) in matches.iter().enumerate() {
+        let matched = captures.get(0).expect("route match has a complete span");
+        let next_route = matches
+            .get(index + 1)
+            .and_then(|next| next.get(0))
+            .map_or(source.len(), |next| next.start());
+        let next_fallback = source[matched.end()..]
+            .find(".fallback")
+            .map_or(source.len(), |offset| matched.end() + offset);
+        let end = next_route.min(next_fallback);
+        let methods: BTreeSet<String> = method
+            .captures_iter(&source[matched.end()..end])
+            .map(|captures| captures[1].to_ascii_uppercase())
+            .collect();
+        let path = captures[1].to_owned();
+        if methods.is_empty() {
+            bail!(
+                "{}: route {path} has no recognized method",
+                source_path.display()
+            );
+        }
+        if routes.insert(path.clone(), methods).is_some() {
+            bail!("{}: duplicate route {path}", source_path.display());
+        }
+    }
+    Ok(routes)
+}
+
+fn documented_server_routes(
+    content: &str,
+    relative: &str,
+) -> Result<(ServerRouteInventory, Vec<String>)> {
+    let (region, mut errors) = marked_region(content, relative, "public-server-routes")?;
+    let mut routes = BTreeMap::new();
+    for (offset, line) in region.lines().enumerate() {
+        if !line.starts_with('|') {
+            continue;
+        }
+        let values = cells(line);
+        if values.len() < 3 {
+            continue;
+        }
+        let signal = plain(values[0]).to_lowercase();
+        if !matches!(signal.as_str(), "metrics" | "logs" | "traces") {
+            continue;
+        }
+        let methods: BTreeSet<String> = plain(values[1])
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_uppercase)
+            .collect();
+        let path = plain(values[2]);
+        let key = (signal, path);
+        if methods.is_empty() {
+            errors.push(format!(
+                "{relative}:{}: server route has no documented method",
+                offset + 1
+            ));
+        } else if routes.insert(key.clone(), methods).is_some() {
+            errors.push(format!(
+                "{relative}:{}: duplicate server route {} {}",
+                offset + 1,
+                key.0,
+                key.1
+            ));
+        }
+    }
+    Ok((routes, errors))
+}
+
+fn validate_public_server_routes(root: &Path) -> Result<Vec<String>> {
+    let sources = [
+        ("metrics", "servers/crates/timeless-metrics-api/src/api.rs"),
+        ("logs", "servers/crates/timeless-logs-api/src/api.rs"),
+        ("traces", "servers/crates/timeless-traces-api/src/api.rs"),
+    ];
+    if !sources
+        .iter()
+        .any(|(_, relative)| root.join(relative).is_file())
+    {
+        return Ok(Vec::new());
+    }
+
+    let relative = "docs/SERVER_API_REFERENCE.md";
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(vec![format!(
+            "missing {relative} for the registered Rust server routes"
+        )]);
+    }
+    let content = fs::read_to_string(path)?;
+    let (documented, mut errors) = documented_server_routes(&content, relative)?;
+    let mut registered = BTreeMap::new();
+    for (signal, source) in sources {
+        let path = root.join(source);
+        if !path.is_file() {
+            continue;
+        }
+        for (route, methods) in source_routes(&path)? {
+            registered.insert((signal.to_owned(), route), methods);
+        }
+    }
+
+    for ((signal, path), methods) in &registered {
+        match documented.get(&(signal.clone(), path.clone())) {
+            None => errors.push(format!(
+                "{relative}: registered {signal} route {path} has no inventory row"
+            )),
+            Some(actual) if actual != methods => errors.push(format!(
+                "{relative}: {signal} route {path} methods differ; source={methods:?}, documented={actual:?}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for (signal, path) in documented.keys() {
+        if !registered.contains_key(&(signal.clone(), path.clone())) {
+            errors.push(format!(
+                "{relative}: inventory row {signal} {path} is not registered by a server"
+            ));
+        }
+    }
+    Ok(errors)
+}
+
+fn source_runtime_environment(root: &Path) -> Result<BTreeSet<String>> {
+    let variable = Regex::new(r#"\"(TIMELESS_[A-Z0-9_]+)\""#)?;
+    let sources = [
+        "servers/crates/timeless-api-common/src/auth.rs",
+        "servers/crates/timeless-api-common/src/lib.rs",
+        "servers/crates/timeless-metrics-api/src/main.rs",
+        "servers/crates/timeless-logs-api/src/main.rs",
+        "servers/crates/timeless-traces-api/src/main.rs",
+    ];
+    let mut variables = BTreeSet::new();
+    for relative in sources {
+        let path = root.join(relative);
+        if !path.is_file() {
+            continue;
+        }
+        let source = production_source(&path)?;
+        variables.extend(
+            variable
+                .captures_iter(&source)
+                .map(|captures| captures[1].to_owned())
+                .filter(|name| !name.starts_with("TIMELESS_BUILD_")),
+        );
+    }
+    Ok(variables)
+}
+
+fn validate_public_server_environment(root: &Path) -> Result<Vec<String>> {
+    let registered = source_runtime_environment(root)?;
+    if registered.is_empty() {
+        return Ok(Vec::new());
+    }
+    let relative = "docs/SERVER_API_REFERENCE.md";
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(vec![format!(
+            "missing {relative} for the Rust server environment"
+        )]);
+    }
+    let content = fs::read_to_string(path)?;
+    let (region, mut errors) = marked_region(&content, relative, "public-server-environment")?;
+    let row = Regex::new(r#"(?m)^\|\s*`(TIMELESS_[A-Z0-9_]+)`\s*\|"#)?;
+    let documented: BTreeSet<String> = row
+        .captures_iter(region)
+        .map(|captures| captures[1].to_owned())
+        .collect();
+    for name in registered.difference(&documented) {
+        errors.push(format!(
+            "{relative}: runtime environment variable {name} has no inventory row"
+        ));
+    }
+    for name in documented.difference(&registered) {
+        errors.push(format!(
+            "{relative}: environment row {name} is not read by production server source"
         ));
     }
     Ok(errors)
@@ -571,6 +785,8 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_local_links(root)?);
     errors.extend(validate_logs_storage_boundary(root)?);
     errors.extend(validate_public_sql_inventory(root)?);
+    errors.extend(validate_public_server_routes(root)?);
+    errors.extend(validate_public_server_environment(root)?);
     Ok(errors)
 }
 
@@ -773,5 +989,74 @@ mod tests {
         )
         .unwrap();
         assert_invalid(fixture.path(), "public SQL symbol timeless_two");
+    }
+
+    #[test]
+    fn public_server_route_inventory_must_match_source_methods_and_paths() {
+        let fixture = fixture();
+        let source = fixture
+            .path()
+            .join("servers/crates/timeless-metrics-api/src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("api.rs"),
+            "Router::new()\n  .route(\"/live\", get(live))\n  .route(\"/query\", get(query).post(query));\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/SERVER_API_REFERENCE.md"),
+            "# Server API\n\n<!-- public-server-routes:start -->\n\n\
+             | Signal | Methods | Path |\n|---|---|---|\n\
+             | `metrics` | `GET` | `/live` |\n\
+             | `metrics` | `GET, PUT` | `/query` |\n\n\
+             <!-- public-server-routes:end -->\n",
+        )
+        .unwrap();
+        assert_invalid(fixture.path(), "route /query methods differ");
+
+        fs::write(
+            fixture.path().join("docs/SERVER_API_REFERENCE.md"),
+            "# Server API\n\n<!-- public-server-routes:start -->\n\n\
+             | Signal | Methods | Path |\n|---|---|---|\n\
+             | `metrics` | `GET, POST` | `/query` |\n\
+             | `metrics` | `GET` | `/not-registered` |\n\n\
+             <!-- public-server-routes:end -->\n",
+        )
+        .unwrap();
+        let errors = validate(fixture.path()).unwrap();
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("route /live has no inventory row")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("/not-registered is not registered")));
+    }
+
+    #[test]
+    fn public_server_environment_inventory_must_match_production_source() {
+        let fixture = fixture();
+        let source = fixture
+            .path()
+            .join("servers/crates/timeless-metrics-api/src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("main.rs"),
+            "let _ = std::env::var(\"TIMELESS_ONE\");\n#[cfg(test)]\nconst TEST: &str = \"TIMELESS_TEST_ONLY\";\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/SERVER_API_REFERENCE.md"),
+            "# Server API\n\n<!-- public-server-environment:start -->\n\n\
+             | Variable | Default |\n|---|---|\n\
+             | `TIMELESS_TWO` | unset |\n\n\
+             <!-- public-server-environment:end -->\n",
+        )
+        .unwrap();
+        let errors = validate(fixture.path()).unwrap();
+        assert!(errors.iter().any(|error| error.contains("TIMELESS_ONE")));
+        assert!(errors.iter().any(|error| error.contains("TIMELESS_TWO")));
+        assert!(!errors
+            .iter()
+            .any(|error| error.contains("TIMELESS_TEST_ONLY")));
     }
 }

@@ -5,7 +5,9 @@ This is the canonical reference for the SQL surface exported by
 (`libtimeless_ext`) and the separate health artifact (`libdbhealth_ext`). The
 [query-language matrices](QUERY_FEATURES.md) describe PromQL, MetricsQL, and
 LogsQL behavior in the Rust signal APIs; they do not change the SQL contracts
-defined here.
+defined here. Binary launch, HTTP routes, authentication, runtime limits,
+shutdown, and coordinated backup are in the
+[Rust signal server API reference](SERVER_API_REFERENCE.md).
 
 All implementation-owned shadow tables are private. Applications must use
 the virtual tables, table-valued functions, scalar, commands, and batch

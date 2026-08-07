@@ -1829,10 +1829,24 @@ the advertised module set equals `pragma_module_list`; the pure Rust unit pins
 the JSON. The pre-existing unversioned raw-series payload is preserved and
 labelled `raw-series-v0`/`versioned=false`, with `TRF1` preferred for new wide
 consumers. `QSF-280`–`QSF-281` retain both audit findings. Session 20 remains
-open for the server/API reference, compatibility and upgrade guides,
+open for the compatibility and upgrade guides,
 embedded/sqld guides, artifact inventory, changelog, stale-wording audit, and
 copyable-example gate. The redundant Python `TAF1`/`TLF1` decoder example was
 removed in favor of the public maintained Rust decoders.
+
+Session 20b closes the Rust signal-server inventory. The canonical
+`docs/SERVER_API_REFERENCE.md` covers all three binary launch contracts, the
+exact 45 route/method registrations, 28 runtime variables and defaults,
+request formats, hard limits, Ed25519 policy/token validation, scope mapping,
+admission, owner fencing, migration ledger, graceful drain, WAL checkpoint,
+verified backup/restore boundary, error envelopes, build identity, and checked
+release platforms. A Rust documentation contract derives every route and
+runtime variable from production source and rejects missing, extra, or
+method-mismatched entries. `QSF-282` corrects the stale reference to an
+unimplemented Unix-socket listener; `QSF-283` corrects the trace-retention
+default from seven days to the actual absent/inherit policy. Current server
+READMEs link the canonical contract and no longer frame release binaries as
+POCs or require Phoenix for standalone use.
 
 ### Session 21: final release gate and report
 

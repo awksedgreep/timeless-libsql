@@ -1,12 +1,16 @@
 # timeless-traces-api release server
 
-This first-class traces-specific release server was promoted from the
-completed process-boundary POC. It owns HTTP scheduling and SQLite connections
-but does not implement storage. Every span and command crosses the public
-`timeless_traces` virtual table supplied by `libtimeless_ext`.
+This first-class traces-specific release server owns HTTP scheduling and
+SQLite connections but does not implement storage. Every span and command
+crosses the public `timeless_traces` virtual table supplied by
+`libtimeless_ext`.
 
-The release binary requires Phoenix-managed policy authentication by default;
-cluster, user, session, and token administration remain in Phoenix.
+The canonical binary, route, configuration, authentication, lifecycle,
+backup, and error contract is the
+[Rust signal server API reference](../../../docs/SERVER_API_REFERENCE.md).
+
+The release binary requires policy authentication by default. An external
+control plane may own cluster, user, session, and token administration.
 
 Sessions 2–6 provide the server lifecycle shell, OTLP ingest, the pinned
 Jaeger read surface, the reusable bounded/streaming extension read path, and a
@@ -21,8 +25,8 @@ TIMELESS_AUTH_MODE=disabled cargo run --manifest-path servers/Cargo.toml -p time
 ```
 
 `TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
-release omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
-`TIMELESS_TENANT` through the Phoenix supervisor.
+production deployment omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
+`TIMELESS_TENANT` through its supervisor or control plane.
 
 The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 
@@ -30,7 +34,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 |---|---:|---|
 | `TIMELESS_TRACES_READER_CONNECTIONS` | `2` | measured bounded SQLite reader default |
 | `TIMELESS_TRACES_COMMAND_QUEUE_BATCHES` | `256` | maximum queued writer requests |
-| `TIMELESS_TRACES_RETENTION_SECS` | `604800` | vtab retention; `0` disables it |
+| `TIMELESS_TRACES_RETENTION_SECS` | absent/inherit | preserve the stored vtab policy; positive overrides it; `0` disables it |
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered, byte-budgeted extension optimize interval |
 
@@ -41,8 +45,10 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   `timeless_traces/rich-span-batch-v1` capability.
 - `GET /select/traces/stats` reports extension, SQLite-file, connection, and
   exact request/span/body queue watermarks.
-- `POST /api/v1/flush` is an ordered completion and durability barrier. Its
+- `GET|POST /api/v1/flush` is an ordered completion and durability barrier. Its
   response identifies the admitted request watermark covered by the flush.
+- `POST /api/v1/backup` flushes, drains actionable optimize backlog,
+  checkpoints the WAL, and publishes a verified no-overwrite SQLite backup.
 - `POST /insert/opentelemetry/v1/traces` accepts OTLP JSON, protobuf, and
   gzip-compressed protobuf. It validates the complete request, encodes one
   public rich-span v1 batch, waits for its one SQLite statement, and returns
