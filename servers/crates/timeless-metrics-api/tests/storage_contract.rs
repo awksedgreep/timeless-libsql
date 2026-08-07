@@ -11612,6 +11612,14 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
             "function \"ts_of_max_over_time\" is not enabled",
         ),
         (
+            "sort_by_label(vector(1), \"instance\")",
+            "function \"sort_by_label\" is not enabled",
+        ),
+        (
+            "sort_by_label_desc(vector(1), \"instance\")",
+            "function \"sort_by_label_desc\" is not enabled",
+        ),
+        (
             "limitk(1, vector(1))",
             "limitk() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
         ),

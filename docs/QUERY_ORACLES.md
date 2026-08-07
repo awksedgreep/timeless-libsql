@@ -422,6 +422,17 @@ ranges. Returned values are source timestamps in fractional seconds. Stable
 Timeless preserves all four default feature gates; future execution requires a
 separately feature-enabled oracle and typed histograms for full parity.
 
+`PQL-F14` adds exact default-tier cases for `sort_by_label` and
+`sort_by_label_desc`, bringing the complete Prometheus API fixture to 541
+cases. The pinned parser requires `promql-experimental-functions` for both.
+Source audit confirms natural ascending/descending comparison across the
+ordered variadic label list, empty strings for absent labels, and complete
+label-set tie-breaking in the same direction. Float and native-histogram
+samples sort identically. Instant queries preserve that order; range queries
+retain fixed label order and emit the standard ineffective-sort warning.
+Stable Timeless preserves both default feature gates; future execution
+requires a separately feature-enabled oracle.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects

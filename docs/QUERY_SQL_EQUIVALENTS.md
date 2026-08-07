@@ -205,6 +205,17 @@ be called equivalent. The row therefore remains `DEFER`, with `PQL-S22` typed
 storage plus a public batch/SQL representation as prerequisites; the stable
 API rejects both operators before any storage query.
 
+`PQL-F14` intentionally has no SQL recipe. Prometheus `sort_by_label` and
+`sort_by_label_desc` compare one or more requested label values using natural
+sort, treat absent labels as empty strings, and fall back to the complete
+Prometheus label set for deterministic ties. Core SQLite/libSQL collations and
+`ORDER BY json_extract(...)` are lexicographic and do not reproduce numeric
+runs such as `2 < 10`, much less the exact full-label-set comparator. An
+application may deliberately use lexicographic order, but it is not a PromQL
+equivalent. The matrix therefore assigns `RAW`/`API`, not `SQL` or `EXT`; a
+future experimental Rust evaluator can sort already-bounded public results
+without changing or accelerating storage.
+
 `LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
 optional terminal semicolon are LogsQL source grammar owned by the Rust API;
 direct SQLite/libSQL users already write ordinary parameterized SQL and do not

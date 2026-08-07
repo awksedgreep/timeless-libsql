@@ -6300,3 +6300,23 @@ reported because stable Timeless never executes these experimental functions.
 The SQL reference is not relabeled as PromQL support. No storage format,
 private access, batching, compression, index, rollup, retention, transaction,
 migration, optimize, or maintenance behavior changed.
+
+## Session 19 experimental disposition: label sorting
+
+`PQL-F14` is classified, not enabled. Two exact cases pass against immutable
+Prometheus 3.13.2, bringing the complete API fixture to 541 cases and pinning
+the default feature gate for ascending and descending label sorting. Rust and
+real-extension regressions failed first on the internal `unsupported PromQL
+expression (parsed as function call)` message, then passed with exact GET
+envelopes, POST diagnostics, shutdown, reopen, and zero raw/window extension
+queries for both names.
+
+No SQL recipe is published: portable SQLite/libSQL text ordering cannot
+reproduce upstream's natural numeric runs, ordered variadic label keys,
+missing-label empty strings, and exact full-label-set tie-break. No API
+narrow/wide p50/p95/p99, result-cardinality, storage-byte, or RSS comparison is
+reported because stable Timeless never evaluates these experimental
+functions. Future work is bounded Rust sorting after child evaluation, so no
+extension primitive, private access, storage format, batching, compression,
+index, rollup, retention, transaction, migration, optimize, or maintenance
+behavior changed.

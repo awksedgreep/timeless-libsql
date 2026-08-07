@@ -69,6 +69,10 @@ The same stable gate applies to `ts_of_first_over_time`,
 `ts_of_last_over_time`, `ts_of_min_over_time`, and `ts_of_max_over_time`.
 Direct SQL documentation covers their bounded finite-float timestamp subset;
 the server does not silently enable, approximate, or delegate the functions.
+`sort_by_label` and `sort_by_label_desc` are also experimental and fail with
+their pinned disabled diagnostics. No lexicographic SQL approximation is
+advertised for Prometheus's natural multi-label order; future execution
+belongs in a separately enabled Rust API tier.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`

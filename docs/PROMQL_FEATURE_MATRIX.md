@@ -209,7 +209,7 @@ bounded frames.
 | `PQL-F11` | `absent` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-047-absent)); present/empty vectors, step-local sparse ranges, unique nonempty equality-label derivation, metric/regex/negative/empty/duplicate exclusions, composed inputs, NaN presence, grid work, limits, cancellation, and reopen are pinned | shipped | yes | `CAT`, `SQL` | `API` | P0 |
 | `PQL-F12` | `absent_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-048-absent_over_time)); exact open-left windows, millisecond boundaries, sparse range steps, equality-label derivation/exclusions, NaN presence, direct selectors, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `WINDOW`, `RAW`, `SQL` | `API` | P0 |
 | `PQL-F13` | `sort` and `sort_desc` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-049-sort-and-sort_desc)); ascending/descending instant order, NaN-last IEEE behavior, signed-zero preservation, labels/names, deterministic ties, nested and empty vectors, range-matrix label order, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-F14` | experimental `sort_by_label`, `sort_by_label_desc` | missing | no | `SQL` | `API` | EXP |
+| `PQL-F14` | experimental `sort_by_label`, `sort_by_label_desc`; pinned Prometheus 3.13.2 rejects both unless `promql-experimental-functions` is enabled, and stable Timeless GET/POST/reopen paths now preserve each diagnostic without reading storage; exact natural multi-label ordering has no portable core-SQL equivalent | experimental | no | `RAW` | `API` | EXP |
 | `PQL-F15` | `scalar` and `vector` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-050-scalar-and-vector)); zero/one/multiple per-step cardinality, stored/result NaN, nameless vectors, exact instant/range types, nesting, grid work, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F16` | `time` and `timestamp` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-051-time-and-timestamp)); millisecond evaluation clocks, stored-sample provenance, response timestamps, lookback, `offset`, `@`, composed-sample time, labels/names, IEEE samples, ranges, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-F17` | `minute`, `hour`, `day_of_week`, `day_of_month` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-052-minute-hour-day_of_week-and-day_of_month)); optional `vector(time())` default, UTC fields, Sunday-zero numbering, fractional truncation, non-finite/out-of-range sentinel conversion, labels/names, nested range grids, errors, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
@@ -217,6 +217,18 @@ bounded frames.
 | `PQL-F19` | experimental query-context `start`, `end`, `step`, and `range`; `start_timestamp` is not PromQL; pinned Prometheus requires `promql-duration-expr` for the four context functions and reports `start_timestamp` as unknown; the stable endpoint preserves those exact failures while `@ start()`/`@ end()` remain shipped; MetricsQL ownership is `MQL-10` | experimental | partial | `SQL` | `API` | EXP |
 | `PQL-F20` | experimental `min_of` and `max_of`; pinned Prometheus requires `promql-duration-expr`; the stable endpoint rejects both through GET, POST, and reopen; stable MetricsQL ownership is `MQL-11` | experimental | no | `SQL` | `API` | EXP |
 | `PQL-F21` | experimental `info` | missing | no | `CAT`, `SQL` | `API` | EXP |
+
+`PQL-F14` is API-owned composition, not SQL or an extension primitive.
+Enabled upstream sorts each requested label using natural order, treats a
+missing label as an empty string, then uses the complete Prometheus label set
+as a deterministic tie-break; descending reverses every comparison. Floats
+and native histograms participate identically, while range results retain
+fixed label order and report that sorting is ineffective. Portable
+SQLite/libSQL exposes neither this natural comparator nor Prometheus's exact
+label-set comparison. A future experimental Rust tier requires a
+feature-enabled oracle, bounded vector state, string/variadic validation,
+labels and metric names, histogram values, range warnings, limits, and
+cancellation. The stable API fails before the child vector or storage scan.
 
 ## Histogram functions
 

@@ -1516,6 +1516,20 @@ annotation, limit, and cancellation behavior. Full upstream first/last and
 mixed-range behavior requires `PQL-S22` typed native-histogram samples. No
 extension primitive or stable API benchmark is justified.
 
+`PQL-F14` is closed as an experimental disposition. Pinned Prometheus 3.13.2
+requires `promql-experimental-functions` for `sort_by_label` and
+`sort_by_label_desc`. Stable Timeless previously parsed both calls and leaked
+the internal unsupported-expression error; GET, POST, shutdown, and reopen now
+preserve both pinned diagnostics with zero raw/window extension queries.
+There is deliberately no SQL recipe: upstream uses natural ordering for each
+requested label and exact full-label-set tie-breaking, neither of which is a
+portable core SQLite/libSQL collation. A future experimental Rust tier must
+use a feature-enabled oracle and own missing labels, variadic strings, natural
+numeric runs, ascending/descending full-label ties, floats/histograms, range
+warnings, limits, cancellation, and response order. Sorting happens after the
+bounded child vector, so no extension primitive or stable API benchmark is
+justified.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

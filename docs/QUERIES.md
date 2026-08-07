@@ -3301,6 +3301,15 @@ min/max ties choose the latest sample. The SQL recipe states timestamp units
 and the native-histogram/NaN limitations explicitly and is not relabeled as
 stable PromQL support.
 
+`sort_by_label(vector, "label", ...)` and `sort_by_label_desc` are
+experimental in pinned Prometheus 3.13.2. Stable Timeless preserves both
+disabled-function diagnostics before storage on GET, POST, and reopen. No SQL
+equivalent is claimed: SQLite's portable text order is lexicographic, while
+Prometheus uses natural order for every requested label and its exact complete
+label-set comparator for ties. A future experimental Rust tier can sort the
+already-bounded child vector; there is no extension, Elixir, or process
+fallback.
+
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
 Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over

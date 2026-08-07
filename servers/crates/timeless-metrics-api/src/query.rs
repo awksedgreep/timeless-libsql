@@ -1865,6 +1865,8 @@ fn prometheus_disabled_stable_function(name: &str) -> bool {
             | "ts_of_last_over_time"
             | "ts_of_min_over_time"
             | "ts_of_max_over_time"
+            | "sort_by_label"
+            | "sort_by_label_desc"
     )
 }
 
@@ -10190,6 +10192,14 @@ mod tests {
             (
                 "ts_of_max_over_time(oracle_temporal[1m])",
                 "1:1: parse error: function \"ts_of_max_over_time\" is not enabled",
+            ),
+            (
+                "sort_by_label(oracle_temporal, \"instance\")",
+                "1:1: parse error: function \"sort_by_label\" is not enabled",
+            ),
+            (
+                "sort_by_label_desc(oracle_temporal, \"instance\")",
+                "1:1: parse error: function \"sort_by_label_desc\" is not enabled",
             ),
             (
                 "limitk(1, oracle_temporal)",
