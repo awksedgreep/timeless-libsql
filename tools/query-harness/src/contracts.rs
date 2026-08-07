@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
@@ -160,7 +161,40 @@ fn heading_anchors(path: &Path) -> Result<BTreeSet<String>> {
 }
 
 fn markdown_files(root: &Path) -> Result<Vec<PathBuf>> {
+    if root.join(".git").exists() {
+        let tracked = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "ls-files",
+                "-z",
+                "--",
+                "README.md",
+                "CHANGELOG.md",
+                "docs/*.md",
+                "servers/crates/*/README.md",
+            ])
+            .output();
+        if let Ok(output) = tracked {
+            if output.status.success() {
+                let encoded = String::from_utf8(output.stdout)
+                    .context("git ls-files returned non-UTF-8 documentation paths")?;
+                let mut files: Vec<PathBuf> = encoded
+                    .split('\0')
+                    .filter(|relative| !relative.is_empty())
+                    .map(|relative| root.join(relative))
+                    .collect();
+                files.sort();
+                return Ok(files);
+            }
+        }
+    }
+
     let mut files = vec![root.join("README.md")];
+    let changelog = root.join("CHANGELOG.md");
+    if changelog.is_file() {
+        files.push(changelog);
+    }
     let docs = root.join("docs");
     if docs.is_dir() {
         for entry in fs::read_dir(docs)? {
@@ -476,6 +510,229 @@ fn validate_public_server_environment(root: &Path) -> Result<Vec<String>> {
     Ok(errors)
 }
 
+fn required_capture(content: &str, pattern: &str, source: &str, field: &str) -> Result<String> {
+    let regex = Regex::new(pattern)?;
+    regex
+        .captures(content)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_owned())
+        .with_context(|| format!("{source}: cannot derive {field}"))
+}
+
+fn pre_one_release_line(version: &str) -> Result<(u64, u64)> {
+    let components: Vec<&str> = version.split('.').collect();
+    if components.len() != 3 {
+        bail!("compatibility version {version:?} is not major.minor.patch");
+    }
+    let major = components[0]
+        .parse::<u64>()
+        .with_context(|| format!("invalid major version in {version:?}"))?;
+    let minor = components[1]
+        .parse::<u64>()
+        .with_context(|| format!("invalid minor version in {version:?}"))?;
+    components[2]
+        .parse::<u64>()
+        .with_context(|| format!("invalid patch version in {version:?}"))?;
+    Ok((major, minor))
+}
+
+fn compatibility_source_versions(root: &Path) -> Result<BTreeMap<String, String>> {
+    let root_manifest = root.join("Cargo.toml");
+    let server_manifest = root.join("servers/Cargo.toml");
+    let extension_source = root.join("crates/timeless-ext/src/capabilities.rs");
+    let server_source = root.join("servers/crates/timeless-api-common/src/lib.rs");
+    if ![
+        root_manifest.as_path(),
+        server_manifest.as_path(),
+        extension_source.as_path(),
+        server_source.as_path(),
+    ]
+    .iter()
+    .all(|path| path.is_file())
+    {
+        return Ok(BTreeMap::new());
+    }
+
+    let root_manifest_text = fs::read_to_string(root_manifest)?;
+    let server_manifest_text = fs::read_to_string(server_manifest)?;
+    let extension = production_source(&extension_source)?;
+    let server = production_source(&server_source)?;
+    let mut values = BTreeMap::new();
+    values.insert(
+        "extension_workspace".to_owned(),
+        required_capture(
+            &root_manifest_text,
+            r#"(?m)^version\s*=\s*\"([^\"]+)\"\s*$"#,
+            "Cargo.toml",
+            "workspace version",
+        )?,
+    );
+    values.insert(
+        "server_workspace".to_owned(),
+        required_capture(
+            &server_manifest_text,
+            r#"(?m)^version\s*=\s*\"([^\"]+)\"\s*$"#,
+            "servers/Cargo.toml",
+            "workspace version",
+        )?,
+    );
+    values.insert(
+        "extension_data_abi".to_owned(),
+        required_capture(
+            &extension,
+            r"(?m)^const DATA_ABI:\s*u64\s*=\s*(\d+);$",
+            "crates/timeless-ext/src/capabilities.rs",
+            "data ABI",
+        )?,
+    );
+    values.insert(
+        "sql_surface_version".to_owned(),
+        required_capture(
+            &extension,
+            r#"\"sql_surface_version\"\s*:\s*(\d+)"#,
+            "crates/timeless-ext/src/capabilities.rs",
+            "SQL surface version",
+        )?,
+    );
+    values.insert(
+        "extension_minimum_server".to_owned(),
+        required_capture(
+            &extension,
+            r#"\"minimum_server_version\"\s*:\s*\"([^\"]+)\""#,
+            "crates/timeless-ext/src/capabilities.rs",
+            "minimum server version",
+        )?,
+    );
+    values.insert(
+        "server_data_schema".to_owned(),
+        required_capture(
+            &server,
+            r"(?m)^pub const DATA_SCHEMA_VERSION:\s*i64\s*=\s*(\d+);$",
+            "servers/crates/timeless-api-common/src/lib.rs",
+            "server data schema",
+        )?,
+    );
+    values.insert(
+        "server_required_data_abi".to_owned(),
+        required_capture(
+            &server,
+            r"(?m)^pub const REQUIRED_EXTENSION_DATA_ABI:\s*u64\s*=\s*(\d+);$",
+            "servers/crates/timeless-api-common/src/lib.rs",
+            "required extension data ABI",
+        )?,
+    );
+    values.insert(
+        "server_minimum_extension".to_owned(),
+        required_capture(
+            &server,
+            r#"(?m)^pub const MINIMUM_EXTENSION_VERSION:\s*&str\s*=\s*\"([^\"]+)\";$"#,
+            "servers/crates/timeless-api-common/src/lib.rs",
+            "minimum extension version",
+        )?,
+    );
+    Ok(values)
+}
+
+fn validate_public_compatibility_versions(root: &Path) -> Result<Vec<String>> {
+    let expected = compatibility_source_versions(root)?;
+    if expected.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let relative = "docs/COMPATIBILITY.md";
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(vec![format!(
+            "missing {relative} for the public compatibility generations"
+        )]);
+    }
+    let content = fs::read_to_string(path)?;
+    let (region, mut errors) = marked_region(&content, relative, "public-compatibility-versions")?;
+    let row = Regex::new(r#"(?m)^\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|"#)?;
+    let documented: BTreeMap<String, String> = row
+        .captures_iter(region)
+        .map(|captures| (captures[1].to_owned(), captures[2].to_owned()))
+        .collect();
+    for (key, value) in &expected {
+        match documented.get(key) {
+            None => errors.push(format!(
+                "{relative}: compatibility key {key} has no inventory row"
+            )),
+            Some(actual) if actual != value => errors.push(format!(
+                "{relative}: compatibility key {key} differs; source={value:?}, documented={actual:?}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for key in documented.keys() {
+        if !expected.contains_key(key) {
+            errors.push(format!(
+                "{relative}: compatibility inventory key {key} has no source contract"
+            ));
+        }
+    }
+
+    if expected.get("extension_workspace") != expected.get("server_workspace") {
+        errors.push(format!(
+            "Cargo.toml and servers/Cargo.toml release versions differ: extension={:?}, server={:?}",
+            expected.get("extension_workspace"),
+            expected.get("server_workspace")
+        ));
+    }
+    for (workspace, floor, description) in [
+        (
+            "extension_workspace",
+            "extension_minimum_server",
+            "extension workspace and minimum server",
+        ),
+        (
+            "server_workspace",
+            "server_minimum_extension",
+            "server workspace and minimum extension",
+        ),
+    ] {
+        let workspace_line = pre_one_release_line(
+            expected
+                .get(workspace)
+                .expect("compatibility source inventory has workspace"),
+        )?;
+        let floor_line = pre_one_release_line(
+            expected
+                .get(floor)
+                .expect("compatibility source inventory has floor"),
+        )?;
+        if workspace_line != floor_line {
+            errors.push(format!(
+                "{description} versions must use the same pre-1.0 compatibility line"
+            ));
+        }
+    }
+    if expected.get("extension_data_abi") != expected.get("server_required_data_abi") {
+        errors.push("extension and server data ABI contracts differ".to_owned());
+    }
+
+    let changelog_relative = "CHANGELOG.md";
+    let changelog = root.join(changelog_relative);
+    if !changelog.is_file() {
+        errors.push(format!("missing {changelog_relative}"));
+    } else {
+        let changelog_content = fs::read_to_string(changelog)?;
+        let target = required_capture(
+            &changelog_content,
+            r"<!--\s*release-target:\s*([^\s]+)\s*-->",
+            changelog_relative,
+            "release target",
+        )?;
+        if Some(&target) != expected.get("extension_workspace") {
+            errors.push(format!(
+                "{changelog_relative}: release target {target:?} differs from workspace {:?}",
+                expected.get("extension_workspace")
+            ));
+        }
+    }
+    Ok(errors)
+}
+
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -787,6 +1044,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_public_sql_inventory(root)?);
     errors.extend(validate_public_server_routes(root)?);
     errors.extend(validate_public_server_environment(root)?);
+    errors.extend(validate_public_compatibility_versions(root)?);
     Ok(errors)
 }
 
@@ -941,6 +1199,39 @@ mod tests {
     }
 
     #[test]
+    fn repository_documentation_scan_excludes_untracked_drafts() {
+        let fixture = fixture();
+        fs::write(
+            fixture.path().join("docs/tracked.md"),
+            "# Tracked\n\n[Root](../README.md)\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/untracked.md"),
+            "# Draft\n\n[Missing](private-draft-target.md)\n",
+        )
+        .unwrap();
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = Command::new("git")
+            .args(["add", "README.md", "docs/tracked.md"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let files = markdown_files(fixture.path()).unwrap();
+        assert!(files.ends_with(&[
+            fixture.path().join("README.md"),
+            fixture.path().join("docs/tracked.md")
+        ]));
+        assert!(!files.contains(&fixture.path().join("docs/untracked.md")));
+    }
+
+    #[test]
     fn server_matrix_disagreement_fails() {
         let fixture = fixture();
         fs::write(
@@ -1058,5 +1349,67 @@ mod tests {
         assert!(!errors
             .iter()
             .any(|error| error.contains("TIMELESS_TEST_ONLY")));
+    }
+
+    #[test]
+    fn public_compatibility_inventory_must_match_both_workspaces_and_floors() {
+        let fixture = fixture();
+        for relative in [
+            "crates/timeless-ext/src",
+            "servers/crates/timeless-api-common/src",
+        ] {
+            fs::create_dir_all(fixture.path().join(relative)).unwrap();
+        }
+        fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.4.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("servers/Cargo.toml"),
+            "[workspace.package]\nversion = \"0.4.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture
+                .path()
+                .join("crates/timeless-ext/src/capabilities.rs"),
+            "const DATA_ABI: u64 = 1;\nfn value() { let _ = serde_json::json!({\"sql_surface_version\": 1, \"minimum_server_version\": \"0.4.0\"}); }\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture
+                .path()
+                .join("servers/crates/timeless-api-common/src/lib.rs"),
+            "pub const DATA_SCHEMA_VERSION: i64 = 1;\n\
+             pub const REQUIRED_EXTENSION_DATA_ABI: u64 = 1;\n\
+             pub const MINIMUM_EXTENSION_VERSION: &str = \"0.4.0\";\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/COMPATIBILITY.md"),
+            "# Compatibility\n\n<!-- public-compatibility-versions:start -->\n\n\
+             | Contract key | Current value | Meaning |\n|---|---|---|\n\
+             | `extension_workspace` | `0.3.0` | stale |\n\
+             | `server_workspace` | `0.4.0` | current |\n\
+             | `extension_data_abi` | `1` | current |\n\
+             | `sql_surface_version` | `1` | current |\n\
+             | `extension_minimum_server` | `0.4.0` | current |\n\
+             | `server_data_schema` | `1` | current |\n\
+             | `server_required_data_abi` | `1` | current |\n\
+             | `server_minimum_extension` | `0.4.0` | current |\n\n\
+             <!-- public-compatibility-versions:end -->\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("CHANGELOG.md"),
+            "# Changelog\n\n<!-- release-target: 0.3.0 -->\n",
+        )
+        .unwrap();
+        let errors = validate(fixture.path()).unwrap();
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("extension_workspace differs")));
+        assert!(errors.iter().any(|error| error.contains("release target")));
     }
 }

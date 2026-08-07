@@ -420,3 +420,7 @@ The binaries use TCP, a local SQLite/libSQL-compatible database file, WAL
 mode, and the loadable extension API. A direct Rust embedding that does not
 need HTTP should use `timeless_ext::register_telemetry` and the public SQL
 contracts instead of launching a signal server.
+
+Before replacing either side of the binary/extension pair, follow the
+[compatibility statement](COMPATIBILITY.md) and
+[upgrade and rollback guide](UPGRADE.md).

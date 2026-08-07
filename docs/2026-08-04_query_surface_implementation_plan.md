@@ -1848,6 +1848,18 @@ default from seven days to the actual absent/inherit policy. Current server
 READMEs link the canonical contract and no longer frame release binaries as
 POCs or require Phoenix for standalone use.
 
+Session 20c closes release versioning, compatibility, and replacement
+operations. `CHANGELOG.md`, `docs/COMPATIBILITY.md`, and `docs/UPGRADE.md`
+separate source, artifact, data-ABI, SQL-surface, batch/frame, schema-ledger,
+and language generations; define supported binary pairings; and give a
+copy-based drain/preflight/upgrade/verify/rollback procedure. `QSF-284`
+records that tagged `v0.3.0` predates the capability handshake even though
+post-tag source still reported `0.3.0`. Both workspaces and mutual peer floors
+now advance to unreleased `0.4.0`, while compatible future `0.4.x` patches may
+retain that peer floor; data ABI 1 and every storage format remain unchanged.
+Rust regressions and a source-derived eight-axis documentation contract prevent
+another tag/source identity collision without breaking patch compatibility.
+
 ### Session 21: final release gate and report
 
 Run all extension, crash, transaction, migration, storage, API, parser,

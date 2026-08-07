@@ -4,7 +4,7 @@
 //!
 //! Concurrency model: every public method takes &self and guards state
 //! with Mutexes, matching the metrics Engine so a vtab cursor can hold
-//! an Arc<BlockEngine> next to the table object. NOTHING in here uses
+//! an `Arc<BlockEngine>` next to the table object. NOTHING in here uses
 //! rayon or spawns threads — every store call happens on the caller's
 //! thread. This is a hard rule (PLAN.md Session 3 lesson): store calls
 //! re-enter SQLite on the host connection whose mutex the vtab callback

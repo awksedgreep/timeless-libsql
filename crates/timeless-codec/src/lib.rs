@@ -511,7 +511,7 @@ const DICT_MAX_RATIO_DEN: usize = 8;
 
 /// Encode a string column from any iterator of &str (the callers hold
 /// entries, not string arrays — an iterator avoids materializing an
-/// intermediate Vec<String>). `n` is the expected count and is
+/// intermediate `Vec<String>`). `n` is the expected count and is
 /// validated: a mismatch is a caller bug worth failing loudly on.
 ///
 /// Strategy pick by DISTINCT RATIO on a min(n, 64Ki) sample (a cheap

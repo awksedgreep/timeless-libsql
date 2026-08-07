@@ -4187,7 +4187,7 @@ impl Engine {
     ///
     /// Called by the maintenance wrappers AFTER their transition guard
     /// is released (delete_before takes it again); must never run under
-    /// an engine lock. Manual 'prune:<ts>' is unaffected.
+    /// an engine lock. Manual `prune:<ts>` is unaffected.
     pub fn apply_retention(&self) -> EngineResult<usize> {
         let retention = self.retention_native.load(Ordering::Relaxed);
         let tiers: Vec<RollupTier> = self
@@ -4766,8 +4766,8 @@ pub enum WindowOp {
     Agg(AggFn),
     /// last − first (engine-order ties, same rule as grid-last).
     Delta,
-    /// Σ over consecutive pairs of (v[i] − v[i−1]) if v[i] ≥ v[i−1]
-    /// else v[i] — the stable reset-adjustment rule. The window's
+    /// Σ over consecutive pairs of (`v[i] − v[i−1]`) if `v[i] ≥ v[i−1]`,
+    /// else `v[i]` — the stable reset-adjustment rule. The window's
     /// first sample contributes nothing.
     Increase,
     /// increase ÷ window, per NATIVE ts unit.

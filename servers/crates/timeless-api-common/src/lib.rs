@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DATA_SCHEMA_VERSION: i64 = 1;
 pub const REQUIRED_EXTENSION_DATA_ABI: u64 = 1;
-pub const MINIMUM_EXTENSION_VERSION: &str = "0.3.0";
+pub const MINIMUM_EXTENSION_VERSION: &str = "0.4.0";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -533,6 +533,23 @@ mod tests {
     static NON_LOOPBACK_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn release_compatibility_floor_matches_the_server_release_line() {
+        assert_ne!(
+            env!("CARGO_PKG_VERSION"),
+            "0.3.0",
+            "the tagged v0.3.0 artifact predates the release server handshake"
+        );
+        assert!(
+            env!("CARGO_PKG_VERSION").starts_with("0.4."),
+            "the current servers must remain on the documented 0.4 compatibility line"
+        );
+        assert_eq!(
+            MINIMUM_EXTENSION_VERSION, "0.4.0",
+            "compatible 0.4 patch releases retain the 0.4.0 extension floor"
+        );
+    }
+
+    #[test]
     fn future_database_schema_fails_before_migration() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -553,9 +570,9 @@ mod tests {
     fn additive_ledger_is_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         let capabilities = ExtensionCapabilities {
-            extension_version: "0.3.0".into(),
+            extension_version: "0.4.0".into(),
             data_abi: 1,
-            minimum_server_version: "0.3.0".into(),
+            minimum_server_version: "0.4.0".into(),
             build: BuildIdentity {
                 commit: "test".into(),
                 target: "test".into(),
@@ -584,9 +601,9 @@ mod tests {
     #[test]
     fn additive_query_surface_capabilities_fail_closed() {
         let mut capabilities = ExtensionCapabilities {
-            extension_version: "0.3.0".into(),
+            extension_version: "0.4.0".into(),
             data_abi: 1,
-            minimum_server_version: "0.3.0".into(),
+            minimum_server_version: "0.4.0".into(),
             build: BuildIdentity {
                 commit: "test".into(),
                 target: "test".into(),

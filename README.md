@@ -5,7 +5,6 @@ one loadable extension, three virtual tables.** Think *"FTS5 for telemetry."*
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)
-![Status: experimental](https://img.shields.io/badge/status-experimental-red.svg)
 
 ```sql
 .load ./libtimeless_ext
@@ -97,6 +96,9 @@ frame formats, capability negotiation, transaction behavior, and embedding
 entry points. The [Rust signal server API reference](docs/SERVER_API_REFERENCE.md)
 is the canonical inventory of binaries, routes, configuration, authentication,
 limits, lifecycle, backup, errors, and checked platforms.
+Versioning and operational changes are defined by the
+[changelog](CHANGELOG.md), [compatibility statement](docs/COMPATIBILITY.md),
+and [upgrade/rollback guide](docs/UPGRADE.md).
 
 ## The three virtual tables
 

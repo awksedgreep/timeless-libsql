@@ -6,6 +6,13 @@ This is the release workspace for the three signal-specific Rust executables:
 - `timeless-logs-api`
 - `timeless-traces-api`
 
+The complete public route, configuration, authentication, lifecycle, backup,
+and error inventory is the
+[Rust signal server API reference](../docs/SERVER_API_REFERENCE.md). Artifact
+pairing and replacement are defined by the
+[compatibility statement](../docs/COMPATIBILITY.md) and
+[upgrade guide](../docs/UPGRADE.md).
+
 The servers own HTTP scheduling, bounded admission, query/response work,
 maintenance wake-ups, and process lifecycle. They do not implement telemetry
 storage. Every write, flush, optimize, rollup, retention, and query operation
@@ -56,4 +63,6 @@ All three expose `/live`, `/ready`, `/health`, and signal-specific stats. A
 SIGINT or SIGTERM stops admission, drains accepted HTTP work, stops maintenance,
 flushes through the public extension command, closes/reaps SQLite workers, and
 releases the owner lease. Authentication and production limits are added in
-release Session 4; migration/startup state is added in Sessions 2–3.
+the current release servers. Startup capability/schema fencing occurs before
+listener binding; coordinated backup and complete WAL checkpointing use the
+sole writer connection.

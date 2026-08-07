@@ -1,13 +1,16 @@
 # SQLite extension API reference
 
 This is the canonical reference for the SQL surface exported by
-`timeless-libsql` 0.3.x. It covers both the telemetry loadable artifact
+`timeless-libsql` 0.4.x. It covers both the telemetry loadable artifact
 (`libtimeless_ext`) and the separate health artifact (`libdbhealth_ext`). The
 [query-language matrices](QUERY_FEATURES.md) describe PromQL, MetricsQL, and
 LogsQL behavior in the Rust signal APIs; they do not change the SQL contracts
 defined here. Binary launch, HTTP routes, authentication, runtime limits,
 shutdown, and coordinated backup are in the
 [Rust signal server API reference](SERVER_API_REFERENCE.md).
+Artifact/database pairing rules are in the
+[compatibility statement](COMPATIBILITY.md), and replacement procedures are
+in the [upgrade and rollback guide](UPGRADE.md).
 
 All implementation-owned shadow tables are private. Applications must use
 the virtual tables, table-valued functions, scalar, commands, and batch
@@ -50,7 +53,7 @@ The result is deterministic JSON. These fields are contractual:
 
 - `extension_version`: semantic version of the loaded extension.
 - `data_abi`: on-disk/public data compatibility generation. It is `1` for
-  0.3.x; additive SQL or JSON fields do not change it.
+  0.4.x; additive SQL or JSON fields do not change it.
 - `sql_surface_version`: generation of the advertised SQL inventory. It is
   `1` for the surface documented here.
 - `minimum_server_version`: oldest compatible Timeless Rust signal server.
