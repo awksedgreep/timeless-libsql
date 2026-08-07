@@ -322,6 +322,14 @@ removal under `keep_metric_names`, cumulative and `vmrange` buckets, missing
 `+Inf`, negative-first interpolation, monotonic/NaN repair, computed-NaN
 omission, scalar/empty inputs, arity/type errors, and duplicate-output
 collisions. The fixture now contains 184 MetricsQL cases in total.
+The `MQL-08` disposition adds twelve successful acceptance witnesses, one for
+each item in the finite legacy rejection catalog. The cases deliberately use
+small deterministic values: they prove that pinned VictoriaMetrics recognizes
+`label_keep`, `label_map`, `quantiles`, `distinct`, `increase_pure`,
+`remove_resets`, `interpolate`, `keep_last_value`, `keep_next_value`,
+`drop_common_labels`, `rate_over_sum`, and `WITH`, without pretending those
+unrelated features share one compatibility contract. The fixture now contains
+196 MetricsQL cases in total.
 Timeless compares exact result labels, timestamp grids, and float values while
 retaining its documented HTTP 400 `bad_data` envelope in place of
 VictoriaMetrics's HTTP 422/error-type-`422` wire policy.
@@ -478,6 +486,17 @@ query-context functions `start()`, `end()`, and `step()`, but rejects
 `min_of()` and `max_of()`; those names are not stable MetricsQL functions in
 the pinned tier. The matrix records those dispositions instead of turning a
 previous planning assumption into a compatibility claim.
+
+The `MQL-08` source audit is also pinned to
+`d94a85a4059b22fd238a0d2516bcb3e9bfb54587`. VictoriaMetrics registers
+`label_keep`, `label_map`, `drop_common_labels`, `remove_resets`,
+`interpolate`, `keep_last_value`, and `keep_next_value` in
+`app/vmselect/promql/transform.go`; `distinct` and `quantiles` in
+`app/vmselect/promql/aggr.go`; and `increase_pure` and `rate_over_sum` in
+`app/vmselect/promql/rollup.go`. Its vendored MetricsQL 0.87.3 parser expands
+`WITH` expression, function, selector, and duration templates before
+evaluation. This classification is why the catch-all is deferred and split
+into future row prerequisites rather than implemented as one function family.
 
 For `MQL-10`, the pinned source implementation returns request start, end,
 and step milliseconds divided by 1,000. Range queries therefore expose the

@@ -1399,6 +1399,93 @@
       "query": "histogram_quantiles(\"phi\", 0.5, 1)",
       "evaluation_offset_ms": 30000,
       "expected_empty": true
+    },
+    {
+      "id": "MQL-08-label-keep-is-an-upstream-transform",
+      "query": "label_keep(label_set(1, \"host\", \"a\", \"zone\", \"east\"), \"host\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"host": "a"},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-08-label-map-is-an-upstream-transform",
+      "query": "label_map(label_set(1, \"zone\", \"east\"), \"zone\", \"east\", \"primary\")",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"zone": "primary"},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-08-quantiles-is-an-upstream-aggregate",
+      "query": "quantiles(\"phi\", 0.5, 1, label_set(1, \"host\", \"a\") or label_set(3, \"host\", \"b\"))",
+      "evaluation_offset_ms": 30000,
+      "result_order": "unordered",
+      "expected_results": [
+        {"metric": {"phi": "0.5"}, "value": 2},
+        {"metric": {"phi": "1"}, "value": 3}
+      ]
+    },
+    {
+      "id": "MQL-08-distinct-is-an-upstream-aggregate",
+      "query": "distinct(label_set(1, \"host\", \"a\") or label_set(3, \"host\", \"b\"))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [2]
+    },
+    {
+      "id": "MQL-08-increase-pure-is-an-upstream-rollup",
+      "query": "increase_pure(oracle_step[5s])",
+      "evaluation_offset_ms": 0,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [5]
+    },
+    {
+      "id": "MQL-08-remove-resets-is-an-upstream-transform",
+      "query": "remove_resets(vector(1))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-08-interpolate-is-an-upstream-transform",
+      "query": "interpolate(vector(1))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-08-keep-last-value-is-an-upstream-transform",
+      "query": "keep_last_value(vector(1))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-08-keep-next-value-is-an-upstream-transform",
+      "query": "keep_next_value(vector(1))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-08-drop-common-labels-is-an-upstream-transform",
+      "query": "drop_common_labels(label_set(1, \"common\", \"x\"))",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {},
+      "expected_values": [1]
+    },
+    {
+      "id": "MQL-08-rate-over-sum-is-an-upstream-rollup",
+      "query": "rate_over_sum(oracle_step[5s])",
+      "evaluation_offset_ms": 0,
+      "expected_metric": {"job": "oracle"},
+      "expected_values": [9]
+    },
+    {
+      "id": "MQL-08-with-is-upstream-template-grammar",
+      "query": "WITH (x = label_set(1, \"source\", \"template\")) x",
+      "evaluation_offset_ms": 30000,
+      "expected_metric": {"source": "template"},
+      "expected_values": [1]
     }
   ],
   "operator_error_cases": [

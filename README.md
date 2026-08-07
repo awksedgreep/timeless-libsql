@@ -691,7 +691,12 @@ resolutions, signed offsets, and adaptive `0i` rollups, plus request-owned
 errors, plus VictoriaMetrics plural histogram quantiles over cumulative and
 `vmrange` buckets with one shared bucket read; direct SQL users retain
 the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`,
-`SQL-MQL-009` through `SQL-MQL-010`, and `SQL-MQL-012` recipes. The LogsQL API
+`SQL-MQL-009` through `SQL-MQL-010`, and `SQL-MQL-012` recipes. The finite
+`MQL-08` legacy remainder is explicitly deferred, not implied parity:
+`label_keep`, `label_map`, `quantiles`, `distinct`, `increase_pure`,
+`remove_resets`, `interpolate`, `keep_last_value`, `keep_next_value`,
+`drop_common_labels`, `rate_over_sum`, and `WITH` fail before storage until
+each receives its own pinned compatibility row. The LogsQL API
 includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
 exact-prefix matching, and static multi-exact `in(...)` membership over bounded
 public rows while retaining Timeless's rich JSON types, plus static

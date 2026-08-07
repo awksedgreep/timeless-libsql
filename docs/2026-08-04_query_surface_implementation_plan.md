@@ -1576,6 +1576,24 @@ identical public chunks, decoded/returned points, payload bytes, zero result
 cardinality, and 63-byte responses. Metrics HWM is 52,224 KiB after the full
 workload.
 
+`MQL-08` is closed as a finite catalog disposition, not a blanket MetricsQL
+compatibility row. The old Elixir parser's twelve-name `@metricsql_fns` list
+was rejection-only: it implemented none of `label_keep`, `label_map`,
+`quantiles`, `distinct`, `increase_pure`, `remove_resets`, `interpolate`,
+`keep_last_value`, `keep_next_value`, `drop_common_labels`, `rate_over_sum`, or
+`WITH`. Pinned VictoriaMetrics 1.148.0 source and twelve live immutable-image
+witnesses classify those names across label transforms, cross-series
+aggregates, range/grid transforms, rollups, and parser-time template grammar.
+They cannot honestly share one evaluator or SQL contract. Both Timeless
+MetricsQL routes now reject each name case-insensitively at its source
+position, before public storage reads, through GET, POST, range, shutdown, and
+reopen; strings and comments are isolated. Each construct must receive its own
+stable matrix row, exact oracle corpus, ownership decision, public-SQL recipe
+or no-SQL disposition, limits/cancellation contract, real-extension
+regression, and evidence before execution is enabled. No benchmark is claimed
+for a catalog the product deliberately rejects, and no extension or storage
+contract changed.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

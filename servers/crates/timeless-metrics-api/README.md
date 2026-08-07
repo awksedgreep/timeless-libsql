@@ -285,6 +285,17 @@ name-removal, and duplicate-output rules. Timeless retains exact stored NaN
 bucket bits that VictoriaMetrics Remote Write omits. Work/result/response
 limits and cancellation bound both bucket conversion and every rank.
 
+The MetricsQL routes do not claim the old catch-all remainder. `label_keep`,
+`label_map`, `quantiles`, `distinct`, `increase_pure`, `remove_resets`,
+`interpolate`, `keep_last_value`, `keep_next_value`, `drop_common_labels`,
+`rate_over_sum`, and parser-time `WITH` templates are the exact finite
+`MQL-08` deferred catalog. Each returns HTTP 400 `bad_data` with its
+case-normalized name and source position before a storage read. Strings and
+line comments are ignored by this detector. The list came from constructs the
+old Elixir parser explicitly rejected; it is not an Elixir fallback surface
+and is not shorthand for every other VictoriaMetrics feature. Each item needs
+an individual compatibility row and pinned semantics before it can execute.
+
 MetricsQL never enters the SQLite extension as language syntax. The Rust API
 parses and composes it over the same public bounded grid used by PromQL; direct
 SQLite/libSQL users can execute the corresponding

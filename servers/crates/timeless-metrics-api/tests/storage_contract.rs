@@ -11912,6 +11912,120 @@ async fn session_nineteen_native_histogram_functions_ignore_float_samples_and_re
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_nineteen_remaining_metricsql_catalog_fails_explicitly_without_storage() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_nineteen_remaining_metricsql_catalog.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let cases = [
+        (r#"label_keep(cpu, "host")"#, "label_keep"),
+        (r#"label_map(cpu, "zone", "east", "primary")"#, "label_map"),
+        (r#"quantiles("phi", 0.5, 0.9, cpu)"#, "quantiles"),
+        ("distinct(cpu)", "distinct"),
+        ("increase_pure(cpu[5m])", "increase_pure"),
+        ("remove_resets(cpu)", "remove_resets"),
+        ("interpolate(cpu)", "interpolate"),
+        ("keep_last_value(cpu)", "keep_last_value"),
+        ("keep_next_value(cpu)", "keep_next_value"),
+        ("drop_common_labels(cpu)", "drop_common_labels"),
+        ("rate_over_sum(cpu[5m])", "rate_over_sum"),
+        ("with (x = cpu) x", "with"),
+    ];
+
+    let stats_before = storage.stats().await.unwrap();
+    for (query, construct) in cases {
+        let diagnostic = format!(
+            "1:1: MetricsQL construct \"{construct}\" is deferred; it requires an individual compatibility row with pinned VictoriaMetrics semantics"
+        );
+        let expected = serde_json::json!({
+            "status": "error",
+            "errorType": "bad_data",
+            "error": format!("invalid parameter \"query\": {diagnostic}")
+        });
+        let get = mql_query(&app, query, 2).await;
+        assert_eq!(get.0, StatusCode::BAD_REQUEST, "{query}: {}", get.1);
+        assert_eq!(get.1, expected, "{query}");
+
+        let post_params = form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", query)
+            .append_pair("time", "2")
+            .finish();
+        let post = post_form(&app, "/metricsql/api/v1/query", &post_params).await;
+        assert_eq!(post.0, StatusCode::BAD_REQUEST, "{query}: {}", post.1);
+        assert_eq!(post.1, expected, "{query}");
+    }
+    let range = mql_query_range(&app, "keep_last_value(cpu)", 0, 2, 1).await;
+    assert_eq!(range.0, StatusCode::BAD_REQUEST, "{}", range.1);
+    assert!(range.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("MetricsQL construct \"keep_last_value\" is deferred"));
+    for query in [
+        r#"label_set(vector(1), "note", "label_keep(cpu) and with (x=1) x")"#,
+        "# label_map(cpu, \"zone\")\nvector(1)",
+    ] {
+        let response = mql_query(&app, query, 2).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["result"][0]["value"][1], "1", "{query}");
+    }
+    let stats_after = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after.extension_raw_batch_query_count - stats_before.extension_raw_batch_query_count
+            + stats_after.extension_window_batch_query_count
+            - stats_before.extension_window_batch_query_count,
+        0,
+        "deferred MetricsQL catalog constructs must fail before storage"
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_stats_before = reopened.stats().await.unwrap();
+    for (query, construct) in cases {
+        let response = mql_query(&reopened_app, query, 2).await;
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "{query}: {}",
+            response.1
+        );
+        assert!(
+            response.1["error"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("MetricsQL construct \"{construct}\" is deferred")),
+            "{query}: {}",
+            response.1
+        );
+    }
+    let reopened_stats_after = reopened.stats().await.unwrap();
+    assert_eq!(
+        reopened_stats_after.extension_raw_batch_query_count
+            - reopened_stats_before.extension_raw_batch_query_count
+            + reopened_stats_after.extension_window_batch_query_count
+            - reopened_stats_before.extension_window_batch_query_count,
+        0,
+        "deferred MetricsQL catalog constructs must remain storage-free after reopen"
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_reopen() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

@@ -295,7 +295,7 @@ the P0 PromQL rows. They remain `API` composition, not extension syntax.
 | `MQL-05` | `default_rollup` and window-less rollups ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-005-default_rollup-and-window-less-rollups)); implicit selectors, 0.6-quantile scrape inference, jitter inflation, `max_lookback`, stale/ordinary-NaN distinction, step windows, previous-sample/reset semantics, first/last/name policy, timestamp provenance, limits, stable-route isolation, and reopen are pinned | shipped | yes | `API` | P2 |
 | `MQL-06` | `range_avg/min/max/sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-006-range-aggregates)); whole-request-grid reduction/fill, slot-index average, ordinary sum, later-tie extrema, sparse/NaN/infinity behavior, unconditional name removal, scalar/expression composition, collisions, limits, cancellation, route isolation, and reopen are pinned | shipped | yes | `API` | P2 |
 | `MQL-07` | `running_avg/min/max/sum` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-007-running-aggregates)); cumulative grid output, slot-index average, ordinary sum, later-tie extrema, leading/missing/stale carry, computed-NaN omission, unconditional name removal, scalar/expression composition, collisions, limits, cancellation, route isolation, and reopen are pinned | shipped | yes | `API` | P2 |
-| `MQL-08` | remaining MetricsQL functions/operators | missing | partial | `API` | DEFER |
+| `MQL-08` | finite legacy rejection catalog: `label_keep`, `label_map`, `quantiles`, `distinct`, `increase_pure`, `remove_resets`, `interpolate`, `keep_last_value`, `keep_next_value`, `drop_common_labels`, `rate_over_sum`, and `WITH` | deferred | no | `DEFER` | DEFER |
 | `MQL-09` | request-step-relative durations such as `[5i]`, `[5i:1i]`, and `offset 5i` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-009-request-step-relative-durations)); decimal/compound/case behavior, inherited negative offsets, exact `int64` saturation through collision-free markers, comments/strings, adaptive direct/subquery `0i`, limits, stable-route isolation, exact-build evidence, and reopen are pinned | shipped | yes | `API` | P2 |
 | `MQL-10` | query-context `start()`, `end()`, and `step()` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-mql-010-query-context-values)); request-owned range/instant values, subsecond/pre-epoch seconds, case-insensitive zero-argument grammar, expression composition, preserved selector `@ start()`/`@ end()`, stable-route isolation, explicit unsupported functions, limits, cancellation, exact-build evidence, and reopen are pinned | shipped | yes | `API` | P2 |
 | `MQL-11` | `min_of` and `max_of` | deferred | no | `DEFER` | DEFER |
@@ -306,6 +306,39 @@ The MetricsQL tier uses only `/metricsql/api/v1/query` and
 implicitly. Pinned VictoriaMetrics 1.148.0 rejects both `min_of` and `max_of`,
 so `MQL-11` is deferred unless a later immutable upstream tier or an explicit
 Timeless-only contract supplies a real semantic oracle.
+
+`MQL-08` is a finite catalog disposition, not shorthand for “all other
+MetricsQL.” The twelve names are exactly the old `TimelessMetrics.PromQL`
+`@metricsql_fns` rejection list; that Elixir implementation rejected every
+item and therefore supplies no behavior to port. Pinned VictoriaMetrics
+1.148.0 accepts one source-backed witness for each item. They do not form one
+coherent feature and cannot honestly share one implementation or SQL recipe:
+
+| construct | pinned upstream category | prerequisite before admission as a new stable row |
+|---|---|---|
+| `label_keep` | label transform | exact name/label retention, empty and duplicate-output behavior, bounded generated labels, and an honest public-SQL recipe or no-SQL disposition |
+| `label_map` | label transform | exact ordered mapping, missing/empty/name behavior, collision policy, bounded generated labels, and an honest public-SQL recipe or no-SQL disposition |
+| `quantiles` | cross-series aggregate | grouping/modifier grammar, multiple scalar ranks, IEEE interpolation, rank-label formatting, output collisions, cardinality limits, and direct-SQL ownership |
+| `distinct` | cross-series aggregate | per-step IEEE equality, grouping/modifier grammar, missing/NaN behavior, bounded group state, and direct-SQL ownership |
+| `increase_pure` | range rollup | open-left windows, previous-sample selection, reset preprocessing, gaps/staleness, name/timestamp policy, limits, cancellation, and direct-SQL ownership |
+| `remove_resets` | complete-grid transform | exact reset and precision rules, missing/stale/NaN behavior, names, limits, cancellation, and direct-SQL ownership |
+| `interpolate` | complete-grid gap transform | leading/interior/trailing gaps, stale versus ordinary NaN, infinity/signed zero, names, limits, and cancellation |
+| `keep_last_value` | complete-grid gap transform | leading/trailing gaps, stale versus ordinary NaN, names, limits, cancellation, and direct-SQL ownership |
+| `keep_next_value` | complete-grid look-ahead transform | bounded look-ahead state, leading/trailing gaps, stale versus ordinary NaN, names, limits, cancellation, and direct-SQL ownership |
+| `drop_common_labels` | multi-series label transform | complete-result commonality, name behavior, empty/scalar/collision cases, bounded identity state, and direct-SQL ownership |
+| `rate_over_sum` | range rollup | exact window sum/rate units, boundaries, gaps/staleness, IEEE behavior, name/timestamp policy, limits, cancellation, and direct-SQL ownership |
+| `WITH` | parser-time template grammar, not a function | lexical scope, expression/function/selector/duration templates, substitution and shadowing, recursion/depth/size limits, source diagnostics, and no-storage grammar ownership |
+
+Until one of those contracts receives its own stable row and pinned semantic
+corpus, both MetricsQL HTTP routes reject it explicitly before any public
+extension read. Quoted strings and line comments cannot trigger the detector;
+names are case-insensitive and errors include the first construct's source
+position. There is no `MQL-08` SQL equivalent because a rejection catalog has
+no executable value semantics. Adding an individual row must decide its own
+ordinary-SQL foundation before implementation.
+Regression:
+`session_nineteen_remaining_metricsql_catalog_fails_explicitly_without_storage`;
+source/oracle disposition: `QSF-260`.
 
 ## Higher-order library boundary
 

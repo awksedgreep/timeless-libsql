@@ -4795,6 +4795,27 @@ Executable regression: Rust SQL-equivalent harness `SQL-MQL-012`; pinned
 VictoriaMetrics and real-extension HTTP/reopen regression:
 `session_fifteen_metricsql_histogram_quantiles_match_victoriametrics_and_reopen`.
 
+### MQL-08: no SQL equivalent for a rejection catalog
+
+`MQL-08` does not denote one executable MetricsQL expression. It is the finite
+twelve-item rejection catalog inherited from the old Elixir parser, spanning
+label transforms, cross-series aggregates, rollups, complete-grid transforms,
+and parser-time `WITH` templates. A statement that merely returns no rows
+would not evaluate a child, enforce any of those semantics, or reproduce the
+explicit unsupported error. It is therefore not an honest SQL equivalent.
+
+Direct SQLite/libSQL users can already compose many mechanical pieces with
+public metric rows, grids, JSON labels, grouping, recursive CTEs, and window
+functions. Each catalog item must nevertheless receive its own matrix row
+before support is claimed. That row must specify parameter units, bounds,
+ordering, IEEE/missing/name/label behavior, limits, language-owned semantics,
+and an executable public statement when ordinary SQL is correct. If no honest
+public statement exists, the future row must record API ownership instead of
+linking this disposition as SQL support.
+
+Real-extension rejection regression:
+`session_nineteen_remaining_metricsql_catalog_fails_explicitly_without_storage`.
+
 ## LogsQL foundations and equivalents
 
 ### SQL-LOG-001: bounded filter, sort, and pagination

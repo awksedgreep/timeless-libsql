@@ -4457,6 +4457,33 @@ was added to the extension. Direct SQLite/libSQL users can apply the executable
 [`SQL-MQL-012`](QUERY_SQL_EQUIVALENTS.md#sql-mql-012-histogram_quantiles)
 multi-rank recipe over public cumulative buckets.
 
+### Deferred MetricsQL catalog
+
+The MetricsQL routes explicitly reject the finite `MQL-08` catalog:
+`label_keep`, `label_map`, `quantiles`, `distinct`, `increase_pure`,
+`remove_resets`, `interpolate`, `keep_last_value`, `keep_next_value`,
+`drop_common_labels`, `rate_over_sum`, and parser-time `WITH` templates. The
+error is HTTP 400 `bad_data`, names the normalized construct and one-indexed
+source position, and occurs before any public extension read. For example:
+
+```text
+invalid parameter "query": 1:1: MetricsQL construct "label_keep" is deferred; it requires an individual compatibility row with pinned VictoriaMetrics semantics
+```
+
+Names are case-insensitive. Identical text inside double-quoted, single-quoted,
+or backtick strings and line comments is not classified as a construct. The
+list is exactly the old Elixir parser's rejection catalog; none of those
+features had Elixir execution semantics to port, and the list does not mean
+“all remaining MetricsQL.” Pinned VictoriaMetrics accepts all twelve, but they
+span unrelated transform, aggregate, rollup, and template contracts.
+
+There is deliberately no executable `MQL-08` SQL recipe. A rejection catalog
+has no result semantics, and `SELECT ... WHERE 0` would incorrectly skip child
+evaluation. A future individual row must document its own public SQL
+equivalent—or explicitly retain Rust API ownership—together with exact
+boundaries, missing/IEEE/name/label behavior, limits, cancellation, and pinned
+oracle parity.
+
 ## Prometheus warning and info annotations
 
 Successful PromQL responses add top-level `warnings` and/or `infos` only when

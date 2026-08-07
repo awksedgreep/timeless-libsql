@@ -15,6 +15,20 @@ const MAX_METRICSQL_DEPTH: usize = 64;
 const PLACEHOLDER_PREFIX: &str = "__timeless_metricsql_expr_";
 const DEFAULT_MAX_SILENCE_INTERVAL_MS: i64 = 300_000;
 const PROMETHEUS_STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
+const DEFERRED_METRICSQL_CONSTRUCTS: [&str; 12] = [
+    "label_keep",
+    "label_map",
+    "quantiles",
+    "distinct",
+    "increase_pure",
+    "remove_resets",
+    "interpolate",
+    "keep_last_value",
+    "keep_next_value",
+    "drop_common_labels",
+    "rate_over_sum",
+    "with",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BinaryOp {
@@ -192,6 +206,12 @@ pub(super) fn lower_with_max_lookback(
     if step <= 0 {
         return Err("MetricsQL request step must be positive".into());
     }
+    if let Some((start, construct)) = first_deferred_metricsql_construct(input) {
+        return Err(format!(
+            "{}: MetricsQL construct \"{construct}\" is deferred; it requires an individual compatibility row with pinned VictoriaMetrics semantics",
+            promql_source_position(input, start)
+        ));
+    }
     let context_rewritten = rewrite_query_context_functions(input, query_start, query_end, step)?;
     for attempt in 0..64_i64 {
         let zero_marker = i64::from(u32::MAX) - attempt * 3;
@@ -246,6 +266,66 @@ pub(super) fn lower_with_max_lookback(
         return Ok(plan);
     }
     Err("MetricsQL query exhausted collision-free zero-duration markers".into())
+}
+
+fn first_deferred_metricsql_construct(input: &str) -> Option<(usize, &'static str)> {
+    let bytes = input.as_bytes();
+    let mut index = 0_usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if delimiter != b'`' && escaped {
+                escaped = false;
+            } else if delimiter != b'`' && byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'#' => {
+                comment = true;
+                index += 1;
+            }
+            b'"' | b'\'' | b'`' => {
+                quote = Some(byte);
+                index += 1;
+            }
+            _ if is_ident_start(byte) => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && is_ident_continue(bytes[index]) {
+                    index += 1;
+                }
+                let open = skip_space_and_comments(input, index);
+                if bytes.get(open) != Some(&b'(') {
+                    continue;
+                }
+                let name = input[start..index].to_ascii_lowercase();
+                if let Some(construct) = DEFERRED_METRICSQL_CONSTRUCTS
+                    .iter()
+                    .copied()
+                    .find(|construct| *construct == name)
+                {
+                    return Some((start, construct));
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn rewrite_query_context_functions(
@@ -4810,6 +4890,49 @@ mod tests {
         assert_eq!(
             lower("range()", 300_000, 2_000).unwrap_err(),
             "unsupported function \"range\""
+        );
+    }
+
+    #[test]
+    fn remaining_metricsql_catalog_fails_with_stable_explicit_diagnostics() {
+        for (query, construct) in [
+            (r#"label_keep(cpu, "host")"#, "label_keep"),
+            (r#"label_map(cpu, "zone", "east", "primary")"#, "label_map"),
+            (r#"quantiles("phi", 0.5, 0.9, cpu)"#, "quantiles"),
+            ("distinct(cpu)", "distinct"),
+            ("increase_pure(cpu[5m])", "increase_pure"),
+            ("remove_resets(cpu)", "remove_resets"),
+            ("interpolate(cpu)", "interpolate"),
+            ("keep_last_value(cpu)", "keep_last_value"),
+            ("keep_next_value(cpu)", "keep_next_value"),
+            ("drop_common_labels(cpu)", "drop_common_labels"),
+            ("rate_over_sum(cpu[5m])", "rate_over_sum"),
+            ("with (x = cpu) x", "with"),
+        ] {
+            assert_eq!(
+                lower(query, 300_000, 2_000).unwrap_err(),
+                format!(
+                    "1:1: MetricsQL construct \"{construct}\" is deferred; it requires an individual compatibility row with pinned VictoriaMetrics semantics"
+                ),
+                "{query}"
+            );
+        }
+
+        assert_eq!(
+            lower("sum(cpu) +\n  LABEL_KEEP(cpu, \"host\")", 300_000, 2_000).unwrap_err(),
+            "2:3: MetricsQL construct \"label_keep\" is deferred; it requires an individual compatibility row with pinned VictoriaMetrics semantics"
+        );
+        assert!(lower(
+            r#"label_set(vector(1), "note", "label_keep(cpu) and with (x=1) x") # interpolate(cpu)"#,
+            300_000,
+            2_000,
+        )
+        .is_ok());
+        assert_eq!(
+            first_deferred_metricsql_construct(
+                r#""label_keep(cpu)" 'with (x=1) x' `interpolate(cpu)` # rate_over_sum(cpu[5m])"#,
+            ),
+            None
         );
     }
 

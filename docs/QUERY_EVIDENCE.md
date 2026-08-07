@@ -6321,6 +6321,33 @@ extension primitive, private access, storage format, batching, compression,
 index, rollup, retention, transaction, migration, optimize, or maintenance
 behavior changed.
 
+## Session 19 catalog disposition: remaining MetricsQL names
+
+`MQL-08` is classified, not enabled. A read-only audit of the old
+`TimelessMetrics.PromQL` parser proved that its twelve-name `@metricsql_fns`
+list was rejection-only, so the matrix's prior `partial` Elixir claim had no
+implementation behind it. Twelve deterministic cases pass against immutable
+VictoriaMetrics 1.148.0, bringing its API fixture from 184 to 196 cases and
+proving that every catalog item is a real upstream construct. Pinned source
+places them in four distinct evaluator families plus parser-time `WITH`
+expansion; one catch-all cannot be an honest compatibility implementation.
+
+The Rust unit regression failed first on PromQL-parser “unknown function”
+errors. The completed real-extension regression now pins case-insensitive,
+source-positioned HTTP 400 `bad_data` failures across all twelve names, GET,
+POST, range, shutdown, and reopen. Quoted strings and line comments are
+isolated, and raw/window extension query counters remain unchanged. There is
+no SQL recipe because the row is a rejection catalog rather than an
+expression; each future construct must receive an individual SQL/API
+ownership decision.
+
+No API narrow/wide p50/p95/p99, result-cardinality, storage-byte, or RSS
+comparison is reported because Timeless deliberately does not evaluate these
+constructs. An individual admitted row must add those measurements. No
+extension primitive, private access, storage format, batching, compression,
+index, rollup, retention, transaction, migration, optimize, or maintenance
+behavior changed.
+
 ## Session 19 experimental disposition: info-series enrichment
 
 `PQL-F21` is classified, not enabled. Two exact cases pass against immutable
