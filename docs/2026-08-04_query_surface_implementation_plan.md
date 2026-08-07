@@ -1298,10 +1298,10 @@ cardinality, response bytes, deadlines, and cancellation are cumulative and
 bounded. Real-extension coverage pins rich final state on every row, limits,
 reader reuse after cancellation, immutable source rows, optimize, shutdown,
 and reopen. `QSF-241` records the semantic and unchanged-storage boundary.
-Exact release build `e04b8754ee9bb47fb892e4bce3105478ff25c0a5`
-measures 3.801/49.242 ms narrow/wide p95 versus 3.699/37.881 ms same-scan
-controls. `QSF-242` accepts the +2.8%/+30.0% endpoint tail and
--0.7%/+30.0% request-attributed API mean after byte-identical public storage
+Exact release build `3bfdf2c843ebc221916d20b35a1df98d111e3eb9`
+measures 3.744/47.706 ms narrow/wide p95 versus 3.618/34.716 ms same-scan
+controls. `QSF-242` accepts the +3.5%/+37.4% endpoint tail and
++8.6%/+32.6% request-attributed API mean after byte-identical public storage
 work. All 8,192 entries complete durably; storage remains four raw blocks;
 queued and in-flight work are zero. No extension primitive, private table,
 storage contract, or authoritative batching behavior changed. `LQL-P46` is

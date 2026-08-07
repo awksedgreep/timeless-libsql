@@ -4734,8 +4734,8 @@ downstream repository was used or modified.
 The checked-in
 [`2026-08-06_session18_lql_p46_total_stats.json`](evidence/2026-08-06_session18_lql_p46_total_stats.json)
 was captured from exact release extension and server build
-`e04b8754ee9bb47fb892e4bce3105478ff25c0a5` and has SHA-256
-`f6fa7044f116beb9e7457fe7285687775affcf3f8ffb1a2315211cf913c48d09`.
+`3bfdf2c843ebc221916d20b35a1df98d111e3eb9` and has SHA-256
+`11605cde0ec229e35d2af601aa1b134934676e771a80c6e9a62fd95c37f0019f`.
 Each candidate and control performs one public scan, sorts the same candidate
 set chronologically, and limits the response to 64 rows. The candidate
 partitions by service and severity, computes complete-group count, and writes
@@ -4746,14 +4746,14 @@ without pretending that native-count and `math` output types are identical.
 
 | shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| grouped `total_stats count()`, indexed host | 64 | 896 | 3.508 | 3.801 | 4.240 | 1 | 1,024 | 235,778 | 128 |
-| grouped `total_stats count()`, full fixture | 64 | 960 | 45.963 | 49.242 | 51.592 | 4 | 8,192 | 1,914,055 | 8,192 |
-| time-sort/constant control, indexed host | 64 | 1,024 | 3.466 | 3.699 | 3.929 | 1 | 1,024 | 235,778 | 128 |
-| time-sort/constant control, full fixture | 64 | 1,088 | 35.171 | 37.881 | 46.930 | 4 | 8,192 | 1,914,055 | 8,192 |
+| grouped `total_stats count()`, indexed host | 64 | 896 | 3.557 | 3.744 | 4.797 | 1 | 1,024 | 235,778 | 128 |
+| grouped `total_stats count()`, full fixture | 64 | 960 | 44.051 | 47.706 | 49.552 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/constant control, indexed host | 64 | 1,024 | 3.280 | 3.618 | 3.805 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/constant control, full fixture | 64 | 1,088 | 33.905 | 34.716 | 35.739 | 4 | 8,192 | 1,914,055 | 8,192 |
 
-Total statistics p95 is 2.8% above the narrow control and 30.0% above the
-wide control. Request-attributed API averages are 2.590/44.814 ms versus
-2.609/34.473 ms, or 0.7% lower/30.0% higher. Every equal-width pair executes
+Total statistics p95 is 3.5% above the narrow control and 37.4% above the
+wide control. Request-attributed API averages are 2.796/43.581 ms versus
+2.575/32.879 ms, or 8.6%/32.6% higher. Every equal-width pair executes
 exactly 50 public queries and has byte-identical candidate-block selection,
 entry decode, payload reads, matches, public-row returns, and requested work.
 The candidate's 128-byte-smaller response in both fixtures is the honest
@@ -4762,11 +4762,11 @@ two-quote-per-row consequence of native numeric count results versus quoted
 does not erase that output-type difference.
 
 All 8,192 rich entries completed durably with zero queued work. Admission took
-18.313 ms and the explicit durability barrier took 38.969 ms. Storage remains
+14.420 ms and the explicit durability barrier took 42.435 ms. Storage remains
 exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
-physical database/WAL/SHM bytes. Logs HWM was 103,160 KiB, 792 KiB above
-LQL-P45 after four additional one-scan shapes; metrics HWM was 52,224 KiB,
-1,468 KiB above it. Both are retained as whole-process complete-workload
+physical database/WAL/SHM bytes. Logs HWM was 100,688 KiB, 1,680 KiB below
+LQL-P45 after four additional one-scan shapes; metrics HWM was 52,240 KiB,
+1,484 KiB above it. Both are retained as whole-process complete-workload
 variation. Cancellation ended with zero requests in flight and zero cancelled
 requests at capture. The measured wide complete-group prepass and rich
 snapshot-write cost remain bounded Rust API work. Fixed-key full-partition
@@ -4783,6 +4783,14 @@ visibility, work/state/result/response/deadline limits, cancellation and
 reader reuse, immutable source rows, optimize, flush, shutdown, and reopen.
 Executable `SQL-LOG-060` proves the fixed-key full-partition numeric window
 foundation through the public release extension.
+
+Final local gates pass: 146 logs library tests, two logs binary tests, all 72
+logs and 90 metrics real-extension tests, both complete Rust workspaces, the
+35-test Rust query harness, all six focused correctness profiles, the
+standalone DB-health lifecycle gate, all 45 CLI/crash/transaction sections,
+the complete 1,329-case live oracle, documentation/oracle contracts,
+formatting, and Clippy with warnings denied. All 126 executable SQL recipes
+and 164 statements pass through the public release extension.
 
 The extension's authoritative 8,192-entry batching, storage formats,
 compression, indexes, retention, optimize, transactions, migrations, and

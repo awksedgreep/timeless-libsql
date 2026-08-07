@@ -1887,11 +1887,11 @@ dynamic LogsQL grammar, natural/rich semantics, limits, cancellation, and
 envelopes; no private table, extension query opcode, storage format, or
 authoritative 8,192-entry batching behavior changes.
 
-Exact release build `e04b8754ee9bb47fb892e4bce3105478ff25c0a5`
-measures grouped total count at 3.801/49.242 ms narrow/wide p95 versus
-3.699/37.881 ms same-scan chronological-sort constant controls, or
-+2.8%/+30.0%. Request-attributed API means are 2.590/44.814 ms versus
-2.609/34.473 ms, or -0.7%/+30.0%. Every pair performs one public scan with
+Exact release build `3bfdf2c843ebc221916d20b35a1df98d111e3eb9`
+measures grouped total count at 3.744/47.706 ms narrow/wide p95 versus
+3.618/34.716 ms same-scan chronological-sort constant controls, or
++3.5%/+37.4%. Request-attributed API means are 2.796/43.581 ms versus
+2.575/32.879 ms, or +8.6%/+32.6%. Every pair performs one public scan with
 byte-identical block, decode, payload, match, requested-work, and public-row
 counters. Candidates and controls each return 64 rows; the 896/960 versus
 1,024/1,088 response bytes honestly reflect native numeric count results
