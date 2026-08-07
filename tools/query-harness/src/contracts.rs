@@ -21,6 +21,7 @@ const LEGAL_STATUSES: [&str; 7] = [
 ];
 const LEGAL_TARGETS: [&str; 5] = ["EXT", "API", "SQL", "LIB", "DEFER"];
 const LEGAL_PRIORITIES: [&str; 6] = ["P0", "P1", "P2", "P3", "EXP", "DEFER"];
+const LEGAL_FINDING_STATUSES: [&str; 4] = ["accepted", "deferred", "experimental", "resolved"];
 
 #[derive(Clone, Debug)]
 struct MatrixRow {
@@ -48,6 +49,95 @@ fn cells(line: &str) -> Vec<&str> {
         .split('|')
         .map(str::trim)
         .collect()
+}
+
+fn unescaped_pipe_count(line: &str) -> usize {
+    let mut count = 0;
+    let mut backslashes = 0;
+    for character in line.chars() {
+        if character == '|' && backslashes % 2 == 0 {
+            count += 1;
+        }
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    count
+}
+
+fn query_storage_finding_ids(root: &Path) -> Result<Vec<(usize, u32)>> {
+    let path = root.join("docs/QUERY_STORAGE_FINDINGS.md");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let identifier = Regex::new(r"^\|\s*`QSF-(\d{3})`\s*\|")?;
+    Ok(fs::read_to_string(path)?
+        .lines()
+        .enumerate()
+        .filter_map(|(offset, line)| {
+            identifier
+                .captures(line)
+                .and_then(|captures| captures[1].parse::<u32>().ok())
+                .map(|value| (offset + 1, value))
+        })
+        .collect())
+}
+
+fn validate_query_storage_findings(root: &Path) -> Result<Vec<String>> {
+    let relative = "docs/QUERY_STORAGE_FINDINGS.md";
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path)?;
+    let identifier = Regex::new(r"^\|\s*`QSF-(\d{3})`\s*\|")?;
+    let terminal_status = Regex::new(r"\|\s*([a-z]+)\s*\|\s*$")?;
+    let mut errors = Vec::new();
+    let mut previous = 0;
+    let mut rows = 0;
+
+    for (offset, line) in content.lines().enumerate() {
+        let Some(captures) = identifier.captures(line) else {
+            continue;
+        };
+        let number = offset + 1;
+        let value = captures[1].parse::<u32>()?;
+        rows += 1;
+        if value != previous + 1 {
+            errors.push(format!(
+                "{relative}:{number}: QSF IDs must be contiguous; expected QSF-{:03}, got QSF-{value:03}",
+                previous + 1
+            ));
+        }
+        previous = value;
+
+        let expected_pipes = if value <= 7 { 4 } else { 9 };
+        let actual_pipes = unescaped_pipe_count(line);
+        if actual_pipes != expected_pipes {
+            errors.push(format!(
+                "{relative}:{number}: QSF-{value:03} has {actual_pipes} unescaped table separators; expected {expected_pipes}"
+            ));
+        }
+        if value > 7 {
+            let status = terminal_status
+                .captures(line)
+                .map(|status| status[1].to_owned());
+            if status
+                .as_deref()
+                .is_none_or(|status| !LEGAL_FINDING_STATUSES.contains(&status))
+            {
+                errors.push(format!(
+                    "{relative}:{number}: QSF-{value:03} has illegal terminal status {status:?}"
+                ));
+            }
+        }
+    }
+    if rows == 0 {
+        errors.push(format!("{relative}: no QSF rows found"));
+    }
+    Ok(errors)
 }
 
 fn parse_matrix(path: &Path) -> Result<(Vec<MatrixRow>, Vec<String>)> {
@@ -1429,6 +1519,20 @@ fn validate_query_release_report(root: &Path, rows: &[MatrixRow]) -> Result<Vec<
     let content = fs::read_to_string(&path)?;
     let mut errors = Vec::new();
 
+    match query_storage_finding_ids(root)?.last().copied() {
+        Some((_, last)) => {
+            let expected = format!("through `QSF-{last:03}`");
+            if !content.contains(&expected) {
+                errors.push(format!(
+                    "{relative}: storage-finding range is stale; expected {expected:?}"
+                ));
+            }
+        }
+        None => errors.push(format!(
+            "{relative}: cannot derive the storage-finding range"
+        )),
+    }
+
     let summary_marker = Regex::new(r"<!--\s*query-release-matrix-summary:\s*(.*?)\s*-->")?;
     let expected_summary = matrix_terminal_summary(rows);
     let actual_summary = summary_marker
@@ -1757,6 +1861,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_public_compatibility_versions(root)?);
     errors.extend(validate_public_artifact_inventory(root)?);
     errors.extend(validate_public_embedding_contract(root)?);
+    errors.extend(validate_query_storage_findings(root)?);
     errors.extend(validate_query_release_report(root, &rows)?);
     errors.extend(validate_canonical_documentation_wording(root)?);
     Ok(errors)
@@ -1898,6 +2003,37 @@ mod tests {
             fixture.path(),
             "missing query-release-fault-evidence marker",
         );
+    }
+
+    #[test]
+    fn storage_findings_require_contiguous_structured_terminal_rows() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path();
+        fs::create_dir(root.join("docs")).unwrap();
+        let mut document = String::from("# Findings\n\n");
+        for identifier in 1..=7 {
+            document.push_str(&format!(
+                "| `QSF-{identifier:03}` | baseline behavior | consequence |\n"
+            ));
+        }
+        document.push_str(
+            "| `QSF-008` | date | row | an unescaped | pipe | expected | evidence | disposition | open |\n",
+        );
+        document.push_str(
+            "| `QSF-010` | date | row | observation | expected | evidence | disposition | accepted |\n",
+        );
+        fs::write(root.join("docs/QUERY_STORAGE_FINDINGS.md"), document).unwrap();
+
+        let errors = validate_query_storage_findings(root).unwrap();
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("QSF-008 has 10 unescaped table separators")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("illegal terminal status")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("expected QSF-009, got QSF-010")));
     }
 
     #[test]

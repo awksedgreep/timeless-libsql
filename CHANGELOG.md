@@ -54,7 +54,8 @@ artifact exists until a tag is created from the finished, validated `main`.
 - A source-checked final query release report with exact matrix dispositions,
   pinned-oracle coverage, Session 0 versus final evidence, storage findings,
   artifact inventory, deferred prerequisites, and higher-order Elixir
-  interface recommendations.
+  interface recommendations. Rust contracts keep the append-only finding IDs,
+  table structure, terminal statuses, and reported range synchronized.
 
 ### Changed
 

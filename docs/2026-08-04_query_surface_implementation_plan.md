@@ -1927,9 +1927,11 @@ The final matrix audit leaves all 216 rows terminal: 191 shipped, 11
 experimental, and 14 deferred behind explicit prerequisites. The Rust
 documentation contract derives that summary, requires every non-shipped ID in
 the final report, checks exact query-build identities and durable barriers,
-and rejects absent or failed owned fault evidence. `LQL-P10` and `LQL-P11`
-received the missing physical-block-diagnostics prerequisite and explicit
-no-SQL disposition without exposing private storage.
+rejects absent or failed owned fault evidence, and keeps the append-only
+storage-finding IDs, table columns, terminal statuses, and reported range in
+sync. `LQL-P10` and `LQL-P11` received the missing
+physical-block-diagnostics prerequisite and explicit no-SQL disposition
+without exposing private storage.
 
 The exact-build query artifact for implementation source
 `178f75f7f3b1284c6b3940ae7af0986b9e2fe940` executes 184 metric and 307 log
@@ -1942,7 +1944,7 @@ failure. Its SHA-256 is
 the exact query artifact SHA-256 is
 `d576b5bcb3729f79d6e81f4793181551c3c99fd9c9a6bbdb877164c2b7e39660`.
 
-The successful gate set includes 46 Rust query-contract tests; 135 public-SQL
+The successful gate set includes 47 Rust query-contract tests; 135 public-SQL
 recipes/173 statements; live immutable Prometheus 549, VictoriaMetrics 196,
 and VictoriaLogs 1,498-case runs; root and server format/test/strict
 Clippy/Rustdoc; separate dbhealth validation; 93 metrics and 84 logs
