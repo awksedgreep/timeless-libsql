@@ -1174,3 +1174,24 @@ Timeless retains the P45 numeric-microsecond compatibility correction. The
 fixture now contains 167 source rows, 346 row-query cases, one stochastic
 case, 480 error cases, and 502 statistics/pipeline cases: 1,329 cases total,
 all passing against the immutable image. The fixture now contains 1329 cases.
+
+`LQL-P47` adds six exact pipeline cases and six error cases for `time_add`.
+They pin compound and negative durations, nanosecond preservation, timezone
+normalization, zone-less UTC behavior in the immutable oracle image, the SQL
+space separator, trimmed RFC3339Nano output, invalid-string no-op behavior,
+default `_time` composition, and strict missing/invalid/leading-plus/trailing
+grammar failures. Timeless' retained native-type behavior is tested against
+the real extension because VictoriaLogs stores log field values textually.
+
+Source audit covers `pipe_time_add.go`, `values_encoder.go` timestamp and
+duration parsing/formatting, `parser.go` saturating subtraction, their unit
+tests, and the checked language reference at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The implementation changes only
+parseable current-row strings, applies the offset in signed nanoseconds, and
+writes canonical UTC while leaving durable storage untouched. VictoriaLogs
+uses its local process timezone for zone-less values; Timeless fixes that
+environmental input to UTC, matching the pinned image and making embedded
+behavior deterministic. The fixture remains 167 source rows and now contains
+346 row-query cases, one stochastic case, 486 error cases, and 508
+statistics/pipeline cases: 1,341 cases total, all passing against the
+immutable image. The fixture now contains 1341 cases.

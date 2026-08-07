@@ -454,6 +454,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "total_value_path" => Value::Text("$.duration_ms".to_owned()),
         "total_companion_path" => Value::Text("$.host".to_owned()),
         "total_first_offset" | "total_last_offset" => Value::Integer(1),
+        "time_add_offset_native" => Value::Integer(250),
+        "time_add_subnative_ns" => Value::Integer(500_000),
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "any_source_path" => Value::Text("$.host".to_owned()),
@@ -1784,6 +1786,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let join_rows = recipe_values("SQL-LOG-057", 0)?;
     let running_stats_rows = recipe_values("SQL-LOG-059", 0)?;
     let total_stats_rows = recipe_values("SQL-LOG-060", 0)?;
+    let time_add_rows = recipe_values("SQL-LOG-061", 0)?;
     if [
         bounded,
         substring,
@@ -2104,6 +2107,32 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-060 total numeric state changed: {total_stats_rows:?}");
+    }
+    let shifted = time_add_rows
+        .iter()
+        .map(|row| {
+            (
+                row.first().cloned(),
+                row.get(1).cloned(),
+                row.get(2).cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if shifted
+        != [
+            (
+                Some(Value::Integer(1_000)),
+                Some(Value::Integer(1_250)),
+                Some(Value::Integer(500_000)),
+            ),
+            (
+                Some(Value::Integer(2_000)),
+                Some(Value::Integer(2_250)),
+                Some(Value::Integer(500_000)),
+            ),
+        ]
+    {
+        bail!("SQL-LOG-061 native time shift changed: {time_add_rows:?}");
     }
     let join_sql = recipe_sql("SQL-LOG-057", 0)?;
     let measured_join =
@@ -4432,13 +4461,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 126);
+        assert_eq!(recipes.len(), 127);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            158
+            159
         );
         assert_eq!(
             recipes
@@ -4446,7 +4475,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            164
+            165
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

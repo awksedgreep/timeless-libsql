@@ -9171,6 +9171,165 @@ async fn session_eighteen_total_stats_are_rich_bounded_chronological_and_durable
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_time_add_is_rich_bounded_composable_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("time-add-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let base = 1_800_200_000_000_000_i64;
+    storage
+        .ingest(vec![
+            LogEntry {
+                ts: base + 1,
+                level: 1,
+                severity: "info".into(),
+                message: "valid".into(),
+                metadata_json: serde_json::json!({
+                    "time_add_group":"time-add", "case":"valid",
+                    "stamp":"2024-05-30T01:02:03.123456789+02:30",
+                    "nested":{"stamp":"2024-05-30 01:02:03.000000100Z"}
+                })
+                .to_string(),
+            },
+            LogEntry {
+                ts: base + 2,
+                level: 2,
+                severity: "notice".into(),
+                message: "rich".into(),
+                metadata_json: serde_json::json!({
+                    "time_add_group":"time-add", "case":"rich",
+                    "stamp":123, "nested":{"stamp":null},
+                    "array":[1,false,null], "object":{"keep":"yes"}
+                })
+                .to_string(),
+            },
+            LogEntry {
+                ts: base + 3,
+                level: 3,
+                severity: "warning".into(),
+                message: "missing".into(),
+                metadata_json: serde_json::json!({
+                    "time_add_group":"time-add", "case":"missing"
+                })
+                .to_string(),
+            },
+        ])
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let query = r#"time_add_group:="time-add" | sort by (_time) asc | time_add 500ns at stamp | time_add 1h at nested.stamp | fields case, stamp, nested, array, object | limit 10000"#;
+    let rows = pipeline_rows(&app, query).await;
+    assert_eq!(
+        rows,
+        [
+            serde_json::json!({
+                "case":"valid",
+                "stamp":"2024-05-29T22:32:03.123457289Z",
+                "nested":{"stamp":"2024-05-30T02:02:03.0000001Z"}
+            }),
+            serde_json::json!({
+                "case":"rich", "stamp":123, "nested":{"stamp":null},
+                "array":[1,false,null], "object":{"keep":"yes"}
+            }),
+            serde_json::json!({"case":"missing"})
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"time_add_group:="time-add" | sort by (_time) asc | time_add 1ns | fields case, _time | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"valid","_time":"2027-01-17T15:33:20.000001001Z"}),
+            serde_json::json!({"case":"rich","_time":"2027-01-17T15:33:20.000002001Z"}),
+            serde_json::json!({"case":"missing","_time":"2027-01-17T15:33:20.000003001Z"})
+        ],
+        "default time_add must retain nanosecond response precision beyond stored microseconds"
+    );
+
+    for malformed in [
+        "* | time_add",
+        "* | time_add at stamp",
+        "* | time_add 1d at",
+        "* | time_add 1hour",
+        "* | time_add +1h",
+        "* | time_add 1h at stamp trailing",
+        "* | time_add 1h at stamp*",
+        "* | time_add.extra 1h",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let response = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(query))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "max_work_rows", "{body}");
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"time_add_group:="time-add" | sort by (_time) asc | fields case, stamp, nested, array, object | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case":"valid", "stamp":"2024-05-30T01:02:03.123456789+02:30",
+                "nested":{"stamp":"2024-05-30 01:02:03.000000100Z"}
+            }),
+            serde_json::json!({
+                "case":"rich", "stamp":123, "nested":{"stamp":null},
+                "array":[1,false,null], "object":{"keep":"yes"}
+            }),
+            serde_json::json!({"case":"missing"})
+        ],
+        "time_add must never mutate stored rows"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(pipeline_rows(&router(reopened.clone()), query).await, rows);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
@@ -15206,6 +15365,39 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_total_stats_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_time_add = storage.stats().await.unwrap().api_query_cancelled;
+    let time_add_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | time_add 1ns | fields _time | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(time_add_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_time_add && stats.api_query_in_flight == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_time_add);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_time_add_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            "level:error | time_add 1ns | fields _time | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_time_add_cancel.status(), StatusCode::OK);
 
     let cancelled_before_uniq = storage.stats().await.unwrap().api_query_cancelled;
     let uniq_timeout = router_with_limits(

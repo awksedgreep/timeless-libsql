@@ -3903,6 +3903,13 @@ fn is_total_stats_pipe(segment: &str) -> bool {
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
+fn is_time_add_pipe(segment: &str) -> bool {
+    let operation = "time_add";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
     let operation = "drop_empty_fields";
     segment
@@ -4454,6 +4461,63 @@ fn parse_unpack_words_exact_field(token: &str, role: &str) -> Result<PipelineFie
             "LogsQL unpack_words {role} must be an exact field"
         ))),
     }
+}
+
+fn parse_time_add_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    const OPERATION: &str = "time_add";
+    let command = segment
+        .get(..OPERATION.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL time_add pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(OPERATION) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL time_add pipe, not {command:?}"
+        )));
+    }
+    if segment[OPERATION.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL time_add requires whitespace before its duration",
+        ));
+    }
+
+    let tokens = pipeline_words(segment[OPERATION.len()..].trim_start())?;
+    let duration_token = tokens
+        .first()
+        .ok_or_else(|| LogsqlError::malformed("LogsQL time_add requires a duration"))?;
+    let duration = quoted_value(duration_token)?.unwrap_or_else(|| duration_token.clone());
+    let offset_ns = parse_victorialogs_human_duration(&duration).ok_or_else(|| {
+        LogsqlError::malformed(format!("invalid LogsQL time_add duration {duration:?}"))
+    })?;
+
+    let field = match tokens.as_slice() {
+        [_] => parse_pipeline_field("_time", false)?,
+        [_, at, field] if at.eq_ignore_ascii_case("at") => {
+            match parse_pipeline_field(field, false)? {
+                field @ PipelineField::Exact { .. } => field,
+                PipelineField::Prefix { .. } | PipelineField::All => {
+                    return Err(LogsqlError::malformed(
+                        "LogsQL time_add at requires an exact field",
+                    ))
+                }
+            }
+        }
+        [_, at] if at.eq_ignore_ascii_case("at") => {
+            return Err(LogsqlError::malformed(
+                "LogsQL time_add at requires an exact field",
+            ))
+        }
+        [_, token, ..] => {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected LogsQL time_add token {token:?}"
+            )))
+        }
+        [] => unreachable!("duration token was required above"),
+    };
+
+    Ok(PipelineOp::TimeAdd(TimeAddSpec { offset_ns, field }))
 }
 
 struct ParsedUnpackSpec {
@@ -5388,6 +5452,12 @@ pub(crate) struct UnpackWordsSpec {
     pub drop_duplicates: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TimeAddSpec {
+    pub offset_ns: i64,
+    pub field: PipelineField,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
@@ -5442,6 +5512,7 @@ pub(crate) enum PipelineOp {
     UnpackLogfmt(UnpackLogfmtSpec),
     UnpackSyslog(UnpackSyslogSpec),
     UnpackWords(UnpackWordsSpec),
+    TimeAdd(TimeAddSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5896,6 +5967,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_total_stats_pipe(segment) => {
                 pipeline.push(parse_running_stats_pipe(segment, RunningStatsMode::Total)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_time_add_pipe(segment) => {
+                pipeline.push(parse_time_add_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_drop_empty_fields_pipe(segment) => {
@@ -12649,6 +12724,59 @@ mod tests {
             assert!(
                 parse_at(invalid, TimestampUnit::Microseconds, 0).is_err(),
                 "{invalid:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn session_eighteen_time_add_grammar_is_complete_and_strict() {
+        let plan = parse_at(
+            r#"* | TiMe_AdD "1d2h3m4.5s" AT "nested stamp""#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::TimeAdd(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected time_add plan: {plan:?}");
+        };
+        assert_eq!(spec.offset_ns, 93_784_500_000_000);
+        assert_eq!(
+            spec.field,
+            PipelineField::Exact {
+                path: vec!["nested stamp".into()],
+                name: "nested stamp".into(),
+            }
+        );
+        assert_eq!(plan.output, LogsqlOutput::Pipeline);
+
+        let default = parse_at("* | time_add -1.5s", TimestampUnit::Microseconds, 0).unwrap();
+        let [PipelineOp::TimeAdd(spec)] = default.pipeline.as_slice() else {
+            panic!("unexpected default time_add plan: {default:?}");
+        };
+        assert_eq!(spec.offset_ns, -1_500_000_000);
+        assert_eq!(
+            spec.field,
+            PipelineField::Exact {
+                path: vec!["_time".into()],
+                name: "_time".into(),
+            }
+        );
+
+        for malformed in [
+            "* | time_add",
+            "* | time_add at stamp",
+            "* | time_add 1d at",
+            "* | time_add 1hour",
+            "* | time_add +1h",
+            "* | time_add 0",
+            "* | time_add 1h stamp",
+            "* | time_add 1h at stamp trailing",
+            "* | time_add 1h at stamp*",
+            "* | time_add.extra 1h",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed:?} was accepted"
             );
         }
     }

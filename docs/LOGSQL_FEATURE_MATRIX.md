@@ -150,10 +150,28 @@ extension.
 | `LQL-P44` | `union` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-058-bounded-ordered-union-of-two-public-log-scans)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P45` | `running_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P46` | `total_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P47` | `time_add` | missing | no | `SQL` | `API` | P3 |
+| `LQL-P47` | `time_add` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time)) | in progress | no | `SQL` | `API` | P3 |
 | `LQL-P48` | `generate_sequence` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P49` | `set_stream_fields` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
+
+`LQL-P47` is a bounded Rust API transform over one public `logs` scan.
+`time_add <duration> [at <exact-field>]` uses the pinned VictoriaLogs compound
+duration and RFC3339Nano behavior, canonical UTC output, signed-64-bit
+nanosecond saturation, exact nested current-row mutation, later-pipe
+composition, and strict errors. Timeless defines zone-less timestamps as UTC
+to keep embedded behavior independent of the host timezone; the pinned oracle
+image is UTC, while upstream otherwise uses process-local time.
+
+Invalid strings and native missing/null/number/boolean/array/object states are
+unchanged. Work, generated state, results, response bytes, deadline, and
+cancellation are bounded, and durable rows remain immutable through optimize
+and reopen. `SQL-LOG-061` gives direct users an exact native-unit saturating
+shift plus an explicit sub-native nanosecond remainder. Arbitrary metadata
+RFC3339Nano parsing has no honest core-SQL equivalent. Because every row has
+already crossed the public boundary and no block can be pruned, an extension
+primitive or private-table access would not improve the retained storage
+model.
 
 `LQL-P10` is deliberately deferred, not approximated. VictoriaLogs
 `block_stats` exposes one row per physical field column with its internal

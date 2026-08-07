@@ -16,7 +16,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, TimeDelta, Utc};
 use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
@@ -27,7 +27,7 @@ use crate::logsql::{
     PackJsonSpec, PackLogfmtSpec, PipelineField, PipelineOp, QueryRowsSource,
     RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, RunningStatsExpression,
     RunningStatsKind, RunningStatsMode, RunningStatsSpec, SplitSpec, StatsExpression, StatsKind,
-    TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec,
+    TimeAddSpec, TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec,
     UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
@@ -114,6 +114,217 @@ pub(crate) fn format_timestamp(ts: i64, timestamp_unit: TimestampUnit) -> Result
         .ok_or_else(|| format!("timestamp {ts} is outside the RFC3339 range"))
 }
 
+fn time_add_fields(
+    rows: Vec<Value>,
+    spec: &TimeAddSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let PipelineField::Exact {
+        path: field_path,
+        name: field_name,
+    } = &spec.field
+    else {
+        return Err("LogsQL time_add target is not exact".into());
+    };
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "time_add")?;
+            let Some(shifted) = coalesce_exact_value(&row, field_path)
+                .and_then(Value::as_str)
+                .and_then(parse_victorialogs_timestamp_ns)
+                .map(|timestamp_ns| add_victorialogs_time(timestamp_ns, spec.offset_ns))
+                .and_then(format_victorialogs_timestamp_ns)
+            else {
+                return Ok(row);
+            };
+
+            let mut state_bytes = size_of::<Value>();
+            charge_transfer_string(
+                field_name,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "time_add",
+            )?;
+            for segment in field_path {
+                charge_transfer_string(
+                    segment,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "time_add",
+                )?;
+            }
+            charge_transfer_string(
+                &shifted,
+                &mut state_bytes,
+                limits.max_state_bytes,
+                "time_add",
+            )?;
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL time_add input row is not a JSON object".to_string())?;
+            insert_path(object, field_path, Value::String(shifted))
+                .map_err(|error| format!("LogsQL time_add target conflict: {error}"))?;
+            Ok(row)
+        })
+        .collect()
+}
+
+fn parse_victorialogs_timestamp_ns(source: &str) -> Option<i64> {
+    if source.len() < 19 {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    if bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || !matches!(bytes.get(10), Some(b'T' | b' '))
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+
+    let year = timestamp_digits(bytes, 0, 4)?;
+    if !(1677..=2262).contains(&year) {
+        return None;
+    }
+    let month = timestamp_digits(bytes, 5, 2)?;
+    let day = timestamp_digits(bytes, 8, 2)?;
+    let hour = timestamp_digits(bytes, 11, 2)?;
+    let minute = timestamp_digits(bytes, 14, 2)?;
+    let second = timestamp_digits(bytes, 17, 2)?;
+
+    let tail = &source[19..];
+    let (fraction, timezone_ns) = if let Some(fraction) = tail.strip_suffix('Z') {
+        (fraction, 0i64)
+    } else if let Some(index) = tail.rfind(['+', '-']) {
+        let sign = if tail.as_bytes()[index] == b'-' {
+            -1i64
+        } else {
+            1i64
+        };
+        let timezone = &tail[index + 1..];
+        let (hours, minutes) = match timezone.len() {
+            4 => (
+                timestamp_digits(timezone.as_bytes(), 0, 2)?,
+                timestamp_digits(timezone.as_bytes(), 2, 2)?,
+            ),
+            5 if timezone.as_bytes().get(2) == Some(&b':') => (
+                timestamp_digits(timezone.as_bytes(), 0, 2)?,
+                timestamp_digits(timezone.as_bytes(), 3, 2)?,
+            ),
+            _ => return None,
+        };
+        if hours > 24 || minutes > 60 {
+            return None;
+        }
+        let offset = i64::from(hours)
+            .checked_mul(3_600_000_000_000)?
+            .checked_add(i64::from(minutes).checked_mul(60_000_000_000)?)?;
+        (&tail[..index], sign.checked_mul(offset)?)
+    } else {
+        // The pinned VictoriaLogs image runs in UTC. VictoriaLogs otherwise
+        // uses the process-local timezone for zone-less input; Timeless keeps
+        // this deterministic across embedded hosts by pinning that oracle
+        // behavior to UTC.
+        (tail, 0i64)
+    };
+
+    let fraction_ns = if fraction.is_empty() {
+        0i64
+    } else {
+        let digits = fraction.strip_prefix('.').unwrap_or(fraction);
+        if digits.is_empty()
+            || digits.len() > 9
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let parsed = digits.parse::<i64>().ok()?;
+        parsed.checked_mul(10_i64.pow((9 - digits.len()) as u32))?
+    };
+
+    // Go's time.Date normalizes out-of-range calendar components. Mirror the
+    // upstream parser instead of accepting a subtly narrower chrono subset.
+    let absolute_month = i64::from(year)
+        .checked_mul(12)?
+        .checked_add(i64::from(month))?
+        .checked_sub(1)?;
+    let normalized_year = i32::try_from(absolute_month.div_euclid(12)).ok()?;
+    let normalized_month = u32::try_from(absolute_month.rem_euclid(12) + 1).ok()?;
+    let start =
+        NaiveDate::from_ymd_opt(normalized_year, normalized_month, 1)?.and_hms_opt(0, 0, 0)?;
+    let normalized_seconds = i64::from(day)
+        .checked_sub(1)?
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour).checked_mul(3_600)?)?
+        .checked_add(i64::from(minute).checked_mul(60)?)?
+        .checked_add(i64::from(second))?;
+    let seconds = start
+        .checked_add_signed(TimeDelta::seconds(normalized_seconds))?
+        .and_utc()
+        .timestamp();
+    const MIN_SECONDS: i64 = i64::MIN / 1_000_000_000;
+    const MAX_SECONDS: i64 = i64::MAX / 1_000_000_000;
+    if !(MIN_SECONDS..MAX_SECONDS).contains(&seconds) {
+        return None;
+    }
+    let timestamp_ns = seconds.checked_mul(1_000_000_000)?;
+    let timestamp_ns = sub_victorialogs_int64(timestamp_ns, timezone_ns);
+    Some(timestamp_ns.wrapping_add(fraction_ns))
+}
+
+fn timestamp_digits(bytes: &[u8], start: usize, length: usize) -> Option<u32> {
+    let digits = bytes.get(start..start.checked_add(length)?)?;
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    digits.iter().try_fold(0u32, |value, byte| {
+        value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))
+    })
+}
+
+fn add_victorialogs_time(timestamp_ns: i64, offset_ns: i64) -> i64 {
+    sub_victorialogs_int64(timestamp_ns, offset_ns.wrapping_neg())
+}
+
+fn sub_victorialogs_int64(value: i64, offset: i64) -> i64 {
+    if offset >= 0 {
+        if value == i64::MAX {
+            return value;
+        }
+        if value < i64::MIN + offset {
+            return i64::MIN;
+        }
+        value - offset
+    } else {
+        if value == i64::MIN {
+            return value;
+        }
+        if value > i64::MAX + offset {
+            return i64::MAX;
+        }
+        value - offset
+    }
+}
+
+fn format_victorialogs_timestamp_ns(timestamp_ns: i64) -> Option<String> {
+    let seconds = timestamp_ns.div_euclid(1_000_000_000);
+    let nanoseconds = timestamp_ns.rem_euclid(1_000_000_000) as u32;
+    let datetime = DateTime::<Utc>::from_timestamp(seconds, nanoseconds)?;
+    let mut output = datetime.format("%Y-%m-%dT%H:%M:%S").to_string();
+    if nanoseconds != 0 {
+        let fraction = format!("{nanoseconds:09}");
+        output.push('.');
+        output.push_str(fraction.trim_end_matches('0'));
+    }
+    output.push('Z');
+    Some(output)
+}
+
 pub(crate) fn execute(
     mut rows: Vec<Value>,
     execution: PipelineExecution<'_>,
@@ -186,6 +397,9 @@ pub(crate) fn execute(
             )?)],
             PipelineOp::RunningStats(spec) => {
                 running_stats_rows(rows, spec, execution.limits, execution.cancelled)?
+            }
+            PipelineOp::TimeAdd(spec) => {
+                time_add_fields(rows, spec, execution.limits, execution.cancelled)?
             }
             PipelineOp::QueryStats => vec![Value::Object(query_stats(
                 execution.report,
@@ -14926,6 +15140,116 @@ mod tests {
                 &cancelled,
             )
             .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn time_add_matches_rfc3339_nano_and_preserves_rich_values_and_bounds() {
+        for (source, offset, expected) in [
+            (
+                "2024-05-30T01:02:03Z",
+                93_784_500_000_000,
+                "2024-05-31T03:05:07.5Z",
+            ),
+            (
+                "2024-05-30T01:02:03.123456789+02:30",
+                500,
+                "2024-05-29T22:32:03.123457289Z",
+            ),
+            (
+                "2024-05-30T01:02:03.25",
+                -1_500_000_000,
+                "2024-05-30T01:02:01.75Z",
+            ),
+            (
+                "2024-05-30 01:02:03.000000100Z",
+                3_600_000_000_000,
+                "2024-05-30T02:02:03.0000001Z",
+            ),
+        ] {
+            let parsed = parse_victorialogs_timestamp_ns(source).unwrap();
+            assert_eq!(
+                format_victorialogs_timestamp_ns(add_victorialogs_time(parsed, offset)).as_deref(),
+                Some(expected),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            format_victorialogs_timestamp_ns(
+                parse_victorialogs_timestamp_ns("2024-00-00T00:00:00Z").unwrap()
+            )
+            .as_deref(),
+            Some("2023-11-30T00:00:00Z"),
+            "VictoriaLogs normalizes calendar components through Go time.Date"
+        );
+        for invalid in [
+            "",
+            "2024-05-30",
+            "2024-05-30X01:02:03Z",
+            "2024-05-30T01:02:03.Z",
+            "2024-05-30T01:02:03.1234567890Z",
+            "2024-05-30T01:02:03+25:00",
+            "1676-12-31T23:59:59Z",
+            "2263-01-01T00:00:00Z",
+        ] {
+            assert_eq!(parse_victorialogs_timestamp_ns(invalid), None, "{invalid}");
+        }
+        assert_eq!(add_victorialogs_time(i64::MAX, -1), i64::MAX);
+        assert_eq!(add_victorialogs_time(i64::MIN, 1), i64::MIN);
+
+        let spec = TimeAddSpec {
+            offset_ns: 500,
+            field: PipelineField::Exact {
+                path: vec!["nested".into(), "stamp".into()],
+                name: "nested.stamp".into(),
+            },
+        };
+        let rows = vec![
+            json!({"nested":{"stamp":"2024-05-30T01:02:03Z"},"keep":[1,false,null]}),
+            json!({"nested":{"stamp":123},"keep":{"rich":true}}),
+            json!({"missing":true}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        assert_eq!(
+            time_add_fields(rows.clone(), &spec, limits, &AtomicBool::new(false)).unwrap(),
+            [
+                json!({"nested":{"stamp":"2024-05-30T01:02:03.0000005Z"},"keep":[1,false,null]}),
+                rows[1].clone(),
+                rows[2].clone(),
+            ]
+        );
+        let work_error = time_add_fields(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+        let state_error = time_add_fields(
+            rows.clone(),
+            &spec,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+        assert_eq!(
+            time_add_fields(rows, &spec, limits, &AtomicBool::new(true)).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

@@ -1307,6 +1307,26 @@ queued and in-flight work are zero. No extension primitive, private table,
 storage contract, or authoritative batching behavior changed. `LQL-P46` is
 closed.
 
+Session 18's `LQL-P47` semantic implementation is complete as API-owned
+bounded timestamp transformation over one public `logs` scan, with
+`SQL-LOG-061` as the direct-user native-unit shift and explicit sub-native
+nanosecond foundation. Pinned VictoriaLogs source plus the complete
+1,341-case live oracle establish strict duration/field grammar, nanosecond
+RFC3339 parsing, timezone normalization, zone-less pinned-UTC behavior,
+canonical output, invalid-string preservation, default `_time` composition,
+and explicit failures. Real-extension coverage additionally preserves missing,
+null, numeric, array, object, nested-sibling, and durable-source fidelity that
+the upstream textual field model cannot express.
+
+Every visited row and generated result is work/state/result/response/deadline
+bounded and cancellation leaves the public reader reusable. Source rows remain
+immutable through optimize, shutdown, and reopen. `QSF-243` records the
+semantic and unchanged-storage boundary. Exact-build candidate/control
+performance, physical-work equality, durability, and HWM evidence remain the
+only P47 exit item before the row is closed. No extension primitive, private
+table, storage contract, timestamp format, batching, compression, index,
+retention, transaction, migration, optimize, or maintenance behavior changed.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

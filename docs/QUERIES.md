@@ -2382,6 +2382,50 @@ complete-group prepass and rich snapshot writes occur after the same public
 scan; fixed-key full-partition SQL windows already serve direct users, so the
 measured cost does not justify an extension primitive.
 
++## LogsQL timestamp addition
+
+`time_add` adds one VictoriaLogs duration to the default `_time` field or
+one exact current-row field:
+
+```text
+* | time_add 5m
+* | time_add -1.5s at observed_at
+* | time_add 500ns at nested.received_at
+```
+
+The command and optional `at` keyword are case-insensitive. Durations may be
+negative and may combine decimal `ns`, `µs`, `ms`, `s`, `m`, `h`, `d`,
+`w`, and 365-day `y` segments. A leading `+`, an unsuffixed number, a
+missing duration or field, wildcards, prefixes, attached suffixes, and trailing
+tokens fail explicitly before storage is queried.
+
+Only a string accepted by the pinned VictoriaLogs RFC3339Nano parser changes.
+The parser accepts `T` or the documented SQL-space separator, up to nine
+fractional digits, `Z`, `±HH:MM`, `±HHMM`, and zone-less input. Output is
+canonical UTC with insignificant fractional zeroes removed. To make embedded
+results independent of the host timezone, Timeless defines zone-less input as
+UTC, matching the pinned oracle container. VictoriaLogs otherwise consults its
+process-local timezone. Addition and extreme durations use VictoriaLogs'
+signed-64-bit nanosecond saturation behavior.
+
+Missing paths, invalid timestamp strings, JSON null, numbers, booleans, arrays,
+and objects remain unchanged with their native type. Exact dotted fields retain
+siblings, and later pipes observe the transformed value. Adding sub-microsecond
+durations to `_time` preserves nanoseconds in the response even though durable
+log timestamps retain the configured millisecond or microsecond unit. The
+operation is request-local: public rows remain byte-for-byte unchanged through
+optimize, shutdown, and reopen.
+
+Every visited row and generated string is bounded by the existing work, state,
+result, response, deadline, and cancellation limits. The operation performs
+one public `logs` scan and never accesses a shadow table. Executable
+[SQL-LOG-061](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time)
+gives direct SQLite/libSQL users a saturating native-timestamp shift plus an
+explicit sub-native nanosecond remainder. Core SQLite has no honest generic
+RFC3339Nano equivalent for arbitrary metadata fields, so that semantic remains
+in the Rust API rather than being mislabeled as extension support.
+
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

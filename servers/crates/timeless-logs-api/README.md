@@ -1899,6 +1899,46 @@ versus quoted `math` constants. The bounded wide complete-group prepass and
 rich snapshot writes remain above the unchanged public storage boundary;
 ordinary full-partition SQLite windows already benefit direct users.
 
++## LogsQL timestamp addition
+
+`time_add <duration> [at <exact-field>]` adds a VictoriaLogs duration to
+`_time` by default or to one exact current-row field:
+
+```text
+* | time_add 5m
+* | time_add -1.5s at observed_at
+* | time_add 500ns at nested.received_at
+```
+
+The command and `at` keyword are case-insensitive. Durations combine decimal
+`ns`, `µs`, `ms`, `s`, `m`, `h`, `d`, `w`, and 365-day `y` segments
+with an optional leading minus. Missing, unsuffixed, leading-plus, wildcard,
+prefix, attached-suffix, and trailing forms fail before the public scan.
+
+Accepted strings follow the pinned VictoriaLogs RFC3339Nano behavior: `T` or
+SQL-space date/time separation, up to nanoseconds, `Z`, `±HH:MM`, `±HHMM`,
+or no zone. Results use canonical UTC and trim insignificant fractional zeroes.
+Timeless deliberately treats zone-less input as UTC so embedded behavior does
+not depend on the host process timezone; this matches the pinned oracle image.
+Addition uses the upstream signed-64-bit nanosecond saturation rules.
+
+Invalid strings and retained missing/null/number/boolean/array/object values are
+unchanged and keep their native type. Dotted exact paths retain siblings, later
+pipes observe the result, and sub-microsecond `_time` additions retain
+nanoseconds in the response above millisecond/microsecond durable storage.
+Work, generated state, result rows, response bytes, deadline, and cancellation
+are bounded. Source rows remain immutable through optimize, shutdown, and
+reopen.
+
+Executable
+[SQL-LOG-061](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time)
+provides a saturating shift in the public table's native unit plus an explicit
+sub-native nanosecond remainder. Arbitrary RFC3339Nano metadata mutation has no
+honest core-SQL equivalent and remains API-owned. One public `logs` scan
+supplies the rowset; no private table, extension opcode, storage format, or
+authoritative 8,192-entry batching behavior changes.
+
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

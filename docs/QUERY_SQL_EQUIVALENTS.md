@@ -168,6 +168,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-058`](#sql-log-058-bounded-ordered-union-of-two-public-log-scans) | `LQL-P44` | current foundation | bounded `UNION ALL` over two independent public log scans with explicit source/row order and complete typed payloads; API owns LogsQL grammar, inline/query sources, nesting, cumulative limits, cancellation, and envelopes |
 | [`SQL-LOG-059`](#sql-log-059-bounded-running-numeric-state-by-one-exact-key) | `LQL-P45` | current foundation | bounded chronological SQL windows for row count, nonempty numeric count, numeric sum/min/max, first-at-offset, and previous-at-offset over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
 | [`SQL-LOG-060`](#sql-log-060-bounded-total-numeric-state-by-one-exact-key) | `LQL-P46` | current foundation | bounded full-partition SQL windows that repeat final row count, nonempty numeric count, numeric sum/min/max, and fixed first/last offsets over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
+| [`SQL-LOG-061`](#sql-log-061-add-a-duration-to-public-native-log-time) | `LQL-P47` | current foundation | bounded saturating shift of public native log timestamps plus an explicit sub-native nanosecond remainder; API owns duration/RFC3339Nano grammar, arbitrary fields, UTC canonicalization, response mutation, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -9388,6 +9389,76 @@ No extension primitive or private shadow-table access is warranted. Direct
 regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_eighteen_total_stats_are_rich_bounded_chronological_and_durable`.
+
+### SQL-LOG-061: add a duration to public native log time
+
+Bind inclusive timestamp bounds, a positive public-scan work limit, a positive
+result limit, the whole-native-unit portion of the duration, and its signed
+sub-native nanosecond remainder. The offset and `ts` use the virtual table's
+configured native unit: milliseconds unless `timestamp_unit='us'` was selected
+when creating `logs`. Split the duration so the remainder's absolute value is
+less than `1_000_000` nanoseconds for milliseconds or `1_000` nanoseconds for
+microseconds. This read-only statement keeps the remainder explicit rather
+than discarding precision that SQLite's date/time functions cannot retain.
+
+```sql
+WITH source AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+    AND :max_result_rows > 0
+)
+SELECT
+  ts AS source_ts,
+  CASE
+    WHEN ts = 9223372036854775807 THEN 9223372036854775807
+    WHEN ts = -9223372036854775808 THEN -9223372036854775808
+    WHEN :time_add_offset_native > 0
+      AND ts > 9223372036854775807 - :time_add_offset_native
+      THEN 9223372036854775807
+    WHEN :time_add_offset_native < 0
+      AND ts < -9223372036854775808 - :time_add_offset_native
+      THEN -9223372036854775808
+    ELSE ts + :time_add_offset_native
+  END AS shifted_ts,
+  :time_add_subnative_ns AS subnative_remainder_ns,
+  level,
+  message,
+  metadata
+FROM source
+ORDER BY ts, level, message, metadata
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:max_work_entries` to `100000`, `:max_result_rows` to `100`,
+`:time_add_offset_native` to `250`, and `:time_add_subnative_ns` to `500000`.
+The fixture's default millisecond table therefore represents a `250.5ms`
+shift as `(1250, 500000)` and `(2250, 500000)` without rounding. `source_ts`,
+`level`, `message`, and the complete typed `metadata` payload remain visible.
+
+This is the honest direct-SQL foundation for default-field `LQL-P47`; it does
+not claim that SQLite's built-in date/time functions implement `time_add`.
+Those functions normalize only a narrower timestamp language and lose
+nanosecond precision. The Rust logs API owns case-insensitive
+`time_add <duration> [at <exact-field>]` parsing; the complete VictoriaLogs
+duration grammar; RFC3339Nano/SQL-space parsing; deterministic UTC treatment
+for zone-less input; timezone normalization; nanosecond-domain saturation;
+canonical variable-width UTC output; exact nested current-row mutation;
+missing/invalid/native-rich no-op preservation; sequential composition;
+work/state/result/response/deadline limits; cancellation; and HTTP envelopes.
+
+Arbitrary retained metadata timestamps have no honest generic SQL equivalent:
+SQLite JSON can expose the string through `json_extract`, but core SQLite has
+no RFC3339Nano parser/formatter with VictoriaLogs semantics. That part remains
+correctly API-owned instead of being mislabeled as SQL support. Both paths use
+only the public `logs` table. The transform is request-local and never mutates
+storage, so an extension primitive would not prune a block, avoid decoding, or
+reduce the public payload crossing. Direct regression: `tests/cli.sh` section
+45 and the Rust SQL harness; HTTP/oracle/optimize/reopen regression:
+`session_eighteen_time_add_is_rich_bounded_composable_and_durable`.
 
 ## Adding the next recipe
 
