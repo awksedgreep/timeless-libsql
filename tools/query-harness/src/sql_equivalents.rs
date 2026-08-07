@@ -4789,13 +4789,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 134);
+        assert_eq!(recipes.len(), 135);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            166
+            167
         );
         assert_eq!(
             recipes
@@ -4803,7 +4803,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            172
+            173
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }
