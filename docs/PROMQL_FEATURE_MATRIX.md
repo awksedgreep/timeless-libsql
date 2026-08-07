@@ -99,7 +99,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O16` | `count_values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-020-count-series-by-sample-value)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O17` | experimental `limitk` and `limit_ratio`; pinned Prometheus 3.13.2 rejects both unless `promql-experimental-functions` is enabled, and the stable Timeless GET/POST/reopen paths preserve that diagnostic without reading storage; implementation requires a separately configured experimental tier and oracle plus bounded group state, while full upstream parity also requires typed native-histogram samples | experimental | no | `RAW` | `API` | EXP |
 | `PQL-O18` | experimental binary `fill`, `fill_left`, and `fill_right` modifiers ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-057-fill-missing-one-to-one-vector-matches)); pinned Prometheus 3.13.2 requires `promql-binop-fill-modifiers`, and stable Timeless GET/POST/reopen paths now preserve its diagnostic without reading storage; future execution requires a separately configured feature-enabled oracle and complete bounded matching semantics | experimental | no | `SQL` | `API` | EXP |
-| `PQL-O19` | native-histogram trim operators `</` and `>/` | deferred | no | none | `DEFER` | DEFER |
+| `PQL-O19` | native-histogram trim operators `</` and `>/`; pinned Prometheus 3.13.2 accepts both in its stable grammar, drops float/float pairs with typed infos, and only produces values for native-histogram-left/scalar-right samples; stable Timeless now fails explicitly before storage because its retained metrics model has no typed native-histogram sample | deferred | no | none | `DEFER` | DEFER |
 
 `PQL-O17` is deliberately not an extension or ordinary-SQL row. Prometheus
 selects `limit_ratio` members from its canonical label-set hash and `limitk`
@@ -119,6 +119,17 @@ group cardinality, label/name projection, uniqueness errors, and per-step
 limits. Set operators and histogram samples are rejected upstream. The stable
 API fails before either child scan; a future experimental Rust tier must own
 the complete language behavior after both child vectors are evaluated.
+
+`PQL-O19` cannot be approximated over classic `_bucket` float series. Upstream
+trims the positive, negative, zero, custom, and infinite buckets inside one
+typed native-histogram sample, interpolates partial buckets, and recomputes
+count and sum. A portable row query has neither that sample identity nor its
+schema, spans, zero threshold/count, reset hint, or custom bounds. Timeless
+therefore reports the typed-storage prerequisite at the operator position and
+performs no storage read. Shipping requires the `PQL-S22` data model, public
+batch/SQL representation, backward-readable format, ingress, result envelope,
+bucket math, annotations, limits, cancellation, durability, and pinned-oracle
+parity; classic histogram support remains unchanged.
 
 ## Range, counter, and regression functions
 

@@ -3267,6 +3267,18 @@ which uses two public grids and an ordinary full-outer composition. It does not
 claim the experimental PromQL grammar, group matching, labels, types, limits,
 or envelopes.
 
+Prometheus's stable `</` and `>/` operators trim observations inside a typed
+native-histogram sample; they are not comparison or division spellings. The
+current Timeless metrics model stores float samples only, with classic
+histograms represented as separate `_bucket` float series. Stable GET and
+POST requests containing either trim operator therefore fail at the operator
+position with `requires typed native-histogram storage`, before any storage
+query and with the same result after reopen. Operators inside quoted strings
+or line comments do not trigger that rejection. There is no SQL equivalent:
+classic bucket rows do not encode one native sample's exponential/custom
+schema, positive and negative spans, zero bucket, count, sum, or reset hint.
+`PQL-O19` remains deferred with `PQL-S22` as its prerequisite.
+
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
 Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over

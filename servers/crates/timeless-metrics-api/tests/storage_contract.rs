@@ -11694,6 +11694,94 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_nineteen_native_histogram_trim_operators_fail_explicitly_without_storage() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("session_nineteen_trim_operators.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let cases = [
+        (
+            "vector(1) </ 5",
+            "1:11: parse error: native histogram trim operator \"</\" requires typed native-histogram storage",
+        ),
+        (
+            "vector(1) >/ 5",
+            "1:11: parse error: native histogram trim operator \">/\" requires typed native-histogram storage",
+        ),
+    ];
+
+    let stats_before = storage.stats().await.unwrap();
+    for (query, diagnostic) in cases {
+        let expected = serde_json::json!({
+            "status": "error",
+            "errorType": "bad_data",
+            "error": format!("invalid parameter \"query\": {diagnostic}")
+        });
+        let get = prom_query(&app, query, 2).await;
+        assert_eq!(get.0, StatusCode::BAD_REQUEST, "{query}: {}", get.1);
+        assert_eq!(get.1, expected, "{query}");
+
+        let post_params = form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", query)
+            .append_pair("time", "2")
+            .finish();
+        let post = post_form(&app, "/prometheus/api/v1/query", &post_params).await;
+        assert_eq!(post.0, StatusCode::BAD_REQUEST, "{query}: {}", post.1);
+        assert_eq!(post.1, expected, "{query}");
+    }
+    let stats_after = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after.extension_raw_batch_query_count - stats_before.extension_raw_batch_query_count
+            + stats_after.extension_window_batch_query_count
+            - stats_before.extension_window_batch_query_count,
+        0,
+        "deferred native-histogram operators must fail before storage"
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    let reopened_stats_before = reopened.stats().await.unwrap();
+    for (query, diagnostic) in cases {
+        let response = prom_query(&reopened_app, query, 2).await;
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "{query}: {}",
+            response.1
+        );
+        assert_eq!(
+            response.1["error"],
+            format!("invalid parameter \"query\": {diagnostic}"),
+            "{query}"
+        );
+    }
+    let reopened_stats_after = reopened.stats().await.unwrap();
+    assert_eq!(
+        reopened_stats_after.extension_raw_batch_query_count
+            - reopened_stats_before.extension_raw_batch_query_count
+            + reopened_stats_after.extension_window_batch_query_count
+            - reopened_stats_before.extension_window_batch_query_count,
+        0,
+        "deferred native-histogram operators must remain storage-free after reopen"
+    );
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_reopen() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

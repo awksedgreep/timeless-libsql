@@ -1472,6 +1472,21 @@ semantics. No extension primitive is justified because both child vectors
 must already be scanned, decoded, and evaluated. No API latency/storage
 benchmark is claimed for syntax the stable product deliberately rejects.
 
+`PQL-O19` is closed as a typed-data-model deferral. Pinned Prometheus 3.13.2
+accepts `</` and `>/` without an experimental flag. Float/float inputs return
+no samples plus exact incompatible-type infos; useful results require a typed
+native histogram on the left and a scalar on the right. Timeless previously
+collapsed the unrecognized tokens into `parse error: invalid promql query`.
+The stable GET, POST, shutdown, and reopen paths now report the exact operator
+position and the missing typed-native-histogram prerequisite with zero
+raw/window extension queries. Quoted strings and line comments cannot trigger
+the detector. No SQL recipe or extension primitive is claimed: classic
+`_bucket` float series cannot represent the positive/negative spans, custom
+bounds, zero bucket, reset hint, count, and sum mutated by the operator.
+Shipping requires `PQL-S22` storage, ingress, public batch/SQL, result, bucket
+interpolation, annotation, limit, cancellation, durability, and oracle work.
+No latency/storage benchmark is claimed for a deliberately rejected row.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

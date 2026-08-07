@@ -6236,3 +6236,25 @@ comparison is reported because stable Timeless never executes this
 experimental syntax. The SQL reference is not relabeled as PromQL support. No
 storage format, private access, batching, compression, index, rollup,
 retention, transaction, migration, optimize, or maintenance behavior changed.
+
+## Session 19 data-model disposition: native-histogram trim operators
+
+`PQL-O19` remains deferred with a precise public boundary. Two new cases pass
+against immutable Prometheus 3.13.2, bringing the complete API fixture to 534
+cases. They prove that stable upstream syntax accepts `</` and `>/` and drops
+float/float inputs with exact incompatible-type infos. Source at pinned commit
+`bb5dff00cf8fdfbf5c65e0531aa835fa238a43a2` proves that useful evaluation
+requires a native histogram on the left, a scalar on the right, complete
+bucket decoding, threshold interpolation, and count/sum reconstruction.
+
+Rust and real-extension regressions failed first on the opaque `parse error:
+invalid promql query`, then passed with a typed-native-histogram prerequisite,
+exact operator positions, quoted/comment exclusion, GET and POST envelopes,
+shutdown, reopen, and zero raw/window extension queries. No SQL recipe exists
+because public float rows and classic cumulative `_bucket` series do not
+represent one typed native-histogram sample. No narrow/wide p50/p95/p99,
+result-cardinality, storage-byte, or RSS comparison is reported because the
+current product deliberately performs no query for this deferred row. No
+extension surface, private access, storage format, batching, compression,
+index, rollup, retention, transaction, migration, optimize, or maintenance
+behavior changed.

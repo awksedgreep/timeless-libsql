@@ -3579,6 +3579,20 @@
       "evaluation_offset_ms": 30000,
       "expected_metric": {"__name__": "oracle_temporal", "job": "oracle"},
       "expected_values": [7]
+    },
+    {
+      "id": "PQL-O19-float-upper-trim-is-dropped",
+      "query": "oracle_temporal </ 5",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true,
+      "expected_infos": ["PromQL info: incompatible sample types encountered for binary operator \"</\": float </ float (1:1)"]
+    },
+    {
+      "id": "PQL-O19-float-lower-trim-is-dropped",
+      "query": "oracle_temporal >/ 5",
+      "evaluation_offset_ms": 30000,
+      "expected_empty": true,
+      "expected_infos": ["PromQL info: incompatible sample types encountered for binary operator \">/\": float >/ float (1:1)"]
     }
   ],
   "operator_error_cases": [

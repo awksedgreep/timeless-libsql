@@ -192,6 +192,17 @@ added later, its Rust evaluator will compose over public raw results and own
 canonical hashing, grouping, bounds, cancellation, labels, and response
 semantics.
 
+`PQL-O19` intentionally has no SQL recipe. Prometheus `</` and `>/` mutate
+the positive, negative, zero, custom, and infinite buckets inside one typed
+native-histogram sample, interpolate a partially retained bucket, and
+recompute that sample's count and sum. Timeless currently stores float samples;
+classic `_bucket` series are independent cumulative floats and do not expose a
+native sample's schema, spans, zero threshold/count, reset hint, custom bounds,
+count, or sum. SQL over those rows would be a different data model and cannot
+be called equivalent. The row therefore remains `DEFER`, with `PQL-S22` typed
+storage plus a public batch/SQL representation as prerequisites; the stable
+API rejects both operators before any storage query.
+
 `LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
 optional terminal semicolon are LogsQL source grammar owned by the Rust API;
 direct SQLite/libSQL users already write ordinary parameterized SQL and do not

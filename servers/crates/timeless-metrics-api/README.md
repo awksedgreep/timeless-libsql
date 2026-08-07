@@ -56,6 +56,11 @@ they do not execute the recognized parser nodes or cross to another runtime.
 The direct-SQL documentation provides bounded one-to-one float composition,
 while full PromQL behavior remains an explicitly configured future
 experimental tier.
+Prometheus's stable native-histogram trim operators `</` and `>/` are a
+separate typed-data-model deferral. The server reports `requires typed
+native-histogram storage` at the operator position before reading storage;
+classic `_bucket` float series are not treated as native histogram samples,
+and no SQL, Elixir, or process fallback is used.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`

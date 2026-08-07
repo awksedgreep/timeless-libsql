@@ -1730,6 +1730,12 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
     if let Some(error) = prometheus_preparse_function_error(input) {
         return Err(error);
     }
+    if let Some((start, operator)) = prometheus_native_histogram_trim_operator(input) {
+        let position = promql_source_position(input, start);
+        return Err(format!(
+            "{position}: parse error: native histogram trim operator \"{operator}\" requires typed native-histogram storage"
+        ));
+    }
     let parsed = promql::parse(input).map_err(|error| {
         if error == "no expression found in input" {
             "unknown position: parse error: no expression found in input".to_string()
@@ -1777,6 +1783,36 @@ fn lower_promql(input: &str, lookback: i64) -> Result<PromPlan, String> {
     })?;
     attach_promql_source_positions(&mut plan, input)?;
     Ok(plan)
+}
+
+fn prometheus_native_histogram_trim_operator(input: &str) -> Option<(usize, &'static str)> {
+    let bytes = input.as_bytes();
+    let mut index = 0_usize;
+    let mut quote = None;
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if matches!(delimiter, b'\'' | b'"') && bytes[index] == b'\\' {
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'#' => index = skip_promql_line_comment(bytes, index),
+            delimiter @ (b'\'' | b'"' | b'`') => {
+                quote = Some(delimiter);
+                index += 1;
+            }
+            b'<' if bytes.get(index + 1) == Some(&b'/') => return Some((index, "</")),
+            b'>' if bytes.get(index + 1) == Some(&b'/') => return Some((index, ">/")),
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn promql_expr_contains_binop_fill(expr: &promql_parser::parser::Expr) -> bool {
@@ -10146,6 +10182,22 @@ mod tests {
 
         assert!(lower_promql("oracle_temporal @ start()", 300_000).is_ok());
         assert!(lower_promql("oracle_temporal @ end()", 300_000).is_ok());
+    }
+
+    #[test]
+    fn prometheus_native_histogram_trim_operators_fail_with_typed_storage_prerequisite() {
+        for (query, expected) in [
+            (
+                "oracle_temporal </ 5",
+                "1:17: parse error: native histogram trim operator \"</\" requires typed native-histogram storage",
+            ),
+            (
+                "oracle_temporal{job=\"</\"}\n# >/ is only a comment\n>/ 5",
+                "3:1: parse error: native histogram trim operator \">/\" requires typed native-histogram storage",
+            ),
+        ] {
+            assert_eq!(lower_promql(query, 300_000).unwrap_err(), expected);
+        }
     }
 
     #[test]

@@ -387,6 +387,19 @@ must account for one-to-one plus many/one matching. Future execution parity
 requires a separate oracle process started with this feature flag; the default
 oracle remains the stable compatibility authority.
 
+`PQL-O19` adds two stable-tier float-input cases, bringing the complete
+Prometheus API fixture to 534 cases. The pinned parser accepts `</` and `>/`
+without a feature flag. A float vector on the left and scalar float on the
+right produces an empty vector plus an exact incompatible-sample-types info;
+source audit confirms that only native-histogram-left/scalar-right evaluation
+returns a value. `</` keeps observations below the threshold and `>/` keeps
+observations above it, interpolating exponential, custom, zero, and infinite
+buckets and recomputing count and sum. This oracle evidence defines the future
+operator contract; it does not erase Timeless's missing `PQL-S22` typed sample
+model. Until that model exists, the stable Timeless endpoint intentionally
+returns an explicit typed-storage prerequisite instead of pretending that
+classic `_bucket` floats are equivalent.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects
