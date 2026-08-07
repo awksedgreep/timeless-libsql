@@ -1530,6 +1530,21 @@ warnings, limits, cancellation, and response order. Sorting happens after the
 bounded child vector, so no extension primitive or stable API benchmark is
 justified.
 
+`PQL-F21` is closed as an experimental disposition. Pinned Prometheus 3.13.2
+requires `promql-experimental-functions` for both the one-argument `info(v)`
+form and its optional selector-only second argument. Stable Timeless
+previously leaked an internal unsupported-call error; GET, POST, shutdown,
+and reopen now preserve the pinned diagnostic before evaluating the child or
+reading storage. There is deliberately no SQL recipe. The enabled function
+performs a second lookback-aware info-series selection, uses fixed `job` and
+`instance` identity, resolves changing data labels by the newest source
+sample, honors exact stale markers, and can return float or native-histogram
+base samples. Full execution therefore requires `PQL-S17` marker-capable
+ingress and selector semantics plus `PQL-S22` typed native-histogram storage
+and results. A future experimental Rust tier can compose the public catalog
+and packed-raw surfaces; no extension primitive or stable API benchmark is
+justified.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

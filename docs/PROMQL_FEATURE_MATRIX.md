@@ -216,7 +216,7 @@ bounded frames.
 | `PQL-F18` | `day_of_year`, `days_in_month`, `month`, `year` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-053-day_of_year-days_in_month-month-and-year)); optional `vector(time())` default, UTC and one-indexed fields, Gregorian leap years, fractional and non-finite/out-of-range conversion, labels/names, nested range grids, errors, limits, cancellation, and reopen are pinned | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-F19` | experimental query-context `start`, `end`, `step`, and `range`; `start_timestamp` is not PromQL; pinned Prometheus requires `promql-duration-expr` for the four context functions and reports `start_timestamp` as unknown; the stable endpoint preserves those exact failures while `@ start()`/`@ end()` remain shipped; MetricsQL ownership is `MQL-10` | experimental | partial | `SQL` | `API` | EXP |
 | `PQL-F20` | experimental `min_of` and `max_of`; pinned Prometheus requires `promql-duration-expr`; the stable endpoint rejects both through GET, POST, and reopen; stable MetricsQL ownership is `MQL-11` | experimental | no | `SQL` | `API` | EXP |
-| `PQL-F21` | experimental `info` | missing | no | `CAT`, `SQL` | `API` | EXP |
+| `PQL-F21` | experimental `info`; pinned Prometheus 3.13.2 rejects both arities unless `promql-experimental-functions` is enabled, and stable Timeless GET/POST/reopen paths now preserve that diagnostic before child evaluation or storage; full execution requires `PQL-S17` stale-marker and `PQL-S22` typed-histogram contracts | experimental | no | `CAT`, `RAW` | `API` | EXP |
 
 `PQL-F14` is API-owned composition, not SQL or an extension primitive.
 Enabled upstream sorts each requested label using natural order, treats a
@@ -229,6 +229,22 @@ label-set comparison. A future experimental Rust tier requires a
 feature-enabled oracle, bounded vector state, string/variadic validation,
 labels and metric names, histogram values, range warnings, limits, and
 cancellation. The stable API fails before the child vector or storage scan.
+
+`PQL-F21` is also API-owned composition rather than an ordinary SQL or
+extension query vector. Enabled upstream accepts one instant vector and an
+optional selector-only argument, defaults info sources to `target_info`, and
+joins on the currently fixed identifying labels `job` and `instance`. It
+merges only selected non-identifying labels, preserves conflicting base
+labels, resolves info-series churn by newest sample timestamp, rejects
+same-timestamp duplicates and cross-info-metric label conflicts, and either
+drops or preserves an unenriched base sample according to whether every data
+matcher accepts the empty string. Lookback, `offset`, `@`, exact stale-marker
+termination, float-only info sources, and float/native-histogram base samples
+are part of the contract. An application-specific public-raw JSON join can be
+useful but is not equivalent under churn or staleness. Future execution needs
+`PQL-S17`, `PQL-S22`, a feature-enabled oracle, bounded dual selection,
+limits, cancellation, and duplicate-result enforcement. The stable API fails
+before evaluating either vector or reading storage.
 
 ## Histogram functions
 

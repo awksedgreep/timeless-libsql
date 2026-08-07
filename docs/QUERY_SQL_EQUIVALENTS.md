@@ -216,6 +216,19 @@ equivalent. The matrix therefore assigns `RAW`/`API`, not `SQL` or `EXT`; a
 future experimental Rust evaluator can sort already-bounded public results
 without changing or accelerating storage.
 
+`PQL-F21` intentionally has no SQL recipe. Prometheus `info()` is not merely a
+JSON label join: it performs an independently bounded info-series selection,
+uses lookback and exact stale markers, resolves changing info series by their
+source timestamps, detects equal-time and cross-metric conflicts, applies
+matcher-versus-empty behavior, and preserves float or native-histogram base
+samples. The retained packed metric storage preserves stale-marker bits, but
+`PQL-S17` documents that supported ingress and query paths do not yet expose
+an end-to-end stale-marker contract; `PQL-S22` separately defers typed native
+histograms. A direct user may join public `timeless_series`/raw rows on
+application-defined `job` and `instance` labels, but that is not an equivalent
+to the experimental language function. The matrix therefore assigns
+`CAT`/`RAW`/`API`, not `SQL` or `EXT`.
+
 `LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
 optional terminal semicolon are LogsQL source grammar owned by the Rust API;
 direct SQLite/libSQL users already write ordinary parameterized SQL and do not

@@ -4058,6 +4058,28 @@
       }
     },
     {
+      "id": "PQL-F21-info-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "info(vector(1))", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"info\" is not enabled"
+      }
+    },
+    {
+      "id": "PQL-F21-info-selector-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "info(vector(1), {__name__=\"target_info\"})", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"info\" is not enabled"
+      }
+    },
+    {
       "id": "PQL-R09-quantile-over-time-arity-error",
       "endpoint": "/api/v1/query",
       "params": {"query": "quantile_over_time(up[20s])", "time": "2"},

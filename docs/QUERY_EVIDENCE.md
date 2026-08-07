@@ -6320,3 +6320,24 @@ functions. Future work is bounded Rust sorting after child evaluation, so no
 extension primitive, private access, storage format, batching, compression,
 index, rollup, retention, transaction, migration, optimize, or maintenance
 behavior changed.
+
+## Session 19 experimental disposition: info-series enrichment
+
+`PQL-F21` is classified, not enabled. Two exact cases pass against immutable
+Prometheus 3.13.2, bringing the complete API fixture to 543 cases and pinning
+the default feature gate for the one-argument and selector-argument forms.
+Rust and real-extension regressions failed first on the internal `unsupported
+PromQL expression (parsed as function call)` message, then passed with exact
+GET envelopes, POST diagnostics, shutdown, reopen, and zero raw/window
+extension queries for both forms.
+
+No SQL recipe is published. Pinned source and behavior require a separate
+lookback-aware info selection, fixed `job`/`instance` identity, newest-source
+conflict resolution, exact stale markers, matcher-versus-empty behavior, and
+float/native-histogram base values. The retained model needs `PQL-S17` and
+`PQL-S22` before a feature-enabled Rust tier can claim parity. No API
+narrow/wide p50/p95/p99, result-cardinality, storage-byte, or RSS comparison is
+reported because stable Timeless never evaluates the function. No extension
+primitive, private access, storage format, batching, compression, index,
+rollup, retention, transaction, migration, optimize, or maintenance behavior
+changed.

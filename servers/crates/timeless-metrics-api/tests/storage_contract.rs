@@ -11620,6 +11620,14 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
             "function \"sort_by_label_desc\" is not enabled",
         ),
         (
+            "info(vector(1))",
+            "function \"info\" is not enabled",
+        ),
+        (
+            "info(vector(1), {__name__=\"target_info\"})",
+            "function \"info\" is not enabled",
+        ),
+        (
             "limitk(1, vector(1))",
             "limitk() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
         ),

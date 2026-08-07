@@ -73,6 +73,10 @@ the server does not silently enable, approximate, or delegate the functions.
 their pinned disabled diagnostics. No lexicographic SQL approximation is
 advertised for Prometheus's natural multi-label order; future execution
 belongs in a separately enabled Rust API tier.
+`info` is experimental as well and fails before child evaluation or storage.
+A simple SQL metadata join is not advertised as equivalent to its lookback,
+stale-marker, source-conflict, matcher, and native-histogram semantics; future
+execution requires `PQL-S17` and `PQL-S22` in a separately enabled Rust tier.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`

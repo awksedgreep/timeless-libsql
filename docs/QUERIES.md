@@ -3310,6 +3310,17 @@ label-set comparator for ties. A future experimental Rust tier can sort the
 already-bounded child vector; there is no extension, Elixir, or process
 fallback.
 
+`info(vector[, {label_matchers...}])` is likewise experimental. Stable
+Timeless returns Prometheus's disabled-function error before evaluating the
+child or reading storage. No full SQL equivalent is advertised: upstream
+performs an additional lookback-aware info-series read, resolves data-label
+churn by source timestamp, observes exact stale markers, and supports
+native-histogram base samples. Application code may perform a simpler metadata
+join through public catalog/raw rows, but it must not call that join PromQL
+`info()`. A future Rust experimental tier requires the `PQL-S17` stale-marker
+and `PQL-S22` typed-histogram prerequisites; there is no Elixir, NIF, HTTP, or
+process fallback.
+
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
 Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over

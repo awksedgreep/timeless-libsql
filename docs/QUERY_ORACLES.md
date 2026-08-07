@@ -433,6 +433,18 @@ retain fixed label order and emit the standard ineffective-sort warning.
 Stable Timeless preserves both default feature gates; future execution
 requires a separately feature-enabled oracle.
 
+`PQL-F21` adds exact default-tier cases for both `info(v)` and
+`info(v, {selector})`, bringing the complete Prometheus API fixture to 543
+cases. Pinned source marks the function experimental and requires
+`promql-experimental-functions` before arity, selector-only syntax, or
+evaluation proceeds. Enabled behavior independently selects info series,
+defaults to `target_info`, joins on `job`/`instance`, resolves changing data
+labels by newest source timestamp, applies empty-string matcher semantics,
+and observes lookback and stale markers. Info sources must be floats while
+base values can be floats or native histograms. Stable Timeless preserves the
+default feature gate; future execution requires a feature-enabled oracle plus
+the retained-model prerequisites `PQL-S17` and `PQL-S22`.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects

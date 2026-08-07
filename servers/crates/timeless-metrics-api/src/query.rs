@@ -1867,6 +1867,7 @@ fn prometheus_disabled_stable_function(name: &str) -> bool {
             | "ts_of_max_over_time"
             | "sort_by_label"
             | "sort_by_label_desc"
+            | "info"
     )
 }
 
@@ -10200,6 +10201,14 @@ mod tests {
             (
                 "sort_by_label_desc(oracle_temporal, \"instance\")",
                 "1:1: parse error: function \"sort_by_label_desc\" is not enabled",
+            ),
+            (
+                "info(oracle_temporal)",
+                "1:1: parse error: function \"info\" is not enabled",
+            ),
+            (
+                "info(oracle_temporal, {__name__=\"target_info\"})",
+                "1:1: parse error: function \"info\" is not enabled",
             ),
             (
                 "limitk(1, oracle_temporal)",
