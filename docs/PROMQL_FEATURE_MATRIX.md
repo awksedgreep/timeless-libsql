@@ -97,9 +97,18 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O14` | `topk` and `bottomk` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-005-top-k-per-evaluation-step)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O15` | `quantile` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-019-cross-series-quantile)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O16` | `count_values` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-020-count-series-by-sample-value)) | shipped | yes | `SQL` | `API` | P0 |
-| `PQL-O17` | experimental `limitk` and `limit_ratio` | missing | no | `SQL` | `API` | EXP |
+| `PQL-O17` | experimental `limitk` and `limit_ratio`; pinned Prometheus 3.13.2 rejects both unless `promql-experimental-functions` is enabled, and the stable Timeless GET/POST/reopen paths preserve that diagnostic without reading storage; implementation requires a separately configured experimental tier and oracle plus bounded group state, while full upstream parity also requires typed native-histogram samples | experimental | no | `RAW` | `API` | EXP |
 | `PQL-O18` | experimental binary fill modifiers | missing | no | `SQL` | `API` | EXP |
 | `PQL-O19` | native-histogram trim operators `</` and `>/` | deferred | no | none | `DEFER` | DEFER |
+
+`PQL-O17` is deliberately not an extension or ordinary-SQL row. Prometheus
+selects `limit_ratio` members from its canonical label-set hash and `limitk`
+from evaluator order after the child vector has been evaluated. Neither
+contract is exposed by portable SQLite/libSQL SQL, and neither can prune the
+underlying raw scan. The stable API therefore fails before storage. A future
+experimental tier belongs in the Rust planner/evaluator over public raw
+results; it must be enabled explicitly and tested against an oracle started
+with the same feature flag.
 
 ## Range, counter, and regression functions
 

@@ -1794,10 +1794,11 @@ fn prometheus_disabled_function_error(input: &str, name: &str) -> String {
 
 fn prometheus_preparse_function_error(input: &str) -> Option<String> {
     let calls = scan_promql_source_calls(input);
-    let mut first: Option<(&str, usize, bool)> = None;
+    let mut first: Option<(&str, usize, bool, bool)> = None;
     for (name, calls) in &calls {
         let known_unknown = name == "start_timestamp";
-        if !known_unknown && !prometheus_disabled_stable_function(name) {
+        let experimental_aggregate = matches!(name.as_str(), "limitk" | "limit_ratio");
+        if !known_unknown && !experimental_aggregate && !prometheus_disabled_stable_function(name) {
             continue;
         }
         for call in calls {
@@ -1806,15 +1807,19 @@ fn prometheus_preparse_function_error(input: &str) -> Option<String> {
             {
                 continue;
             }
-            if first.is_none_or(|(_, start, _)| call.start < start) {
-                first = Some((name, call.start, known_unknown));
+            if first.is_none_or(|(_, start, _, _)| call.start < start) {
+                first = Some((name, call.start, known_unknown, experimental_aggregate));
             }
         }
     }
-    first.map(|(name, start, known_unknown)| {
+    first.map(|(name, start, known_unknown, experimental_aggregate)| {
         let position = promql_source_position(input, start);
         if known_unknown {
             format!("{position}: parse error: unknown function with name \"{name}\"")
+        } else if experimental_aggregate {
+            format!(
+                "{position}: parse error: {name}() is experimental and must be enabled with --enable-feature=promql-experimental-functions"
+            )
         } else {
             format!("{position}: parse error: function \"{name}\" is not enabled")
         }
@@ -2056,7 +2061,7 @@ fn scan_promql_source_calls(input: &str) -> BTreeMap<String, VecDeque<PromSource
         }
         let name = &input[start..index];
         let mut next = skip_promql_whitespace(bytes, index);
-        if name == "quantile" {
+        if matches!(name, "quantile" | "limitk" | "limit_ratio") {
             if let Some((modifier, after_modifier)) = promql_identifier_at(input, next) {
                 if matches!(modifier, "by" | "without") {
                     next = skip_promql_whitespace(bytes, after_modifier);
@@ -10078,6 +10083,14 @@ mod tests {
             (
                 "histogram_quantiles(buckets, \"quantile\", 0.5)",
                 "1:1: parse error: function \"histogram_quantiles\" is not enabled",
+            ),
+            (
+                "limitk(1, oracle_temporal)",
+                "1:1: parse error: limitk() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
+            ),
+            (
+                "# experimental\nlimit_ratio by (host) (0.5, oracle_temporal)",
+                "2:1: parse error: limit_ratio() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
             ),
         ] {
             assert_eq!(lower_promql(query, 300_000).unwrap_err(), expected);

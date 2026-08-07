@@ -3831,6 +3831,22 @@
       "error_contains": "vector cannot contain metrics with the same labelset"
     },
     {
+      "id": "PQL-O17-limitk-is-experimental",
+      "query": "limitk(1, oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "limitk() is experimental and must be enabled with --enable-feature=promql-experimental-functions"
+    },
+    {
+      "id": "PQL-O17-limit-ratio-is-experimental",
+      "query": "limit_ratio by (host) (0.5, oracle_temporal)",
+      "evaluation_offset_ms": 30000,
+      "status": 400,
+      "error_type": "bad_data",
+      "error_contains": "limit_ratio() is experimental and must be enabled with --enable-feature=promql-experimental-functions"
+    },
+    {
       "id": "PQL-F19-start-is-experimental",
       "query": "start()",
       "evaluation_offset_ms": 30000,

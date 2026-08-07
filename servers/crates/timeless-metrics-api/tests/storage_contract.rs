@@ -11591,7 +11591,16 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
             "histogram_quantiles(vector(1), \"quantile\", 0.5, 0.9)",
             "function \"histogram_quantiles\" is not enabled",
         ),
+        (
+            "limitk(1, vector(1))",
+            "limitk() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
+        ),
+        (
+            "limit_ratio by (host) (0.5, vector(1))",
+            "limit_ratio() is experimental and must be enabled with --enable-feature=promql-experimental-functions",
+        ),
     ];
+    let stats_before_get_errors = storage.stats().await.unwrap();
     for (query, diagnostic) in cases {
         let response = prom_query(&app, query, 2).await;
         assert_eq!(
@@ -11609,6 +11618,15 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
             })
         );
     }
+    let stats_after_get_errors = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after_get_errors.extension_raw_batch_query_count
+            - stats_before_get_errors.extension_raw_batch_query_count
+            + stats_after_get_errors.extension_window_batch_query_count
+            - stats_before_get_errors.extension_window_batch_query_count,
+        0,
+        "stable experimental-function GET failures must not reach storage"
+    );
 
     let at_start = prom_query_range(&app, "missing_metric @ start()", 2, 4, 1).await;
     assert_eq!(at_start.0, StatusCode::OK, "{}", at_start.1);
@@ -11617,25 +11635,32 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
     assert_eq!(at_end.0, StatusCode::OK, "{}", at_end.1);
     assert_eq!(at_end.1["data"]["result"], serde_json::json!([]));
 
-    let post_params = form_urlencoded::Serializer::new(String::new())
-        .append_pair(
-            "query",
-            "histogram_quantiles(vector(1), \"quantile\", 0.5, 0.9)",
-        )
-        .append_pair("time", "2")
-        .finish();
-    let posted = post_form(&app, "/prometheus/api/v1/query", &post_params).await;
-    assert_eq!(posted.0, StatusCode::BAD_REQUEST, "{}", posted.1);
-    assert!(posted.1["error"]
-        .as_str()
-        .unwrap()
-        .contains("function \"histogram_quantiles\" is not enabled"));
+    let stats_before_post_errors = storage.stats().await.unwrap();
+    for (query, diagnostic) in cases {
+        let post_params = form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", query)
+            .append_pair("time", "2")
+            .finish();
+        let posted = post_form(&app, "/prometheus/api/v1/query", &post_params).await;
+        assert_eq!(posted.0, StatusCode::BAD_REQUEST, "{query}: {}", posted.1);
+        assert!(posted.1["error"].as_str().unwrap().contains(diagnostic));
+    }
+    let stats_after_post_errors = storage.stats().await.unwrap();
+    assert_eq!(
+        stats_after_post_errors.extension_raw_batch_query_count
+            - stats_before_post_errors.extension_raw_batch_query_count
+            + stats_after_post_errors.extension_window_batch_query_count
+            - stats_before_post_errors.extension_window_batch_query_count,
+        0,
+        "stable experimental-function POST failures must not reach storage"
+    );
 
     drop(app);
     storage.shutdown().await.unwrap();
     drop(storage);
     let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
     let reopened_app = router(reopened.clone());
+    let reopened_stats_before = reopened.stats().await.unwrap();
     for (query, diagnostic) in cases {
         let response = prom_query(&reopened_app, query, 2).await;
         assert_eq!(
@@ -11646,6 +11671,15 @@ async fn session_fourteen_experimental_promql_functions_fail_stably_and_reopen()
         );
         assert!(response.1["error"].as_str().unwrap().contains(diagnostic));
     }
+    let reopened_stats_after = reopened.stats().await.unwrap();
+    assert_eq!(
+        reopened_stats_after.extension_raw_batch_query_count
+            - reopened_stats_before.extension_raw_batch_query_count
+            + reopened_stats_after.extension_window_batch_query_count
+            - reopened_stats_before.extension_window_batch_query_count,
+        0,
+        "stable experimental-function failures must remain storage-free after reopen"
+    );
     drop(reopened_app);
     reopened.shutdown().await.unwrap();
 }

@@ -45,6 +45,11 @@ decrease `resets(selector[window])`.
 Pinned Prometheus 3.13.2 marks `double_exponential_smoothing` experimental and
 disables it by default; the stable Timeless tier rejects it explicitly until
 a separately enabled experimental compatibility tier and oracle gate exist.
+Pinned Prometheus likewise feature-gates the `limitk` and `limit_ratio`
+aggregators. Stable PromQL requests reject both before any storage read; they
+are not approximated with SQL ordering or silently executed through another
+runtime. Their matrix row remains experimental until an explicitly enabled
+Rust API tier passes a feature-enabled oracle with bounded group state.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`

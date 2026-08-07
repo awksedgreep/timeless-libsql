@@ -179,6 +179,18 @@ still correctly marked `missing`.
 
 ## Rows without an honest SQL equivalent
 
+`PQL-O17` intentionally has no SQL recipe. Prometheus `limit_ratio` selects
+series using its canonical label-set hash, while `limitk` observes the
+evaluator's group order; portable SQLite/libSQL exposes neither contract.
+`ORDER BY ... LIMIT` can provide a useful application-defined sample, but it
+would not be PromQL-compatible and would give direct users a false parity
+claim. The matrix therefore assigns the row to `RAW`/`API`, not `SQL` or
+`EXT`. The stable Timeless endpoint rejects both feature-gated aggregators
+before any public storage query. If a separately enabled experimental tier is
+added later, its Rust evaluator will compose over public raw results and own
+canonical hashing, grouping, bounds, cancellation, labels, and response
+semantics.
+
 `LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
 optional terminal semicolon are LogsQL source grammar owned by the Rust API;
 direct SQLite/libSQL users already write ordinary parameterized SQL and do not

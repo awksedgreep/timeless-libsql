@@ -6197,3 +6197,22 @@ formats, compression, indexes, retention, optimize, transactions, migrations,
 and public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
+
+## Session 19 experimental disposition: `limitk` and `limit_ratio`
+
+`PQL-O17` is classified, not implemented. Two new cases pass against the
+immutable Prometheus 3.13.2 API oracle and prove that its stable configuration
+rejects `limitk` and modifier-form `limit_ratio` with the exact
+`promql-experimental-functions` diagnostic. The complete Prometheus fixture is
+now 530 cases. A failing-then-passing Rust parser regression pinned the same
+source positions, and the real-extension regression pins exact GET envelopes,
+POST diagnostics, shutdown, reopen, and the absence of raw/window extension
+queries on every rejected request.
+
+No narrow/wide p50/p95/p99, result-cardinality, storage-byte, or RSS comparison
+is reported because the stable product deliberately performs no query and
+returns no result for this experimental row. Manufacturing an execution
+benchmark would imply support that does not exist. The relevant cost verdict
+is exact: rejection happens before public storage work. No extension surface,
+private table, storage format, batching, compression, index, rollup, retention,
+transaction, migration, optimize, or maintenance behavior changed.

@@ -1447,6 +1447,18 @@ Exit: each experimental row names its stability/cost decision; each deferred
 row names a typed native-histogram, stream-identity, or other exact
 prerequisite. None is implied by a nearby primitive or counted as parity.
 
+`PQL-O17` is closed as an experimental disposition. Pinned Prometheus 3.13.2
+requires `promql-experimental-functions` for both `limitk` and `limit_ratio`;
+the stable Timeless GET, POST, and post-reopen paths preserve the exact
+diagnostic and perform zero raw/window extension queries. The foundation is
+`RAW`/`API`, not SQL or an extension primitive: upstream selection depends on
+canonical Prometheus label hashing or evaluator group order after child-vector
+evaluation and cannot prune storage. Reconsideration requires an explicit
+experimental compatibility configuration and feature-enabled oracle, bounded
+group/vector state and cancellation, and typed native-histogram storage for a
+claim of full upstream parity. No query latency/storage benchmark is claimed
+for an operator that the stable product deliberately does not execute.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

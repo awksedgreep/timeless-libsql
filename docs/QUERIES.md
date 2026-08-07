@@ -3246,6 +3246,16 @@ name before grouping. Values use Prometheus fixed shortest formatting,
 including `-0`, infinities, NaN, and fully expanded decimal exponents; this
 operation can approach input cardinality and remains subject to result limits.
 
+Prometheus 3.13.2 classifies `limitk` and `limit_ratio` as experimental
+aggregators. The stable Timeless PromQL endpoint rejects both with the pinned
+`promql-experimental-functions` feature-gate diagnostic on GET and POST,
+including after reopen, and performs no storage query. There is no hidden SQL,
+extension, Elixir, or process fallback. Portable SQLite/libSQL cannot reproduce
+Prometheus's canonical label hashing and evaluator-order selection honestly;
+direct users may write an explicitly application-defined `ORDER BY ... LIMIT`
+query, but it is not a PromQL equivalent. A future implementation requires a
+separately enabled experimental Rust API tier and matching oracle gate.
+
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
 Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over

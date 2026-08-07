@@ -365,6 +365,16 @@ Prometheus. These are explicit experimental or MetricsQL rows; the stable
 Timeless endpoint must not enable them merely because the parser recognizes a
 similar construct.
 
+`PQL-O17` adds two error cases to that same immutable Prometheus oracle. At
+source commit `bb5dff00cf8fdfbf5c65e0531aa835fa238a43a2`, the parser classifies
+`limitk` and `limit_ratio` as experimental aggregators and rejects them unless
+`--enable-feature=promql-experimental-functions` is active. The default pinned
+image is intentionally started without that flag, so both cases require the
+exact feature-gate diagnostic. The complete 530-case Prometheus API fixture
+passes. This is a stable-tier compatibility decision, not evidence that
+Timeless implements the experimental operators. A future implementation must
+use a separately configured oracle run with the feature enabled.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects
