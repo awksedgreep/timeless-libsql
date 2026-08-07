@@ -6613,3 +6613,54 @@ ownership and the prerequisite for reconsideration. No extension primitive,
 private access, storage format, authoritative batching, compression, index,
 rollup, retention, transaction, migration, optimize, or maintenance behavior
 changed.
+
+## Session 19 LogsQL query time offsets
+
+`LQL-Q04` is shipped as a scoped Rust API query option over the unchanged
+public `logs` table. Eleven successful and eight error witnesses pass inside
+the complete 1,460-case immutable VictoriaLogs 1.52.0 fixture. Pinned source
+and exact responses establish backward storage-bound translation, forward
+result `_time` shifting, signed fractional/compound duration grammar,
+duplicate-last and trailing-comma behavior, nested inheritance and explicit
+replacement, day/week composition, and the upstream leading-filter optimizer
+order. Rich values, strict pre-storage errors, work/response/deadline limits,
+cancellation, immutable rows, optimize, flush, shutdown, and reopen pass
+against the real extension.
+
+Exact release build `c4ea4cf6ba43de36f831e048d9f39e3e60b8d183`
+produces these loopback measurements over 50 requests after five warmups:
+
+| shape | candidate p50/p95/p99 | equal-read control p50/p95/p99 | p95 delta | API-owned mean delta | result |
+|---|---:|---:|---:|---:|---:|
+| indexed host | 3.230/3.538/4.159 ms | 3.032/3.162/3.366 ms | +11.9% | +8.3% | 64 rows / 2,546 bytes |
+| full fixture | 37.799/38.840/39.006 ms | 33.530/34.322/34.499 ms | +13.2% | +13.0% | 64 rows / 2,555 bytes |
+
+Candidate and control each execute one public query per request. The narrow
+pair considers one block, decodes 1,024 entries, reads 235,778 payload bytes,
+and matches/returns 128 public rows before the shared sort/limit. The wide pair
+considers four blocks, decodes, matches, and returns all 8,192 entries, and
+reads 1,914,055 payload bytes. Thus the option adds no public storage read,
+decode, payload-transfer, or row-crossing amplification. The measured delta is
+the bounded API-owned nanosecond timestamp transformation and response
+rendering; ordinary SQL already performs the useful source-bound pruning, so
+there is no extension-primitive opportunity.
+
+All 8,192 log entries completed durably with zero queued work. Admission took
+13.694 ms and the ordered durability barrier 34.693 ms. Storage remained four
+raw blocks, 1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM
+bytes. Logs RSS HWM was 101,372 KiB. The companion metrics workload completed
+136,953 points with zero failed or queued points; metrics storage was 224,688
+logical bytes, 409,600 index bytes, and 1,542,312 physical bytes, with 53,484
+KiB RSS HWM. Cancellation finished with zero requests in flight; the dedicated
+regression separately forces a deadline, observes cancellation, and reuses the
+same reader.
+
+The artifact is
+[`2026-08-07_session19_lql_q04_time_offset.json`](evidence/2026-08-07_session19_lql_q04_time_offset.json)
+(SHA-256 `24cd5561dad928c154a3106259c32edae327899e1dbc7abc700a8df88a0736f7`).
+Executable `SQL-LOG-065` pins positive and negative sub-native source-bound
+translation through only public surfaces. `QSF-270`–`QSF-272` retain the
+semantic, parser, storage, performance, and ownership verdicts. No extension
+primitive, private access, storage format, authoritative batching,
+compression, index, rollup, retention, transaction, migration, optimize, or
+maintenance behavior changed.

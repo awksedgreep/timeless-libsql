@@ -2717,6 +2717,14 @@ nested scope, pipeline order, RFC3339Nano rendering, limits, cancellation,
 and HTTP envelopes remain Rust API responsibilities; there is no
 language-specific extension opcode.
 
+Exact release build `c4ea4cf6ba43de36f831e048d9f39e3e60b8d183`
+measures 64-row offsets at 3.230/3.538/4.159 ms narrow and
+37.799/38.840/39.006 ms wide p50/p95/p99. Equal-read controls measure
+3.032/3.162/3.366 and 33.530/34.322/34.499 ms. The option's p95 is
+11.9%/13.2% higher, but every candidate/control pair reads exactly the same
+blocks, entries, payload bytes, and public rows. The measured cost is bounded
+API timestamp transformation and rendering, not storage amplification.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

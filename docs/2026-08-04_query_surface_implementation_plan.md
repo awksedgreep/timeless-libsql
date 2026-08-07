@@ -1731,6 +1731,15 @@ through only the public `logs` table. No extension primitive, private access,
 storage format, authoritative batching, compression, index, retention,
 transaction, migration, optimize, or maintenance behavior changed.
 
+Exact build `c4ea4cf6ba43de36f831e048d9f39e3e60b8d183` measures
+3.230/3.538/4.159 ms narrow and 37.799/38.840/39.006 ms wide
+p50/p95/p99, versus equal-read controls at 3.032/3.162/3.366 and
+33.530/34.322/34.499 ms. The 11.9%/13.2% p95 cost is API-owned timestamp
+transformation: every pair has identical public blocks, decoded entries,
+payload bytes, matched rows, and returned rows. The 8,192-entry fixture
+remains four raw blocks and 2,022,736 physical bytes with zero queued work;
+logs RSS HWM is 101,372 KiB.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

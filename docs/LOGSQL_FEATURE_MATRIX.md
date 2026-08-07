@@ -1326,7 +1326,7 @@ closed.
 | `LQL-Q01` | deterministic `asc`/`desc`, limit, and offset ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | `API` | P0 | Time sort uses `(ts, stable engine order)` in either direction; equal timestamps, aliases, zero limits, optimize, and reopen are pinned. |
 | `LQL-Q02` | field projection in response ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | shipped | `API` | P1 | Ordered `fields`/`keep` stages choose response fields; `_time`/`_msg` are retained only when selected, dotted metadata reconstructs its nested shape, and missing paths remain absent. |
 | `LQL-Q03` | concurrency/parallel-reader options ([no SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-19-architecture-disposition-logsql-query-parallelism)) | deferred | `DEFER` | DEFER | VictoriaLogs controls CPU workers and I/O readers inside each query. Timeless executes one public SQLite cursor per query; its server reader pool and auth admission cap independent requests and are not equivalent. |
-| `LQL-Q04` | `time_offset` | in progress | `API` | P2 | Planner-owned storage-bound and result timestamp shift; exact upstream inheritance, pipeline ordering, retained-unit rounding, and SQL foundation are being pinned. |
+| `LQL-Q04` | `time_offset` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-065-offset-public-log-query-time-without-rounding); [evidence](QUERY_EVIDENCE.md#session-19-logsql-query-time-offsets)) | shipped | `API` | P2 | Exact positive/negative/sub-native source bounds, nested inheritance/replacement, leading-filter optimizer order, nanosecond results, strict errors, limits, cancellation, optimize, and reopen are pinned by `session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_queries`. |
 | `LQL-Q05` | `global_filter` | missing | `API` | P3 | Apply before every subquery without textual substitution. |
 | `LQL-Q06` | partial-response option | missing | `API` | P3 | Default remains fail-closed; never silently return incomplete rows. |
 | `LQL-Q07` | cancellation, deadline, row/response/sample limits | shipped | `API` | P0 | Hard defaults cap result rows, decoded/examined entries, response bytes, and wall time. Capability-advertised `max_work_entries` guards row/count/value reads before decode; dropped requests cancel SQLite/Rust work and readers remain reusable. |
@@ -1349,6 +1349,19 @@ deterministic merge, exact work accounting, cancellation, reader reuse, and
 proof that multiple cursors do not duplicate block reads or weaken ordering.
 There is no SQL recipe or benchmark for deliberately rejected resource
 syntax, and no extension or storage contract changed.
+
+`LQL-Q04` shifts logical storage bounds backward and returned `_time` values
+forward without mutating retained rows. Eleven successful and eight error
+witnesses pass the complete 1,460-case immutable VictoriaLogs oracle. Nested
+queries inherit the outer option unless they explicitly replace it; retained
+millisecond/microsecond bounds use exact ceil/floor handling for sub-native
+remainders; and consecutive leading filter pipes preserve the upstream
+source-time optimizer order. Real-extension regressions pin rich fidelity,
+limits, cancellation, optimize, shutdown, and reopen. Public `SQL-LOG-065`
+implements the same integer source-bound translation through the documented
+`logs` table. Exact-build evidence shows identical candidate/control public
+storage work and an 11.9%/13.2% narrow/wide p95 API-layer cost, so no extension
+primitive or private storage access is warranted.
 
 ## Higher-order library boundary
 
