@@ -4916,6 +4916,67 @@ public batch/SQL contracts are unchanged. No extension opcode, private shadow
 table, language fallback, tag, release, or downstream repository was used or
 modified.
 
+## Session 18 LogsQL P3: bounded typed `json_values`
+
+The checked-in
+[`2026-08-07_session18_lql_s12_json_values.json`](evidence/2026-08-07_session18_lql_s12_json_values.json)
+was captured from exact release extension and server build
+`898006684a82b5fd6cc0f7ff477c75e5c1778367` and has SHA-256
+`ad8e05fcb10cee4efc863d66830d7a5b61025c8ebd20c871e66994e7aab91637`.
+Candidate shapes return one statistics row whose JSON string contains 64
+selected typed objects. Controls return one bounded `values` statistics row
+from the same sources and preserve exact public storage work.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/request | decoded entries/request | extension payload bytes/request | public rows/request |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| typed natural top-k, indexed host | 1 | 3,663 | 3.275 | 3.557 | 3.967 | 1 | 1,024 | 235,778 | 128 |
+| typed natural top-k, full fixture | 1 | 3,663 | 35.728 | 37.237 | 37.801 | 4 | 8,192 | 1,914,055 | 8,192 |
+| bounded unique-value control, indexed host | 1 | 451 | 3.199 | 3.364 | 3.429 | 1 | 1,024 | 235,778 | 128 |
+| bounded unique-value control, full fixture | 1 | 451 | 33.646 | 34.563 | 37.043 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Candidate p95 is 5.7% higher narrow and 7.7% higher wide.
+Request-attributed API means are 2.546/34.506 ms versus
+2.437/32.417 ms, or 4.5%/6.4% higher. The candidate response is 3,212
+bytes larger because it contains 64 native nested objects rather than a
+bounded unique-value envelope. Across 50 measured requests per shape, each
+candidate/control pair nevertheless records exactly the same public query,
+candidate-block, decoded-entry, payload-byte, matched-row, returned-row, and
+bounded-request work. Both request 100,001 bounded entries per query; the
+hard limit remains an explicit failure boundary rather than truncation.
+
+All 8,192 rich fixture entries completed durably with zero queued work.
+Admission took 12.859 ms and the explicit durability barrier took 36.741 ms.
+Storage remains exactly four raw blocks, 1,914,055 logical payload bytes, and
+2,022,736 physical database/WAL/SHM bytes. Logs HWM was 106,908 KiB, 528 KiB
+below LQL-P48 after four additional one-scan shapes; metrics HWM was 51,432
+KiB, 712 KiB above it. Both complete-workload maxima are retained as
+whole-process variation. Cancellation ended with zero requests in flight and
+zero cancelled requests at capture.
+
+The complete 1,374-case pinned VictoriaLogs v1.52.0 corpus passes live.
+Direct parser/evaluator and real-extension regressions pin statistics and
+standalone grammar, normalized implicit aliases, exact/prefix/all selectors,
+rich native values, missing and empty-object behavior, natural multi-key
+ordering, stable ties, bounded top-k, zero-limit handling, cumulative limits,
+cancellation and reader reuse, immutable rows, optimize, flush, shutdown, and
+reopen. Executable `SQL-LOG-063` proves the fixed-path typed JSON1 foundation
+through the public SQLite/libSQL interface.
+
+Final local gates pass: 152 logs library tests, two logs binary tests, all 75
+logs and 90 metrics real-extension tests, the complete default root workspace
+and server workspace targets, the 36-test Rust query harness, all six focused
+correctness profiles, the standalone DB-health lifecycle gate, all 45
+CLI/crash/transaction sections including 150,000 oracle operations and five
+kill-9 rounds, the complete 1,374-case live oracle, documentation/oracle
+contracts, formatting, and Clippy with warnings denied. All 129 executable SQL
+recipes and 167 statements pass through the public release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No extension opcode, private shadow
+table, language fallback, tag, release, or downstream repository was used or
+modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

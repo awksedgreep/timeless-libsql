@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F38 LQL-F39 LQL-F40 LQL-F41 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P17 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P25 LQL-P26 LQL-P27 LQL-P28 LQL-P29 LQL-P30 LQL-P31 LQL-P32 LQL-P33 LQL-P34 LQL-P35 LQL-P36 LQL-P37 LQL-P38 LQL-P39 LQL-P40 LQL-P41 LQL-P42 LQL-P43 LQL-P44 LQL-P45 LQL-P46 LQL-P47 LQL-P48 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F38 LQL-F39 LQL-F40 LQL-F41 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P17 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P25 LQL-P26 LQL-P27 LQL-P28 LQL-P29 LQL-P30 LQL-P31 LQL-P32 LQL-P33 LQL-P34 LQL-P35 LQL-P36 LQL-P37 LQL-P38 LQL-P39 LQL-P40 LQL-P41 LQL-P42 LQL-P43 LQL-P44 LQL-P45 LQL-P46 LQL-P47 LQL-P48 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 LQL-S12 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -236,6 +236,17 @@ provides fixed-path typed JSON1 composition and native-number sorting to
 direct SQLite/libSQL users. Dynamic selectors and complete LogsQL semantics
 remain in this Rust API over public rows; no private table or extension
 primitive is used.
+
+Exact release build `898006684a82b5fd6cc0f7ff477c75e5c1778367`
+measures the 64-object natural top-k at 3.275/3.557/3.967 ms narrow and
+35.728/37.237/37.801 ms wide p50/p95/p99. Equal-scan bounded `values`
+controls measure 3.199/3.364/3.429 and 33.646/34.563/37.043 ms. Candidate
+p95 is 5.7%/7.7% higher, while both pairs read exactly the same one/four
+blocks, decode 1,024/8,192 entries, cross 235,778/1,914,055 payload bytes,
+and materialize 128/8,192 public rows. The 3,663-byte typed-object response
+versus the 451-byte unique-value control explains part of the bounded
+API-owned cost; `QSF-248` records the accepted verdict and unchanged storage
+boundary.
 
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.

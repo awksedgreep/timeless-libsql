@@ -1375,9 +1375,16 @@ the implicit result name now includes VictoriaLogs' normalized sort/limit
 suffix; sort-key projection and multiple `json_values` expressions share one
 cumulative work budget; retained result strings are included in the state
 budget; and the transient heap-to-index conversion is peak-bounded. `QSF-247`
-records these corrections and the unchanged public-storage boundary. Exact release
-performance, physical-work equality, storage, and HWM evidence remain before
-`LQL-S12` can close.
+records these corrections and the unchanged public-storage boundary. Exact
+release evidence measures 3.557/37.237 ms narrow/wide p95 versus
+3.364/34.563 ms equal-scan controls, or 5.7%/7.7% higher. Every pair reads
+the same one/four blocks, 1,024/8,192 decoded entries,
+235,778/1,914,055 payload bytes, and 128/8,192 public rows. All 8,192 fixture
+entries complete durably; storage remains four raw blocks; queued and
+in-flight work are zero; and logs HWM is 106,908 KiB. `QSF-248` records the
+accepted exact-build verdict. No extension primitive, private table, storage
+contract, batching, compression, index, retention, transaction, migration,
+optimize, or maintenance behavior changed. `LQL-S12` is closed.
 
 ### Session 19: experimental and data-model dispositions
 

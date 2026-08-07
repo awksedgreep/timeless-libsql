@@ -1059,7 +1059,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-S12` | `json_values` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)) | in progress | `ROWS`, `SQL` | `API` | P3 |
+| `LQL-S12` | `json_values` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)) | shipped | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S15` | total `count/first/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -1183,9 +1183,23 @@ rows, optimize, shutdown, and reopen. Public `SQL-LOG-063` gives direct users
 fixed-path typed JSON1 composition with deterministic native-number sorting.
 Dynamic selectors, complete natural sorting, top-k, grammar, limits,
 cancellation, and envelopes remain Rust API composition after the required
-public scan; no extension primitive or private table is warranted. Exact-build
-narrow/wide performance, physical-work equality, storage, and HWM evidence
-remain required before this row changes from `in progress` to `shipped`.
+public scan; no extension primitive or private table is warranted.
+
+Exact release build `898006684a82b5fd6cc0f7ff477c75e5c1778367`
+measures typed natural top-k at 3.275/3.557/3.967 ms narrow and
+35.728/37.237/37.801 ms wide p50/p95/p99. Equal-scan bounded `values`
+controls measure 3.199/3.364/3.429 and 33.646/34.563/37.043 ms. Candidate
+p95 is 5.7%/7.7% higher; request-attributed API means are
+2.546/34.506 ms versus 2.437/32.417 ms, or 4.5%/6.4% higher. Candidate
+responses are 3,663 bytes versus 451 because they contain 64 typed nested
+objects rather than the control's bounded unique-value envelope.
+
+Every equal-width pair performs identical public storage work: one/four
+candidate blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload
+bytes, and 128/8,192 public rows. `QSF-248` accepts the bounded API-owned
+selection/sort/encoding cost, unchanged four-block storage, zero queue and
+in-flight work, and 106,908 KiB complete-workload logs HWM. `LQL-S12` is
+closed.
 
 ## Query options and HTTP behavior
 

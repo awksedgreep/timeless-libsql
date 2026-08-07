@@ -2772,6 +2772,17 @@ top-k, LogsQL grammar, limits, cancellation, and envelopes remain Rust API
 composition over public `logs` rows. No private table, extension opcode,
 storage-format change, or batching change is involved.
 
+Exact release build `898006684a82b5fd6cc0f7ff477c75e5c1778367`
+measures the 64-object natural top-k at 3.275/3.557/3.967 ms narrow and
+35.728/37.237/37.801 ms wide p50/p95/p99. Equal-scan bounded `values`
+controls measure 3.199/3.364/3.429 and 33.646/34.563/37.043 ms. Candidate
+p95 is 5.7%/7.7% higher and request-attributed API means are 4.5%/6.4%
+higher. Candidate responses are 3,663 bytes rather than 451 because they
+retain 64 typed nested objects. Every equal-width pair reads byte-identical
+public storage work: one/four blocks, 1,024/8,192 decoded entries,
+235,778/1,914,055 payload bytes, and 128/8,192 materialized rows. The checked
+artifact and accepted boundary verdict are recorded in `QSF-248`.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the
