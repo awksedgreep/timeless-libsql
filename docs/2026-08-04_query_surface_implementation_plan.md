@@ -1569,7 +1569,12 @@ GET, POST, range, shutdown, and reopen regressions include classic
 `_bucket`/`_sum`/`_count` names. Count, sum, average, and bucket-estimated
 variance values still require the versioned typed sample design in `PQL-S22`.
 No empty-result SQL shortcut or extension primitive is claimed because it
-would skip child semantics rather than reproduce the language function.
+would skip child semantics rather than reproduce the language function. Exact
+release evidence measures 0.823/4.203 ms narrow/wide p95 versus 0.786/4.239 ms
+equal-read empty-filter controls, or 4.6% higher/0.8% lower. Both pairs have
+identical public chunks, decoded/returned points, payload bytes, zero result
+cardinality, and 63-byte responses. Metrics HWM is 52,224 KiB after the full
+workload.
 
 ### Session 20: release-grade public documentation
 

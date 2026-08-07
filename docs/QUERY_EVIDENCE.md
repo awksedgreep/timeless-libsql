@@ -6361,3 +6361,38 @@ and reopen. There is no SQL recipe and no narrow/wide latency, cardinality,
 storage, or RSS benchmark for a sample type the product does not store. No
 private table, storage format, batch, compression, index, rollup, retention,
 transaction, migration, optimize, or maintenance behavior changed.
+
+## Session 19 retained-model disposition: native-histogram scalar functions
+
+`PQL-H04` remains deferred for value-producing typed samples, but its complete
+float-only behavior now executes. Six exact cases pass against immutable
+Prometheus 3.13.2, bringing the API fixture to 549 cases. Rust and
+real-extension regressions failed first on the internal unsupported-call
+error, then passed for all five functions with child evaluation, classic
+bucket/sum/count non-coercion, exact empty GET/POST/range envelopes, shutdown,
+and reopen.
+
+Exact release build `f6947a6bb810a55e2cd171723b6a0a1f1961b5a5`
+measures `histogram_count(float-vector)` at 0.657/0.823/0.846 ms
+narrow and 3.907/4.203/4.367 ms wide p50/p95/p99. Equal-read empty float
+comparison controls measure 0.552/0.786/0.941 and 3.947/4.239/4.502 ms.
+The candidate p95 is 4.6% higher narrow and 0.8% lower wide. Both candidate
+and control return zero samples in identical 63-byte responses.
+
+Every narrow pair executes one public raw query per request, considers one
+chunk, decodes 32 points, reads 131 payload bytes, and returns 31 child points.
+Every wide pair considers 512 chunks, decodes and returns 16,384 child points,
+and reads 53,831 payload bytes. Thus the function preserves required child
+work without storage amplification. The run completed 136,953 metric points
+across the primary and limit fixtures with zero failed or queued points;
+final metrics storage was 224,688 logical bytes, 409,600 index bytes, and
+1,542,312 physical database/WAL/SHM bytes. Metrics RSS HWM was 52,224 KiB.
+
+The artifact is
+[`2026-08-07_session19_pql_h04_native_histogram_float.json`](evidence/2026-08-07_session19_pql_h04_native_histogram_float.json)
+(SHA-256 `0d63c1896c590f1afc451b5cd7e8a0c8681b3316641ae27c2beea5c1edd51b47`).
+There is no SQL recipe: returning no rows without evaluating the child would
+not reproduce errors, limits, cancellation, or public storage work. No
+extension primitive, private access, storage format, batching, compression,
+index, rollup, retention, transaction, migration, optimize, or maintenance
+behavior changed.
