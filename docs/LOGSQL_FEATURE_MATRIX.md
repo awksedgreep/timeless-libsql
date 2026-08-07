@@ -1328,7 +1328,7 @@ closed.
 | `LQL-Q03` | concurrency/parallel-reader options ([no SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-19-architecture-disposition-logsql-query-parallelism)) | deferred | `DEFER` | DEFER | VictoriaLogs controls CPU workers and I/O readers inside each query. Timeless executes one public SQLite cursor per query; its server reader pool and auth admission cap independent requests and are not equivalent. |
 | `LQL-Q04` | `time_offset` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-065-offset-public-log-query-time-without-rounding); [evidence](QUERY_EVIDENCE.md#session-19-logsql-query-time-offsets)) | shipped | `API` | P2 | Exact positive/negative/sub-native source bounds, nested inheritance/replacement, leading-filter optimizer order, nanosecond results, strict errors, limits, cancellation, optimize, and reopen are pinned by `session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_queries`. |
 | `LQL-Q05` | `global_filter` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-066-apply-one-global-predicate-to-every-public-log-scan); [evidence](QUERY_EVIDENCE.md#session-19-logsql-global-filters)) | shipped | `API` | P3 | Query-wide compiled-predicate composition, nested inheritance/replacement, query-backed filter initialization, declaration-time `time_offset` scope, strict filter-only grammar, limits, cancellation, optimize, and reopen are pinned by `session_nineteen_global_filter_applies_to_every_public_query_scope`. |
-| `LQL-Q06` | partial-response option | missing | `API` | P3 | Default remains fail-closed; never silently return incomplete rows. |
+| `LQL-Q06` | partial-response option ([no SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-19-architecture-disposition-logsql-partial-responses)) | deferred | `DEFER` | DEFER | `false` is honored as the existing fail-closed behavior. VictoriaLogs can honor `true` only when another independent `vlstorage` owner succeeds; Timeless has one authoritative libSQL owner, so `true` fails explicitly before storage rather than becoming a no-op or hiding the only failure. |
 | `LQL-Q07` | cancellation, deadline, row/response/sample limits | shipped | `API` | P0 | Hard defaults cap result rows, decoded/examined entries, response bytes, and wall time. Capability-advertised `max_work_entries` guards row/count/value reads before decode; dropped requests cancel SQLite/Rust work and readers remain reusable. |
 | `LQL-Q08` | stable VictoriaLogs-compatible errors | shipped | `API` | P0 | Timeless intentionally improves the upstream 400 text envelope: malformed syntax is stable JSON HTTP 400 and unsupported capability is stable JSON HTTP 422, with neither reaching storage. See `QSF-063`. |
 
@@ -1393,6 +1393,32 @@ and only 4.1% higher request-attributed API mean; the wide p95/API mean are
 bytes, matched rows, returned public rows, 64-row/2,560-byte responses, and
 unchanged four-block storage. `QSF-273`–`QSF-276` close the row without a new
 extension primitive.
+
+`LQL-Q06` is explicitly deferred because the retained deployment has no
+partial-result topology. Nine successful grammar witnesses and seven errors
+pass the complete 1,498-case immutable VictoriaLogs oracle. Pinned source
+shows that `allow_partial_response=true` is meaningful only when multiple
+independent `vlstorage` owners are queried: an unavailable owner may be
+ignored if another succeeds, while configuration errors and complete outage
+still fail. The single-owner Timeless API cannot honestly implement that
+contract, and accepting the option as a no-op would falsely promise degraded
+availability.
+
+Every upstream Go boolean spelling is validated and every duplicate
+declaration is parsed before the last value wins. `false` executes the normal
+complete fail-closed query at top level or in nested scopes. `true` returns
+stable HTTP 422 before storage. The separately accepted VictoriaLogs HTTP form
+parameter follows the same rule, and an explicit query option overrides its
+valid value; malformed booleans return HTTP 400. Nested membership, join, and
+union parsing preserves the unsupported classification rather than demoting
+it to malformed. Real-extension regressions prove rich complete results for
+`false` and zero public query, native-count, payload, or decode work for
+rejected `true` before and after optimize and reopen. There is no SQL recipe,
+performance benchmark, or extension primitive for the deferred `true`
+cluster-failure policy. Reconsideration requires multiple fenced public
+storage owners, unavailable-owner error classification, deterministic
+merge/order, cumulative limits and cancellation, plus explicit
+response-completeness metadata.
 
 ## Higher-order library boundary
 

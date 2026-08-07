@@ -354,6 +354,26 @@ implementation needs a general bounded partitioned-scan and deterministic
 merge contract useful to direct SQLite/libSQL users; merely accepting and
 ignoring the option would make a false CPU, memory, and I/O promise.
 
+`LQL-Q06` intentionally has no SQL recipe. VictoriaLogs
+`allow_partial_response` controls failure handling across multiple independent
+`vlstorage` owners: an unavailable owner may be omitted only when another
+owner succeeds, while configuration errors and complete outage still fail.
+One SQLite/libSQL statement against Timeless's single authoritative owner has
+no independent successful response to merge and no honest partial result to
+label. `UNION`, `ATTACH`, or multiple application connections would invent an
+undeclared ownership, fencing, failure-classification, and completeness
+contract rather than reproduce the language option.
+
+The Rust API therefore validates the query-option and HTTP-parameter boolean
+grammar. False executes the ordinary complete fail-closed statement; true is
+rejected before storage. Duplicate query options use their final value, and a
+query option overrides a valid HTTP value. Shipping true requires multiple
+versioned public storage owners, deterministic bounded merge/order, cumulative
+limits and cancellation, unavailable-owner classification, and explicit
+response-completeness metadata. A LogsQL-specific extension opcode over one
+store would be a no-op or would hide the only authoritative failure, so no SQL
+or `EXT` equivalent is claimed for true.
+
 `LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
 known phrase in their application and bind the resulting strings to an `IN`
 predicate for `equals_common_case`, but core SQLite `upper()`/`lower()` do not

@@ -2783,6 +2783,60 @@ pairs read exactly the same blocks, entries, payload bytes, and public rows
 and return identical 2,560-byte responses. The differences are retained as
 API/parser and whole-run variation, not storage amplification.
 
+## Deferred LogsQL partial responses
+
+VictoriaLogs accepts both a leading query option and an HTTP form parameter:
+
+```text
+options(allow_partial_response=true) service:=api | fields _time, _msg
+allow_partial_response=true
+```
+
+This is a cluster failure-policy contract, not a relational query modifier.
+With multiple `vlstorage` owners, VictoriaLogs may suppress an unavailable
+owner when at least one other owner returns a complete response. It still
+fails when every owner is unavailable or when an available owner reports a
+configuration error. Timeless currently executes against one authoritative
+SQLite/libSQL owner, so it has no second complete result with which to form an
+honest partial response. Silently accepting the option would be a misleading
+no-op; suppressing the only owner's failure would be data loss.
+
+`allow_partial_response=false` is fully supported: it explicitly selects the
+normal complete, fail-closed Timeless query. `allow_partial_response=true`
+returns HTTP 422 during language planning and before storage execution:
+
+```json
+{
+  "error": "unsupported_capability",
+  "reason": "unsupported_logsql",
+  "message": "LogsQL allow_partial_response is deferred: Timeless has one authoritative SQLite/libSQL storage owner; partial responses require multiple independent storage owners, unavailable-owner error classification, deterministic merge, and explicit response-completeness metadata"
+}
+```
+
+Accepted source grammar follows Go `strconv.ParseBool`: `1`, `t`, `T`,
+`TRUE`, `true`, and `True`; or `0`, `f`, `F`, `FALSE`, `false`, and `False`.
+Quoted values are accepted, `options` is case-insensitive, the option name is
+case-sensitive, a trailing comma is valid, and duplicate declarations are all
+validated before the final value wins. A final false value executes; a final
+true value is deferred. Malformed values return HTTP 400. The same explicit
+boundary survives nested membership, join, union, and global-filter parsing.
+The HTTP parameter follows the same false/true rule and is never ignored; an
+explicit query option overrides its valid value after both inputs are
+validated, matching VictoriaLogs. An empty HTTP value is the documented
+omitted/default-false form; an empty query-option value remains malformed.
+
+False requests use the ordinary bounded query path and return complete rich
+rows. Rejected true and malformed requests perform no public `logs` query,
+count, block read, payload transfer, or decode. There is no SQL equivalent or
+latency benchmark for `true` because ordinary SQL cannot represent multi-owner
+failure suppression; a false request is simply the normal fail-closed SQL
+statement. Shipping true requires multiple fenced public owners, exact
+unavailable/error classes, deterministic bounded merge and ordering,
+cumulative limits and cancellation, and a response contract that says which
+owners contributed. No storage, extension, batching, compression, index,
+transaction, retention, migration, or maintenance behavior changes for this
+deferral.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

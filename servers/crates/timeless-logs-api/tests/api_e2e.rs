@@ -18829,6 +18829,208 @@ async fn session_nineteen_global_filter_applies_to_every_public_query_scope() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_nineteen_partial_response_fails_explicitly_without_multiple_storage_owners() {
+    const MESSAGE: &str = "LogsQL allow_partial_response is deferred: Timeless has one authoritative SQLite/libSQL storage owner; partial responses require multiple independent storage owners, unavailable-owner error classification, deterministic merge, and explicit response-completeness metadata";
+
+    fn partial_response_request(query: &str, value: &str) -> Request<Body> {
+        let mut encoded_query = String::new();
+        for byte in query.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded_query.push(char::from(byte));
+                }
+                b' ' => encoded_query.push('+'),
+                _ => encoded_query.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        Request::builder()
+            .method("POST")
+            .uri("/select/logsql/query")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "query={encoded_query}&allow_partial_response={value}"
+            )))
+            .unwrap()
+    }
+
+    async fn assert_deferred(app: &axum::Router, request: Request<Body>) {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "error": "unsupported_capability",
+                "reason": "unsupported_logsql",
+                "message": MESSAGE,
+            })
+        );
+    }
+
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("partial-response-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(
+                r#"{"_time":1800000000000001,"_msg":"options(allow_partial_response=true)","level":"notice","service":"api","case":"ordinary","nested":{"allow_partial_response":true},"array":[1,true,null,"x"]}"#
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    let ordinary = app
+        .clone()
+        .oneshot(logsql_request(
+            "case:=ordinary | fields case, nested, array",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ordinary.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(ordinary.into_body(), usize::MAX).await.unwrap()),
+        [serde_json::json!({
+            "case": "ordinary",
+            "nested": {"allow_partial_response": true},
+            "array": [1, true, null, "x"],
+        })]
+    );
+
+    for query in [
+        "options(allow_partial_response=false) *",
+        "options(allow_partial_response=0) *",
+        "OPTIONS(allow_partial_response=FALSE,) *",
+        "options(allow_partial_response=true, allow_partial_response=false,) *",
+        "case:in(options(allow_partial_response=false) * | fields case)",
+        "* | join by (case) (options(allow_partial_response=false) * | fields case) inner",
+        "* | union (options(allow_partial_response=false) *)",
+        "options(global_filter=(options(allow_partial_response=false) *)) *",
+    ] {
+        let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query:?}");
+    }
+    for (query, value) in [
+        ("*", "false"),
+        ("*", "0"),
+        ("*", ""),
+        ("options(allow_partial_response=false) *", "true"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(partial_response_request(query, value))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query:?}: {value:?}");
+    }
+
+    let before = storage.stats().await.unwrap();
+    for query in [
+        "options(allow_partial_response=true) *",
+        "options(allow_partial_response=1) *",
+        "OPTIONS(allow_partial_response=TRUE,) *",
+        "options(allow_partial_response=false, allow_partial_response=true,) *",
+        "case:in(options(allow_partial_response=true) * | fields case)",
+        "* | join by (case) (options(allow_partial_response=true) * | fields case) inner",
+        "* | union (options(allow_partial_response=true) *)",
+        "options(global_filter=(options(allow_partial_response=true) *)) *",
+    ] {
+        assert_deferred(&app, logsql_request(query)).await;
+    }
+    assert_deferred(&app, partial_response_request("*", "true")).await;
+    assert_deferred(&app, partial_response_request("*", "1")).await;
+    assert_deferred(
+        &app,
+        partial_response_request("options(allow_partial_response=true) *", "false"),
+    )
+    .await;
+
+    for request in [
+        logsql_request("options(allow_partial_response=yes) *"),
+        logsql_request("options(allow_partial_response=bogus, allow_partial_response=true) *"),
+        logsql_request("options(allow_partial_response=true, global_filter=(* | fields case)) *"),
+        partial_response_request("*", "yes"),
+        partial_response_request("options(allow_partial_response=true) *", "yes"),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap()["reason"],
+            "malformed_logsql"
+        );
+    }
+    let after = storage.stats().await.unwrap();
+    assert_eq!(after.api_query_count, before.api_query_count);
+    assert_eq!(after.query_count, before.query_count);
+    assert_eq!(after.native_count_count, before.native_count_count);
+    assert_eq!(
+        after.query_payload_bytes_read,
+        before.query_payload_bytes_read
+    );
+    assert_eq!(after.query_decoded_entries, before.query_decoded_entries);
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    let accepted = reopened_app
+        .clone()
+        .oneshot(partial_response_request(
+            "options(allow_partial_response=false) *",
+            "true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let before = reopened.stats().await.unwrap();
+    assert_deferred(
+        &reopened_app,
+        logsql_request("options(allow_partial_response=true) *"),
+    )
+    .await;
+    assert_deferred(&reopened_app, partial_response_request("*", "true")).await;
+    let after = reopened.stats().await.unwrap();
+    assert_eq!(after.api_query_count, before.api_query_count);
+    assert_eq!(after.query_count, before.query_count);
+    assert_eq!(after.native_count_count, before.native_count_count);
+    assert_eq!(
+        after.query_payload_bytes_read,
+        before.query_payload_bytes_read
+    );
+    assert_eq!(after.query_decoded_entries, before.query_decoded_entries);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_nineteen_set_stream_fields_synthesizes_canonical_result_streams() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

@@ -945,8 +945,8 @@ Rows: `LQL-F37`, `LQL-F38`, `LQL-F41`, `LQL-P17`, `LQL-P25`–`LQL-P27`,
 
 Exit: each row is individually shipped, classified as higher-library work, or
 deferred with a concrete prerequisite. Stateful and multi-query constructs
-prove strict memory/cardinality limits; partial responses remain opt-in and
-unmistakable.
+prove strict memory/cardinality limits; partial-response policy is either
+complete and unmistakable or rejected explicitly before storage.
 
 Session 18's `LQL-P17` row is closed.
 
@@ -1768,6 +1768,35 @@ payload bytes, matched/returned public rows, 64-row/2,560-byte responses, and
 unchanged four-block storage. `QSF-273`–`QSF-276` retain the complete semantic,
 parser, planner, performance, HWM, and ownership verdicts. `LQL-Q05` is
 shipped without an extension or storage change.
+
+`LQL-Q06` is closed as an architecture deferral. Nine successful and seven
+error witnesses pass the complete 1,498-case immutable VictoriaLogs fixture.
+Pinned source proves that `allow_partial_response` is not a result transform:
+it suppresses an unavailable `vlstorage` owner only when another independent
+owner succeeds, while all-owner outage and configuration errors remain fatal.
+Timeless has one authoritative SQLite/libSQL owner, so accepting the option as
+a no-op or hiding its failure would be dishonest.
+
+The Rust parser validates all Go boolean forms, quotes, duplicates, nesting,
+and malformed syntax. False executes the complete fail-closed query, true
+returns stable HTTP 422 before storage, and malformed values return HTTP 400
+for both query options and the separately supported upstream HTTP form
+parameter. The final duplicate wins, and an explicit query option overrides a
+valid HTTP value. Failing regressions exposed and corrected two adjacent gaps:
+nested membership/join/union wrappers had demoted recognized unsupported
+capabilities to malformed syntax, and the POST form decoder had silently
+ignored the unsupported parameter. The real-extension regression proves exact
+rich false results, zero row/count/payload/decode work for rejected true and
+malformed input, optimize, shutdown, and reopen.
+
+There is no SQL recipe or benchmark for deliberately rejected multi-owner
+failure policy. Reconsideration requires multiple fenced public owners,
+unavailable/error classification, deterministic bounded merge/order,
+cumulative limits and cancellation, and explicit response-completeness
+metadata. `QSF-277`–`QSF-279` retain the architecture and regression verdicts.
+No extension, private access, storage format, authoritative batching,
+compression, index, rollup, retention, transaction, migration, optimize, or
+maintenance behavior changed.
 
 ### Session 20: release-grade public documentation
 

@@ -394,6 +394,60 @@
       "expected_cases": ["page-0", "page-1"]
     },
     {
+      "id": "LQL-Q06-partial-response-true-is-valid",
+      "query": "options(allow_partial_response=true) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-partial-response-false-is-valid",
+      "query": "options(allow_partial_response=false) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-partial-response-accepts-one",
+      "query": "options(allow_partial_response=1) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-partial-response-accepts-zero",
+      "query": "options(allow_partial_response=0) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-partial-response-accepts-go-boolean-case-forms",
+      "query": "options(allow_partial_response=TRUE) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-partial-response-accepts-a-quoted-boolean",
+      "query": "options(allow_partial_response=\"False\") case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-partial-response-accepts-a-quoted-option-name",
+      "query": "options(\"allow_partial_response\"=true) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-last-duplicate-partial-response-option-wins",
+      "query": "options(allow_partial_response=false, allow_partial_response=true,) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q06-partial-response-is-valid-in-a-nested-query",
+      "query": "case:in(options(allow_partial_response=true) case:=phrase-exact | fields case) | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
       "id": "LQL-F35-bare-stream-selector-equality",
       "query": "{case=\"phrase-exact\"}",
       "status": 200,
@@ -6050,6 +6104,55 @@
     {
       "id": "LQL-Q05-global-filter-rejects-trailing-text",
       "query": "options(global_filter=(*) trailing) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q06-partial-response-requires-a-value",
+      "query": "options(allow_partial_response=) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q06-partial-response-requires-an-equals-sign",
+      "query": "options(allow_partial_response) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q06-partial-response-rejects-yes",
+      "query": "options(allow_partial_response=yes) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q06-partial-response-rejects-numeric-text",
+      "query": "options(allow_partial_response=123) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q06-partial-response-option-name-is-case-sensitive",
+      "query": "options(ALLOW_PARTIAL_RESPONSE=true) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q06-an-invalid-earlier-duplicate-still-fails",
+      "query": "options(allow_partial_response=bogus, allow_partial_response=true) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q06-partial-response-options-still-require-a-query",
+      "query": "options(allow_partial_response=true)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -1554,3 +1554,29 @@ retained.
 The fixture remains 167 source rows and now contains 391 row-query cases, one
 stochastic case, 549 error cases, and 541 statistics/pipeline cases: 1,482
 cases total, all passing against the immutable image. The fixture now contains 1482 cases.
+
+`LQL-Q06` adds nine successful row-query witnesses and seven parser errors for
+`allow_partial_response`. They pin true/false, Go's `1`/`0` and case variants,
+quoted values and option names, duplicate-last and trailing-comma syntax,
+nested query validity, case-sensitive option names, required assignment and
+value, invalid earlier duplicates, and the required following query.
+
+Source audit at immutable commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers `parser.go`,
+`storage_search.go`, the request parser, and `vlstorage/netselect.go`.
+VictoriaLogs uses `strconv.ParseBool`, lets query options override the HTTP
+argument or process flag, and applies partial responses only in a cluster with
+multiple independent storage owners. An unavailable owner can be omitted if
+another succeeds; all-owner outage and errors from an available but
+misconfigured owner still fail. The single-node live oracle can prove grammar
+and unchanged complete results, while the pinned source is the authoritative
+witness for the multi-owner failure path.
+
+Timeless intentionally differs only where execution requires multiple owners.
+False query options and HTTP parameters select the existing complete
+fail-closed query; true returns explicit HTTP 422 before storage; malformed
+booleans return HTTP 400. Duplicate options use the final value, and an
+explicit query option overrides a valid HTTP value after both are validated.
+The fixture remains 167 source rows and now contains 400 row-query cases, one
+stochastic case, 556 error cases, and 541 statistics/pipeline cases: 1,498
+cases total, all passing against the immutable image. The fixture now contains 1498 cases.

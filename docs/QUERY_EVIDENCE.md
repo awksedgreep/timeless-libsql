@@ -6739,3 +6739,64 @@ The artifact is
 performance, memory, and ownership verdicts. No extension primitive, private
 access, storage format, authoritative batching, compression, index, rollup,
 retention, transaction, migration, optimize, or maintenance behavior changed.
+
+## Session 19 architecture disposition: LogsQL partial responses
+
+`LQL-Q06` is deferred with an exact topology prerequisite. Nine successful
+grammar witnesses and seven parser errors pass the complete 1,498-case
+immutable VictoriaLogs 1.52.0 fixture. They pin both boolean values, all
+relevant Go boolean spellings, quoted values and option names,
+duplicate-last/trailing-comma syntax, nested queries, case-sensitive option
+names, required assignment/value/query, and validation of an invalid earlier
+duplicate.
+
+Pinned source commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`
+establishes the execution contract. `parser.go` parses the query option with
+Go `strconv.ParseBool`; `storage_search.go` lets the query option override the
+request/flag value; and `netselect.go` applies it only across multiple
+independent `vlstorage` owners. With partial responses disabled, any owner
+error fails the request. With them enabled, an unavailable-owner error may be
+suppressed only if at least one owner succeeds. All-owner outage and errors
+from an available but misconfigured owner still fail.
+
+Timeless executes against one authoritative SQLite/libSQL owner. Treating
+`true` as a no-op would falsely promise degraded-cluster availability;
+suppressing its failure would hide the entire result. `false`, however,
+exactly requests the complete fail-closed behavior Timeless already provides.
+The parser therefore validates every declaration, retains the final duplicate,
+executes false normally, and returns stable HTTP 422 for true at top level or
+in nested options. The VictoriaLogs POST form parameter receives the same
+boundary, an explicit query option overrides its valid value, and invalid
+query-option or nonempty form booleans return HTTP 400. The HTTP helper treats
+empty as omitted/default false, exactly as the pinned request parser does.
+
+The parser regression first failed on the old generic “not implemented”
+message and incorrect malformed handling for invalid booleans. A nested
+query-backed case then exposed a pre-existing wrapper that demoted child
+`unsupported` errors to `malformed`; membership, join, and union composition
+now preserve the capability error while still adding context to genuinely
+malformed child syntax. The real-extension regression also proved that the
+previous open form decoder silently ignored `allow_partial_response`; the
+named parameter is now rejected explicitly.
+
+`session_nineteen_partial_response_fails_explicitly_without_multiple_storage_owners`
+pins rich complete fail-closed results for false, query-option-over-form
+precedence, exact 400/422 envelopes, zero public row/native-count queries and
+zero payload/decode work for rejected true or malformed input, optimize,
+flush, shutdown, and reopen.
+`session_nineteen_partial_response_has_an_explicit_topology_prerequisite`
+pins the complete parser boundary. The deferred true policy has no meaningful
+narrow/wide result cardinality, storage-byte, latency, or RSS measurement, so
+no benchmark artifact is manufactured. It also has no SQL recipe: one public
+statement cannot represent multiple fenced owners or response completeness.
+False is the existing ordinary fail-closed public statement and needs no new
+SQL surface.
+
+Shipping requires a versioned multiple-owner public storage contract,
+ownership fencing, unavailable/error classification, deterministic bounded
+merge and ordering, cumulative limits, cancellation, and explicit metadata
+identifying complete and omitted owners. `QSF-277`–`QSF-279` retain the
+architecture and discovered-error verdicts. No extension primitive, private
+access, storage format, authoritative 8,192-entry batching, compression,
+index, rollup, retention, transaction, migration, optimize, or maintenance
+behavior changed.

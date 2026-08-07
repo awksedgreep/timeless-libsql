@@ -38,6 +38,10 @@ pub struct LogsqlPlan {
     /// after storage selection; API-owned pipelines receive an internal
     /// offset operation at the exact upstream position.
     pub time_offset_ns: i64,
+    /// Explicit top-level VictoriaLogs partial-response policy. `false` is a
+    /// supported fail-closed request; `true` is rejected during planning
+    /// until the server has a compatible multiple-owner topology.
+    pub(crate) allow_partial_response: Option<bool>,
     /// Distinguishes an explicit `limit`/`head` from the API default so a
     /// tighter server policy can lower only the default without rewriting a
     /// caller's request.
@@ -3110,11 +3114,12 @@ fn parse_query_rows_source<'a>(
     context.query_backed_depth += 1;
     let parsed = parse_with_context(query_source, context);
     context.query_backed_depth -= 1;
-    let mut query = parsed.map_err(|error| {
-        LogsqlError::malformed(format!(
+    let mut query = parsed.map_err(|error| match error.kind {
+        LogsqlErrorKind::Unsupported => error,
+        LogsqlErrorKind::Malformed => LogsqlError::malformed(format!(
             "cannot parse LogsQL {operation} subquery: {}",
             error.message
-        ))
+        )),
     })?;
     normalize_query_rows_source(&mut query);
     Ok((
@@ -6158,6 +6163,9 @@ fn parse_with_scoped_context(
         // remain fully functional.
         explicit_global_filter = Some(parse_global_filter_value(source, context)?);
     }
+    if options.allow_partial_response == Some(true) {
+        return Err(partial_response_deferred_error());
+    }
     let global_filter = explicit_global_filter.or_else(|| context.inherited_global_filter.clone());
     let time_offset_ns = options
         .time_offset_ns
@@ -6715,6 +6723,7 @@ fn parse_with_scoped_context(
         spec,
         output,
         time_offset_ns,
+        allow_partial_response: options.allow_partial_response,
         limit_explicit,
         pipeline,
         implicit_result_limit,
@@ -6870,11 +6879,12 @@ fn parse_value_list(
         context.query_backed_depth += 1;
         let parsed = parse_with_context(source, context);
         context.query_backed_depth -= 1;
-        let mut query = parsed.map_err(|error| {
-            LogsqlError::malformed(format!(
+        let mut query = parsed.map_err(|error| match error.kind {
+            LogsqlErrorKind::Unsupported => error,
+            LogsqlErrorKind::Malformed => LogsqlError::malformed(format!(
                 "cannot parse LogsQL {function}(subquery): {}",
                 error.message
-            ))
+            )),
         })?;
         let output_path = finalize_query_backed_list(&mut query, function)?;
         let cache_key = format!("{}\u{0}{}", source, output_path.join("."));
@@ -9604,6 +9614,36 @@ struct ParsedQueryOptions<'a> {
     /// Every declaration is parsed for strictness and request-cost
     /// accounting; VictoriaLogs retains only the final duplicate.
     global_filters: Vec<String>,
+    /// Every declaration is validated even though this single-owner API
+    /// cannot execute VictoriaLogs's cluster-only partial-response contract.
+    allow_partial_response: Option<bool>,
+}
+
+const PARTIAL_RESPONSE_DEFERRED_MESSAGE: &str = "LogsQL allow_partial_response is deferred: Timeless has one authoritative SQLite/libSQL storage owner; partial responses require multiple independent storage owners, unavailable-owner error classification, deterministic merge, and explicit response-completeness metadata";
+
+pub(crate) fn partial_response_deferred_error() -> LogsqlError {
+    LogsqlError::unsupported(PARTIAL_RESPONSE_DEFERRED_MESSAGE)
+}
+
+fn parse_victorialogs_bool(value: &str) -> Option<bool> {
+    match value {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_partial_response_http(value: &str) -> Result<bool, LogsqlError> {
+    if value.is_empty() {
+        // VictoriaLogs treats an empty form value as omitted and retains the
+        // fail-closed default. Query-option values remain strictly required.
+        return Ok(false);
+    }
+    parse_victorialogs_bool(value).ok_or_else(|| {
+        LogsqlError::malformed(format!(
+            "invalid LogsQL allow_partial_response HTTP parameter boolean {value:?}"
+        ))
+    })
 }
 
 /// Parse one optional leading VictoriaLogs `options(...)` clause and return
@@ -9619,6 +9659,7 @@ fn parse_leading_query_options(query: &str) -> Result<ParsedQueryOptions<'_>, Lo
         body: query,
         time_offset_ns: None,
         global_filters: Vec::new(),
+        allow_partial_response: None,
     };
 
     let trimmed = query.trim_start();
@@ -9655,11 +9696,13 @@ fn parse_leading_query_options(query: &str) -> Result<ParsedQueryOptions<'_>, Lo
             body,
             time_offset_ns: None,
             global_filters: Vec::new(),
+            allow_partial_response: None,
         });
     }
 
     let mut time_offset_ns = None;
     let mut global_filters = Vec::new();
+    let mut allow_partial_response = None;
     for item in split_query_option_items(inner)? {
         let Some((name, value)) = split_query_option_assignment(&item) else {
             return Err(LogsqlError::malformed(format!(
@@ -9707,9 +9750,13 @@ fn parse_leading_query_options(query: &str) -> Result<ParsedQueryOptions<'_>, Lo
                 )))
             }
             "allow_partial_response" => {
-                return Err(LogsqlError::unsupported(
-                    "LogsQL allow_partial_response query option is not implemented yet",
-                ))
+                let value = quoted_value(value)?.unwrap_or_else(|| value.to_owned());
+                let parsed = parse_victorialogs_bool(&value).ok_or_else(|| {
+                    LogsqlError::malformed(format!(
+                        "invalid LogsQL allow_partial_response boolean {value:?}"
+                    ))
+                })?;
+                allow_partial_response = Some(parsed);
             }
             _ => {
                 return Err(LogsqlError::malformed(format!(
@@ -9722,6 +9769,7 @@ fn parse_leading_query_options(query: &str) -> Result<ParsedQueryOptions<'_>, Lo
         body,
         time_offset_ns,
         global_filters,
+        allow_partial_response,
     })
 }
 
@@ -11871,6 +11919,82 @@ mod tests {
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_nineteen_partial_response_has_an_explicit_topology_prerequisite() {
+        const MESSAGE: &str = "LogsQL allow_partial_response is deferred: Timeless has one authoritative SQLite/libSQL storage owner; partial responses require multiple independent storage owners, unavailable-owner error classification, deterministic merge, and explicit response-completeness metadata";
+
+        for query in [
+            "options(allow_partial_response=true) *",
+            "options(allow_partial_response=1) *",
+            "options(allow_partial_response=t) *",
+            "options(allow_partial_response=T) *",
+            "options(allow_partial_response=TRUE) *",
+            "options(allow_partial_response=True) *",
+            r#"options(allow_partial_response="true") *"#,
+            "case:in(options(allow_partial_response=true) * | fields case)",
+            "* | union (options(allow_partial_response=true) *)",
+            "options(global_filter=(options(allow_partial_response=true) *)) *",
+            "OPTIONS(allow_partial_response=false, allow_partial_response=true,) *",
+        ] {
+            let error = parse_at(query, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(
+                error.kind,
+                LogsqlErrorKind::Unsupported,
+                "{query:?}: {}",
+                error.message
+            );
+            assert_eq!(error.message, MESSAGE, "{query:?}");
+        }
+
+        for query in [
+            "options(allow_partial_response=false) *",
+            "options(allow_partial_response=0) *",
+            "options(allow_partial_response=f) *",
+            "options(allow_partial_response=F) *",
+            "options(allow_partial_response=FALSE) *",
+            "options(allow_partial_response=False) *",
+            r#"options(allow_partial_response="false") *"#,
+            r#"options("allow_partial_response"=false) *"#,
+            "OPTIONS(allow_partial_response=true, allow_partial_response=false,) *",
+            "case:in(options(allow_partial_response=false) * | fields case)",
+            "* | join by (case) (options(allow_partial_response=false) * | fields case) inner",
+            "* | union (options(allow_partial_response=false) *)",
+            "options(global_filter=(options(allow_partial_response=false) *)) *",
+        ] {
+            assert!(
+                parse_at(query, TimestampUnit::Microseconds, 0).is_ok(),
+                "{query:?}"
+            );
+        }
+
+        for malformed in [
+            "options(allow_partial_response=) *",
+            "options(allow_partial_response) *",
+            "options(allow_partial_response=yes) *",
+            "options(allow_partial_response=123) *",
+            "options(allow_partial_response=null) *",
+            "options(ALLOW_PARTIAL_RESPONSE=true) *",
+            "options(allow_partial_response=bogus, allow_partial_response=true) *",
+            "options(allow_partial_response=true, global_filter=(* | fields case)) *",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+
+        for ordinary_data in [
+            r#""allow_partial_response=true""#,
+            r#"allow_partial_response:="true""#,
+            r#"nested.allow_partial_response:=true"#,
+            "* | fields allow_partial_response",
+            "* # options(allow_partial_response=true)",
+        ] {
+            assert!(
+                parse_at(ordinary_data, TimestampUnit::Microseconds, 0).is_ok(),
+                "{ordinary_data:?}"
+            );
         }
     }
 

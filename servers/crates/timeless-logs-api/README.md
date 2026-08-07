@@ -2153,6 +2153,30 @@ partitioned-read contract, deterministic merge/order, exact cumulative work
 accounting, cancellation, and proof that multiple cursors do not amplify
 storage work.
 
+## Deferred LogsQL partial responses
+
+VictoriaLogs `options(allow_partial_response=...)` and the POST form parameter
+of the same name describe multi-owner cluster failure policy. They may ignore
+one unavailable `vlstorage` owner only when another owner succeeds; they do
+not suppress configuration errors or total outage. This server has one
+authoritative SQLite/libSQL owner, so it cannot return that result honestly.
+
+All Go boolean spellings, quoted values, duplicates, and nested query options
+are recognized. False executes the complete fail-closed query; true returns
+HTTP 422 `unsupported_logsql` before public storage work. Malformed booleans
+return HTTP 400 `malformed_logsql`. The HTTP form parameter follows the same
+rule instead of being silently ignored, while an explicit query option
+overrides its valid value. An empty HTTP value means omitted/default false;
+an empty query-option value is malformed. False preserves rich complete
+results; rejected true and malformed requests leave public row/count, payload,
+and decode counters unchanged across optimize, shutdown, and reopen.
+
+There is no SQL equivalent or performance claim for rejected cluster policy.
+Implementation requires multiple fenced public owners, unavailable-owner
+classification, deterministic bounded merge/order, cancellation, and explicit
+response-completeness metadata. It does not justify a LogsQL opcode or private
+storage path in the extension.
+
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for

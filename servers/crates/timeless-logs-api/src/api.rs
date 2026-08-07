@@ -232,6 +232,7 @@ async fn field_values(
 #[derive(Deserialize)]
 struct QueryForm {
     query: Option<String>,
+    allow_partial_response: Option<String>,
 }
 
 struct QueryBackedResolution {
@@ -660,11 +661,23 @@ async fn query_post(
             message: "LogsQL query parameter is required".into(),
         });
     };
+    let http_allow_partial_response = match form.allow_partial_response.as_deref() {
+        Some(value) => match logsql::parse_partial_response_http(value) {
+            Ok(value) => Some(value),
+            Err(error) => return logsql_error(error),
+        },
+        None => None,
+    };
     let deadline = tokio::time::Instant::now() + limits.deadline;
     let mut plan = match logsql::parse(query, storage.timestamp_unit()) {
         Ok(parsed) => parsed,
         Err(error) => return logsql_error(error),
     };
+    if let Some(allow_partial_response) = http_allow_partial_response {
+        if allow_partial_response && plan.allow_partial_response.is_none() {
+            return logsql_error(logsql::partial_response_deferred_error());
+        }
+    }
     if let Err((reason, limit)) = apply_plan_limits(&mut plan, limits) {
         return query_limit_error(reason, limit);
     }
