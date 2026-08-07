@@ -313,7 +313,7 @@ fn require_same_public_query_work(
     control_key: &str,
     sampled_key: &str,
 ) -> Result<()> {
-    require_same_public_query_work_with_scans(queries, control_key, sampled_key, 1)
+    require_same_public_query_work_with_scans(queries, control_key, sampled_key, 1, 0)
 }
 
 fn require_same_public_query_work_with_scans(
@@ -321,6 +321,7 @@ fn require_same_public_query_work_with_scans(
     control_key: &str,
     sampled_key: &str,
     scans_per_request: u64,
+    sampled_work_reservation_per_request: u64,
 ) -> Result<()> {
     if scans_per_request == 0 {
         bail!("public query evidence must require at least one scan per request");
@@ -347,6 +348,9 @@ fn require_same_public_query_work_with_scans(
     let expected_queries = iterations
         .checked_mul(scans_per_request)
         .context("public query evidence query-count overflow")?;
+    let expected_work_reservation = iterations
+        .checked_mul(sampled_work_reservation_per_request)
+        .context("public query evidence work-reservation overflow")?;
     for (key, evidence) in [(control_key, control), (sampled_key, sampled)] {
         let query_count = evidence
             .pointer("/stats_delta/query_count")
@@ -362,8 +366,27 @@ fn require_same_public_query_work_with_scans(
             );
         }
     }
+    let control_requested_entries = control
+        .pointer("/stats_delta/query_bounded_requested_entries")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let sampled_requested_entries = sampled
+        .pointer("/stats_delta/query_bounded_requested_entries")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let expected_sampled_requested_entries = control_requested_entries
+        .checked_sub(expected_work_reservation)
+        .with_context(|| {
+            format!(
+                "sample evidence {sampled_key} declares more work reservation than control {control_key} requested"
+            )
+        })?;
+    if sampled_requested_entries != expected_sampled_requested_entries {
+        bail!(
+            "sample evidence {control_key}/{sampled_key} changed public query_bounded_requested_entries outside the declared {sampled_work_reservation_per_request}-entry/request sampled state reservation: expected {expected_sampled_requested_entries}, got {sampled_requested_entries} (control {control_requested_entries})"
+        );
+    }
     for field in [
-        "query_bounded_requested_entries",
         "query_candidate_blocks",
         "query_decoded_entries",
         "query_payload_bytes_read",
@@ -3445,8 +3468,15 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "join_control_narrow",
             "join_narrow",
             2,
+            192,
         )?;
-        require_same_public_query_work_with_scans(&queries, "join_control_wide", "join_wide", 2)?;
+        require_same_public_query_work_with_scans(
+            &queries,
+            "join_control_wide",
+            "join_wide",
+            2,
+            192,
+        )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
@@ -3634,12 +3664,12 @@ mod tests {
 
     #[test]
     fn multi_scan_controls_must_declare_the_exact_scan_count() {
-        let public = || {
+        let public = |requested_entries| {
             json!({
                 "iterations": 50,
                 "stats_delta": {
                     "query_count": 100,
-                    "query_bounded_requested_entries": 10_000_100,
+                    "query_bounded_requested_entries": requested_entries,
                     "query_candidate_blocks": 400,
                     "query_decoded_entries": 819_200,
                     "query_payload_bytes_read": 191_405_500,
@@ -3649,14 +3679,18 @@ mod tests {
             })
         };
         let queries = Map::from_iter([
-            ("control".to_owned(), public()),
-            ("sampled".to_owned(), public()),
+            ("control".to_owned(), public(10_000_100)),
+            ("sampled".to_owned(), public(9_990_500)),
         ]);
 
-        require_same_public_query_work_with_scans(&queries, "control", "sampled", 2).unwrap();
+        require_same_public_query_work_with_scans(&queries, "control", "sampled", 2, 192).unwrap();
 
         let error = require_same_public_query_work(&queries, "control", "sampled").unwrap_err();
         assert!(format!("{error:#}").contains("1 scans/request"));
+
+        let error = require_same_public_query_work_with_scans(&queries, "control", "sampled", 2, 0)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("state reservation"));
     }
 
     #[test]
