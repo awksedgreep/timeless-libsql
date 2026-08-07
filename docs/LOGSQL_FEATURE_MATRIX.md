@@ -1062,7 +1062,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S12` | `json_values` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)) | shipped | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-064-bounded-histogram-over-one-native-number-path)) | shipped | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S14` | running `count/last/min/max/sum` via `running_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)) | shipped | `ROWS`, `SQL` | `API` | P3 |
-| `LQL-S15` | total `count/first/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
+| `LQL-S15` | total `count/first/last/min/max/sum` via `total_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)) | shipped | `ROWS`, `SQL` | `API` | P3 |
 
 `LQL-S14` is the function-catalog view of the already-shipped `LQL-P45`
 `running_stats` pipe, not a second LogsQL syntax surface. The pinned upstream
@@ -1075,6 +1075,17 @@ duplicate `running_count`-style functions or extension primitive exist. The
 current complete 1,388-case live VictoriaLogs corpus, targeted real-extension
 regression, and all 130 executable SQL recipes/168 statements were re-run
 when the catalog row was reconciled.
+
+`LQL-S15` is likewise the function-catalog view of the already-shipped
+`LQL-P46` `total_stats` pipe. The pinned reference exposes `count`, `first`,
+`last`, `max`, `min`, and `sum` only inside `total_stats`, whose parser reuses
+the shared running-state grammar in explicit total mode. P46's complete-group
+evaluator, oracle corpus, real-extension regression, `SQL-LOG-060`, exact-
+build benchmark, storage finding, and bounded-memory verdict therefore
+constitute S15's evidence. No duplicate `total_count`-style functions or
+extension primitive exist. The current complete 1,388-case live VictoriaLogs
+corpus, targeted real-extension regression, and all 130 executable SQL
+recipes/168 statements passed at reconciliation.
 
 `count(field)` requires at least one present non-empty selected value;
 `count_empty` counts rows whose selected values are all missing, null, or an

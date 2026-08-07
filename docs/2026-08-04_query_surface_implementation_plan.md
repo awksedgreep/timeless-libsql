@@ -1319,6 +1319,18 @@ queued and in-flight work are zero. No extension primitive, private table,
 storage contract, or authoritative batching behavior changed. `LQL-P46` is
 closed.
 
+The follow-up matrix reconciliation closes `LQL-S15` against that same P46
+implementation and evidence. Upstream documents total `count`, `first`,
+`last`, `max`, `min`, and `sum` as functions of the `total_stats` pipe; it
+exposes no separate `total_*` grammar. `SQL-LOG-060`, the 1,329-case pinned
+oracle, the real-extension regression, `QSF-241`–`QSF-242`, and exact-build
+artifact `2026-08-06_session18_lql_p46_total_stats.json` already satisfy
+every S15 exit dimension. The current complete 1,388-case live oracle,
+targeted real-extension regression, query contracts, and all 130 executable
+SQL recipes/168 statements were re-run at reconciliation. No duplicate parser,
+evaluator, SQL recipe, benchmark workload, or extension surface is warranted.
+`LQL-S15` is closed as a catalog-alias row, not as a new implementation.
+
 Session 18's `LQL-P47` semantic implementation is complete as API-owned
 bounded timestamp transformation over one public `logs` scan, with
 `SQL-LOG-061` as the direct-user native-unit shift and explicit sub-native

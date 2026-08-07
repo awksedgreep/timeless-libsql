@@ -1186,6 +1186,15 @@ fixture now contains 167 source rows, 346 row-query cases, one stochastic
 case, 480 error cases, and 502 statistics/pipeline cases: 1,329 cases total,
 all passing against the immutable image. The fixture now contains 1329 cases.
 
+`LQL-S15` catalogs the six documented functions from this same `total_stats`
+surface: `count`, `first`, `last`, `max`, `min`, and `sum`. The immutable
+reference contains no separate `total_count`, `total_first`, `total_last`,
+`total_min`, `total_max`, or `total_sum` grammar. Consequently the P46 source
+audit and live cases are also the S15 oracle; a duplicate parser or corpus
+would invent an upstream surface. The catalog reconciliation re-ran the
+current complete 1,388-case live corpus successfully; the 1,329-case count
+above records the earlier point at which P46 itself entered the fixture.
+
 `LQL-P47` adds six exact pipeline cases and six error cases for `time_add`.
 They pin compound and negative durations, nanosecond preservation, timezone
 normalization, zone-less UTC behavior in the immutable oracle image, the SQL

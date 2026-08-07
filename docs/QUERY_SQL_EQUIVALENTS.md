@@ -167,7 +167,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-057`](#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key) | `LQL-P43` | current foundation | bounded deterministic left/inner join over two public log scans using one exact textual metadata key, with duplicate right matches and separate typed payloads; API owns LogsQL grammar, multiple keys, inline/query sources, rich merging, prefixes, limits, cancellation, and envelopes |
 | [`SQL-LOG-058`](#sql-log-058-bounded-ordered-union-of-two-public-log-scans) | `LQL-P44` | current foundation | bounded `UNION ALL` over two independent public log scans with explicit source/row order and complete typed payloads; API owns LogsQL grammar, inline/query sources, nesting, cumulative limits, cancellation, and envelopes |
 | [`SQL-LOG-059`](#sql-log-059-bounded-running-numeric-state-by-one-exact-key) | `LQL-P45`, `LQL-S14` | current foundation | bounded chronological SQL windows for row count, nonempty numeric count, numeric sum/min/max, first-at-offset, and previous-at-offset over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
-| [`SQL-LOG-060`](#sql-log-060-bounded-total-numeric-state-by-one-exact-key) | `LQL-P46` | current foundation | bounded full-partition SQL windows that repeat final row count, nonempty numeric count, numeric sum/min/max, and fixed first/last offsets over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
+| [`SQL-LOG-060`](#sql-log-060-bounded-total-numeric-state-by-one-exact-key) | `LQL-P46`, `LQL-S15` | current foundation | bounded full-partition SQL windows that repeat final row count, nonempty numeric count, numeric sum/min/max, and fixed first/last offsets over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
 | [`SQL-LOG-061`](#sql-log-061-add-a-duration-to-public-native-log-time) | `LQL-P47` | current foundation | bounded saturating shift of public native log timestamps plus an explicit sub-native nanosecond remainder; API owns duration/RFC3339Nano grammar, arbitrary fields, UTC canonicalization, response mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-062`](#sql-log-062-generate-a-bounded-decimal-string-sequence) | `LQL-P48` | current foundation | input-independent bounded recursive sequence of decimal strings using core SQLite/libSQL; API owns LogsQL numeric grammar, replacement semantics, limits, cancellation, composition, and envelopes |
 | [`SQL-LOG-063`](#sql-log-063-bounded-typed-json-values-from-fixed-public-paths) | `LQL-S12` | current foundation | one JSON-array string of fixed exact retained paths from bounded public log rows, with missing omission, explicit-null/native-type fidelity, and deterministic native-number ordering; API owns dynamic selectors, complete natural sorting, top-k, grammar, limits, cancellation, and envelopes |
@@ -9372,9 +9372,10 @@ minimum `4.0`, maximum `12.0`, first-at-offset `web-2`, and last-at-offset
 `web-1`. Timestamps remain in the virtual table's configured native unit;
 this fixture uses milliseconds.
 
-This is the honest direct-SQL foundation for `LQL-P46`, not a claim that SQL
-has parsed LogsQL or reproduced every VictoriaLogs state rule. It provides the
-ordinary-SQL path when direct users have a fixed group and numeric field.
+This is the honest direct-SQL foundation for `LQL-P46` and its function-
+catalog view `LQL-S15`, not a claim that SQL has parsed LogsQL or reproduced
+every VictoriaLogs state rule. It provides the ordinary-SQL path when direct
+users have a fixed group and numeric field.
 SQLite JSON exposes arrays and objects from `json_extract` as JSON text, its
 `min`/`max` ordering is not VictoriaLogs natural textual ordering, and a safe
 generic SQL cast cannot distinguish every accepted textual float from a

@@ -4743,6 +4743,14 @@ The checked-in
 was captured from exact release extension and server build
 `3bfdf2c843ebc221916d20b35a1df98d111e3eb9` and has SHA-256
 `11605cde0ec229e35d2af601aa1b134934676e771a80c6e9a62fd95c37f0019f`.
+This artifact is also the exact evidence for function-catalog row `LQL-S15`:
+upstream exposes total `count`/`first`/`last`/`min`/`max`/`sum` only through
+the `LQL-P46` `total_stats` pipe. It is not evidence for separate standalone
+function names. Reconciliation on 2026-08-07 re-runs the targeted real-
+function names. Reconciliation on 2026-08-07 re-ran the targeted real-
+extension durability test, the current complete 1,388-case live VictoriaLogs
+corpus, and all 130 public SQL recipes/168 statements without changing code,
+storage, or the measured artifact.
 Each candidate and control performs one public scan, sorts the same candidate
 set chronologically, and limits the response to 64 rows. The candidate
 partitions by service and severity, computes complete-group count, and writes
