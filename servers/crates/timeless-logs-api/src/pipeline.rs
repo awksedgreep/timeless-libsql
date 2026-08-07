@@ -5371,6 +5371,13 @@ enum RunningAccumulator {
     },
 }
 
+#[derive(Clone, Copy)]
+struct RunningStatsExecution<'a> {
+    operation: &'static str,
+    limits: PipelineLimits,
+    cancelled: &'a AtomicBool,
+}
+
 impl RunningAccumulator {
     fn new(kind: RunningStatsKind, operation: &str) -> Result<Self, String> {
         Ok(match kind {
@@ -5397,14 +5404,17 @@ impl RunningAccumulator {
 
     fn advance(
         &mut self,
-        operation: &str,
         expression: &RunningStatsExpression,
         row: &Value,
         state_bytes: &mut usize,
         work_items: &mut usize,
-        limits: PipelineLimits,
-        cancelled: &AtomicBool,
+        execution: RunningStatsExecution<'_>,
     ) -> Result<(), String> {
+        let RunningStatsExecution {
+            operation,
+            limits,
+            cancelled,
+        } = execution;
         charge_transfer_work(work_items, limits.max_state_items, operation)?;
         ensure_active(cancelled)?;
         match self {
@@ -5417,14 +5427,9 @@ impl RunningAccumulator {
                     *total = total.saturating_add(1);
                 } else {
                     let mut matched = false;
-                    for value in running_selected_values(
-                        row,
-                        &expression.fields,
-                        work_items,
-                        limits.max_state_items,
-                        cancelled,
-                        operation,
-                    )? {
+                    for value in
+                        running_selected_values(row, &expression.fields, work_items, execution)?
+                    {
                         if value.is_some_and(is_nonempty) {
                             matched = true;
                         }
@@ -5436,14 +5441,9 @@ impl RunningAccumulator {
                 Ok(())
             }
             Self::Sum(sum) => {
-                for value in running_selected_values(
-                    row,
-                    &expression.fields,
-                    work_items,
-                    limits.max_state_items,
-                    cancelled,
-                    operation,
-                )? {
+                for value in
+                    running_selected_values(row, &expression.fields, work_items, execution)?
+                {
                     let text = projected_text(value);
                     let Ok(number) = text.parse::<f64>() else {
                         continue;
@@ -5466,9 +5466,7 @@ impl RunningAccumulator {
                 row,
                 state_bytes,
                 work_items,
-                limits,
-                cancelled,
-                operation,
+                execution,
             ),
             Self::Max { selected } => update_running_extreme(
                 selected,
@@ -5477,9 +5475,7 @@ impl RunningAccumulator {
                 row,
                 state_bytes,
                 work_items,
-                limits,
-                cancelled,
-                operation,
+                execution,
             ),
             Self::First {
                 offset,
@@ -5556,6 +5552,11 @@ fn running_stats_rows(
     cancelled: &AtomicBool,
 ) -> Result<Vec<Value>, String> {
     let operation = spec.mode.operation();
+    let execution = RunningStatsExecution {
+        operation,
+        limits,
+        cancelled,
+    };
     ensure_active(cancelled)?;
     if rows.len() > limits.max_state_items {
         return Err(format!(
@@ -5668,13 +5669,11 @@ fn running_stats_rows(
                     .ok_or_else(|| format!("LogsQL {operation} selected a row twice"))?;
                 for (expression, accumulator) in spec.expressions.iter().zip(&mut accumulators) {
                     accumulator.advance(
-                        operation,
                         expression,
                         row,
                         &mut group_bytes,
                         &mut work_items,
-                        limits,
-                        cancelled,
+                        execution,
                     )?;
                 }
                 ensure_running_stats_bytes(
@@ -5702,13 +5701,11 @@ fn running_stats_rows(
             for (expression, accumulator) in spec.expressions.iter().zip(&mut accumulators) {
                 if spec.mode == RunningStatsMode::Running {
                     accumulator.advance(
-                        operation,
                         expression,
                         &row,
                         &mut group_bytes,
                         &mut work_items,
-                        limits,
-                        cancelled,
+                        execution,
                     )?;
                     ensure_running_stats_bytes(
                         persistent_bytes,
@@ -5758,7 +5755,6 @@ fn running_stats_rows(
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn update_running_extreme(
     selected: &mut Option<(String, Value)>,
     maximum: bool,
@@ -5766,18 +5762,14 @@ fn update_running_extreme(
     row: &Value,
     state_bytes: &mut usize,
     work_items: &mut usize,
-    limits: PipelineLimits,
-    cancelled: &AtomicBool,
-    operation: &str,
+    execution: RunningStatsExecution<'_>,
 ) -> Result<(), String> {
-    for value in running_selected_values(
-        row,
-        &expression.fields,
-        work_items,
-        limits.max_state_items,
-        cancelled,
+    let RunningStatsExecution {
         operation,
-    )? {
+        limits,
+        cancelled,
+    } = execution;
+    for value in running_selected_values(row, &expression.fields, work_items, execution)? {
         let text = projected_text(value).into_owned();
         let replace = selected.as_ref().is_none_or(|(current, _)| {
             let ordering = logsql_sort_comparison(&text, current);
@@ -5809,16 +5801,19 @@ fn running_selected_values<'a>(
     row: &'a Value,
     fields: &[PipelineField],
     work_items: &mut usize,
-    max_work_items: usize,
-    cancelled: &AtomicBool,
-    operation: &str,
+    execution: RunningStatsExecution<'_>,
 ) -> Result<Vec<Option<&'a Value>>, String> {
+    let RunningStatsExecution {
+        operation,
+        limits,
+        cancelled,
+    } = execution;
     let mut output = Vec::new();
     for field in fields {
         ensure_active(cancelled)?;
         match field {
             PipelineField::Exact { path, .. } => {
-                charge_transfer_work(work_items, max_work_items, operation)?;
+                charge_transfer_work(work_items, limits.max_state_items, operation)?;
                 output.push(field_value(row, path));
             }
             PipelineField::Prefix { prefix } => collect_running_leaves(
@@ -5827,9 +5822,7 @@ fn running_selected_values<'a>(
                 Some(prefix),
                 &mut output,
                 work_items,
-                max_work_items,
-                cancelled,
-                operation,
+                execution,
             )?,
             PipelineField::All => collect_running_leaves(
                 row,
@@ -5837,27 +5830,27 @@ fn running_selected_values<'a>(
                 None,
                 &mut output,
                 work_items,
-                max_work_items,
-                cancelled,
-                operation,
+                execution,
             )?,
         }
     }
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_running_leaves<'a>(
     value: &'a Value,
     path: &mut String,
     prefix: Option<&str>,
     output: &mut Vec<Option<&'a Value>>,
     work_items: &mut usize,
-    max_work_items: usize,
-    cancelled: &AtomicBool,
-    operation: &str,
+    execution: RunningStatsExecution<'_>,
 ) -> Result<(), String> {
-    charge_transfer_work(work_items, max_work_items, operation)?;
+    let RunningStatsExecution {
+        operation,
+        limits,
+        cancelled,
+    } = execution;
+    charge_transfer_work(work_items, limits.max_state_items, operation)?;
     check_periodically(cancelled, *work_items)?;
     if prefix.is_some_and(|prefix| {
         !path.is_empty() && !path.starts_with(prefix) && !prefix.starts_with(path.as_str())
@@ -5874,16 +5867,7 @@ fn collect_running_leaves<'a>(
                 path.push('.');
             }
             path.push_str(name);
-            collect_running_leaves(
-                child,
-                path,
-                prefix,
-                output,
-                work_items,
-                max_work_items,
-                cancelled,
-                operation,
-            )?;
+            collect_running_leaves(child, path, prefix, output, work_items, execution)?;
             path.truncate(original_len);
         }
         return Ok(());

@@ -2367,6 +2367,21 @@ provides full-partition fixed-key SQLite windows for direct users. Rust owns
 dynamic LogsQL grammar, natural/rich semantics, limits, cancellation, and
 HTTP envelopes; no extension primitive or storage-format change is needed.
 
+Exact release build `e04b8754ee9bb47fb892e4bce3105478ff25c0a5`
+measures grouped total count at 3.508/3.801/4.240 ms narrow and
+45.963/49.242/51.592 ms wide p50/p95/p99. Same-scan chronological-sort
+constant controls measure 3.466/3.699/3.929 and 35.171/37.881/46.930 ms.
+Total statistics p95 is 2.8%/30.0% higher; request-attributed API means are
+2.590/44.814 ms versus 2.609/34.473 ms, or 0.7% lower/30.0% higher. Every
+pair reads the identical one/four blocks, decodes 1,024/8,192 entries, reads
+235,778/1,914,055 payload bytes, and materializes 128/8,192 public rows.
+Candidates and controls each return 64 rows. Candidate responses are
+896/960 bytes versus 1,024/1,088 because count results are native numbers
+while the `math` constant control uses quoted values. The bounded wide
+complete-group prepass and rich snapshot writes occur after the same public
+scan; fixed-key full-partition SQL windows already serve direct users, so the
+measured cost does not justify an extension primitive.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and
