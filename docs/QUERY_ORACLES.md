@@ -1483,3 +1483,23 @@ rows per stream before the additional bounded state budget.
 The fixture remains 167 source rows and now contains 361 row-query cases, one
 stochastic case, 526 error cases, and 541 statistics/pipeline cases: 1,429
 cases total, all passing against the immutable image. The fixture now contains 1429 cases.
+
+`LQL-Q03` adds six successful row-query witnesses and six parser errors for
+the leading `options(...)` resource controls. They pin positive and zero
+`concurrency`, duplicate-last-wins behavior, independent `parallel_readers`,
+combined whitespace/trailing-comma grammar, nested-query overrides, unsigned
+integer values, required `=`, and the requirement for a query after options.
+
+Source audit at immutable commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers `parser.go`,
+`storage_search.go`, `net_query_runner.go`, the parser/net-runner tests, and
+the query-option documentation. `concurrency` bounds CPU pipe workers to the
+available cores. `parallel_readers` controls storage readers, inherits
+`concurrency` when absent, otherwise falls back to the configured/default
+reader count, and is capped at 2,000. Both options propagate independently to
+each storage node and therefore describe intra-query topology, not result-only
+syntax.
+
+The fixture remains 167 source rows and now contains 367 row-query cases, one
+stochastic case, 532 error cases, and 541 statistics/pipeline cases: 1,441
+cases total, all passing against the immutable image. The fixture now contains 1441 cases.

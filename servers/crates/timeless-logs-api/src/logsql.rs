@@ -6090,6 +6090,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
     let query_now = context.query_now;
     let prepared_query = prepare_query_layout(query)?;
     let query = prepared_query.as_ref();
+    reject_deferred_query_parallelism_options(query)?;
     reject_deferred_stream_context_pipe(query)?;
     reject_deferred_stream_selectors(query)?;
     reject_deferred_stream_id_filters(query)?;
@@ -9512,6 +9513,152 @@ fn deferred_stream_id_error(query: &str, offset: usize) -> Result<(), LogsqlErro
     )))
 }
 
+/// Reject VictoriaLogs intra-query parallelism controls before planning.
+///
+/// Each Timeless log query deliberately owns one public SQLite cursor on one
+/// reader thread. The server-wide reader pool admits independent requests; it
+/// cannot be relabeled as VictoriaLogs CPU-worker or I/O-reader fan-out within
+/// one query. Comments have already been blanked without changing offsets.
+fn reject_deferred_query_parallelism_options(query: &str) -> Result<(), LogsqlError> {
+    let mut cursor = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+
+    while cursor < query.len() {
+        let character = query[cursor..].chars().next().unwrap();
+        let width = character.len_utf8();
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            cursor += width;
+            continue;
+        }
+
+        match character {
+            '"' | '\'' | '`' => {
+                quote = Some(character);
+                cursor += width;
+            }
+            character if character.is_ascii_alphabetic() || character == '_' => {
+                let token_start = cursor;
+                cursor += width;
+                while cursor < query.len() {
+                    let next = query[cursor..].chars().next().unwrap();
+                    if !next.is_ascii_alphanumeric() && next != '_' {
+                        break;
+                    }
+                    cursor += next.len_utf8();
+                }
+                if !query[token_start..cursor].eq_ignore_ascii_case("options") {
+                    continue;
+                }
+                let mut open = cursor;
+                while open < query.len() {
+                    let next = query[open..].chars().next().unwrap();
+                    if !next.is_whitespace() {
+                        break;
+                    }
+                    open += next.len_utf8();
+                }
+                if query[open..].starts_with('(') {
+                    cursor = reject_deferred_parallelism_inside_options(query, open)?;
+                }
+            }
+            _ => cursor += width,
+        }
+    }
+    Ok(())
+}
+
+fn reject_deferred_parallelism_inside_options(
+    query: &str,
+    open: usize,
+) -> Result<usize, LogsqlError> {
+    let mut cursor = open + 1;
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut expect_option_name = true;
+
+    while cursor < query.len() {
+        let character = query[cursor..].chars().next().unwrap();
+        let width = character.len_utf8();
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            cursor += width;
+            continue;
+        }
+
+        match character {
+            '"' | '\'' | '`' => {
+                quote = Some(character);
+                if depth == 1 && expect_option_name {
+                    expect_option_name = false;
+                }
+                cursor += width;
+            }
+            '(' => {
+                depth += 1;
+                cursor += width;
+            }
+            ')' if depth == 1 => return Ok(cursor + width),
+            ')' => {
+                depth -= 1;
+                cursor += width;
+            }
+            ',' if depth == 1 => {
+                expect_option_name = true;
+                cursor += width;
+            }
+            character if depth == 1 && expect_option_name && character.is_whitespace() => {
+                cursor += width;
+            }
+            character
+                if depth == 1
+                    && expect_option_name
+                    && (character.is_ascii_alphabetic() || character == '_') =>
+            {
+                let option_start = cursor;
+                cursor += width;
+                while cursor < query.len() {
+                    let next = query[cursor..].chars().next().unwrap();
+                    if !next.is_ascii_alphanumeric() && next != '_' {
+                        break;
+                    }
+                    cursor += next.len_utf8();
+                }
+                let option = &query[option_start..cursor];
+                if matches!(option, "concurrency" | "parallel_readers") {
+                    let (line, column) = source_line_column(query, option_start);
+                    return Err(LogsqlError::unsupported(format!(
+                        "LogsQL {option} query option at line {line}, column {column} is deferred: Timeless executes each log query through one public SQLite cursor; server reader pools and request admission do not implement VictoriaLogs intra-query CPU or I/O parallelism"
+                    )));
+                }
+                expect_option_name = false;
+            }
+            _ => {
+                if depth == 1 && expect_option_name {
+                    expect_option_name = false;
+                }
+                cursor += width;
+            }
+        }
+    }
+
+    Ok(cursor)
+}
+
 /// Reject the VictoriaLogs `stream_context` pipe before planning or storage.
 ///
 /// The operation performs additional tenant- and `_stream_id`-scoped reads
@@ -10857,6 +11004,54 @@ mod tests {
             r#""literal | stream_context before 1""#,
             "* # | stream_context before 1\n| limit 1",
             "* | fields stream_context",
+        ] {
+            assert!(
+                parse(ordinary_data, TimestampUnit::Microseconds).is_ok(),
+                "{ordinary_data:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_nineteen_query_parallelism_options_fail_with_an_explicit_architecture_prerequisite()
+    {
+        for (query, option, line, column) in [
+            ("options(concurrency=1) *", "concurrency", 1, 9),
+            (
+                "options ( parallel_readers = 3 ) *",
+                "parallel_readers",
+                1,
+                11,
+            ),
+            (
+                "case:in(options(concurrency=1) case:=phrase-exact | fields case)",
+                "concurrency",
+                1,
+                17,
+            ),
+            (
+                "case:in(options(parallel_readers=1) case:=phrase-exact | fields case)",
+                "parallel_readers",
+                1,
+                17,
+            ),
+        ] {
+            let error = parse(query, TimestampUnit::Microseconds).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Unsupported, "{query:?}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "LogsQL {option} query option at line {line}, column {column} is deferred: Timeless executes each log query through one public SQLite cursor; server reader pools and request admission do not implement VictoriaLogs intra-query CPU or I/O parallelism"
+                ),
+                "{query:?}"
+            );
+        }
+
+        for ordinary_data in [
+            r#""options(concurrency=1)""#,
+            r#"service:="options(parallel_readers=2)""#,
+            "* # options(concurrency=1)\n| limit 1",
+            "* | fields concurrency, parallel_readers",
         ] {
             assert!(
                 parse(ordinary_data, TimestampUnit::Microseconds).is_ok(),

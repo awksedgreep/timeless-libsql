@@ -336,6 +336,22 @@ requires a versioned public stream data model first; an extension opcode over
 the current rows would only manufacture identity after decode and could mix
 unrelated streams.
 
+`LQL-Q03` intentionally has no SQL recipe. VictoriaLogs
+`options(concurrency=N, parallel_readers=M)` selects CPU workers and I/O
+readers inside one query execution; it is a resource/topology contract, not a
+relational result expression. A Timeless `logs` statement owns one public
+SQLite cursor on one reader thread. Applications can execute independent
+queries concurrently on separate public SQLite/libSQL connections, but that
+does not reproduce parallel readers within one query and must not be labeled
+as LogsQL option parity.
+
+The Rust server's `TIMELESS_LOGS_READER_CONNECTIONS` and authenticated
+`max_concurrent_requests` limit independent request admission. They are
+documented deployment controls, not SQL substitutes for this row. A future
+implementation needs a general bounded partitioned-scan and deterministic
+merge contract useful to direct SQLite/libSQL users; merely accepting and
+ignoring the option would make a false CPU, memory, and I/O promise.
+
 `LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
 known phrase in their application and bind the resulting strings to an `IN`
 predicate for `equals_common_case`, but core SQLite `upper()`/`lower()` do not

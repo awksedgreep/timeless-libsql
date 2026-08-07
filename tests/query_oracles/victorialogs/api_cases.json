@@ -171,6 +171,42 @@
   ],
   "query_cases": [
     {
+      "id": "LQL-Q03-concurrency-one-preserves-results",
+      "query": "options(concurrency=1) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q03-concurrency-zero-uses-the-default",
+      "query": "options(concurrency=0) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q03-last-duplicate-concurrency-wins",
+      "query": "options(concurrency=2, concurrency=1,) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q03-parallel-readers-one-preserves-results",
+      "query": "options(parallel_readers=1) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q03-worker-and-reader-options-compose",
+      "query": "options ( concurrency = 2 , parallel_readers = 3 ) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q03-nested-query-may-override-workers-and-readers",
+      "query": "case:in(options(concurrency=1, parallel_readers=1) case:=phrase-exact | fields case) | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
       "id": "LQL-F35-bare-stream-selector-equality",
       "query": "{case=\"phrase-exact\"}",
       "status": 200,
@@ -5670,6 +5706,48 @@
     }
   ],
   "error_cases": [
+    {
+      "id": "LQL-Q03-concurrency-rejects-negative-values",
+      "query": "options(concurrency=-1) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q03-concurrency-rejects-fractional-values",
+      "query": "options(concurrency=1.5) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q03-parallel-readers-rejects-negative-values",
+      "query": "options(parallel_readers=-1) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q03-parallel-readers-rejects-nonnumeric-values",
+      "query": "options(parallel_readers=invalid) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q03-concurrency-requires-an-equals-sign",
+      "query": "options(concurrency) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q03-options-still-require-a-query",
+      "query": "options(concurrency=1)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
     {
       "id": "LQL-F36-stream-id-requires-48-hex-digits",
       "query": "_stream_id:foo",

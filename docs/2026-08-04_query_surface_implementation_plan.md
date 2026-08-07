@@ -1690,6 +1690,27 @@ recipe or benchmark for deliberately rejected syntax, and no extension,
 private access, storage format, authoritative batching, compression, index,
 retention, transaction, migration, optimize, or maintenance behavior changed.
 
+The terminal-row audit found that Session 17 had incorrectly claimed every
+declared P2 row complete while `LQL-Q03` and `LQL-Q04` remained nonterminal.
+`LQL-Q03` is now closed as an architecture deferral. Six successful and six
+error witnesses pass the complete 1,441-case immutable VictoriaLogs fixture.
+Pinned source distinguishes two intra-query controls: `concurrency` limits
+CPU-bound pipe workers, while `parallel_readers` controls I/O readers and may
+inherit the former. They apply per storage node and are not output-only hints.
+
+Timeless executes one public SQLite cursor on one reader thread per query.
+The configurable reader pool serves independent requests, and authenticated
+request admission caps per-subject concurrency; neither setting implements
+multiple workers/readers inside one query. Accepting these options as ignored
+would therefore make a false CPU, RAM, and I/O promise. Genuine top-level and
+nested occurrences now fail with one source-positioned HTTP 422 before
+storage, while quoted/commented text and ordinary field names remain data.
+There is no SQL recipe or performance benchmark for rejected resource syntax.
+A future implementation needs bounded public partitioning, deterministic
+merge/order, exact work accounting, cancellation, and reader-reuse evidence.
+No extension, storage, batching, compression, index, transaction, migration,
+optimize, or maintenance contract changed.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

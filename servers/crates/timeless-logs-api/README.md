@@ -2112,6 +2112,28 @@ There is no public SQL equivalent until the versioned stream model deferred by
 `LQL-F35` and `LQL-F36` is designed and stored. Rejection performs no public
 row query, candidate-block selection, payload read, or decode.
 
+## Deferred LogsQL intra-query parallelism
+
+Leading `options(concurrency=N)` and `options(parallel_readers=N)` are rejected
+with a source-positioned HTTP 422 `unsupported_logsql` envelope before
+planning or storage, including inside nested queries. They control CPU workers
+and storage readers within each VictoriaLogs query; they do not merely preserve
+the same result under an optional hint.
+
+This server deliberately runs one public SQLite cursor on one reader thread
+per query. `TIMELESS_LOGS_READER_CONNECTIONS` changes the server-wide pool for
+independent requests, and authenticated `max_concurrent_requests` changes
+per-subject admission. Neither setting implements intra-query fan-out, so the
+API does not silently reinterpret or ignore the query options. Quoted text,
+comments, projected field names, and retained metadata named `concurrency` or
+`parallel_readers` remain ordinary data. Rejected options perform no public
+row/native-count query, candidate-block selection, payload read, or decode.
+
+There is no SQL equivalent. A future implementation requires a general public
+partitioned-read contract, deterministic merge/order, exact cumulative work
+accounting, cancellation, and proof that multiple cursors do not amplify
+storage work.
+
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for

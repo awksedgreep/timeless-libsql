@@ -6578,3 +6578,38 @@ storage model lacks the identity on which correct same-stream rereads depend.
 extension primitive, private access, storage format, authoritative batching,
 compression, index, rollup, retention, transaction, migration, optimize, or
 maintenance behavior changed.
+
+## Session 19 architecture disposition: LogsQL query parallelism
+
+`LQL-Q03` is deferred after correcting a roadmap ownership error. Six
+successful and six parser-error cases pass immutable VictoriaLogs 1.52.0,
+bringing the complete LogsQL fixture to 1,441 cases. They pin positive/zero
+worker values, duplicate-last-wins behavior, independent and combined
+`parallel_readers`, whitespace and trailing commas, nested overrides, strict
+unsigned integers, required assignment, and the required following query.
+
+Pinned source establishes that `concurrency` limits CPU-bound pipe workers
+within one query and `parallel_readers` controls I/O-bound storage readers,
+inherits concurrency when omitted, and is capped at 2,000. Both are propagated
+to each storage node. Timeless instead runs every public `logs` statement on
+one sequential SQLite cursor and one reader thread. Its configured reader pool
+serves independent requests; auth admission separately caps concurrent
+requests per subject. Neither is the upstream intra-query contract.
+
+The Rust parser regression failed first on the generic `unsupported LogsQL
+term "options(concurrency=1)"` message. The corrected quote-aware option
+scanner returns a source-positioned HTTP 422 before planning or storage for
+top-level and nested genuine options. Quoted phrases, comments, field names,
+and rich application metadata remain queryable. The real-extension regression
+pins exact envelopes, unchanged public row-query/native-count/payload/decode
+counters, two configured reader connections without false fan-out, rich
+fidelity, optimize, flush, shutdown, and reopen.
+
+There is no narrow/wide latency, cardinality, storage-byte, or RSS benchmark
+because Timeless deliberately does not execute the resource syntax. There is
+no SQL recipe: independent application connections are useful concurrency but
+not parallel readers inside one query. `QSF-269` records the corrected
+ownership and the prerequisite for reconsideration. No extension primitive,
+private access, storage format, authoritative batching, compression, index,
+rollup, retention, transaction, migration, optimize, or maintenance behavior
+changed.

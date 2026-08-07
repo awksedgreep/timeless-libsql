@@ -2636,6 +2636,37 @@ comments, field names, and ordinary metadata values containing
 correct implementation depends on the deferred ingestion-owned stream model
 and index described by `LQL-F35` and `LQL-F36`, not a new row-level SQL recipe.
 
+## Deferred LogsQL intra-query parallelism
+
+VictoriaLogs accepts leading resource options such as:
+
+```text
+options(concurrency=2) * | stats count()
+options(parallel_readers=100) _time:1d error | stats count()
+```
+
+These are not result-only hints. `concurrency` limits CPU workers inside one
+query, while `parallel_readers` selects storage readers for that query and
+each storage node. Timeless executes one public SQLite cursor sequentially on
+one reader thread per query, so silently accepting either option would make a
+false CPU, memory, and I/O promise. Top-level and nested uses return HTTP 422
+before storage:
+
+```json
+{
+  "error": "unsupported_capability",
+  "reason": "unsupported_logsql",
+  "message": "LogsQL concurrency query option at line 1, column 9 is deferred: Timeless executes each log query through one public SQLite cursor; server reader pools and request admission do not implement VictoriaLogs intra-query CPU or I/O parallelism"
+}
+```
+
+`TIMELESS_LOGS_READER_CONNECTIONS` controls how many independent requests may
+use separate SQLite connections. Auth `max_concurrent_requests` limits
+per-subject request admission. Those deployment controls are useful but are
+not equivalent to parallel execution within one query. Direct SQLite/libSQL
+applications likewise may run independent statements concurrently, but there
+is no SQL statement equivalent to this resource contract.
+
 
 ## LogsQL upper-step quantiles and population deviation
 

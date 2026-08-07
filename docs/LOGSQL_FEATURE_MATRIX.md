@@ -1325,12 +1325,30 @@ closed.
 |---|---|---|---|---|---|
 | `LQL-Q01` | deterministic `asc`/`desc`, limit, and offset ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | `API` | P0 | Time sort uses `(ts, stable engine order)` in either direction; equal timestamps, aliases, zero limits, optimize, and reopen are pinned. |
 | `LQL-Q02` | field projection in response ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | shipped | `API` | P1 | Ordered `fields`/`keep` stages choose response fields; `_time`/`_msg` are retained only when selected, dotted metadata reconstructs its nested shape, and missing paths remain absent. |
-| `LQL-Q03` | concurrency/parallel-reader options | partial | `API` | P2 | Claims/configuration may lower hard server limits. |
+| `LQL-Q03` | concurrency/parallel-reader options ([no SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-19-architecture-disposition-logsql-query-parallelism)) | deferred | `DEFER` | DEFER | VictoriaLogs controls CPU workers and I/O readers inside each query. Timeless executes one public SQLite cursor per query; its server reader pool and auth admission cap independent requests and are not equivalent. |
 | `LQL-Q04` | `time_offset` | missing | `API` | P2 | Planner-only timestamp shift. |
 | `LQL-Q05` | `global_filter` | missing | `API` | P3 | Apply before every subquery without textual substitution. |
 | `LQL-Q06` | partial-response option | missing | `API` | P3 | Default remains fail-closed; never silently return incomplete rows. |
 | `LQL-Q07` | cancellation, deadline, row/response/sample limits | shipped | `API` | P0 | Hard defaults cap result rows, decoded/examined entries, response bytes, and wall time. Capability-advertised `max_work_entries` guards row/count/value reads before decode; dropped requests cancel SQLite/Rust work and readers remain reusable. |
 | `LQL-Q08` | stable VictoriaLogs-compatible errors | shipped | `API` | P0 | Timeless intentionally improves the upstream 400 text envelope: malformed syntax is stable JSON HTTP 400 and unsupported capability is stable JSON HTTP 422, with neither reaching storage. See `QSF-063`. |
+
+`LQL-Q03` is explicitly deferred rather than silently ignored. Six accepted
+and six parser-error cases pass the complete 1,441-case immutable VictoriaLogs
+oracle. Upstream `concurrency` limits CPU-bound workers within each query;
+`parallel_readers` independently selects I/O readers, inherits `concurrency`
+when omitted, and caps at 2,000. The options propagate to each storage node.
+
+Timeless instead executes each public `logs` statement sequentially on one
+SQLite cursor and one reader thread. `TIMELESS_LOGS_READER_CONNECTIONS`
+controls how many independent requests can run on separate connections, while
+auth `max_concurrent_requests` limits per-subject admission. Neither setting
+can honestly satisfy intra-query worker counts. Top-level and nested options
+therefore return a source-positioned HTTP 422 before any public storage read.
+Shipping requires a bounded public partitioned-scan/fan-out contract with
+deterministic merge, exact work accounting, cancellation, reader reuse, and
+proof that multiple cursors do not duplicate block reads or weaken ordering.
+There is no SQL recipe or benchmark for deliberately rejected resource
+syntax, and no extension or storage contract changed.
 
 ## Higher-order library boundary
 
