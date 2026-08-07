@@ -1663,6 +1663,14 @@ extension primitive, private access, storage format, authoritative batching,
 compression, index, retention, transaction, migration, optimize, or
 maintenance behavior changes.
 
+Exact release build `bf82f7625a15170b93d2a7ea8e8fd5ec94d6300c`
+returns the same 64 rows/1,856 bytes as its equal-read control and performs
+byte-identical public storage work. Narrow/wide candidate p95 is 4.564/40.091
+ms versus 3.633/38.555 ms for the control; request-attributed API mean is
+4.4% lower/1.4% higher. The bounded post-scan cost is accepted without an
+extension primitive; exact evidence and the storage verdict are linked by
+`QSF-266`.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

@@ -6489,3 +6489,52 @@ recorded in the matrix, plan, SQL disposition, and `QSF-263`. No extension
 primitive, private access, storage format, authoritative batching,
 compression, index, rollup, retention, transaction, migration, optimize, or
 maintenance behavior changed.
+
+## Session 19 LogsQL P3 result stream synthesis
+
+`LQL-P49` is shipped as a bounded Rust API result transform. Eleven successful
+and eight error witnesses pass inside the complete 1,419-case immutable
+VictoriaLogs 1.52.0 fixture. The source audit and exact responses pin
+exact/prefix/all-current selection, empty omission, bytewise name order, Go
+quoting, `_stream` replacement, `_stream_id` clearing, prior-pipe visibility,
+direct and query-backed optional conditions, false-row preservation,
+case-insensitive grammar, and strict errors. Rich Timeless object leaves,
+atomic arrays, overlap, limits, cancellation, immutable durable metadata,
+optimize, flush, shutdown, and reopen pass against the real extension.
+
+Exact release build `bf82f7625a15170b93d2a7ea8e8fd5ec94d6300c`
+produces these loopback measurements over 50 requests after five warmups:
+
+| shape | candidate p50/p95/p99 | equal-read control p50/p95/p99 | p95 delta | API-owned mean delta | result |
+|---|---:|---:|---:|---:|---:|
+| indexed host | 3.040/4.564/5.399 ms | 3.376/3.633/4.119 ms | +25.6% | -4.4% | 64 rows / 1,856 bytes |
+| full fixture | 38.316/40.091/45.371 ms | 37.514/38.555/39.040 ms | +4.0% | +1.4% | 64 rows / 1,856 bytes |
+
+Candidate and control each execute one public query per request. The narrow
+pair considers one block, decodes 1,024 entries, reads 235,778 payload bytes,
+matches and returns 128 public rows per request before the shared sort/limit.
+The wide pair considers four blocks, decodes, matches, and returns all 8,192
+entries, and reads 1,914,055 payload bytes per request. Thus P49 adds no
+storage-read, decode, payload-transfer, or row-crossing amplification. The
+narrow p95 tail is visible and honestly retained, but the lower API-owned mean
+and identical physical work show no storage primitive opportunity; the wide
+cost is a small bounded post-scan delta. `QSF-264`–`QSF-266` retain the exact
+ownership, resolver, and performance verdicts.
+
+All 8,192 log entries completed durably with zero queued work. Admission took
+12.834 ms and the ordered durability barrier 38.400 ms. Storage remained four
+raw blocks, 1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM
+bytes. Logs RSS HWM was 103,820 KiB. The companion metrics workload completed
+136,953 points with zero failed or queued points; metrics storage was 224,688
+logical bytes, 409,600 index bytes, and 1,542,312 physical bytes, with 52,032
+KiB RSS HWM. These are complete-workload process maxima, not allocations
+attributed to this pipe.
+
+The artifact is
+[`2026-08-07_session19_lql_p49_set_stream_fields.json`](evidence/2026-08-07_session19_lql_p49_set_stream_fields.json)
+(SHA-256 `5e947e05d0ff7cb49a55510be66ed42c9ba50b0cb23695297ea24ad397f2ee66`).
+There is no SQL recipe because dynamic current-pipeline fields and exact Go
+quoting have no honest portable core-SQL equivalent. No extension primitive,
+private access, storage format, authoritative batching, compression, index,
+rollup, retention, transaction, migration, optimize, or maintenance behavior
+changed.

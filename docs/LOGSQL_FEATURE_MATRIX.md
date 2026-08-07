@@ -152,7 +152,7 @@ extension.
 | `LQL-P46` | `total_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P47` | `time_add` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-time_add)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P48` | `generate_sequence` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-062-generate-a-bounded-decimal-string-sequence); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-generate_sequence)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P49` | `set_stream_fields` | in progress | no | none | `API` | P3 |
+| `LQL-P49` | `set_stream_fields` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [evidence](QUERY_EVIDENCE.md#session-19-logsql-p3-result-stream-synthesis)) | shipped | no | none | `API` | P3 |
 | `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
 
 `LQL-P47` is a bounded Rust API transform over one public `logs` scan.
@@ -221,6 +221,16 @@ or private-table path in the extension would not prune blocks, avoid decode,
 or reduce row crossing. Grammar, condition evaluation, recursive selection,
 canonicalization, limits, cancellation, and response semantics remain in the
 Rust logs API.
+
+Exact release build `bf82f7625a15170b93d2a7ea8e8fd5ec94d6300c`
+measures 64-row `set_stream_fields` responses at 3.040/4.564/5.399 ms
+narrow and 38.316/40.091/45.371 ms wide p50/p95/p99. Equal-read `format`
+controls measure 3.376/3.633/4.119 and 37.514/38.555/39.040 ms. Candidate
+p95 is 25.6%/4.0% higher, while request-attributed API means are 4.4% lower
+narrow and 1.4% higher wide. Every pair returns the same 64 rows and 1,856
+bytes and performs byte-identical public block, decode, payload, match, and
+row work. `QSF-264`–`QSF-266` accept the bounded post-scan transform and reject
+an extension opcode that cannot avoid storage work or row crossing.
 
 `LQL-P10` is deliberately deferred, not approximated. VictoriaLogs
 `block_stats` exposes one row per physical field column with its internal

@@ -2599,6 +2599,13 @@ LogsQL contract. Because this transform runs after one required public
 `logs` scan, adding a special extension primitive would not avoid storage
 reads, decode, or public-row crossing.
 
+Exact release build `bf82f7625a15170b93d2a7ea8e8fd5ec94d6300c`
+measures the 64-row/1,856-byte transform at 3.040/4.564/5.399 ms narrow and
+38.316/40.091/45.371 ms wide p50/p95/p99. Equal-read `format` controls are
+3.376/3.633/4.119 and 37.514/38.555/39.040 ms. Candidate p95 is 25.6%/4.0%
+higher while API-owned mean is 4.4% lower/1.4% higher; every public block,
+decode, payload, match, and returned-row counter is identical.
+
 
 ## LogsQL upper-step quantiles and population deviation
 
